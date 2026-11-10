@@ -287,3 +287,18 @@ func TestListMatchesBanned(t *testing.T) {
 		t.Errorf("switched off: %v", got)
 	}
 }
+
+func TestSetEdgeModeDefaultsAndTypos(t *testing.T) {
+	defer SetEdgeMode("")
+	for in, want := range map[string]string{
+		"": "enforce", "enforce": "enforce", " ENFORCE ": "enforce",
+		"log": "log", " Log ": "log",
+		// A misspelt observe-only value logs, never enforces.
+		"logonly": "log", "dryrun": "log", "off": "log", "0": "log",
+	} {
+		SetEdgeMode(in)
+		if got := EdgeMode(); got != want {
+			t.Errorf("SetEdgeMode(%q): %q, want %q", in, got, want)
+		}
+	}
+}

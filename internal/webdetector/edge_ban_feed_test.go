@@ -52,8 +52,8 @@ func TestEdgeBanJournal(t *testing.T) {
 		t.Fatalf("bad token: http %d, want 403", code)
 	}
 	_, first, raw := pollEdgeBan(t, b, url.Values{}, "tok")
-	if !first.Full || first.Epoch == "" || first.Mode != "log" {
-		t.Fatalf("first poll: %s, want the whole list in log mode", raw)
+	if !first.Full || first.Epoch == "" || first.Mode != "enforce" {
+		t.Fatalf("first poll: %s, want the whole list in enforce mode (the default)", raw)
 	}
 	if exp, ok := first.IPs["34.153.214.160"]; !ok || exp != 0 {
 		t.Errorf("permanent ban: %v %v", exp, ok)
@@ -106,10 +106,10 @@ func TestEdgeBanJournal(t *testing.T) {
 	}
 
 	// The mode rides on every reply.
-	edgeban.SetEdgeMode("enforce")
-	defer edgeban.SetEdgeMode("log")
-	if _, r, _ := pollEdgeBan(t, b, at(ch), "tok"); r.Mode != "enforce" {
-		t.Errorf("mode %q, want enforce", r.Mode)
+	edgeban.SetEdgeMode("log")
+	defer edgeban.SetEdgeMode("")
+	if _, r, _ := pollEdgeBan(t, b, at(ch), "tok"); r.Mode != "log" {
+		t.Errorf("mode %q, want log", r.Mode)
 	}
 
 	// EDGE_BAN = 0: the list empties through the usual changes.
@@ -164,7 +164,7 @@ func TestEdgeBanStatusCounters(t *testing.T) {
 	pollEdgeBan(t, b, url.Values{"would": {"7"}, "blocked": {"2"}}, "tok")
 	pollEdgeBan(t, b, url.Values{"would": {"3"}, "blocked": {"-9"}}, "tok")
 	st := b.EdgeBanStatus()
-	if st.WouldBlock != 10 || st.Blocked != 2 || st.Published != 1 || !st.Ready || st.Mode != "log" || st.LastPoll.IsZero() {
+	if st.WouldBlock != 10 || st.Blocked != 2 || st.Published != 1 || !st.Ready || st.Mode != "enforce" || st.LastPoll.IsZero() {
 		t.Fatalf("status %+v", st)
 	}
 	if b.Status().EdgeBan.Published != 1 {

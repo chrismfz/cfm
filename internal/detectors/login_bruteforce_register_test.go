@@ -52,7 +52,7 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 	secs := Sections{ByName: map[string]KV{"global": {}}}
 	applyBuiltinLoginBruteforce(&secs)
 	kv := secs.ByName[loginBruteforceType]
-	if kvStrClean(kv, "SITE_FAILS", "") != "5" || kvStrClean(kv, "SITES", "") != "5" {
+	if kvStrClean(kv, "SITE_FAILS", "") != "4" || kvStrClean(kv, "SITES", "") != "3" {
 		t.Fatalf("built-in section: %v", kv)
 	}
 	pol := sectionBlockPolicy(loginBruteforceType, kv)
@@ -63,6 +63,16 @@ func TestApplyBuiltinLoginBruteforce(t *testing.T) {
 	if lp == nil || lp.SendToAPI || lp.Pol.Mode != "ttl" || lp.Pol.TTL != 10*time.Minute ||
 		len(lp.Countries) != 2 || lp.Countries[0] != "GR" || lp.Countries[1] != "CY" {
 		t.Fatalf("built-in leniency: %+v", lp)
+	}
+	// A WARP address is shared: Cloudflare gets the soft tier too.
+	warp := false
+	for _, a := range lp.ASNs {
+		if a == "AS13335" {
+			warp = true
+		}
+	}
+	if !warp {
+		t.Fatalf("built-in leniency without Cloudflare (WARP): %v", lp.ASNs)
 	}
 
 	// Written by the operator (cfm-admin's "Add" writes no leniency): the
@@ -134,28 +144,35 @@ func TestLoginBruteforceWrittenSectionKeepsTheProxyASNs(t *testing.T) {
 	}
 }
 
-func TestLoginBruteforceShipsAsADryRun(t *testing.T) {
+func TestLoginBruteforceShipsArmed(t *testing.T) {
 	f, ok := getFactory(loginBruteforceType)
 	if !ok {
 		t.Fatal("login_bruteforce not registered")
 	}
 	for name, kv := range map[string]KV{
 		"built-in":                loginBruteforceDefaults(),
-		"written without DRY_RUN": {"SITE_FAILS": "5"},
+		"written without DRY_RUN": {"SITE_FAILS": "4"},
 	} {
 		det, err := f(loginBruteforceType, kv, KV{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		d := det.(*loginbf.Detector)
-		if !d.DryRun() {
-			t.Errorf("%s: armed, want the burn-in dry run", name)
+		if d.DryRun() {
+			t.Errorf("%s: a dry run, want armed", name)
 		}
 		_ = d.Shutdown()
 	}
+	for _, v := range []string{"1", "y", "dryrun", "enabled"} {
+		det, _ := f(loginBruteforceType, KV{"DRY_RUN": v}, KV{})
+		if !det.(*loginbf.Detector).DryRun() {
+			t.Errorf("DRY_RUN = %q is armed, want the dry run", v)
+		}
+		_ = det.(*loginbf.Detector).Shutdown()
+	}
 	det, _ := f(loginBruteforceType, KV{"DRY_RUN": "0"}, KV{})
 	if det.(*loginbf.Detector).DryRun() {
-		t.Error("DRY_RUN = 0 still a dry run")
+		t.Error("DRY_RUN = 0 is a dry run")
 	}
 	_ = det.(*loginbf.Detector).Shutdown()
 }

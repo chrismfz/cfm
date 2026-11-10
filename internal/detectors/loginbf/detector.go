@@ -16,7 +16,11 @@
 // A client is an IPv4 address or an IPv6 /64 (one subscriber, who can
 // rotate addresses inside it); the ban is on the /64's address with the
 // most failures in the window, not on whichever failed last: in an office
-// /64 a colleague's one typo must not take the ban for another's spray.
+// /64 a colleague's one typo must not take the ban for another's spray. When
+// several addresses failed, the worst one needs 2 failures, and on the
+// one-site rule more than half of SITE_FAILS on that site, or the alert only
+// logs (ipv6_ambiguous); a second such alert within WINDOW (an attacker
+// alternating two addresses) bans it.
 //
 // A success takes back up to RetractMax of the client's latest failures on
 // that site in the last RetractWindow, and a failure counts only once it is
@@ -37,7 +41,8 @@
 //     the client (Sucuri, Imperva, Fastly, ...) reads as one client for all
 //     its visitors, and a 3 day ban reported to the fleet would take every
 //     site behind it down. Cloudflare is not listed by ASN: its ASN is also
-//     WARP's egress, which an attacker can use. (Workers come in from the
+//     WARP's egress, which an attacker can use (the shipped leniency gives
+//     AS13335 the 10 minute local tier instead: a WARP address is shared). (Workers come in from the
 //     trusted ranges above and are exempt: a known gap.)
 //   - an address with no geo record (no database yet, ENRICH = 0): the
 //     GR/CY leniency cannot be decided, so the alert is a dry run.
@@ -137,6 +142,10 @@ type client struct {
 	// failing; one would-be ban per client per WINDOW, or the burn-in's
 	// counts (and mail) would be many times what armed mode does.
 	quietUntil int64
+	// ambigAt: the last alert held as ipv6_ambiguous because the /64's worst
+	// address had at least 2 failures but not more than half of SITE_FAILS.
+	// A second one within WINDOW bans that address.
+	ambigAt int64
 }
 
 type geoLookup interface {
@@ -483,14 +492,37 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		a.Extra["reason"] = fmt.Sprintf("%d failed %s logins and %d failed lostpassword / register forms (half each) on %s in %s",
 			onSite-onSiteForm, ev.Tag, onSiteForm, ev.Site, d.cfg.Window)
 	}
-	if ip, worst, addrs := worstAddr(c.fails, c.firedAt); ip != "" {
+	// On the one-site rule the /64's addresses are weighed on that site only.
+	scope := ""
+	if rule == "site" {
+		scope = ev.Site
+	}
+	if ip, worst, addrs := worstAddr(c.fails, c.firedAt, scope); ip != "" {
 		a.Key, a.Extra["ip"] = ip, ip
-		if addrs > 1 && worst < 2 {
-			// Several addresses of one /64, none with more than one failure:
-			// nothing says which is the attacker (a VPS provider's shared
-			// /64, a rotating client). Logged, never banned.
+		// Several addresses of one /64 and the worst one alone did not get
+		// near the rule: nothing says which is the attacker (a VPS provider's
+		// shared /64, a rotating client, two colleagues in an office /64 who
+		// mistyped twice each at SITE_FAILS = 4). Logged, never banned. The
+		// worst address needs more than half of SITE_FAILS on the rule's
+		// site, and 2 failures either way.
+		need := 2
+		if rule == "site" && d.cfg.SiteFails/2+1 > need {
+			need = d.cfg.SiteFails/2 + 1
+		}
+		switch {
+		case addrs > 1 && worst < 2:
 			a.Extra["enforcement"] = "dryrun"
 			a.Extra["ipv6_ambiguous"] = "1"
+		case addrs > 1 && worst < need:
+			// Colleagues do not do it twice in one window; an attacker
+			// alternating two addresses of its /64 does, every round.
+			if c.ambigAt > 0 && at-c.ambigAt < win {
+				a.Extra["ipv6_ambiguous_repeat"] = "1"
+			} else {
+				a.Extra["enforcement"] = "dryrun"
+				a.Extra["ipv6_ambiguous"] = "1"
+				c.ambigAt = at
+			}
 		}
 	}
 	c.firedAt = c.last
@@ -595,11 +627,11 @@ func (d *Detector) retractLocked(key string, ev Event, at int64, max int) {
 // worstAddr is the address with the most failures after firedAt (the newest
 // one's on a tie), its count, and how many addresses failed. For IPv4 it is
 // the only one.
-func worstAddr(fails []fail, after int64) (string, int, int) {
+func worstAddr(fails []fail, after int64, site string) (string, int, int) {
 	n := map[string]int{}
 	last := map[string]int64{}
 	for _, f := range fails {
-		if f.at <= after {
+		if f.at <= after || (site != "" && f.site != site) {
 			continue
 		}
 		n[f.ip]++
