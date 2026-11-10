@@ -528,8 +528,15 @@ copy of the list, pulled from `GET /nginx/edgeban` (`edge_ban_feed.go`). The
 daemon keeps what the edge should hold (every address the store answers, less
 IGNORE_IPS, capped at 20 000) and a numbered journal of the changes to it (the
 last 4 096; an epoch per daemon start). It resyncs that list against the store
-only when the store's version moves (every write, reconcile and switch), an
-entry in it expires, or after 5 minutes: an idle poll is a version compare.
+only when the store's version moves (every write, reconcile and switch) or
+after 5 minutes: an idle poll is a version compare. An expiry alone does not
+resync it: the edge drops an entry at its expiry by itself (the dict TTL),
+and the next resync deletes it from the list. (Until 2026-11-10 an expiry
+did, and with ~20 000 TTL bans that was nearly every poll.) A resync checks
+each ban against the nft allow sets; they are merged into sorted intervals
+and searched, not scanned: on mars a linear scan of them over ~23 000 bans
+took 100-150 ms per resync, ~1 600 slow-handler lines a day
+(`BenchmarkList`: 190 ms with 1 000 allow nets, 9 ms now).
 The edge sends its position (`epoch`, `seq`) and gets the changes since
 (`set` / `del`), so a poll costs what changed, not the list; the whole list
 comes on its first poll, after a daemon restart, when it is further behind

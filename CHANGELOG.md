@@ -18,6 +18,14 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **`GET /nginx/edgeban` no longer takes 100+ ms.** Each time the edge ban
+  list was rebuilt, every ban was checked against every nft allow net in
+  turn. With ~23 000 bans that took 55-150 ms per rebuild on mars, orion and
+  virgo, ~800-1 700 "slow handler" lines a day. The allow nets are now
+  merged into sorted ranges and searched (190 ms → 9 ms with 1 000 allow
+  nets). A ban that expires no longer triggers a rebuild either: the edge
+  drops it at its expiry by itself, and the next change removes it from the
+  list.
 - **cPanel users see their site's traffic.** CFM opened from cPanel
   covered only the domain names in `/etc/userdatadomains` (`trimel.gr`), but
   a site's traffic is logged under the name it was asked for, nearly always

@@ -23,6 +23,8 @@
 package edgeban
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"net"
 	"os"
@@ -428,12 +430,20 @@ func (s *Store) Clear() {
 }
 
 // allowSet matches the addresses nft's allow sets accept: hosts, CIDRs and
-// first-last ranges.
+// first-last ranges. The CIDRs and ranges are merged into sorted,
+// non-overlapping intervals per family and looked up by binary search: the
+// edge ban list checks every ban against them on each resync, and a linear
+// scan of a few hundred allow nets over ~23 000 bans took 100+ ms (mars,
+// 2026-11-10; BenchmarkList).
 type allowSet struct {
-	hosts  map[string]bool
-	nets   []*net.IPNet
-	ranges [][2]net.IP
+	hosts map[string]bool
+	v4    []span4
+	v6    []span6
 }
+
+type span4 struct{ lo, hi uint32 }
+
+type span6 struct{ lo, hi [16]byte }
 
 func parseAllowSet(elems []string) *allowSet {
 	a := &allowSet{hosts: map[string]bool{}}
@@ -443,13 +453,29 @@ func parseAllowSet(elems []string) *allowSet {
 		case e == "":
 		case strings.Contains(e, "/"):
 			if _, n, err := net.ParseCIDR(e); err == nil {
-				a.nets = append(a.nets, n)
+				// As net.IPNet.Contains reads it: a v4-mapped v6 CIDR is a v4 one.
+				ip, m := n.IP.To4(), n.Mask
+				if ip == nil {
+					ip = n.IP
+				}
+				if len(m) == net.IPv6len && len(ip) == net.IPv4len {
+					m = m[12:]
+				}
+				if len(m) != len(ip) {
+					continue
+				}
+				lo, hi := make(net.IP, len(ip)), make(net.IP, len(ip))
+				for i := range ip {
+					lo[i] = ip[i] & m[i]
+					hi[i] = lo[i] | ^m[i]
+				}
+				a.add(lo, hi)
 			}
 		case strings.Contains(e, "-"):
 			parts := strings.SplitN(e, "-", 2)
 			lo, hi := net.ParseIP(strings.TrimSpace(parts[0])), net.ParseIP(strings.TrimSpace(parts[1]))
 			if lo != nil && hi != nil {
-				a.ranges = append(a.ranges, [2]net.IP{norm(lo), norm(hi)})
+				a.add(norm(lo), norm(hi))
 			}
 		default:
 			if k := key(net.ParseIP(e)); k != "" {
@@ -457,7 +483,75 @@ func parseAllowSet(elems []string) *allowSet {
 			}
 		}
 	}
+	a.v4 = mergeSpans(a.v4, func(x, y span4) bool { return x.lo < y.lo },
+		func(cur *span4, next span4) bool {
+			if cur.hi == ^uint32(0) || next.lo <= cur.hi+1 {
+				if next.hi > cur.hi {
+					cur.hi = next.hi
+				}
+				return true
+			}
+			return false
+		})
+	a.v6 = mergeSpans(a.v6, func(x, y span6) bool { return bytes.Compare(x.lo[:], y.lo[:]) < 0 },
+		func(cur *span6, next span6) bool {
+			if bytes.Compare(next.lo[:], cur.hi[:]) <= 0 || adjacent6(cur.hi, next.lo) {
+				if bytes.Compare(next.hi[:], cur.hi[:]) > 0 {
+					cur.hi = next.hi
+				}
+				return true
+			}
+			return false
+		})
 	return a
+}
+
+// add records the interval lo-hi of one family (4 or 16 bytes, as a v4 or
+// v6 CIDR parses and as norm gives them). A range whose ends are of two
+// families, or whose ends are reversed, matches nothing, as before.
+func (a *allowSet) add(lo, hi net.IP) {
+	switch {
+	case len(lo) == 4 && len(hi) == 4:
+		l, h := binary.BigEndian.Uint32(lo), binary.BigEndian.Uint32(hi)
+		if l <= h {
+			a.v4 = append(a.v4, span4{l, h})
+		}
+	case len(lo) == 16 && len(hi) == 16:
+		var sp span6
+		copy(sp.lo[:], lo)
+		copy(sp.hi[:], hi)
+		if bytes.Compare(sp.lo[:], sp.hi[:]) <= 0 {
+			a.v6 = append(a.v6, sp)
+		}
+	}
+}
+
+// adjacent6 reports whether b is a+1.
+func adjacent6(a, b [16]byte) bool {
+	for i := 15; i >= 0; i-- {
+		if a[i] != 0xff {
+			a[i]++
+			return a == b
+		}
+		a[i] = 0
+	}
+	return false // a was the last address
+}
+
+// mergeSpans sorts spans by start and merges overlapping or adjacent ones
+// (join extends cur by next when they touch).
+func mergeSpans[T any](spans []T, less func(x, y T) bool, join func(cur *T, next T) bool) []T {
+	if len(spans) < 2 {
+		return spans
+	}
+	sort.Slice(spans, func(i, j int) bool { return less(spans[i], spans[j]) })
+	out := spans[:1]
+	for _, sp := range spans[1:] {
+		if !join(&out[len(out)-1], sp) {
+			out = append(out, sp)
+		}
+	}
+	return out
 }
 
 func norm(ip net.IP) net.IP {
@@ -474,30 +568,19 @@ func (a *allowSet) contains(ip net.IP) bool {
 	if a.hosts[key(ip)] {
 		return true
 	}
-	for _, n := range a.nets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
 	n := norm(ip)
-	for _, r := range a.ranges {
-		if len(r[0]) == len(n) && bytesCompare(r[0], n) <= 0 && bytesCompare(n, r[1]) <= 0 {
-			return true
-		}
+	if len(n) == 4 {
+		v := binary.BigEndian.Uint32(n)
+		i := sort.Search(len(a.v4), func(i int) bool { return a.v4[i].lo > v }) - 1
+		return i >= 0 && v <= a.v4[i].hi
 	}
-	return false
-}
-
-func bytesCompare(a, b net.IP) int {
-	for i := range a {
-		if a[i] != b[i] {
-			if a[i] < b[i] {
-				return -1
-			}
-			return 1
-		}
+	if len(n) != 16 {
+		return false
 	}
-	return 0
+	var v [16]byte
+	copy(v[:], n)
+	i := sort.Search(len(a.v6), func(i int) bool { return bytes.Compare(a.v6[i].lo[:], v[:]) > 0 }) - 1
+	return i >= 0 && bytes.Compare(v[:], a.v6[i].hi[:]) <= 0
 }
 
 // Load reads the persisted store (missing or unreadable: empty). Entries

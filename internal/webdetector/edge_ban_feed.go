@@ -35,7 +35,10 @@ const edgeBanJournalMax = 4096
 
 // edgeBanSyncMax bounds how long the published list goes unchecked against
 // the store when nothing bumps its version (IGNORE_IPS can change under it on
-// a config reload).
+// a config reload, and expired bans leave it). An expiry alone does not
+// resync: the edge drops an entry at its expiry by itself (the dict TTL),
+// and with ~20 000 TTL bans the earliest expiry is always seconds away, so
+// resyncing on it rebuilt the whole list on nearly every poll.
 const edgeBanSyncMax = 5 * time.Minute
 
 // edgeBanChange is one journal line: ip banned until Exp (unix seconds, 0 =
@@ -56,7 +59,7 @@ type edgeBanJournal struct {
 	published map[string]int64
 	log       []edgeBanChange
 	version   uint64    // edgeban.Version() at the last sync
-	recheck   time.Time // the earliest expiry in published, or edgeBanSyncMax after the sync
+	recheck   time.Time // edgeBanSyncMax after the sync
 	logged    time.Time // last truncation warning
 
 	// What the edge reported on its polls, for the status view.
@@ -124,9 +127,6 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 		var exp int64
 		if !it.Expires.IsZero() {
 			exp = it.Expires.Unix()
-			if it.Expires.Before(recheck) {
-				recheck = it.Expires
-			}
 		}
 		cur[it.IP] = exp
 	}

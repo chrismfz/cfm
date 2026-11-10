@@ -133,8 +133,9 @@ func TestEdgeBanNotReady(t *testing.T) {
 	}
 }
 
-// The journal is resynced only when the store's version moves, an entry in
-// it expires, or edgeBanSyncMax passes: an idle poll does no list scan.
+// The journal is resynced only when the store's version moves or
+// edgeBanSyncMax passes: an idle poll does no list scan, an expiry alone
+// included (the edge drops the entry at its expiry by itself).
 func TestEdgeBanSyncOnlyOnChange(t *testing.T) {
 	s := installEdgeBans(t, "34.153.214.160")
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
@@ -152,8 +153,14 @@ func TestEdgeBanSyncOnlyOnChange(t *testing.T) {
 		t.Fatalf("after a ban: %+v", ch)
 	}
 	time.Sleep(short + 100*time.Millisecond)
-	if _, exp, raw := pollEdgeBan(t, b, at(ch), "tok"); len(exp.Del) != 1 {
-		t.Fatalf("after the timed ban expired: %s, want it deleted", raw)
+	before := scans
+	if _, idle, raw := pollEdgeBan(t, b, at(ch), "tok"); len(idle.Del) != 0 || scans != before {
+		t.Fatalf("an expiry alone resynced: %s", raw)
+	}
+	// The next change carries the expired ban's delete.
+	s.Add(net.ParseIP("198.51.100.10"), nil, "manual", true)
+	if _, next, raw := pollEdgeBan(t, b, at(ch), "tok"); len(next.Del) != 1 || next.Del[0] != "198.51.100.9" {
+		t.Fatalf("after the next change: %s, want the expired ban deleted", raw)
 	}
 }
 
