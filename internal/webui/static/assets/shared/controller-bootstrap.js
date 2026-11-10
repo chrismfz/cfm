@@ -5,6 +5,10 @@
   // Vhost live/Forensics, WAF engine, Vhost controls, MySQL governor) is
   // scope-filtered server-side and stays visible. Backends already fail-closed
   // (403) on these paths; this just hides the dead links from scoped users.
+  // The daemon also redirects a scoped user who opens one of these pages to
+  // Vhost controls (scopedAdminOnlyPages, internal/apiserver/
+  // scoped_page_redirect.go). Change both together: TestScopedAdminOnlyPagesMatchNav
+  // fails when they differ.
   const ADMIN_ONLY_NAV_PATHS = new Set([
     '/cfm-admin',                    // Dashboard (global stats + global block/unblock)
     '/cfm-admin/health',             // Health history — box-wide metrics (admin-only endpoints)
