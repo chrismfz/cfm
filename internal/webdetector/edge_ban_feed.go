@@ -35,7 +35,13 @@ const edgeBanJournalMax = 4096
 
 // edgeBanSyncMax bounds how long the published list goes unchecked against
 // the store when nothing bumps its version (IGNORE_IPS can change under it on
-// a config reload).
+// a config reload). An expiry alone does not resync: the edge drops an
+// entry at its expiry by itself (the dict TTL), and with ~20 000 TTL bans the
+// earliest expiry is always seconds away, so resyncing on it rebuilt the
+// whole list on nearly every poll. Expired bans leave the published list at
+// the next resync: the store's reconcile (every ~2 minutes) deletes them,
+// which moves the version, and this bound covers a reconcile that cannot
+// read nft.
 const edgeBanSyncMax = 5 * time.Minute
 
 // edgeBanChange is one journal line: ip banned until Exp (unix seconds, 0 =
@@ -56,7 +62,7 @@ type edgeBanJournal struct {
 	published map[string]int64
 	log       []edgeBanChange
 	version   uint64    // edgeban.Version() at the last sync
-	recheck   time.Time // the earliest expiry in published, or edgeBanSyncMax after the sync
+	recheck   time.Time // edgeBanSyncMax after the sync
 	logged    time.Time // last truncation warning
 
 	// What the edge reported on its polls, for the status view.
@@ -96,7 +102,7 @@ func newEdgeBanEpoch() string {
 // current is the list the edge must hold now: every address the store
 // answers banned, less IGNORE_IPS (the decision path skips those too), with
 // its expiry in unix seconds (0 = permanent); capped at edgeBanFeedMax.
-func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[string]int64, time.Time) {
+func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) map[string]int64 {
 	items := edgeban.List()
 	if len(items) > edgeBanFeedMax {
 		// Over the cap, keep the longest bans: permanent first, then the
@@ -107,11 +113,13 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 			if ea.IsZero() != ec.IsZero() {
 				return ea.IsZero()
 			}
+			if ea.Equal(ec) {
+				return items[a].IP < items[c].IP // List is unordered: ties stay deterministic
+			}
 			return ea.After(ec)
 		})
 	}
 	cur := make(map[string]int64, len(items))
-	recheck := now.Add(edgeBanSyncMax)
 	truncated := 0
 	for _, it := range items {
 		if b.bypassFunc != nil && b.bypassFunc(it.IP) {
@@ -124,9 +132,6 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 		var exp int64
 		if !it.Expires.IsZero() {
 			exp = it.Expires.Unix()
-			if it.Expires.Before(recheck) {
-				recheck = it.Expires
-			}
 		}
 		cur[it.IP] = exp
 	}
@@ -134,7 +139,7 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 		j.logged = now
 		logging.Logf("[edgeban] %d bans, the edge copy takes %d: %d left out (the soonest to expire)", len(cur)+truncated, edgeBanFeedMax, truncated)
 	}
-	return cur, recheck
+	return cur
 }
 
 // sync brings the published list to the store's, journalling the
@@ -145,7 +150,8 @@ func (b *NginxBridge) edgeBanSync(j *edgeBanJournal, now time.Time) {
 		return
 	}
 	t0 := time.Now()
-	cur, recheck := b.edgeBanCurrent(j, now)
+	cur := b.edgeBanCurrent(j, now)
+	recheck := now.Add(edgeBanSyncMax)
 	if j.published == nil {
 		j.epoch = newEdgeBanEpoch()
 		j.published = map[string]int64{}
