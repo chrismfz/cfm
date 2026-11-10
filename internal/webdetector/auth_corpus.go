@@ -236,6 +236,22 @@ func wpResetDone(af authField) bool {
 	return false
 }
 
+// authFormFail: the line is a lostpassword / retrievepassword / register
+// form (or a login hidden behind one), which authOutcome reads as a failure
+// on a 200: what a customer who forgot the password sends. LoginEvent.Form.
+// Not the other wpNonLoginActions: a 200 on rp, postpass or logout is no
+// customer's reset, so a login hidden there stays a full failure.
+func authFormFail(af authField) bool {
+	if af.Tag != "WP_LOGIN" {
+		return false
+	}
+	switch af.Action {
+	case "lostpassword", "retrievepassword", "register":
+		return true
+	}
+	return false
+}
+
 // wpNonLoginActions are wp-login.php's own actions other than login (its
 // $default_actions); every other value, an unknown one included, runs the
 // login. The edge sends the query's last `action`, URL-decoded, as PHP reads

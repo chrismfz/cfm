@@ -727,3 +727,23 @@ func TestLoginLedgerPublishesLoginEvents(t *testing.T) {
 		t.Fatal("LOGIN_SIGNALS = 0 still published")
 	}
 }
+
+func TestLoginEventFormMarksTheOtherWPForms(t *testing.T) {
+	if !authFormFail(authField{Tag: "WP_LOGIN", Action: "lostpassword"}) ||
+		!authFormFail(authField{Tag: "WP_LOGIN", Action: "register"}) ||
+		authFormFail(authField{Tag: "WP_LOGIN"}) || authFormFail(authField{Tag: "WP_LOGIN", Action: "login"}) ||
+		authFormFail(authField{Tag: "LOGIN_POST", Action: "lostpassword"}) ||
+		authFormFail(authField{Tag: "WP_LOGIN", Action: "rp"}) || authFormFail(authField{Tag: "WP_LOGIN", Action: "postpass"}) {
+		t.Fatal("authFormFail")
+	}
+	var got []LoginEvent
+	unsub := SubscribeLoginEvents(func(ev LoginEvent) { got = append(got, ev) })
+	defer unsub()
+	l := newLoginLedger(nil)
+	l.observeForm(loginRec("203.0.113.70", t0), "a.gr", "WP_LOGIN", "fail", true)
+	l.observeForm(loginRec("203.0.113.70", t0+1), "a.gr", "WP_LOGIN", "ok", true)
+	l.observe(loginRec("203.0.113.70", t0+2), "a.gr", "WP_LOGIN", "fail")
+	if len(got) != 3 || !got[0].Form || got[1].Form || got[2].Form {
+		t.Fatalf("Form on the published events: %+v", got)
+	}
+}

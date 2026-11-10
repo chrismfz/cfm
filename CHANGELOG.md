@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **`login_bruteforce`: a forgotten password no longer adds up to a ban.**
+  A lostpassword or register form shown again (an unknown user or address)
+  counted as a full failed login, so a customer who failed twice and then
+  tried four addresses for a reset reached the threshold (a Greek customer on
+  gacbp.com, 2026-11-08; the GR/CY leniency kept it to 10 minutes, a customer
+  abroad would have had 3 days). Such a form now counts as half a failure on
+  the one-site rule. A brute forcer hiding its logins behind
+  `?action=lostpassword` (the edge cannot tell the two apart) is still
+  banned, at twice the tries.
 - **cPanel users see their site's traffic.** CFM opened from cPanel
   covered only the domain names in `/etc/userdatadomains` (`trimel.gr`), but
   a site's traffic is logged under the name it was asked for, nearly always

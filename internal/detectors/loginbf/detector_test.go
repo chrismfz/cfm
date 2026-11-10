@@ -57,6 +57,37 @@ func failAt(ip, site string, at time.Time) Event {
 	return Event{When: at, IP: ip, Host: "www." + site, Site: site, Tag: "WP_LOGIN"}
 }
 
+func formAt(ip, site string, at time.Time) Event {
+	ev := failAt(ip, site, at)
+	ev.Form = true
+	return ev
+}
+
+func TestFormFailuresCountHalf(t *testing.T) {
+	// 2 failed logins, then 4 reset requests with the wrong address (the
+	// gacbp.com customer): 4 of the 5 needed, no ban.
+	d := newTest(Config{})
+	evs := []Event{failAt("203.0.113.60", "a.gr", t0), failAt("203.0.113.60", "a.gr", t0.Add(time.Minute))}
+	for i := 0; i < 4; i++ {
+		evs = append(evs, formAt("203.0.113.60", "a.gr", t0.Add(time.Duration(2+i)*time.Minute)))
+	}
+	for _, ev := range evs {
+		d.Enqueue(ev)
+	}
+	if got := run(t, d); len(got) != 0 {
+		t.Fatalf("a forgotten password banned: %+v", got)
+	}
+	// A bot hiding its logins behind ?action=lostpassword: 10 tries ban.
+	d = newTest(Config{})
+	for i := 0; i < 10; i++ {
+		d.Enqueue(formAt("203.0.113.61", "a.gr", t0.Add(time.Duration(i)*time.Second)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["rule"] != "site" || got[0].Extra["site_form_fails"] != "10" {
+		t.Fatalf("10 hidden logins: %+v", got)
+	}
+}
+
 func TestSiteFailsRule(t *testing.T) {
 	d := newTest(Config{})
 	for i := 0; i < 4; i++ {

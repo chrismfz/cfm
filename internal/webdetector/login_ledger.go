@@ -296,6 +296,11 @@ func loginSiteKey(host string) string {
 
 // observe takes one login line with its outcome. Only "fail" and "ok" count.
 func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
+	l.observeForm(rec, host, tag, outcome, false)
+}
+
+// observeForm is observe with LoginEvent.Form for a failure (authFormFail).
+func (l *loginLedger) observeForm(rec LogRec, host, tag, outcome string, form bool) {
 	if l == nil || !loginSignalsOn.Load() || (outcome != "fail" && outcome != "ok") || rec.IP == "" {
 		return
 	}
@@ -332,6 +337,7 @@ func (l *loginLedger) observe(rec LogRec, host, tag, outcome string) {
 	}
 	publishLoginEvent(LoginEvent{
 		When: time.Unix(now, 0), IP: rec.IP, Host: host, Site: siteKey, Tag: tag, OK: outcome == "ok", Owner: owner,
+		Form: form && outcome == "fail",
 	})
 }
 

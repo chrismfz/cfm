@@ -501,7 +501,8 @@ blocked by anything else. The edge marks every login POST (the login column,
 answer as a failure or a success. The login ledger publishes every failure,
 and this detector bans per client address, over `WINDOW` (1 h):
 
-- `SITE_FAILS` (5) failed logins on ONE site (a registrable domain: `www.`,
+- `SITE_FAILS` (5) failed logins on ONE site (a lostpassword / register
+  form shown again counts half, below) (a registrable domain: `www.`,
   `staging.` and the bare name are one site);
 - failed logins on `SITES` (5) different sites, any number on each. A proxy
   pool sprays one or two tries per site per address, which no per-site count
@@ -529,7 +530,11 @@ Never counted or banned:
   cleared cookie alone is a failure: `wp-login.php?reauth=1` clears it on
   every failed login. A login hidden behind `?action=lostpassword` (the body's
   `action=login` wins in PHP) that fails with 200 is a failure too, and so
-  is a lostpassword / register form shown again (an unknown user); a
+  is a lostpassword / register form shown again (an unknown user). The edge
+  cannot tell those two apart, so each counts as half a failure on the
+  one-site rule: a customer who forgot the password and tries a few
+  addresses is not banned (gacbp.com, 2026-11-08: 2 failed logins and 4
+  reset requests), and a bot hiding its logins there needs twice the tries; a
   password reset that went through (200, its `wp-resetpass-` cookie
   cleared) is not. On a site whose plugin answers a failed login with a
   redirect, such a hidden login still reads `na` (a known gap);
@@ -581,7 +586,7 @@ Known gaps, where a legitimate client can still be banned:
 - the owner record is the ledger's fixed 24 h window, in memory (above): a
   login monitor whose stored password went stale is banned soon after it
   empties;
-- a lostpassword request the site cannot mail answers 200 and counts;
+- a lostpassword request the site cannot mail answers 200 and counts (half);
 - the other way round, a site whose wp-login.php answers carry no
   `wordpress_test_cookie` (a renamed `TEST_COOKIE`; 4yourhealth.gr's real
   successes carry none) never counts a failure;

@@ -144,7 +144,7 @@ func init() {
 		})
 		d.SetName(section)
 		d.AddUnsubscribe(webdetector.SubscribeLoginEvents(func(ev webdetector.LoginEvent) {
-			d.Enqueue(loginbf.Event{When: ev.When, IP: ev.IP, Host: ev.Host, Site: ev.Site, Tag: ev.Tag, OK: ev.OK, Owner: ev.Owner})
+			d.Enqueue(loginbf.Event{When: ev.When, IP: ev.IP, Host: ev.Host, Site: ev.Site, Tag: ev.Tag, OK: ev.OK, Owner: ev.Owner, Form: ev.Form})
 		}))
 		return d, nil
 	})

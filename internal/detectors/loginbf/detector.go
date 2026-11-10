@@ -6,7 +6,8 @@
 // Two rules, per client, over one sliding WINDOW (1 h by default):
 //
 //   - SITE_FAILS: that many failed logins on ONE site (a registrable domain:
-//     www., staging. and the bare name are one site);
+//     www., staging. and the bare name are one site); a lostpassword /
+//     register form shown again counts half (Event.Form);
 //   - SITES: failed logins on that many DIFFERENT sites, any number on each.
 //     A proxy pool spreads a spray as one or two tries per site per address,
 //     which no per-site count ever sees (virgo, 1-6 Nov 2026: 1 363
@@ -66,7 +67,7 @@ const Kind = core.AlertKind("WEB/LOGIN_BRUTEFORCE")
 type Config struct {
 	Every     time.Duration
 	Window    time.Duration
-	SiteFails int // failures on one site within Window; 0 turns the rule off
+	SiteFails int // failures on one site within Window (a Form one counts half); 0 turns the rule off
 	Sites     int // distinct failed sites within Window; 0 turns the rule off
 	DryRun    bool
 
@@ -97,6 +98,10 @@ type Event struct {
 	Tag   string
 	OK    bool
 	Owner bool
+	// Form: a lostpassword / register form shown again, or a login hidden
+	// behind that query (webdetector.LoginEvent.Form): half a failure on
+	// the one-site rule.
+	Form bool
 }
 
 // RetractWindow is how far back a success takes back failures, and
@@ -118,6 +123,7 @@ type fail struct {
 	site string
 	host string
 	tag  string
+	form bool
 }
 
 type client struct {
@@ -426,13 +432,16 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 	if at <= cut {
 		return core.Alert{}, false // older than the window: too late to count
 	}
-	c.fails = append(c.fails, fail{at: at, ip: ev.IP, site: ev.Site, host: ev.Host, tag: ev.Tag})
+	c.fails = append(c.fails, fail{at: at, ip: ev.IP, site: ev.Site, host: ev.Host, tag: ev.Tag, form: ev.Form})
 	if len(c.fails) > maxEventsPerIP {
 		sort.Slice(c.fails, func(i, j int) bool { return c.fails[i].at < c.fails[j].at })
 		c.fails = append(c.fails[:0], c.fails[len(c.fails)-maxEventsPerIP:]...)
 	}
 
-	onSite := 0
+	// onSite2 is twice the failures on this site: a Form failure counts 1,
+	// a login 2. On gacbp.com (2026-11-08) a Greek customer failed twice,
+	// then asked for a reset four times with the wrong address: 6 "failures".
+	onSite2, onSite, onSiteForm := 0, 0, 0
 	sites := map[string]int{}
 	for _, f := range c.fails {
 		if f.at <= c.firedAt {
@@ -441,11 +450,17 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		sites[f.site]++
 		if f.site == ev.Site {
 			onSite++
+			if f.form {
+				onSite2++
+				onSiteForm++
+			} else {
+				onSite2 += 2
+			}
 		}
 	}
 	rule := ""
 	switch {
-	case d.cfg.SiteFails > 0 && onSite >= d.cfg.SiteFails:
+	case d.cfg.SiteFails > 0 && onSite2 >= 2*d.cfg.SiteFails:
 		rule = "site"
 	case d.cfg.Sites > 0 && len(sites) >= d.cfg.Sites:
 		rule = "sites"
@@ -461,6 +476,12 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		c.quietUntil = at + win
 	}
 	a := d.alert(ev, key, c, rule, onSite, sites)
+	if onSiteForm > 0 && rule == "site" {
+		// Say how many were reset / register forms (half each): what an
+		// unblock request needs to see.
+		a.Extra["site_form_fails"] = strconv.Itoa(onSiteForm)
+		a.Extra["reason"] += fmt.Sprintf(" (%d of them lostpassword / register forms, half each)", onSiteForm)
+	}
 	if ip, worst, addrs := worstAddr(c.fails, c.firedAt); ip != "" {
 		a.Key, a.Extra["ip"] = ip, ip
 		if addrs > 1 && worst < 2 {
@@ -496,8 +517,12 @@ func (d *Detector) alert(ev Event, key string, c *client, rule string, onSite in
 	}
 	var samples []string
 	for _, f := range fails {
-		samples = append(samples, fmt.Sprintf("%s %s failed %s login host=%s",
-			time.Unix(f.at, 0).UTC().Format(time.RFC3339), f.ip, f.tag, f.host))
+		what := "login"
+		if f.form {
+			what = "form (lostpassword / register)"
+		}
+		samples = append(samples, fmt.Sprintf("%s %s failed %s %s host=%s",
+			time.Unix(f.at, 0).UTC().Format(time.RFC3339), f.ip, f.tag, what, f.host))
 	}
 	a := core.Alert{
 		When:    ev.When,
