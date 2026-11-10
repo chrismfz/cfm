@@ -26,8 +26,11 @@ back-filled here — see the git/PR history for that period.
   sites, within an hour: botnets were sending 4 tries per address, or trying
   3-4 sites, to stay under 5. On virgo, mars and titan's Apache logs that
   catches 17-42% more addresses, none Greek or Cypriot. The GR/CY leniency
-  (10 minutes, not reported) is unchanged. A `detectors.conf` that writes
-  `DRY_RUN = 1` or its own thresholds keeps them.
+  (10 minutes, not reported) is unchanged. In an IPv6 /64 with several
+  failing addresses, the worst one needs more than half of `SITE_FAILS` on
+  one site (3 of 4), or the alert only logs: two colleagues who mistyped
+  twice each are not banned. A `detectors.conf` that writes `DRY_RUN = 1` or
+  its own thresholds keeps them.
 - **A banned client behind Cloudflare is now blocked at the edge.**
   `[webdetector] EDGE_BAN_MODE` defaults to `enforce`: the edge answers 403
   to a proxied client the web detectors, the WAF autoblock, modsec,
@@ -35,7 +38,8 @@ back-filled here — see the git/PR history for that period.
   sees. It used to only log `would_block edge_ban`: mars had 171 such
   addresses on 2026-11-10, none Greek or Cypriot. `EDGE_BAN_MODE = log`
   brings the logging-only mode back; a `detectors.conf` that writes `log`
-  keeps it.
+  keeps it. Any other value (a typo such as `logonly`) logs only, with a
+  warning in the daemon log, rather than enforce.
 - **`login_bruteforce`: a Cloudflare WARP address gets the soft tier.** A
   WARP egress address is shared by many people, so a brute forcer on it now
   gets the 10 minute local ban, reported nowhere, instead of a 3 day fleet

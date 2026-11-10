@@ -512,8 +512,10 @@ A client is an IPv4 address or an IPv6 /64 (one subscriber, who can rotate
 addresses inside it); the ban is on the /64's address with the most
 failures in the window (in an office /64, a colleague's one typo must not
 take the ban for another's spray; an attacker rotating inside its /64 gets
-one address banned per round, a known gap). A /64 whose worst address has
-a single failure among several (a VPS provider's shared /64) is a dry run.
+one address banned per round, a known gap). In a /64 with several failing
+addresses, a worst address with a single failure (a VPS provider's shared
+/64), or on the one-site rule with no more than half of `SITE_FAILS` (two
+colleagues who mistyped twice each), is a dry run.
 Never counted or banned:
 
 - a failure on a site where the client failed and already succeeded at

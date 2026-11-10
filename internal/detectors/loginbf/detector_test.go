@@ -432,6 +432,28 @@ func TestAmbiguousIPv6IsADryRun(t *testing.T) {
 	}
 }
 
+func TestOfficeIPv6WithTwoTyposEachIsADryRun(t *testing.T) {
+	// Two colleagues in one /64 mistype twice each on the same site: at
+	// SITE_FAILS = 4 the /64 reaches the rule, but neither address did half of it.
+	d := newTest(Config{SiteFails: 4, Sites: 3})
+	for i, a := range []string{"2001:db8:7:7::1", "2001:db8:7:7::2", "2001:db8:7:7::1", "2001:db8:7:7::2"} {
+		d.Enqueue(failAt(a, "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got := run(t, d)
+	if len(got) != 1 || got[0].Extra["ipv6_ambiguous"] != "1" {
+		t.Fatalf("two typos each in a /64 must not ban: %+v", got)
+	}
+	// One of them with 3 of the 4 is banned.
+	d = newTest(Config{SiteFails: 4, Sites: 3})
+	for i, a := range []string{"2001:db8:7:8::1", "2001:db8:7:8::2", "2001:db8:7:8::1", "2001:db8:7:8::1"} {
+		d.Enqueue(failAt(a, "a.gr", t0.Add(time.Duration(i)*time.Minute)))
+	}
+	got = run(t, d)
+	if len(got) != 1 || got[0].Extra["ipv6_ambiguous"] == "1" || got[0].Key != "2001:db8:7:8::1" {
+		t.Fatalf("a /64 address with 3 of 4 failures: %+v", got)
+	}
+}
+
 func TestDryRunAlertsOncePerClientPerWindow(t *testing.T) {
 	// Never banned, a dry-run client keeps failing: one would-be ban an hour.
 	d := newTest(Config{DryRun: true})

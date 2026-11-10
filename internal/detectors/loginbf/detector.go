@@ -36,7 +36,8 @@
 //     the client (Sucuri, Imperva, Fastly, ...) reads as one client for all
 //     its visitors, and a 3 day ban reported to the fleet would take every
 //     site behind it down. Cloudflare is not listed by ASN: its ASN is also
-//     WARP's egress, which an attacker can use. (Workers come in from the
+//     WARP's egress, which an attacker can use (the shipped leniency gives
+//     AS13335 the 10 minute local tier instead: a WARP address is shared). (Workers come in from the
 //     trusted ranges above and are exempt: a known gap.)
 //   - an address with no geo record (no database yet, ENRICH = 0): the
 //     GR/CY leniency cannot be decided, so the alert is a dry run.
@@ -463,10 +464,17 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 	a := d.alert(ev, key, c, rule, onSite, sites)
 	if ip, worst, addrs := worstAddr(c.fails, c.firedAt); ip != "" {
 		a.Key, a.Extra["ip"] = ip, ip
-		if addrs > 1 && worst < 2 {
-			// Several addresses of one /64, none with more than one failure:
-			// nothing says which is the attacker (a VPS provider's shared
-			// /64, a rotating client). Logged, never banned.
+		// Several addresses of one /64 and the worst one alone did not get
+		// near the rule: nothing says which is the attacker (a VPS provider's
+		// shared /64, a rotating client, two colleagues in an office /64 who
+		// mistyped twice each at SITE_FAILS = 4). Logged, never banned. The
+		// worst address needs more than half of SITE_FAILS on a site rule,
+		// and 2 failures either way.
+		need := 2
+		if rule == "site" && d.cfg.SiteFails/2+1 > need {
+			need = d.cfg.SiteFails/2 + 1
+		}
+		if addrs > 1 && worst < need {
 			a.Extra["enforcement"] = "dryrun"
 			a.Extra["ipv6_ambiguous"] = "1"
 		}

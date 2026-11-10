@@ -296,9 +296,9 @@ CMSes join when the corpus gives them an outcome rule.
 
 **L1 enforcement (built 2026-11-06):** the `login_bruteforce` detector
 (`docs/DETECTORS.md`) bans from the ledger's failures with its own, stricter
-rules: ≥ 5 `fail` on one site in 1 h, or `fail` on ≥ 5 sites in 1 h, a 3 day
-ban sent to cfm-web, GR/CY 10 minutes and not sent. It ships as a dry run
-(`DRY_RUN = 1`) for the burn-in. The shadow rows below keep
+rules: ≥ 4 `fail` on one site in 1 h, or `fail` on ≥ 3 sites in 1 h, a 3 day
+ban sent to cfm-web, GR/CY 10 minutes and not sent. It ran as a dry run 6-10
+Nov 2026 (then 5 and 5) and has been armed since 2026-11-10. The shadow rows below keep
 their own thresholds and keep being written.
 
 Every signal ships **shadow** first: a history row plus the MCP, with no

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/logging"
 )
 
 // DefaultPath is where the daemon persists the store (a restart keeps the
@@ -166,14 +167,20 @@ func EdgeMode() string {
 	return "enforce"
 }
 
-// SetEdgeMode sets EdgeMode; anything but "log" (an empty value included) is
-// "enforce".
+// SetEdgeMode sets EdgeMode: "enforce", or empty (the key left out), is
+// enforce; "log" is log. Any other value is a typo for something the
+// operator meant (logonly, dryrun, off): it logs instead of enforcing, and
+// says so, rather than start 403ing on a misspelt observe-only setting.
 func SetEdgeMode(m string) {
-	if strings.EqualFold(strings.TrimSpace(m), "log") {
+	switch v := strings.ToLower(strings.TrimSpace(m)); v {
+	case "", "enforce":
+		edgeMode.Store("enforce")
+	case "log":
 		edgeMode.Store("log")
-		return
+	default:
+		logging.Logf("[edgeban] EDGE_BAN_MODE = %q is neither enforce nor log: logging only", m)
+		edgeMode.Store("log")
 	}
-	edgeMode.Store("enforce")
 }
 
 // Enabled reports the kill switch.
