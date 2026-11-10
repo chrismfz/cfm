@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.10
+
 ### Changed
 - **`login_bruteforce` is armed, at 4 failures per site or 3 sites.** After
   the 6-10 Nov dry run (~2 600 would-be bans on eight nodes, nearly all
