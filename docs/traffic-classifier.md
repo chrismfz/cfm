@@ -905,7 +905,10 @@ at 80 and puts the farm profile 10 points over the bar.
   as its Windows twin, so `linux_sw` never decides a reject alone. It costs
   no catch: a farm that fakes input to reach the rescue loses `no_input` and
   scores 80, a pass, anyway. A stronger group member (`ua_lie`) leaves it no
-  share, so that solve is judged at its full score.
+  share, so that solve is judged at its full score. "Never decides a reject
+  alone" holds at the default fail score (any `CHALLENGE_V2_FAIL_SCORE`
+  above 80): at 61-80, a Linux software-renderer visitor with some input
+  but fewer than 5 pointer events scores 80 and is rejected.
 - **Good-bot waiver:** unchanged. Google-Read-Aloud claims Android (no
   `linux_sw`, still 140); Googlebot/Bingbot rendering UAs carry no Linux
   token. A verified crawler that did would reach the waiver at 110 under a
@@ -916,7 +919,9 @@ at 80 and puts the farm profile 10 points over the bar.
   that ban; before, at 90, it passed.
 - **Unarmed (`would_v2`):** the shadow path scores with the same scorer, so
   the farm profile now writes `would_v2` lines at 110 on unarmed vhosts; expect
-  the `abuse_shadow` humanity counts to jump by that farm's volume.
+  the `abuse_shadow` humanity counts to jump by that farm's volume, and the
+  `solver_farm` humanity buckets to shift for the farm (hs 90 in `60-99` →
+  110 in `100+`).
 
 **Honest limit.** The UA is client-authored. The farm can switch to a Windows
 UA, where `sw_renderer,no_input` = 90 is the RDP human's profile (read 3) and
@@ -1303,7 +1308,7 @@ score with those readings (≥ 5 events, ≥ 100 px) and no certain tell
 (webdriver, headless UA) takes the solved path under every grain, marked
 `v2_rescued=input` (`challengeV2InputRescue`; kill switch
 `CHALLENGE_V2_INPUT_RESCUE`). Since 2026-10-20 (E4 read 3) it is **capped at
-100** (`rescueMaxScore`): a failing score above it is never rescued, whatever
+100** (`rescueMaxScore`; a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve)): a failing score above it is never rescued, whatever
 `CHALLENGE_V2_FAIL_SCORE` is set to (the gate asks the rescue only at or over
 the fail score, so a cap that followed it would rescue one score alone).
 The class it exists for scores exactly 100; the device-claim family above it
@@ -1352,7 +1357,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   either — the PTR wasn't known at verify — and that is NOT evidence the
   client isn't a crawler. `grep v2_rescued=` (since 2026-09-29) is "which
   failing solves did real pointer input let through": under ANY grain, a
-  failing score of at most 100 with no certain tell and `sig=` reporting ≥ 5
+  failing score with no certain tell, a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve), and `sig=` reporting ≥ 5
   pointer events covering ≥ 100 px (`mv` as `sig=` shows it; "Who the deterministic-FP
   residual is" above). It rides only an armed solve's line, after `v2=` /
   `v2_waived=`, with the failing `hs=`/`tells=` intact, and the history row
@@ -1438,7 +1443,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `by_fp`, `by_provider`, `by_ptr_domain`, `by_scope`, …). Since 2026-09-29
   `scope=` rides last (see below), and `v2_rescued=input` (before `src=`)
   marks a line an arm would have let through after all — real pointer input,
-  no certain tell, hs at most 100 — counted as `humanity.rescued`. Lines minus rescued is an
+  no certain tell, a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve) — counted as `humanity.rescued`. Lines minus rescued is an
   upper bound on what an arm would reject (the geo/vhost good-bot waiver
   clears verified crawlers too).
 - **`src=` — challenge provenance** (`challenge_src.go`, 2026-09-23): a

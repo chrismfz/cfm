@@ -179,7 +179,7 @@ D3/D4 are the process fix.
   pointer; a keyboard-only or touch user on such a machine is still walled
   until the confirm fallback. The trajectory readings that could tighten the
   rescue are measured first. *Capped 2026-10-20:* a failing score above 100
-  is never rescued (§5, E4).
+  is never rescued (§5, E4); since 2026-11-10 that is a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve).
 
 ## 5. Enforcement roadmap — the only live checklist
 
@@ -737,7 +737,8 @@ already opened.
 
           **Decided (operator, 2026-10-20, after E4 read 3):** cap the
           rescue at 100: a failing score above it is never rescued
-          (`rescueMaxScore`, the Chrome/109 class's `sw_renderer` +
+          (since 2026-11-10: a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve);
+          `rescueMaxScore`, the Chrome/109 class's `sw_renderer` +
           `outer_zero`; fixed, not `CHALLENGE_V2_FAIL_SCORE`, which only
           gates when the rescue is asked). Measured cost 0
           humans (the rescue fired 0 times in three reads, and its class

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -364,5 +366,34 @@ func TestRendererFamily_Surfaces(t *testing.T) {
 	sig, ok := latestSolveEvent(t, e).Payload["sig"].(map[string]any)
 	if !ok || sig["rf"] != "angle-swiftshader" {
 		t.Fatalf("persisted payload.sig = %#v", latestSolveEvent(t, e).Payload["sig"])
+	}
+}
+
+// deviceClaimWeights is the one weight table claim() and linuxSWShare read: a
+// member the scorer claims but the table lacks would score 0 silently. Every
+// entry must weigh something, and the claim(...) calls in the scorer and the
+// table's keys must be the same set (read from the source, so a new member
+// cannot be added on one side only).
+func TestDeviceClaimWeights_MatchTheScorer(t *testing.T) {
+	src, err := os.ReadFile("challenge_v2.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed := map[string]bool{}
+	for _, m := range regexp.MustCompile(`\bclaim\("([a-z_]+)"\)`).FindAllStringSubmatch(string(src), -1) {
+		claimed[m[1]] = true
+	}
+	if len(claimed) == 0 {
+		t.Fatal("no claim(...) calls found in challenge_v2.go")
+	}
+	for name := range claimed {
+		if w, ok := deviceClaimWeights[name]; !ok || w <= 0 {
+			t.Errorf("claim(%q): weight %d, in table %v", name, w, ok)
+		}
+	}
+	for name, w := range deviceClaimWeights {
+		if w <= 0 || !claimed[name] {
+			t.Errorf("deviceClaimWeights[%q] = %d, claimed by the scorer: %v", name, w, claimed[name])
+		}
 	}
 }

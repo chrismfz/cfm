@@ -90,7 +90,9 @@
   fleet-wide.** `c28caa00` dropped its device-claim lie and passes at
   exactly hs 90 (X11 Linux UA, `sw_renderer,no_input`): 85 684 passes on
   qualityweb, rigel, titan and orion, against 23 GR/CY consumer-ISP solves
-  with that profile (proposal (a) in read 6).
+  with that profile (proposal (a) in read 6). `linux_sw` shipped with the
+  change that approved it (operator, 2026-11-10), so the hs-90 Linux
+  profile now scores 110.
   The farms' rejects are now device-claim lies (`mobile_hw_lie`,
   `mac_hw_lie`), no longer `outer_zero`. Their passes stay under the fail
   score by design (D5b); stopping the rest is the operator fingerprint

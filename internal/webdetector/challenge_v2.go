@@ -133,9 +133,10 @@ package webdetector
 //     can't complete (slots busy, resolver down, PTR not resolved yet)
 //     rejects as before (retry-able, D5c); a reject whose PTR claims a
 //     crawler says why with v2_waiver_miss=<reason> (v2Waiver*).
-//   - Real pointer input RESCUES a failing score of at most 100 that has no
-//     certain tell (v2_rescued=input, challengeV2InputRescue; the cap is
-//     rescueMaxScore), under every grain — unlike
+//   - Real pointer input RESCUES a failing score with no certain tell and
+//     a score of at most 100, not counting linux_sw's share (so at most 120
+//     for a desktop Linux solve) (v2_rescued=input, challengeV2InputRescue;
+//     the cap is rescueMaxScore), under every grain — unlike
 //     the good-bot waiver, whose question (is this a verified crawler?) the
 //     decision path answers per grain, this one (is a person at the
 //     controls?) is the question the rung itself asks. It exists because a
@@ -307,9 +308,11 @@ const (
 	// own fingerprints. A device-claim member like the four above (scored as
 	// the group's max, once), so it never stacks with them: Linux +
 	// sw_renderer = 80 still PASSES (D5b), and only no_input (110) or another
-	// opener rejects. It never decides a reject alone: the real-input rescue
+	// opener rejects. At the default fail score (any CHALLENGE_V2_FAIL_SCORE
+	// above 80) it never decides a reject alone: the real-input rescue
 	// discounts its share (linuxSWShare), so a solve with real input is
-	// rescued exactly as it would be without it. NOT a core-count tell — the
+	// rescued exactly as it would be without it. At 61-80, Linux +
+	// sw_renderer = 80 itself fails, even with some input below the bars. NOT a core-count tell — the
 	// RDS/VDI rule below still holds; this reads the UA's OS claim against
 	// the renderer, not hardwareConcurrency. Honest limit: the UA is
 	// client-authored, so the farm can claim Windows, where sw_renderer,
@@ -782,8 +785,9 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 //
 // A failing score is RESCUED — never rejected, under any arm, the operator's
 // fingerprint policy included — when the payload reports real pointer input,
-// no CERTAIN tell fired, and the score is at most rescueMaxScore (the cap,
-// below). The first E4 read
+// no CERTAIN tell fired, and it has a score of at most rescueMaxScore (100),
+// not counting linux_sw's share (so at most 120 for a desktop Linux solve)
+// (the cap, below). The first E4 read
 // (docs/abuse-defense-master-plan.md §5, E4) found who the automatic v2 arm
 // would reject: Windows Chrome/109 (the last Chrome for Windows 7/8.1) on old
 // hardware, reporting a software renderer AND no window size — exactly the
@@ -810,8 +814,9 @@ func challengeV2ArmGrainVia(fpID, ip, host, scope string) (grain, via string) {
 // bucket itself, which humans share: faked input still passes there.
 // linux_sw's share does NOT count against the cap (linuxSWShare, operator
 // decision 2026-11-10): Linux + sw_renderer + outer_zero with real input
-// scores 120 and is rescued exactly as its Windows twin at 100, so linux_sw
-// never decides a reject alone. It costs no catch: a farm that fakes input
+// scores 120 and is rescued exactly as its Windows twin at 100, so at the
+// default fail score (any CHALLENGE_V2_FAIL_SCORE above 80) linux_sw never
+// decides a reject alone. It costs no catch: a farm that fakes input
 // to reach the rescue loses no_input and scores 80, a pass, anyway.
 // The cap is that class's score, NOT CHALLENGE_V2_FAIL_SCORE: the gate asks
 // only when hs >= the fail score, so a cap that followed it would rescue one

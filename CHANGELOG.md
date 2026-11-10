@@ -38,10 +38,14 @@ back-filled here — see the git/PR history for that period.
   passes, and Windows/Mac scores are unchanged (an RDP user's 90 still
   passes). The real-input rescue is unchanged: a Linux visitor with a
   software renderer, a window size reported as 0×0 and real mouse input
-  scores 120 but is rescued exactly as before, so `linux_sw` never fails a
-  solve on its own. It never fires for Android, ChromeOS, a mobile UA,
-  smart TVs, Chromecast, Tesla or the Puffin browser, and counts once with
-  the other device-claim tells. Unarmed vhosts show the farm profile as
+  scores 120 but is rescued exactly as before (the rescue now takes a score
+  of at most 100, not counting linux_sw's share, so at most 120 for a
+  desktop Linux solve), so at the default fail score (any
+  `CHALLENGE_V2_FAIL_SCORE` above 80) `linux_sw` never fails a solve on its
+  own. It never fires for Android, ChromeOS, a mobile UA, smart TVs,
+  Chromecast, Tesla or the Puffin browser (an Android tablet in desktop-site
+  mode sends a Linux UA; only its hardware GPU keeps it clear), and counts
+  once with the other device-claim tells. Unarmed vhosts show the farm profile as
   `would_v2` at 110. The farm can switch to a Windows UA, so this buys time
   rather than closing the gap. Kill switch: `[webdetector]
   CHALLENGE_V2_HW_TELLS = 0` (turns off `linux_sw` with `mobile_hw_lie` /

@@ -772,7 +772,7 @@ PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
 carries `v2_waiver_miss=<grain|mark|lockdown|off|spoofed|timeout|transient>`, or it
 would read like a spoof) — and except, under EVERY grain, a failing score with
 real pointer input (sig ptr >= 5 AND mv >= 100), no certain tell
-(webdriver / headless UA) and a score of at most 100, never above it (the
+(webdriver / headless UA) and a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve), never above it (the
 cap, `rescueMaxScore`, 2026-10-20, E4 read 3 — fixed, not the fail score;
 above it sits the farm-only device-claim family, which faked input must not
 carry through; linux_sw's share is not counted against it, so a Linux 120
