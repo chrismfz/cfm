@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,8 +84,21 @@ func TestFormFailuresCountHalf(t *testing.T) {
 		d.Enqueue(formAt("203.0.113.61", "a.gr", t0.Add(time.Duration(i)*time.Second)))
 	}
 	got := run(t, d)
-	if len(got) != 1 || got[0].Extra["rule"] != "site" || got[0].Extra["site_form_fails"] != "10" {
+	if len(got) != 1 || got[0].Extra["rule"] != "site" || got[0].Extra["site_form_fails"] != "10" ||
+		!strings.Contains(got[0].Extra["reason"], "0 failed WP_LOGIN logins and 10 failed lostpassword") {
 		t.Fatalf("10 hidden logins: %+v", got)
+	}
+	// The mixed boundary at SITE_FAILS = 5: 2 logins + 6 forms is 5, 2 + 5 is not.
+	for forms, want := range map[int]int{5: 0, 6: 1} {
+		d = newTest(Config{})
+		d.Enqueue(failAt("203.0.113.62", "a.gr", t0))
+		d.Enqueue(failAt("203.0.113.62", "a.gr", t0.Add(time.Second)))
+		for i := 0; i < forms; i++ {
+			d.Enqueue(formAt("203.0.113.62", "a.gr", t0.Add(time.Duration(2+i)*time.Second)))
+		}
+		if got := run(t, d); len(got) != want {
+			t.Errorf("2 logins + %d forms: %d alerts, want %d", forms, len(got), want)
+		}
 	}
 }
 

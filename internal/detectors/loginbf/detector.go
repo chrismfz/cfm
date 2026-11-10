@@ -480,7 +480,8 @@ func (d *Detector) addLocked(ev Event, win int64) (core.Alert, bool) {
 		// Say how many were reset / register forms (half each): what an
 		// unblock request needs to see.
 		a.Extra["site_form_fails"] = strconv.Itoa(onSiteForm)
-		a.Extra["reason"] += fmt.Sprintf(" (%d of them lostpassword / register forms, half each)", onSiteForm)
+		a.Extra["reason"] = fmt.Sprintf("%d failed %s logins and %d failed lostpassword / register forms (half each) on %s in %s",
+			onSite-onSiteForm, ev.Tag, onSiteForm, ev.Site, d.cfg.Window)
 	}
 	if ip, worst, addrs := worstAddr(c.fails, c.firedAt); ip != "" {
 		a.Key, a.Extra["ip"] = ip, ip
