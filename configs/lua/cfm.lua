@@ -1387,7 +1387,7 @@ end
 -- above: the panel proxy hostnames (0d), /.well-known/ (0a1), a clearance
 -- cookie (2b) and a cached clean allow (Step 3, up to 90 s) must not let a
 -- banned client through, as nft would not for a direct one. In
--- EDGE_BAN_MODE=log (the burn-in default) it only counts and logs. Never
+-- EDGE_BAN_MODE=log it only counts and logs (enforce, 403, is the default). Never
 -- raises (step pcalls itself) and fails open: a missing module or list
 -- answers "not banned".
 do

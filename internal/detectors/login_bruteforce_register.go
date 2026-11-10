@@ -6,6 +6,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectors/loginbf"
 	"cfm/internal/detectors/meta"
+	"cfm/internal/logging"
 	"cfm/internal/webdetector"
 )
 
@@ -28,18 +29,22 @@ const loginBruteforceProxyASNs = "30148,19551,54113,20940,16625,12989,33438,2003
 // (TestLoginBruteforceDefaultsMatchReferenceConfig pins it).
 func loginBruteforceDefaults() KV {
 	return KV{
-		"ENABLED":    "1",
-		"EVERY":      "10s",
-		"WINDOW":     "1h",
-		"SITE_FAILS": "5",
-		"SITES":      "5",
-		// Burn-in: alerts log "would block" and land in the alert log; nothing
-		// is banned or reported until the operator sets DRY_RUN = 0.
-		"DRY_RUN": "1",
+		"ENABLED": "1",
+		"EVERY":   "10s",
+		"WINDOW":  "1h",
+		// 4 and 3, not 5 and 5: the 6-10 Nov 2026 burn-in's Apache logs (virgo,
+		// mars, titan) had botnets sending 4 tries per address, or 3-4 sites,
+		// to stay under 5. 0 Greek or Cypriot addresses among the 17-42% more
+		// addresses 4 / 3 catch, nearly all of them datacenters.
+		"SITE_FAILS": "4",
+		"SITES":      "3",
+		// Armed: DRY_RUN = 1 logs "would block" to the alert log and bans
+		// nothing (the 6-10 Nov 2026 burn-in ran so).
+		"DRY_RUN": "0",
 		"BLOCK":   "3d",
-		// A banned client behind Cloudflare is not stopped by the nft drop and,
-		// with [webdetector] EDGE_BAN_MODE = log, not at the edge either: it keeps
-		// failing, and every new alert would mail and report it again.
+		// A client that keeps failing after its ban (one behind Cloudflare, when
+		// [webdetector] EDGE_BAN_MODE = log, which only logs at the edge) would
+		// otherwise be mailed and reported again on every alert.
 		"BLOCK_COOLDOWN": "6h",
 		"ALLOW_ASNS":     loginBruteforceProxyASNs,
 	}
@@ -53,8 +58,12 @@ func loginBruteforceLeniencyDefaults() KV {
 	return KV{
 		"MATCH_COUNTRY": "GR,CY",
 		// OR the Greek and Cypriot eyeball networks (OTE, Vodafone, Wind,
-		// Nova, Cyta, GRNET), for a range the geo database places abroad.
-		"MATCH_ASN":      "6799,3329,25472,1241,6866,5408",
+		// Nova, Cyta, GRNET), for a range the geo database places abroad, and
+		// Cloudflare (13335): a WARP address is shared by many of its users,
+		// so a brute forcer on it gets the soft tier rather than a 3 day fleet
+		// ban that would lock them all out (the first day's dry run: 12 WARP
+		// alerts, 104.28.x and 2a09:bac*).
+		"MATCH_ASN":      "6799,3329,25472,1241,6866,5408,13335",
 		"BLOCK":          "10m",
 		"BLOCK_COOLDOWN": "10m",
 		"SEND_TO_API":    "no",
@@ -114,6 +123,21 @@ func applyBuiltinLoginBruteforce(secs *Sections) {
 	}
 }
 
+// loginBruteforceDryRun: a written section without DRY_RUN is armed, but a
+// value kvBool cannot read (y, dryrun, enabled) keeps the dry run and says
+// so: a garbled burn-in setting must not start 3 day fleet bans.
+func loginBruteforceDryRun(section string, kv KV) bool {
+	on, off := kvBool(kv, "DRY_RUN", true), kvBool(kv, "DRY_RUN", false)
+	if on == off {
+		return on
+	}
+	if v := cleanScalar(kv["DRY_RUN"]); v != "" {
+		logging.Logf("[detectors] %s: DRY_RUN = %q is neither 0 nor 1: dry run", section, v)
+		return true
+	}
+	return false
+}
+
 func init() {
 	tmpl := map[string]string{}
 	for k, v := range loginBruteforceDefaults() {
@@ -132,10 +156,9 @@ func init() {
 		d := loginbf.New(loginbf.Config{
 			Every:     kvDur(kv, "EVERY", 10*time.Second),
 			Window:    kvDur(kv, "WINDOW", time.Hour),
-			SiteFails: kvInt(kv, "SITE_FAILS", 5),
-			Sites:     kvInt(kv, "SITES", 5),
-			// A written section without the key runs the burn-in too.
-			DryRun:    kvBool(kv, "DRY_RUN", true),
+			SiteFails: kvInt(kv, "SITE_FAILS", 4),
+			Sites:     kvInt(kv, "SITES", 3),
+			DryRun:    loginBruteforceDryRun(section, kv),
 			AllowIPs:  csvKV(kv, "ALLOW_IPS"),
 			AllowNets: csvKV(kv, "ALLOW_NETS"),
 			// The proxy list is the default even for a section the operator
@@ -144,7 +167,7 @@ func init() {
 		})
 		d.SetName(section)
 		d.AddUnsubscribe(webdetector.SubscribeLoginEvents(func(ev webdetector.LoginEvent) {
-			d.Enqueue(loginbf.Event{When: ev.When, IP: ev.IP, Host: ev.Host, Site: ev.Site, Tag: ev.Tag, OK: ev.OK, Owner: ev.Owner})
+			d.Enqueue(loginbf.Event{When: ev.When, IP: ev.IP, Host: ev.Host, Site: ev.Site, Tag: ev.Tag, OK: ev.OK, Owner: ev.Owner, Form: ev.Form})
 		}))
 		return d, nil
 	})

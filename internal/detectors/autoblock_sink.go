@@ -827,7 +827,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 // alertFields are the detector Extra keys the alert log keeps for grouping
 // (vhost from host, and what a login_bruteforce row needs to be measured).
-var alertFields = []string{"host", "rule", "site", "leniency", "geo", "ipv6_ambiguous"}
+var alertFields = []string{"host", "rule", "site", "leniency", "geo", "ipv6_ambiguous", "site_form_fails"}
 
 func copyAlertFields(dst, src map[string]string) {
 	for _, k := range alertFields {

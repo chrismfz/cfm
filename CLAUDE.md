@@ -571,7 +571,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   ~5 s) and checks it at cfm.lua Step 0e, before every exemption but the
   static IP/CIDR bypass, and on the static-asset locations: a new exemption
   step goes AFTER it, or a banned proxied client walks through it. That check
-  is `[webdetector] EDGE_BAN_MODE` = `log` (burn-in default) or `enforce`.
+  is `[webdetector] EDGE_BAN_MODE` = `enforce` (default since 2026-11-10) or `log`.
   Kill switch `[webdetector] EDGE_BAN`.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —

@@ -181,7 +181,7 @@ func TestEdgeBanEndpoint(t *testing.T) {
 	}
 	code, body := get(adminCtx())
 	var st EdgeBanStatus
-	if code != http.StatusOK || json.Unmarshal([]byte(body), &st) != nil || st.Mode != "log" || !st.Enabled {
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &st) != nil || st.Mode != "enforce" || !st.Enabled {
 		t.Fatalf("admin GET: %d %s", code, body)
 	}
 }
