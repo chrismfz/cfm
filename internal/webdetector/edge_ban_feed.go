@@ -99,7 +99,7 @@ func newEdgeBanEpoch() string {
 // current is the list the edge must hold now: every address the store
 // answers banned, less IGNORE_IPS (the decision path skips those too), with
 // its expiry in unix seconds (0 = permanent); capped at edgeBanFeedMax.
-func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[string]int64, time.Time) {
+func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) map[string]int64 {
 	items := edgeban.List()
 	if len(items) > edgeBanFeedMax {
 		// Over the cap, keep the longest bans: permanent first, then the
@@ -114,7 +114,6 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 		})
 	}
 	cur := make(map[string]int64, len(items))
-	recheck := now.Add(edgeBanSyncMax)
 	truncated := 0
 	for _, it := range items {
 		if b.bypassFunc != nil && b.bypassFunc(it.IP) {
@@ -134,7 +133,7 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) (map[stri
 		j.logged = now
 		logging.Logf("[edgeban] %d bans, the edge copy takes %d: %d left out (the soonest to expire)", len(cur)+truncated, edgeBanFeedMax, truncated)
 	}
-	return cur, recheck
+	return cur
 }
 
 // sync brings the published list to the store's, journalling the
@@ -145,7 +144,8 @@ func (b *NginxBridge) edgeBanSync(j *edgeBanJournal, now time.Time) {
 		return
 	}
 	t0 := time.Now()
-	cur, recheck := b.edgeBanCurrent(j, now)
+	cur := b.edgeBanCurrent(j, now)
+	recheck := now.Add(edgeBanSyncMax)
 	if j.published == nil {
 		j.epoch = newEdgeBanEpoch()
 		j.published = map[string]int64{}

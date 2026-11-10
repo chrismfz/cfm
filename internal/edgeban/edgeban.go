@@ -84,7 +84,7 @@ var (
 	enabled  atomic.Bool
 	edgeMode atomic.Value // string, see EdgeMode
 	def      atomic.Pointer[Store]
-	proxies  atomic.Pointer[[]*net.IPNet] // the trusted proxies' own ranges
+	proxies  atomic.Pointer[allowSet] // the trusted proxies' own ranges, searched like the allow sets
 )
 
 // SetTrustedProxies sets the ranges the edge trusts to name the client
@@ -93,8 +93,13 @@ var (
 // one (a Cloudflare Worker's subrequest), so a ban of that address would
 // 403 every visitor who arrives the same way.
 func SetTrustedProxies(nets []*net.IPNet) {
-	cp := append([]*net.IPNet(nil), nets...)
-	proxies.Store(&cp)
+	elems := make([]string, 0, len(nets))
+	for _, n := range nets {
+		if n != nil {
+			elems = append(elems, n.String())
+		}
+	}
+	proxies.Store(parseAllowSet(elems))
 	version.Add(1)
 }
 
@@ -108,16 +113,7 @@ func Version() uint64 { return version.Load() }
 func IsTrustedProxy(ip net.IP) bool { return isTrustedProxy(ip) }
 
 func isTrustedProxy(ip net.IP) bool {
-	p := proxies.Load()
-	if p == nil {
-		return false
-	}
-	for _, n := range *p {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return proxies.Load().contains(ip)
 }
 
 // ParseTrustedProxies reads `set_real_ip_from <cidr|ip>;` lines (the
@@ -430,15 +426,14 @@ func (s *Store) Clear() {
 }
 
 // allowSet matches the addresses nft's allow sets accept: hosts, CIDRs and
-// first-last ranges. The CIDRs and ranges are merged into sorted,
-// non-overlapping intervals per family and looked up by binary search: the
-// edge ban list checks every ban against them on each resync, and a linear
-// scan of a few hundred allow nets over ~23 000 bans took 100+ ms (mars,
-// 2026-11-10; BenchmarkList).
+// first-last ranges, all merged into sorted, non-overlapping intervals per
+// family and looked up by binary search. The edge ban list checks every ban
+// against them on each resync, and a linear scan of a few hundred allow nets
+// over ~23 000 bans took 100+ ms (mars, 2026-11-10; BenchmarkList). The
+// trusted proxies' ranges use it too.
 type allowSet struct {
-	hosts map[string]bool
-	v4    []span4
-	v6    []span6
+	v4 []span4
+	v6 []span6
 }
 
 type span4 struct{ lo, hi uint32 }
@@ -446,7 +441,7 @@ type span4 struct{ lo, hi uint32 }
 type span6 struct{ lo, hi [16]byte }
 
 func parseAllowSet(elems []string) *allowSet {
-	a := &allowSet{hosts: map[string]bool{}}
+	a := &allowSet{}
 	for _, raw := range elems {
 		e := strings.TrimSpace(raw)
 		switch {
@@ -478,8 +473,8 @@ func parseAllowSet(elems []string) *allowSet {
 				a.add(norm(lo), norm(hi))
 			}
 		default:
-			if k := key(net.ParseIP(e)); k != "" {
-				a.hosts[k] = true
+			if ip := net.ParseIP(e); ip != nil {
+				a.add(norm(ip), norm(ip))
 			}
 		}
 	}
@@ -508,7 +503,9 @@ func parseAllowSet(elems []string) *allowSet {
 
 // add records the interval lo-hi of one family (4 or 16 bytes, as a v4 or
 // v6 CIDR parses and as norm gives them). A range whose ends are of two
-// families, or whose ends are reversed, matches nothing, as before.
+// families, or whose ends are reversed, matches nothing (the linear code
+// before 2026-11-10 compared a mixed range's v4 probe with the first bytes of
+// its v6 end).
 func (a *allowSet) add(lo, hi net.IP) {
 	switch {
 	case len(lo) == 4 && len(hi) == 4:
@@ -564,9 +561,6 @@ func norm(ip net.IP) net.IP {
 func (a *allowSet) contains(ip net.IP) bool {
 	if a == nil || ip == nil {
 		return false
-	}
-	if a.hosts[key(ip)] {
-		return true
 	}
 	n := norm(ip)
 	if len(n) == 4 {

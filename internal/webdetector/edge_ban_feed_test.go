@@ -40,7 +40,7 @@ func at(r edgeBanReply) url.Values {
 }
 
 // The edge pulls the whole list first, then only what changed since its
-// position: a ban, an unban, an expiry. An edge out of reach (another epoch,
+// position: a ban, an unban, an expiry (on the next resync). An edge out of reach (another epoch,
 // a position the journal no longer covers, or one ahead of it) gets the
 // whole list again.
 func TestEdgeBanJournal(t *testing.T) {
