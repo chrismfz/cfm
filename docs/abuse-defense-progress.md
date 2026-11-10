@@ -24,12 +24,11 @@
 
 ## 2. Current picture (update on every read)
 
-*As of 2026-11-03 (read 5).*
+*As of 2026-11-10 (read 6).*
 
-- **Fleet version:** the 8 web nodes run `2026.11.01` (qualityweb, Angie,
+- **Fleet version:** the 8 web nodes run `2026.11.09` (qualityweb, Angie,
   joined on 2026-10-27). The 5 nodes without an edge serve no challenge:
-  mymail, 3deers, saf and watchdog run `2026.10.21`, avglb (new)
-  `2026.10.28`.
+  mymail, 3deers, saf and watchdog run `2026.10.21`, avglb `2026.11.03`.
 - **Live since release 2026.09.29** (deployed 2026-09-29/30):
 
   | PR | What |
@@ -71,6 +70,11 @@
   Releases 2026.10.27 to 2026.11.01 added, in this area: #1625 (the
   `solver_farm` defaults 180s / 30 / 15) and #1629 (the challenge server
   no longer refuses in-app browsers as a bad UA).
+
+  Releases 2026.11.03 to 2026.11.09 added, in this area: #1637 (humanity
+  context on `solver_farm` findings, master plan candidate 3), #1645 (Meta
+  crawlers get their own image throttle budget) and #1646 (the
+  challenge-exclude file skips google-xrawler from Google's own network).
 - **What bites today:** operator-armed fingerprint / country-ASN policies
   from cfm-web (still no `v2=geo` line in read 3's week), the WAF challenge
   tier at `challenge_v2`, manual vhost v2 tiers, the automatic vhost
@@ -82,7 +86,11 @@
   Read 5 measured 81 % over the same three nodes (orion 94 %, mars 86 %,
   titan 26 %). The fingerprints are coarse buckets, so their "passes"
   include the bucket's humans: on titan most of them are a GR audience on
-  www.e-vafeiadis.gr at hs 0.
+  www.e-vafeiadis.gr at hs 0. **Read 6: 35 % over the three, 14 %
+  fleet-wide.** `c28caa00` dropped its device-claim lie and passes at
+  exactly hs 90 (X11 Linux UA, `sw_renderer,no_input`): 85 684 passes on
+  qualityweb, rigel, titan and orion, against 23 GR/CY consumer-ISP solves
+  with that profile (proposal (a) in read 6).
   The farms' rejects are now device-claim lies (`mobile_hw_lie`,
   `mac_hw_lie`), no longer `outer_zero`. Their passes stay under the fail
   score by design (D5b); stopping the rest is the operator fingerprint
@@ -142,11 +150,11 @@
      2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
      operator cleanup); the shipped `solver_farm` defaults (**decided
      2026-10-27: 180s / 30 / 15**; the fleet moves from 15 to 30).
-- **Next read:** 2026-11-10, after the operator's decisions on read 5's
-  proposals. It watches the `hid:1` solves on `95070673` (orion,
-  DigitalOcean), the farm catch rate per node, human rejects under every v2
-  source (including `vhost_config`), and the `solver_farm` findings at 30
-  (fingerprint-blind ones on a GR audience).
+- **Next read:** 2026-11-17, after the operator's decisions on read 6's
+  proposals. It watches the farm's hs-90 Linux profile (and whether it
+  flips its UA to Windows), the farm catch rate per node, human rejects
+  under every v2 source, the `solver_farm` humanity lines (GR audiences on
+  fingerprint-blind findings), and the `hid:1` solves on `95070673`.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·
@@ -157,14 +165,14 @@
 
 | Node | Edge | Version | `ABUSE_SHADOW` | History kept | ChallengeV2 knobs |
 |---|---|---|---|---|---|
-| earth | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
-| mars | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
-| orion | angie | 2026.11.01 | 1 | 30 d / 1M rows (the 1M cap holds ~6 days) | defaults |
-| qualityweb | angie | 2026.11.01 | 1 (since 2026-11-03) | 30 d / 1M rows | defaults |
-| rigel | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
-| server.speedhost.gr | openresty | 2026.11.01 | 1 (since 2026-09-29) | **7 d** | defaults |
-| titan | openresty | 2026.11.01 | 1 | 30 d / 1M rows | defaults |
-| virgo | angie | 2026.11.01 | 1 | **7 d** | defaults |
+| earth | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
+| mars | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
+| orion | angie | 2026.11.09 | 1 | 30 d / 1M rows (the 1M cap holds ~6 days) | defaults |
+| qualityweb | angie | 2026.11.09 | 1 (since 2026-11-03) | 30 d / 1M rows | defaults |
+| rigel | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
+| server.speedhost.gr | openresty | 2026.11.09 | 1 (since 2026-09-29) | **7 d** | defaults |
+| titan | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
+| virgo | angie | 2026.11.09 | 1 | **7 d** | defaults |
 
 `[challenge_solver_farm]` on every web node: `WINDOW = 180s`, `MIN_SUBNETS =
 30`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`), the shipped
@@ -188,7 +196,7 @@ week missed is a week lost on virgo and speedhost.
 | Payload health | the `hs=-` share of scored solves | — | A jump after a release = the page payload broke (parse / 1 KB cap) |
 | Payload stripping under an arm | `hs=-` solve lines that carry `v2=` (a pass: D5b never fails a missing payload) | read 1 | A rising share on a convicted fp = the farm bypasses the arm by stripping the body → a master-plan decision |
 | Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp means the arm lost that catch → a master-plan decision. Read 4: 793 in 4.9 days, 70 % GR/CY; 4 farm solves passed that a 0x0 size would have failed. (The farms' `outer_zero` rejects had already fallen before #1615.) Read 5: 1 533, 45 % GR/CY; the drop is `95070673` sending `hid:1` from DigitalOcean on orion (702), at hs 0, so a 0x0 size would not have failed them either. |
-| Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
+| Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %; read 6: 14 % fleet-wide, the farm at hs 90); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
 
 ## 5. Entry template
 
@@ -245,6 +253,183 @@ week missed is a week lost on virgo and speedhost.
   `hc` before calling a reject human.
 
 ## 6. Entries
+
+### 2026-11-10 — read 6 (window: 2026-11-03 09:05 to 2026-11-10 09:05 Athens, 7 days)
+
+The first read with candidate 3 (#1637, humanity context on `solver_farm`
+findings). Same method as read 5: every web node's `cfm.challenges.log*` and
+`cfm.abuse_shadow.log*` parsed over SSH (read-only, python on stdin), and
+the `solver_farm` findings from each node's history database (read-only
+SQLite). The window is the whole week on every node.
+
+- **Fleet:**
+  - The 8 web nodes run `2026.11.09` (binary 11-09 13:52 on all). #1637
+    went live with the 2026.11.03 release: its first `humanity` payload is
+    11-03 23:37 UTC on titan. The edgeless nodes: 3deers, mymail, saf and
+    watchdog `2026.10.21`, avglb `2026.11.03`.
+  - In this area since read 5:
+    - #1637 (humanity context);
+    - #1646 (the challenge-exclude file skips google-xrawler from
+      Google's own network);
+    - #1645 (Meta crawlers get their own image throttle budget).
+  - `[challenge_solver_farm]` is 180s / 30 / 15 on all 8 nodes. qualityweb
+    now runs `ABUSE_SHADOW = 1`; it wrote 121 `would_v2` lines this week.
+  - **No operator policy bites:** no `v2=fp` and no `v2=geo` line on any
+    node. Every reject is `v2=vhost` (automatic) or a rung mark.
+  - cfm-web: the farm verdicts are still `c28caa00`, `95070673` and
+    `19877aeb`. One new `suspect`, `2879571a`, has a single fp_concentration
+    finding on orion.
+- **Health:** 291 solves with no payload (`hs=-`) among ~264 000 (read 5:
+  329). No `v2_rescued` line, and 0 Windows Chrome/109 rejects.
+- **The farm found the fail score: `c28caa00` now passes at hs 90.**
+  - **The profile:** an X11 Linux Chrome UA, SwiftShader, no input
+    (`sw_renderer,no_input` = 60 + 30 = 90, under the fail score of 100),
+    with 4, 8, 12 or 16 cores.
+  - **Where it came from:** datacenters (M247, Datacamp, Web2Objects,
+    FDCservers, EGIHosting, OCULUS) and residential proxies (Wave
+    Broadband, RCN, Comcast, Cox).
+  - **The three vhosts:**
+
+    | vhost (node) | Farm passes at hs 90 | Distinct IPs | Peak days |
+    |---|---|---|---|
+    | www.ekalogeropoulos.gr (qualityweb) | 36 601 | 25 588 | 11-04 and 11-05 |
+    | www.e-vafeiadis.gr (rigel; the site moved there from titan on 11-03 at 11:29) | 18 697 | 16 437 | 11-05 and 11-06 |
+    | gastronom.hk (titan) | 9 292 at hs 90, 4 111 at hs 60 (`sw_renderer` alone) | — | every day, 3 240 on 11-09 |
+  - In read 4 the same farm was rejected for device-claim lies
+    (`mobile_hw_lie`). This week it dropped the lie: a Linux desktop UA with
+    a software renderer claims nothing about the device.
+  - **Who else scores the same.** Every solve scored exactly
+    `sw_renderer,no_input` or `sw_renderer` on qualityweb, titan, orion and
+    rigel this week:
+
+    | UA | Farm fps, abroad | GR/CY consumer-ISP addresses |
+    |---|---|---|
+    | X11 Linux | **85 684** | **23**, all on farm fps (the farm uses GR residential exits, read 4) |
+    | Windows | 480 | 59 (27 with `no_input`) |
+    | Mac | 143 | 1 |
+- **Catch rate:** farm fp under an arm, rejected / (passed + rejected).
+
+  | Node | Farm fp | Passed / rejected | Caught (read 5) |
+  |---|---|---|---|
+  | orion | `95070673` | 11 063 / 3 672 | 25 % (94 %) |
+  | titan | `c28caa00` | 19 855 / 13 601 | 41 % (26 %) |
+  | mars | `c28caa00` | 978 / 202 | 17 % (86 %) |
+  | earth | `c28caa00` | 521 / 301 | 37 % (36 %) |
+  | qualityweb | `c28caa00` | 66 839 / 1 731 | **3 %** (48 %) |
+  | rigel | `c28caa00` | 29 635 / 657 | **2 %** (—) |
+  | virgo | `95070673` | 169 / 105 | 38 % (15 %) |
+  | server.speedhost.gr | `c28caa00` | 65 / 32 | 33 % (—) |
+
+  - Over orion, titan and mars: **35 %** (read 5: 81 %). Fleet-wide:
+    14 % (20 301 rejected, 129 125 passed).
+  - orion and mars dropped because the farm left them, not because it beat
+    the arm there:
+    - orion: mail.mathematica.gr had 82 321 rejects in read 5 and ~0 this
+      week. Most of orion's "farm passes" are now a GR audience sharing the
+      bucket: 6 589 GR/CY solves at hs 0 on www.mathematica.gr.
+    - mars: about 1 200 farm solves all week, against ~1 900 in read 5.
+  - Total rejects: 22 459 (read 5: 104 320).
+- **`hid:1` on `95070673` (watch item from read 5):**
+  - orion has 570 non-GR/CY `hid:1` solves (read 5: 702), nearly all at hs
+    0.
+  - Solves that `hid` let through where a 0x0 size would have failed (hs
+    60–99, farm fp, under an arm): **orion 3, virgo 6** (read 5: 4). Six
+    more on orion were rejected at 100+ anyway.
+  - The farm is not using `hid` to pass; the hs-90 profile above is what
+    it uses.
+- **`vhost_config`:** 511 rejects, none from a GR/CY address and none on a
+  panel port. 1 657 GR/CY solves passed on the always-on hosts.
+- **Human-labelled rejects (GR/CY consumer ISP, no bot UA): none human.**
+  All carry a certain tell:
+  - `94.66.129.119` (OTEnet, the address from reads 4 and 5), on escort-ad
+    sites on titan and mars: ~100 rejects, `webdriver`, under WAF 501 and
+    `CHALLENGE_UNIQHOSTS_IP` marks.
+  - rigel www.e-vafeiadis.gr, four OTEnet addresses, 12 rejects:
+    `headless_ua,no_input` with a Mac UA, on `c28caa00`. The farm through
+    Greek exits.
+  - orion www.xylinopatoma.gr, `194.154.45.120` (the DEI corporate network):
+    7 rejects, `headless_ua,webdriver`.
+  - mars ksilokosmos.gr, `37.6.201.246` (Nova): 4 rejects, `webdriver`.
+- **The other big wave: toolpoint.gr (mars), 96 918 solves in 3 days.**
+  - Solves per day: 8 619 on 11-04, 43 827 on 11-05, 44 473 on 11-06.
+  - 78 713 distinct IPs, all residential in FR, GB, ES and CA (Orange, Free,
+    Bouygues, SFR, BT, Virgin, Sky, Bell, Telefónica).
+  - Every solve scored hs 0 with no input and no TLS fingerprint. They pass
+    under `auto:suspicious_vhost` by design: a residential-proxy botnet
+    with a clean browser profile is the hs-0 honest limit. Any score that
+    failed it would fail the same visitors.
+  - `solver_farm` flagged it 81 times (`subnet_spread`, 50–122 `/24`), and
+    candidate 3 made each finding readable on its face: `hs 0 ×N`,
+    countries ES, FR, GB, CA, DE.
+- **`solver_farm` at 30 (with humanity):**
+  - **Findings:**
+
+    | Node | Findings | With `cross_host` | With `subnet_spread` (fingerprint-blind track) |
+    |---|---|---|---|
+    | titan | 983 | 920 | 33 |
+    | orion | 530 | 518 | 9 |
+    | qualityweb | 159 | 159 | 0 (read 5: no findings at all) |
+    | rigel | 120 | 32 | 46 |
+    | mars | 86 | — | 84 (81 of them toolpoint.gr) |
+    | earth | 3 | — | 1 |
+    | virgo | 1 | — | 1 |
+    | server.speedhost.gr | 0 | — | — |
+
+  - **Two fingerprint-blind findings were a Greek audience**, and the
+    humanity line says so at once:
+    - www.mathematica.gr (orion): 7 findings on 11-06 at 31–42 `/24`, each
+      `hs 0`, GR ×30–45 (a Greek maths forum).
+    - gokids.gr and www.gokids.gr (rigel): 2 findings on 11-04 at 30–31
+      `/24`, `hs 0`, GR ×24–26, CY ×5.
+
+    The other fingerprint-blind findings are farm-shaped: gastronom.hk,
+    www.e-vafeiadis.gr and seretistravel.gr (US, DE and HK at hs 60–99),
+    and toolpoint.gr (above).
+  - **Candidate 3 works:** every finding after the deploy carries
+    `payload.humanity`. One case is noisy: a `cross_host` finding with
+    `n=1` (e.g. webmail.dinorouso.gr, one GR solve at hs 0). That is the
+    cross-host track flagging a vhost where the fingerprint has a single
+    passed solve in the window. The finding is right about the
+    fingerprint, while its humanity says little about that vhost.
+- **Since last read:** the farm moved its pass profile to Linux +
+  SwiftShader + no input at hs 90, and the catch rate fell to 14 %
+  fleet-wide. orion's farm left mail.mathematica.gr. A 97 000-solve hs-0
+  residential wave hit toolpoint.gr. Candidate 3 shipped and reads well.
+
+#### Proposals (for the operator; nothing is implemented without a go)
+
+**(a) A `linux_sw` tell: a Linux UA with a software renderer.** It answers
+the hs-90 profile, which carries 85 684 farm passes against 23 GR/CY
+consumer-ISP solves, all of those on the farm's own fingerprints.
+- Scoring: it would join the device-claim group as one member (like
+  `ua_lie`), so a spoofed UA never rejects alone. It would add about 10, so
+  `sw_renderer,no_input` reaches 100 while `sw_renderer` alone (70) still
+  passes.
+- Kill switch: `CHALLENGE_V2_HW_TELLS`.
+- **Honest limit:** the UA is client-authored, so the farm can switch it to
+  Windows within a day. On Windows, `sw_renderer,no_input` at 90 is the
+  RDP-human profile (read 3), and it stays below the fail score by D5b.
+  The tell buys time, not a fix.
+- Recommended, as a small reviewed change, with the next read measuring
+  whether the farm flips its UA.
+
+**(b) `solver_farm` stays at 30.** Two Greek-audience findings in a week
+(mathematica.gr, gokids.gr), both `ACTION = observe`. The humanity line
+now makes them obvious, which is what candidate 3 was for.
+
+**(c) toolpoint.gr-style waves are the hs-0 honest limit.** Nothing in the
+score can separate them, and no change is proposed. A manual vhost
+lockdown (`docs/vhost-lockdown.md`) or a traffic-rule rate limit is the
+operator's per-incident lever.
+
+**(d) Plan order after this.** The farm's adaptation makes (a) the next
+step. After it: candidate 6, a faster in-page PoW solver, which unfreezes
+the `harden` rung. Candidate 5, `CHALLENGE_V2_ENFORCE`, stays last. One
+small open item from #1637: the humanity line usually misses the 5-sample
+`alerts.db` (it comes after the UA lines). Moving it before them costs one
+UA line there.
+
+- **Actions:** none yet; awaiting the operator.
 
 ### 2026-11-03 — read 5 (window: 2026-10-27 09:10 to 2026-11-03 09:05 Athens, 7 days)
 
