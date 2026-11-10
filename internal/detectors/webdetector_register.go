@@ -1027,7 +1027,7 @@ func init() {
 			cfg.AbuseShadow,
 		)
 		// Kill switch for the corpus-measured device-claim tells
-		// (mobile_hw_lie / mac_hw_lie); default on.
+		// (mobile_hw_lie / mac_hw_lie / linux_sw); default on.
 		webdet.ConfigureChallengeV2HWTells(kvBool(kv, "CHALLENGE_V2_HW_TELLS", true))
 		// Kill switch for the real-input rescue of a failing armed solve;
 		// default on.

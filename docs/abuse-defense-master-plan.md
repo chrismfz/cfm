@@ -809,6 +809,24 @@ already opened.
             policy would land on those humans too (`challenge`) or block
             them (`deny`). Next: candidate 3. qualityweb's `ABUSE_SHADOW`
             set to 1 like the other web nodes.
+          - **Read 6 decision (operator, 2026-11-10): `linux_sw` +20 in the
+            device-claim group.** `c28caa00` dropped its device-claim lies
+            and passed at exactly `sw_renderer,no_input` = 90 with an X11
+            Linux Chrome UA: 85 684 farm passes on four nodes vs 23 GR/CY
+            consumer-ISP solves, all on the farm's own fingerprints. A
+            desktop Linux UA (never Android / ChromeOS / mobile) on a
+            software renderer now adds 20 as a device-claim member (the
+            group's max, once): Linux + `sw_renderer` = 80 still passes,
+            + `no_input` = 110 rejects. Under `CHALLENGE_V2_HW_TELLS`. Not a
+            core-count tell (the RDS/VDI rule stands). With it, a log-only
+            `rf` reading (the software-renderer family) on `sig=`, so the
+            next reads calibrate per automation stack. Honest limit: the UA
+            is client-authored, and on a Windows UA the same report is the
+            RDP human's 90, which D5b keeps passing: the tell buys time. The
+            one rescue row it moves: Linux + `sw_renderer` + `outer_zero`
+            with real input, 100 (rescued) → 120 (over the cap). As built:
+            `docs/traffic-classifier.md`, "`linux_sw`". Next read: does the
+            farm flip its UA, and does any Linux human land at 110 or 120.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the

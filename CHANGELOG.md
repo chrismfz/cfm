@@ -17,7 +17,31 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **ChallengeV2: a desktop Linux UA on a software renderer now scores +20
+  (`linux_sw`).** The convicted farm fingerprint `c28caa00` stopped faking
+  its device and passed v2 at exactly hs 90 (an X11 Linux Chrome UA,
+  SwiftShader, no input): 85 684 farm passes on four nodes in the 3-10 Nov
+  read, against 23 Greek/Cypriot consumer-ISP solves. That profile now
+  scores 110 and is rejected wherever v2 is armed; Linux with a software
+  renderer and real input scores 80 and still passes, and Windows/Mac
+  scores are unchanged (an RDP user's 90 still passes). It never fires for
+  Android, ChromeOS or a mobile UA, and counts once with the other
+  device-claim tells, so a spoofed UA never fails a solve on its own. One
+  edge case moves: a Linux visitor with a software renderer, no reported
+  window size AND real mouse input scores 120, over the real-input rescue's
+  cap of 100, and is rejected (it was rescued at 100). Unarmed vhosts show
+  the farm profile as `would_v2` at 110. The farm can switch to a Windows
+  UA, so this buys time rather than closing the gap. Kill switch:
+  `[webdetector] CHALLENGE_V2_HW_TELLS = 0` (turns off `linux_sw` with
+  `mobile_hw_lie` / `mac_hw_lie`).
+- **The challenge log and history rows name the software-renderer family.**
+  When a software renderer is detected, `sig=` (and `payload.sig` on the
+  history row) carries `rf:` with a short family name (`swiftshader`,
+  `angle-swiftshader`, `llvmpipe`, `softpipe`, `swrast`, `mesa-offscreen`,
+  `other`), never the raw renderer string. Scored by nothing; it lets the
+  weekly reads tell automation stacks apart. Stripped for scoped (cPanel)
+  callers with the rest of `sig`.
 
 ## 2026.11.10
 

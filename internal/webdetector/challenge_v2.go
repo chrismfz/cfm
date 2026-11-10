@@ -60,8 +60,8 @@ package webdetector
 //   CHALLENGE_V2_PASSIVE    (default 1) master for scoring + the armed gate
 //   CHALLENGE_V2_FAIL_SCORE (default 100) the fail threshold
 //   CHALLENGE_V2_DEBUG      (default 0) X-CFM-HS response header
-//   CHALLENGE_V2_HW_TELLS   (default 1) kill switch for mobile_hw_lie / mac_hw_lie
-//                           (ConfigureChallengeV2HWTells)
+//   CHALLENGE_V2_HW_TELLS   (default 1) kill switch for mobile_hw_lie / mac_hw_lie /
+//                           linux_sw (ConfigureChallengeV2HWTells)
 //   CHALLENGE_V2_INPUT_RESCUE (default 1) kill switch for the real-input
 //                           rescue (ConfigureChallengeV2InputRescue)
 //   CHALLENGE_V2_AUTO_VHOST (default suspicious_vhost,uniqpaths_short,under_attack,vhost_config)
@@ -295,13 +295,32 @@ const (
 	// payload.
 	tellUALie = 50
 
+	// A desktop Linux UA (X11; Linux / Linux x86_64 / Linux aarch64 — never
+	// Android, ChromeOS or any mobile UA: uaClaimsDesktopLinux) reporting a
+	// SOFTWARE renderer (the sw_renderer match). Operator decision
+	// 2026-11-10, E4 read 6 (docs/abuse-defense-progress.md): the convicted
+	// farm fingerprint c28caa00 dropped its device-claim lies and passed at
+	// exactly sw_renderer,no_input = 90 with an X11 Linux Chrome UA — 85 684
+	// passes on four nodes vs 23 GR/CY consumer-ISP solves, all on the farm's
+	// own fingerprints. A device-claim member like the four above (scored as
+	// the group's max, once), so it never rejects alone and never stacks with
+	// them: Linux + sw_renderer = 80 still PASSES (D5b), only with no_input
+	// (110) or another opener does it reject. NOT a core-count tell — the
+	// RDS/VDI rule below still holds; this reads the UA's OS claim against
+	// the renderer, not hardwareConcurrency. Honest limit: the UA is
+	// client-authored, so the farm can claim Windows, where sw_renderer,
+	// no_input = 90 is the RDP human's profile and stays below the fail score
+	// by D5b — the tell buys time, it closes nothing. Under the
+	// CHALLENGE_V2_HW_TELLS kill switch.
+	tellLinuxSW = 20
+
 	mobileHWLieMinCores = 16
 	macHWLieMinCores    = 64
 )
 
-// THE DEVICE-CLAIM GROUP. touch_lie, mobile_hw_lie, mac_hw_lie and ua_lie all
-// say one thing — "this is not the device/browser the UA claims" — and one
-// spoof trips several at once (DevTools phone emulation or a UA switcher on a
+// THE DEVICE-CLAIM GROUP. touch_lie, mobile_hw_lie, mac_hw_lie, ua_lie and
+// (since 2026-11-10) linux_sw all say one thing — "this is not the
+// device/browser the UA claims" — and one spoof trips several at once (DevTools phone emulation or a UA switcher on a
 // 16-thread desktop reports zero touch points AND desktop core counts). Summed,
 // a single exotic setup would reject on ONE fact, which D5b forbids. So every
 // member that fires is still LISTED in tells (the log shows what was seen), but
@@ -331,12 +350,13 @@ type challengeV2State struct {
 	debug       bool
 	shadowLines bool // emit would_v2 lines to the abuse-shadow log (rides ABUSE_SHADOW)
 	// hwTells gates the device-claim hardware tells (mobile_hw_lie,
-	// mac_hw_lie): CHALLENGE_V2_HW_TELLS, default on. A kill switch, not a
-	// burn-in flag — the tells were measured before shipping — kept because
+	// mac_hw_lie, and since 2026-11-10 linux_sw): CHALLENGE_V2_HW_TELLS,
+	// default on. A kill switch, not a burn-in flag — the tells were measured before shipping — kept because
 	// they bite fleet-wide the moment the binary lands (every WAF
 	// challenge-tier rule is challenge_v2 by default, and those marks are
-	// strict). Off, the two tells are not evaluated (touch_lie and ua_lie
-	// are unaffected). Read in the same snapshot as the other knobs.
+	// strict). Off, the three tells are not evaluated (touch_lie, ua_lie
+	// and sw_renderer itself are unaffected). Read in the same snapshot as
+	// the other knobs.
 	hwTells bool
 	// inputRescue gates the real-input rescue (challengeV2InputRescue):
 	// CHALLENGE_V2_INPUT_RESCUE, default on. A kill switch — the rescue is
@@ -994,8 +1014,82 @@ func uaClaimsMobile(ua string) bool {
 		strings.Contains(ua, "iPad")
 }
 
+// uaClaimsDesktopLinux reports a DESKTOP Linux UA — the claim linux_sw holds
+// a software renderer against: "X11; Linux" (every desktop Chrome/Firefox on
+// Linux) or the bare "Linux x86_64" / "Linux aarch64" desktop form. Never a
+// phone or tablet (uaClaimsMobile: "Linux; Android …", the Kindle's "Linux
+// armv7l like Android"), never ChromeOS ("X11; CrOS x86_64", where a software
+// renderer is an ordinary low-end Chromebook), and never a UA carrying a
+// "Mobile" token. A plain substring check in the style of its two siblings
+// above: uaplausible classifies families and contradictions, not the OS.
+func uaClaimsDesktopLinux(ua string) bool {
+	if uaClaimsMobile(ua) || strings.Contains(ua, "CrOS") || strings.Contains(ua, "Mobile") {
+		return false
+	}
+	return strings.Contains(ua, "X11; Linux") ||
+		strings.Contains(ua, "Linux x86_64") ||
+		strings.Contains(ua, "Linux aarch64")
+}
+
 var softwareRendererMarks = []string{
 	"swiftshader", "llvmpipe", "softpipe", "software rasterizer", "mesa offscreen", "angle (google, vulkan 1.1.0 (swiftshader",
+}
+
+// Software-renderer families: the log-only rf: reading (sigFields). A short
+// enum, never the raw renderer string, so the corpus can be read per
+// automation stack (old headless Chrome's "Google SwiftShader" vs new
+// headless's ANGLE-wrapped one, a Mesa llvmpipe VM, …) without the reading
+// becoming a free-text field. Scored by NOTHING.
+const (
+	rfSwiftShader      = "swiftshader"
+	rfANGLESwiftShader = "angle-swiftshader"
+	rfLLVMPipe         = "llvmpipe"
+	rfSoftpipe         = "softpipe"
+	rfSWRast           = "swrast"
+	rfMesaOffscreen    = "mesa-offscreen"
+	rfOther            = "other"
+)
+
+// softwareRendererFamily is THE software-renderer detection: "" when the
+// reported WebGL renderer matches none of softwareRendererMarks (hardware, or
+// not reported), else the family the matching mark names. The scorer's
+// sw_renderer tell and the rf: reading both call it, so they cannot disagree
+// about whether a renderer is software.
+func softwareRendererFamily(glr string) string {
+	glr = strings.ToLower(glr)
+	if glr == "" {
+		return ""
+	}
+	for _, m := range softwareRendererMarks {
+		if strings.Contains(glr, m) {
+			return rendererFamilyForMark(m, glr)
+		}
+	}
+	return ""
+}
+
+// rendererFamilyForMark names the family of a matched mark. A SwiftShader
+// wrapped in ANGLE ("ANGLE (Google, Vulkan … (SwiftShader Device …") is told
+// apart from a bare one. rfOther is the fallback for a mark added to the list
+// without a family here, so the reading is never absent when sw_renderer
+// fired (TestRendererFamily_EveryMarkIsNamed fails such an addition).
+func rendererFamilyForMark(mark, glr string) string {
+	switch mark {
+	case "swiftshader", "angle (google, vulkan 1.1.0 (swiftshader":
+		if strings.Contains(glr, "angle (") {
+			return rfANGLESwiftShader
+		}
+		return rfSwiftShader
+	case "llvmpipe":
+		return rfLLVMPipe
+	case "softpipe":
+		return rfSoftpipe
+	case "software rasterizer":
+		return rfSWRast
+	case "mesa offscreen":
+		return rfMesaOffscreen
+	}
+	return rfOther
 }
 
 // scoreHumanity is the pure Rung-1 scorer. sig may be nil (no payload): only
@@ -1035,12 +1129,13 @@ func scoreHumanityOpts(sig *humanitySignals, ua string, hwTells bool) (hs int, t
 		if sig.WD != nil && *sig.WD {
 			add(tellNameWebdriver, tellWebdriver)
 		}
-		if glr := strings.ToLower(sig.GLR); glr != "" {
-			for _, m := range softwareRendererMarks {
-				if strings.Contains(glr, m) {
-					add("sw_renderer", tellSWRenderer)
-					break
-				}
+		if softwareRendererFamily(sig.GLR) != "" {
+			add("sw_renderer", tellSWRenderer)
+			// Device-claim member (see THE DEVICE-CLAIM GROUP and
+			// tellLinuxSW): a desktop Linux UA on a software renderer.
+			// Kill switch: CHALLENGE_V2_HW_TELLS.
+			if hwTells && uaClaimsDesktopLinux(ua) {
+				claim("linux_sw", tellLinuxSW)
 			}
 		}
 		// Device-claim group members (see THE DEVICE-CLAIM GROUP): listed
@@ -1114,9 +1209,30 @@ func sigString(v float64) string {
 	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
+// sigField is one retained reading. val is a rounded number; str, when set,
+// is an enum reading (rf) and is rendered instead of val — never a raw
+// client string.
 type sigField struct {
 	key string
 	val float64
+	str string
+}
+
+// render is the log-line spelling of the reading.
+func (f sigField) render() string {
+	if f.str != "" {
+		return f.str
+	}
+	return sigString(f.val)
+}
+
+// value is the history-row spelling: a JSON string for an enum reading, a
+// JSON number otherwise.
+func (f sigField) value() any {
+	if f.str != "" {
+		return f.str
+	}
+	return f.val
 }
 
 // sigFields returns the retained readings in ONE fixed order — the input
@@ -1132,12 +1248,12 @@ func (s *humanitySignals) sigFields() []sigField {
 	var out []sigField
 	addInt := func(k string, v *int) {
 		if v != nil {
-			out = append(out, sigField{k, float64(*v)})
+			out = append(out, sigField{key: k, val: float64(*v)})
 		}
 	}
 	addFloat := func(k string, v *float64, prec int) {
 		if v != nil {
-			out = append(out, sigField{k, sigRound(*v, prec)})
+			out = append(out, sigField{key: k, val: sigRound(*v, prec)})
 		}
 	}
 	addInt("ptr", s.PTR)
@@ -1161,6 +1277,14 @@ func (s *humanitySignals) sigFields() []sigField {
 	addFloat("mj", s.MJ, 1)
 	addFloat("pd", s.PD, 0)
 	addInt("hid", s.HID)
+	// rf (2026-11-10, E4 read 6): the software-renderer FAMILY, present only
+	// when the sw_renderer detection matched (softwareRendererFamily, the
+	// same call the scorer makes) — absent for a hardware or unreported
+	// renderer. A short enum, never the raw string; scored by NOTHING, so the
+	// next reads can calibrate per automation stack from data.
+	if fam := softwareRendererFamily(s.GLR); fam != "" {
+		out = append(out, sigField{key: "rf", str: fam})
+	}
 	return out
 }
 
@@ -1168,8 +1292,8 @@ func (s *humanitySignals) sigFields() []sigField {
 // — the Rung-1 report as REPORTED, before any scoring. Empty when nothing was
 // retained, so a no-payload solve adds no field.
 //
-// Precisely: dm/dpr/raf, the trajectory readings (ut/co/st/dj/mj/pd) and hid
-// are scored by NOTHING — they are corpus only,
+// Precisely: dm/dpr/raf, the trajectory readings (ut/co/st/dj/mj/pd), hid and
+// rf (the software-renderer family, an enum) are scored by NOTHING — they are corpus only,
 // logged so a future tell can be written from measured distributions instead
 // of from memory. hc feeds mobile_hw_lie / mac_hw_lie (written exactly that
 // way, from this corpus), ptr/tch/key feed the no_input amplifier (only
@@ -1185,13 +1309,14 @@ func (s ChallengeSolve) SignalSuffix() string {
 	}
 	parts := make([]string, 0, len(s.sig))
 	for _, f := range s.sig {
-		parts = append(parts, f.key+":"+sigString(f.val))
+		parts = append(parts, f.key+":"+f.render())
 	}
 	return " sig=" + strings.Join(parts, ",")
 }
 
 // signalMap is the history-row spelling of the same report: payload.sig, as
-// JSON numbers so a corpus pass can aggregate without re-parsing a log field.
+// JSON numbers so a corpus pass can aggregate without re-parsing a log field
+// (rf, the one enum reading, is a JSON string).
 // Same sigFields() source and therefore the same rounded values as the log.
 // nil when nothing was retained, so the key is simply absent on such a row —
 // matching the log's missing sig= field.
@@ -1201,7 +1326,7 @@ func (s ChallengeSolve) signalMap() map[string]any {
 	}
 	out := make(map[string]any, len(s.sig))
 	for _, f := range s.sig {
-		out[f.key] = f.val
+		out[f.key] = f.value()
 	}
 	return out
 }

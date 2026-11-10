@@ -478,7 +478,8 @@ func TestHumanityHiddenPageSendsNoSize(t *testing.T) {
 	if hs != tellSWRenderer+ampNoInput || strings.Contains(strings.Join(tells, ","), "outer_zero") {
 		t.Fatalf("hidden: hs=%d tells=%v", hs, tells)
 	}
-	if got := (ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(); !strings.HasSuffix(got, ",hid:1") {
+	// hid is followed by rf (the software-renderer family) since 2026-11-10.
+	if got := (ChallengeSolve{sig: sig.sigFields()}).SignalSuffix(); !strings.HasSuffix(got, ",hid:1,rf:angle-swiftshader") {
 		t.Fatalf("hid not retained: %q", got)
 	}
 	// A forged hid gains nothing server-side: with a reported 0x0 the score

@@ -721,13 +721,14 @@ counts only where it is IMPOSSIBLE for the claimed device:
 | `mobile_hw_lie` | phone/tablet UA **and** `hardwareConcurrency ≥ 16` (human mobiles report 4-10) | 0 / 1 217 mobile | 42.3% | 50 |
 | `mac_hw_lie` | Mac UA **and** `hardwareConcurrency ≥ 64` (human Macs in H topped out at 16) | 0 / 37 Mac | 15% | 50 |
 
-**The device-claim group.** `touch_lie`, `mobile_hw_lie`, `mac_hw_lie` and,
-since 2026-09-29, the UA-borne `ua_lie` (see "ua_lie" below) all say "this is
-not the device the UA claims", and one spoof trips several at once: DevTools phone emulation or a UA switcher on a 16-thread desktop fires
+**The device-claim group.** `touch_lie`, `mobile_hw_lie`, `mac_hw_lie`,
+since 2026-09-29 the UA-borne `ua_lie` (see "ua_lie" below) and, since
+2026-11-10, `linux_sw` (see "linux_sw" below) all say "this is not the device
+the UA claims", and one spoof trips several at once: DevTools phone emulation or a UA switcher on a 16-thread desktop fires
 both `touch_lie` and `mobile_hw_lie`. Summed, ONE exotic setup would reject,
 which D5b forbids. So each member that fires is LISTED in `tells=`, but the
-group adds only its strongest weight to `hs`, once. All of them weigh 50, so
-Google-Read-Aloud still scores exactly 140. A rejection needs independent
+group adds only its strongest weight to `hs`, once. All of them but
+`linux_sw` (20) weigh 50, so Google-Read-Aloud still scores exactly 140. A rejection needs independent
 evidence from outside the group; in the corpus every farm solve caught
 through it also carried `sw_renderer`.
 
@@ -843,6 +844,67 @@ that `ua_lie` + `outer_zero` alone (90) still passes; `ua_lie` +
 `sw_renderer` already makes. Tests:
 `internal/uaplausible` (`TestLegacyEdgeOnModernChrome`) and
 `challenge_v2_ualie_test.go` (the three logged variants).
+
+#### `linux_sw` — a desktop Linux UA on a software renderer (2026-11-10) — adopted
+
+**What it is.** A device-claim member (20, the group's max once): the
+software-renderer detection that sets `sw_renderer` matched AND the UA is a
+desktop Linux one: `X11; Linux`, or the bare `Linux x86_64` /
+`Linux aarch64` form (`uaClaimsDesktopLinux`). It never fires for Android
+(`Linux; Android`, the Kindle's `Linux armv7l like Android`), ChromeOS
+(`CrOS`, where a software renderer is an ordinary low-end Chromebook), a UA
+carrying a `Mobile` token, or a smart TV (`SMART-TV; Linux; Tizen`,
+`Web0S; Linux/SmartTV`). It is **not a core-count tell**: the RDS/VDI rule
+above still holds, and `linux_sw` reads the UA's OS claim against the
+renderer, never `hardwareConcurrency`. Under `CHALLENGE_V2_HW_TELLS`.
+
+**Why** (E4 read 6, `docs/abuse-defense-progress.md`; operator decision
+2026-11-10). The convicted farm fingerprint `c28caa00` dropped its
+device-claim lies and passed at exactly `sw_renderer,no_input` = 90: an X11
+Linux Chrome UA, SwiftShader, no input, 4-16 cores, from datacenters and
+residential proxies. Read 6 counted **85 684** farm passes with this profile
+on four nodes, against **23** solves from GR/CY consumer ISPs, all of them on
+the farm's own fingerprints. The catch rate under an arm fell to 14 %
+fleet-wide.
+
+**Scores** (fail score 100):
+
+| Report | Linux desktop UA | Windows / Mac UA |
+|---|---|---|
+| `sw_renderer` alone | 80, passes | 60, passes |
+| `sw_renderer` + `no_input` | **110, rejects** | 90, passes |
+| `sw_renderer` + `outer_zero` | 120, rejects | 100, rejects |
+| `sw_renderer` + `outer_zero` + real input (rescue) | 120: over the rescue cap, **not rescued** | 100: rescued |
+| `sw_renderer` + `ua_lie` | 110 (the group's max is `ua_lie`'s 50) | 110 |
+
+The read-6 proposal sized the tell at ~10 (so the profile reached exactly
+100); the operator chose 20, which leaves the hs-80 Linux human in the
+first row with the same margin as before and puts the farm profile 10
+points over the bar.
+
+**Interactions.**
+- **Real-input rescue:** a solve with real input cannot carry `no_input`
+  (it needs zero events), so the Linux human with input scores 80 and passes
+  without one. The one row that changes is `sw_renderer` + `outer_zero` + real
+  input on a Linux UA: 100 (rescued) before, 120 (over the fixed cap) now.
+  That class was Windows Chrome/109 in E4 read 1, and the `hid` fix removed
+  the minimized-window case; a Linux member of it would now be walled until
+  it reports a window size. Next read: count Linux 120 rejects with `ptr`/`mv`
+  past the rescue bars.
+- **Good-bot waiver:** unchanged. Google-Read-Aloud claims Android (no
+  `linux_sw`, still 140); Googlebot/Bingbot rendering UAs carry no Linux
+  token. A verified crawler that did would reach the waiver at 110 under a
+  geo/vhost arm, exactly as any failing crawler does.
+- **Unarmed (`would_v2`):** the shadow path scores with the same scorer, so
+  the farm profile now writes `would_v2` lines at 110 on unarmed vhosts; expect
+  the `abuse_shadow` humanity counts to jump by that farm's volume.
+
+**Honest limit.** The UA is client-authored. The farm can switch to a Windows
+UA, where `sw_renderer,no_input` = 90 is the RDP human's profile (read 3) and
+stays below the fail score by D5b. The tell buys time; it closes nothing. The
+next read measures whether the farm flips its UA, and `rf` (above) lets it
+read the renderer family per automation stack. Tests:
+`challenge_v2_linuxsw_test.go`.
 
 #### `deviceMemory` tells (2026-09-29) — measured, NOT adopted
 
@@ -1279,9 +1341,13 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   `ptr`/`tch`/`key` (event counts), `mv` (accumulated pointer movement, px),
   `hc`, `dm`, `dpr`, `raf`, then (since 2026-09-29) the trajectory readings
   `ut`/`co`/`st`/`dj`/`mj`/`pd`, then (since 2026-10-22) `hid` (1 = the page
-  was hidden at POST time and sent no window size) — in that fixed order,
+  was hidden at POST time and sent no window size), then (since 2026-11-10)
+  `rf`, the software-renderer family (`swiftshader`, `angle-swiftshader`,
+  `llvmpipe`, `softpipe`, `swrast`, `mesa-offscreen`, or `other`; present
+  only when `sw_renderer` fired, a short enum and never the raw renderer
+  string, a JSON string on the history row) — in that fixed order,
   omitting any signal the browser did not report. `dm`/`dpr`/`raf`, the
-  trajectory readings and `hid` are scored by nothing; `hc` feeds
+  trajectory readings, `hid` and `rf` are scored by nothing; `hc` feeds
   `mobile_hw_lie`/`mac_hw_lie` ("Rung-1 hardware tells" above);
   `ptr`/`tch`/`key` are also the `no_input` amplifier's inputs, and
   `ptr`+`mv` decide the real-input rescue (which only ever clears), so logging
