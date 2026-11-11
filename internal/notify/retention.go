@@ -9,13 +9,25 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var (
 	jsonlRetentionMu    sync.Mutex
 	retentionPrunerOnce sync.Once
+	// retentionPrunerOn: the 5 minute pruner runs in this process (the
+	// daemon's Load). Without it (a one-shot CLI) every append prunes, as
+	// before.
+	retentionPrunerOn atomic.Bool
+	// jsonlAppendsSincePrune counts rows appended per history file since its
+	// last prune (under jsonlRetentionMu).
+	jsonlAppendsSincePrune = map[string]int{}
 )
+
+// pruneEveryAppends: appendJSONL prunes after this many rows when the 5
+// minute pruner has not run since (an alert storm).
+const pruneEveryAppends = 1000
 
 type RetentionUsage struct {
 	Path            string `json:"path"`
@@ -54,6 +66,7 @@ func activeRetentionLimits() (int, time.Duration) {
 
 func ensureRetentionPruner() {
 	retentionPrunerOnce.Do(func() {
+		retentionPrunerOn.Store(true)
 		go func() {
 			ticker := time.NewTicker(5 * time.Minute)
 			defer ticker.Stop()
@@ -79,6 +92,7 @@ func runRetentionPrune() error {
 	}
 	jsonlRetentionMu.Lock()
 	defer jsonlRetentionMu.Unlock()
+	jsonlAppendsSincePrune[current.JSONLPath] = 0
 	return pruneJSONLWithLimits(current.JSONLPath, maxEntries, maxAge, time.Now().UTC())
 }
 
@@ -97,6 +111,7 @@ func pruneJSONLWithLimits(path string, maxEntries int, maxAge time.Duration, now
 		ts   time.Time
 	}
 	rows := make([]row, 0, 256)
+	read := 0
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 0, 64*1024), 2*1024*1024)
 	for s.Scan() {
@@ -104,6 +119,7 @@ func pruneJSONLWithLimits(path string, maxEntries int, maxAge time.Duration, now
 		if line == "" {
 			continue
 		}
+		read++
 		ts := parseJSONLTime(line)
 		if maxAge > 0 && !ts.IsZero() && ts.Before(now.Add(-maxAge)) {
 			continue
@@ -115,6 +131,11 @@ func pruneJSONLWithLimits(path string, maxEntries int, maxAge time.Duration, now
 	}
 	if maxEntries > 0 && len(rows) > maxEntries {
 		rows = rows[len(rows)-maxEntries:]
+	}
+	if len(rows) == read {
+		// Nothing to drop: leave the file as it is. Rewriting and fsyncing
+		// a 40 MB history every 5 minutes for nothing is ~12 GB a day.
+		return nil
 	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".retention-*")
@@ -150,12 +171,20 @@ func pruneJSONLWithLimits(path string, maxEntries int, maxAge time.Duration, now
 }
 
 func parseJSONLTime(line string) time.Time {
-	var raw map[string]any
+	// Only the three time keys, not a map of every field: a prune of 100 000
+	// rows went from 565 ms and 4.7 M allocations to 342 ms and 1.0 M
+	// (BenchmarkPruneJSONL). The keys match case-insensitively now (Go's
+	// struct decoding); the rows CFM writes use the lowercase ones.
+	var raw struct {
+		Time      any `json:"time"`
+		TS        any `json:"ts"`
+		Timestamp any `json:"timestamp"`
+	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return time.Time{}
 	}
-	for _, key := range []string{"time", "ts", "timestamp"} {
-		if v := strings.TrimSpace(toString(raw[key])); v != "" {
+	for _, v := range []any{raw.Time, raw.TS, raw.Timestamp} {
+		if v := strings.TrimSpace(toString(v)); v != "" {
 			if ts, err := time.Parse(time.RFC3339Nano, v); err == nil {
 				return ts.UTC()
 			}
