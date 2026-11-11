@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.11
+
 ### Fixed
 - **The notifier no longer rewrites its whole history on every alert.**
   Each alert re-read, re-parsed and rewrote `notify.log.jsonl` (up to
