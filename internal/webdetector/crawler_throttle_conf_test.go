@@ -2,9 +2,14 @@ package webdetector
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
+
+// metaStaticMapLine is the $meta_throttle_image entry: the PHP path-info guard
+// (`/x.php/a.js` is a script) and the static-file extensions.
+const metaStaticMapLine = `"~*^(?!.*\.(?:phtml|pht|php[0-9]|php|phar)/).*\.(?:jpe?g|jfif|png|gif|webp|avif|ico|bmp|tiff?|css|m?js|map|woff2?|ttf|otf|eot)$" 1;`
 
 // The crawler throttle (Meta / SEO bots) lives only in the edge confs: the
 // http-block maps and zones, and the server-level limit_req/limit_conn lines.
@@ -47,8 +52,9 @@ func TestCrawlerThrottleBlockSameOnBothEdges(t *testing.T) {
 		for _, want := range []string{
 			"map $uri $meta_throttle_image {",
 			// Static files a page render fetches: images, css/js, fonts. A
-			// css/js file back on the page budget 429s the ads crawler.
-			`|tiff?|css|m?js|woff2?|ttf|otf|eot)$" 1;`,
+			// css/js file back on the page budget 429s the ads crawler. The
+			// whole line is pinned, so the PHP path-info guard stays too.
+			metaStaticMapLine,
 			`"~^[12]\|0\|0$" 1;`, // pages: any listed crawler, host not exempt
 			`"~^2\|0\|1$" 1;`,    // images: Meta crawlers only
 			"zone=meta_img_host_rps:20m rate=50r/s;",
@@ -100,6 +106,36 @@ func TestCrawlerThrottleImageLimitsWhereverPageLimitsApply(t *testing.T) {
 		} {
 			if n := strings.Count(conf, want); n != page {
 				t.Errorf("%s: %q in %d servers, page limit in %d", f, want, n, page)
+			}
+		}
+	}
+}
+
+// Every extension the static-asset location serves must take the crawler's
+// static-file budget: a css/js file left on the page budget 429'd Meta's ads
+// crawler rendering a landing page (2026-11-11). The two lists cannot share
+// one definition in nginx, so this test is what keeps them together.
+func TestCrawlerThrottleStaticBudgetCoversStaticLocation(t *testing.T) {
+	locRe := regexp.MustCompile(`location ~\* "\^\(\?!\.\*\\\.\(\?:phtml\|pht\|php\[0-9\]\|php\|phar\)/\)\.\*\\\.\(\?:([a-z0-9|?]+)\)\$" \{`)
+	mapExt := regexp.MustCompile(`\\\.\(\?:([a-z0-9|?]+)\)\$" 1;`).FindStringSubmatch(metaStaticMapLine)
+	if mapExt == nil {
+		t.Fatal("extension group not found in metaStaticMapLine")
+	}
+	inBudget := regexp.MustCompile(`(?i)\.(?:` + mapExt[1] + `)$`)
+	for _, f := range crawlerThrottleConfs {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		locs := locRe.FindAllStringSubmatch(string(b), -1)
+		if len(locs) == 0 {
+			t.Fatalf("%s: no static-asset location found", f)
+		}
+		for _, loc := range locs {
+			for _, ext := range strings.Split(loc[1], "|") {
+				if !inBudget.MatchString("/a." + ext) {
+					t.Errorf("%s: static-asset location serves .%s, but $meta_throttle_image leaves it on the page budget", f, ext)
+				}
 			}
 		}
 	}
