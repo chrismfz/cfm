@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The notifier no longer rewrites its whole history on every alert.**
+  Each alert re-read, re-parsed and rewrote `notify.log.jsonl` (up to
+  100 000 rows, `MAX_ENTRIES`) to apply the retention. On mars that took 60%
+  of the daemon's CPU on 2026-11-11, once `login_bruteforce` was armed, and
+  it slowed every other handler (`GET /nginx/edgeban` among them). The
+  retention now runs every 5 minutes as before, and on an alert only every
+  1 000 rows (a storm), so the file never outgrows `MAX_ENTRIES` by more than
+  that. A prune itself reads only the time of each row: 565 → 342 ms for
+  100 000 rows.
 
 ## 2026.11.10
 
