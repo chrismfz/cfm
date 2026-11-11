@@ -8,8 +8,9 @@ import (
 
 // The crawler throttle (Meta / SEO bots) lives only in the edge confs: the
 // http-block maps and zones, and the server-level limit_req/limit_conn lines.
-// Images take their own, looser budget (meta_img_host_*) so a catalog crawl
-// of a shop's product images is not 429'd by the 5 r/s page limit. These
+// Images, css/js and fonts take their own, looser budget (meta_img_host_*) so
+// a catalog crawl of a shop's product images, or meta-externalads rendering
+// an ad's landing page with all its assets, is not 429'd by the page limit. These
 // tests pin that both edges carry the same throttle block and that every
 // server applying the page limits applies the image limits too.
 
@@ -45,6 +46,9 @@ func TestCrawlerThrottleBlockSameOnBothEdges(t *testing.T) {
 		blk := crawlerThrottleBlock(t, f, string(b))
 		for _, want := range []string{
 			"map $uri $meta_throttle_image {",
+			// Static files a page render fetches: images, css/js, fonts. A
+			// css/js file back on the page budget 429s the ads crawler.
+			`|tiff?|css|m?js|woff2?|ttf|otf|eot)$" 1;`,
 			`"~^[12]\|0\|0$" 1;`, // pages: any listed crawler, host not exempt
 			`"~^2\|0\|1$" 1;`,    // images: Meta crawlers only
 			"zone=meta_img_host_rps:20m rate=50r/s;",
