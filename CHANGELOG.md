@@ -27,6 +27,18 @@ back-filled here — see the git/PR history for that period.
   1 000 rows (a storm), so the file never outgrows `MAX_ENTRIES` by more than
   that. A prune itself reads only the time of each row: 565 → 342 ms for
   100 000 rows.
+- **The edge no longer 429s Meta's ads crawler on a landing page's css/js.**
+  `meta-externalads` renders an ad's landing page and fetches every
+  stylesheet and script on it at once (~80 on a WordPress page). Those
+  counted against the crawler page budget (10 r/s, burst 100): on one shop
+  it 429'd 395 of 1 946 such fetches in a day (2026-11-11), and Meta reads a
+  landing page that fails to render as unavailable. A Meta crawler's css,
+  js/mjs, source-map and font requests now take the image budget (50 r/s,
+  burst 200, 30 connections) with the images; pages keep theirs. A script
+  path (`/x.php/a.js`) is still a page. A test keeps every extension the
+  static-asset location serves on that budget. The 30-connection cap is now
+  shared by images and css/js: watch `limit_conn_status=REJECTED img=1` in
+  `throttle.log` after deploy.
 
 ## 2026.11.10
 
