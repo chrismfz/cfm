@@ -4,11 +4,10 @@ package nftlib
 
 import (
 	"fmt"
-	"hash/fnv"
-	"sort"
 	"time"
 
 	"cfm/internal/firewall/feedutil"
+	"cfm/internal/firewall/setprobe"
 	"cfm/internal/logging"
 
 	"github.com/google/nftables"
@@ -23,14 +22,27 @@ const setWriteChunk = 1000
 
 // chunkedAdd writes nftElems to set. Caller must hold b.mu.
 //
-// Two shapes, chosen from the ELEMENTS (an IntervalEnd marker ⇒ interval set —
-// reliable regardless of whether GetSetByName populated set.Interval):
+// A replace (flushFirst) is ONE netlink batch: the flush and every add commit
+// together, so a packet sees the old content or the new one, never an empty
+// or half-filled set. It used to be a flush and then one batch per
+// setWriteChunk elements, each its own transaction, and the feed unions the
+// base rules drop on (block_ext_v4_hosts, …) were partial for the whole
+// refill. The batch still carries the elements in messages of setWriteChunk
+// (the attribute-length limit below applies per message); the write socket's
+// buffer is raised for it (growSendBuffer). If the kernel refuses the batch
+// (too large for the buffer, an element it rejects) nothing changed, and the
+// chunked write below runs instead, logged.
 //
-//   - Interval sets (CIDR/nets): the flush must be its OWN netlink transaction —
-//     flushing and re-adding an interval set in one batch fails with ENOTEMPTY
-//     ("directory not empty") on this netlink path. (The ports policy's CLI
-//     transaction flushes and refills its small port sets in one batch; that
-//     was verified on the fleet's kernels, 4.18 / 5.14 / 6.x.) The elements
+// The chunked write, two shapes chosen from the ELEMENTS (an IntervalEnd
+// marker ⇒ interval set — reliable regardless of whether GetSetByName
+// populated set.Interval):
+//
+//   - Interval sets (CIDR/nets): the flush is its OWN netlink transaction —
+//     flushing and re-adding an interval set in one batch failed with
+//     ENOTEMPTY ("directory not empty") on this netlink path once. (The one-
+//     batch replace above does exactly that; the live test
+//     LiveNFTFeedReplaceIsAtomic runs it on interval sets, overlap changes
+//     included.) The elements
 //     are start/IntervalEnd PAIRS, added in batches of setWriteChunk each with
 //     its own Flush, cut only between pairs: a start without its end is an
 //     interval open to the top of the address space. The batches are not
@@ -41,8 +53,8 @@ const setWriteChunk = 1000
 //     an allow set accepting everything above it.
 //   - Plain sets (host IPs): flush queued with the first batch, then batches of
 //     setWriteChunk each with its own Flush, so a huge set (e.g. a 113k blocklist)
-//     can't overflow the netlink socket buffer. A large set is briefly partial
-//     during a refresh — acceptable versus failing to apply it at all.
+//     can't overflow the netlink socket buffer. A large set is partial
+//     during the refresh — the fallback only, versus failing to apply it at all.
 func (b *Backend) chunkedAdd(set *nftables.Set, nftElems []nftables.SetElement, flushFirst bool) error {
 	interval := false
 	for i := range nftElems {
@@ -50,6 +62,15 @@ func (b *Backend) chunkedAdd(set *nftables.Set, nftElems []nftables.SetElement, 
 			interval = true
 			break
 		}
+	}
+
+	if flushFirst {
+		err := b.replaceOneBatch(set, nftElems)
+		if err == nil {
+			return nil
+		}
+		logging.Logf("[nftlib] replace set %s elems=%d: one batch failed (%v); writing it in batches, with the set briefly partial",
+			set.Name, len(nftElems), err)
 	}
 
 	if interval {
@@ -99,20 +120,34 @@ func (b *Backend) chunkedAdd(set *nftables.Set, nftElems []nftables.SetElement, 
 	return nil
 }
 
-// hashElems is an order-independent content hash of a set's elements, used to
-// skip rewriting an unchanged set. Sorted so a reordered-but-identical feed
-// hashes the same.
-func hashElems(elems []string) uint64 {
-	cp := make([]string, len(elems))
-	copy(cp, elems)
-	sort.Strings(cp)
-	h := fnv.New64a()
-	for _, e := range cp {
-		_, _ = h.Write([]byte(e))
-		_, _ = h.Write([]byte{0})
+// replaceOneBatch queues the flush and all of nftElems in messages of
+// setWriteChunk (interval pairs kept together) and sends them as one batch.
+// Caller must hold b.mu.
+func (b *Backend) replaceOneBatch(set *nftables.Set, nftElems []nftables.SetElement) error {
+	b.conn.FlushSet(set)
+	for i := 0; i < len(nftElems); {
+		end := min(i+setWriteChunk, len(nftElems))
+		if end < len(nftElems) && nftElems[end].IntervalEnd {
+			end++ // keep the pair together
+		}
+		if err := b.conn.SetAddElements(set, nftElems[i:end]); err != nil {
+			return err
+		}
+		i = end
 	}
-	return h.Sum64()
+	return b.conn.Flush()
 }
+
+// kernelHolds is setprobe.Holds with an error read as "no" (rewrite); a var
+// for tests.
+var kernelHolds = func(set, elem string) bool {
+	ok, err := setprobe.Holds(set, elem)
+	return err == nil && ok
+}
+
+// hashElems is feedutil.HashElems, the content hash both engines key their
+// skip-if-unchanged on.
+func hashElems(elems []string) uint64 { return feedutil.HashElems(elems) }
 
 // AddElementsBulk adds all elements to a named set via netlink (zero forks),
 // chunked so a large batch can't overflow the netlink message limit.
@@ -178,8 +213,12 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 	var h uint64
 	if permanent {
 		h = hashElems(elems)
-		if prev, ok := b.appliedHash[setName]; ok && prev == h {
-			return nil // no-op: identical content already applied
+		// No-op when identical content was already applied AND the kernel still
+		// holds one of its elements: a set another process emptied or recreated
+		// (`cfm reset` / `cfm disable` from the CLI; invalidateCache only sees
+		// this process) is written again.
+		if prev, ok := b.appliedHash[setName]; ok && prev == h && (len(elems) == 0 || kernelHolds(setName, elems[0])) {
+			return nil
 		}
 	}
 

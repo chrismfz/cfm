@@ -91,6 +91,20 @@ a recreated table and kept; `cfm flush` is the intended clear (it removes the
 file and leaves a `.flushed` marker the daemon acts on). Live test: `-run LiveNFTTTLBans` (both engines). See
 `docs/DETECTORS.md` "TTL bans across a restart".
 
+**A feed set is replaced in ONE transaction** (`ReplaceSetFlushAdd`, both
+engines: one `nft -f` script / one netlink batch holding the flush and every
+add). It used to be a flush and then batches, each its own run, and the
+unions the base rules drop on (`block_ext_v4_hosts`, …) sat empty and then
+partial for seconds on every hourly apply. Don't split a replace into
+transactions again: the per-message element limit (nftlib's
+`setWriteChunk`) is about messages, not transactions. The batched write is
+only the logged fallback for a batch the kernel refuses. Skip-if-unchanged
+(permanent sets) also asks the kernel for one element (`internal/firewall/setprobe`;
+`nft get element` loads the whole set, ~0.7 s at 200k), because the CLI can
+empty the table behind the daemon's back. Live test: `-run LiveNFTFeedReplace`
+(both engines), as real root in a netns (`unshare -n`) for the daemon's
+conditions: under `unshare -r` the socket buffer is capped at `wmem_max`.
+
 ---
 
 ## 3. CI gates — these MUST pass before pushing

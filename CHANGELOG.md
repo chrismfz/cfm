@@ -18,6 +18,32 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **A blocklist feed apply no longer unblocks the feed's addresses while it
+  runs.** Each set was replaced by a flush and then batches of adds, each its
+  own nft run (exec engine) or netlink transaction (nftlib), and every feed
+  apply rebuilds the eight unions the base rules drop on
+  (`block_ext_v4_hosts`, …) the same way. So on every hourly apply of every
+  feed those unions were empty and then partly filled for the whole refill:
+  ~4.5 s for a 1M-address set on the exec engine, with MYBLOCK at ~215 000 on
+  virgo and growing. Both engines now replace a set in ONE transaction (the
+  flush and every add commit together), so a packet sees the old content or
+  the new. Measured in a netns as root, 1M addresses: ~3 s per set on either
+  engine, and a prober asking the kernel ~300 000 times
+  during the apply never found a kept address missing (the old code: 53 901
+  misses at 200k). nft and nftlib raise their netlink socket buffers for the
+  batch (nftlib also its receive buffer: a million-address batch's ACKs
+  overflowed it), so even 2M addresses fit. If the kernel still refuses the
+  batch (in an unprivileged user namespace, or a malformed feed entry),
+  nothing changed and the old batched write runs, with a
+  `replace set … one transaction failed` / `one batch failed` log line.
+- **An unchanged feed apply no longer rewrites the unions.** The exec engine
+  now skips a permanent set whose content is the same as at its last write,
+  as nftlib already did (1M addresses: ~1 s for the whole apply, from ~6 s).
+  Both engines skip only while the kernel still holds one of the set's
+  elements (a single netlink lookup, ~0.1 ms): nftlib's skip trusted its
+  memory, so after `cfm reset` from the CLI, which recreates the table in
+  another process, an unchanged feed left its union empty until the feed
+  changed.
 - **`cfm search` / `cfm which` / unblock lookups no longer time out on a node
   with a large fleet feed.** To find the table's sets the nft lookup dumped the
   whole `inet cfm` table, every set element included, with a 5 s deadline.

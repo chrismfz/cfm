@@ -328,6 +328,7 @@ func (b *Backend) PruneExternalFeeds(activeKeys []string) error {
 }
 
 func (b *Backend) DeleteSetIfExists(name string) error {
+	b.forgetApplied(name)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	args := []string{"delete", "set", family, tableName, name}

@@ -11,6 +11,7 @@ import (
 	"cfm/internal/firewall/autoblock"
 	"cfm/internal/firewall/feedutil"
 	"cfm/internal/firewall/selfip"
+	"cfm/internal/firewall/setprobe"
 	"cfm/internal/logging"
 	"cfm/internal/reporting"
 	"context"
@@ -109,6 +110,13 @@ type Backend struct {
 	extFeedMu sync.RWMutex
 	extAllow  map[string]extFeedData // key -> elems
 	extBlock  map[string]extFeedData // key -> elems
+
+	// appliedHash is the content hash of the last successful ReplaceSetFlushAdd
+	// of a PERMANENT set (the feed unions), so an unchanged hourly apply skips
+	// the rewrite. Only a hint: the skip also asks the kernel for one of the
+	// elements, so a set another process emptied or recreated is rewritten.
+	appliedMu   sync.Mutex
+	appliedHash map[string]uint64
 
 	// cache of external ALLOW set names (per-feed), to avoid expensive table scans on every check
 	extMu           sync.RWMutex
@@ -1423,27 +1431,183 @@ func humanTimeout(d time.Duration) string {
 
 // ---------- external sets apply (flush + bulk add) ----------
 
-// ReplaceSetFlushAdd: καθαρίζει το set και βάζει elems (IP ή CIDR) σε batches.
-// Για _nets sets κάνει κανονικοποίηση CIDR (drop overlapping subnets).
-// ttl==nil => χωρίς timeout per-element.
-func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.Duration) error {
-	// flush
-	if err := b.nftExpr(fmt.Sprintf(`flush set %s %s %s;`, family, tableName, setName)); err != nil {
-		return fmt.Errorf("flush %s: %w", setName, err)
-	}
+// replaceChunk is how many elements go into one `add element` statement of a
+// replace script. The statements all run in ONE nft transaction; the chunk
+// only keeps each line a sane length.
+const replaceChunk = 1500
 
-	// Αν είναι *nets set, καθάρισε επικαλύψεις (shared keying — no drift with nftlib)
-	elems = feedutil.NormalizeNetsForSet(setName, elems)
+// ReplaceSetFlushAdd replaces a set's content with elems (IPs or CIDRs).
+// ttl==nil => no per-element timeout. *_nets sets are de-overlapped first
+// (shared keying with nftlib).
+//
+// The flush and every add are ONE `nft -f` transaction, so the kernel swaps
+// the old content for the new at commit and a packet sees one or the other,
+// never an empty or half-filled set. It used to run the flush as its own nft
+// run and then the adds in batches of 1500, each its own run: the feed unions
+// the base rules drop on (block_ext_v4_hosts, …) were empty and then partly
+// filled for the whole refill, ~4.5 s for a 1M-address set, on every hourly
+// apply of every feed. nft sizes its socket buffer to the batch (it uses
+// SO_SNDBUFFORCE as root), so even millions of elements fit; inside an
+// unprivileged user namespace it is capped at wmem_max and a large batch
+// fails with "Message too long". Then, or when the kernel rejects the batch
+// for any other reason (a malformed feed entry), nothing changed and the old
+// chunked write runs instead, logged: the set gets the new content, with the
+// old gap.
+//
+// A PERMANENT set whose content is unchanged since the last successful write
+// is not rewritten, as nftlib does, as long as the kernel still holds one of
+// its elements: an emptied or recreated set (`cfm reset` / `cfm disable` from
+// the CLI, another process this backend cannot see) is written again. A TTL
+// set is always rewritten: its elements expire, so the same input does not
+// mean the kernel still holds them, and the rewrite is what renews them.
+func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.Duration) error {
+	elems = cleanElems(feedutil.NormalizeNetsForSet(setName, elems))
 
 	ttlStr := ""
 	if ttl != nil && *ttl > 0 {
 		ttlStr = humanTimeout(*ttl)
 	}
+	permanent := ttl == nil
+	var h uint64
+	if permanent {
+		h = feedutil.HashElems(elems)
+		if b.appliedMatches(setName, h) && (len(elems) == 0 || b.setHoldsElem(setName, elems[0])) {
+			return nil
+		}
+	}
+	b.forgetApplied(setName)
 
-	return b.nftAddElementsExpr(setName, elems, ttlStr, 1500)
+	ctx, cancel := context.WithTimeout(context.Background(), replaceTimeout(len(elems)))
+	err := b.nftExprCtx(ctx, replaceSetScript(setName, elems, ttlStr))
+	cancel()
+	if err != nil {
+		logging.Logf("[nft] replace set %s elems=%d: one transaction failed (%v); writing it in batches, with the set briefly partial",
+			setName, len(elems), firstLine(err.Error()))
+		err = b.replaceSetChunked(setName, elems, ttlStr)
+	}
+	if err == nil && permanent {
+		b.recordApplied(setName, h)
+	}
+	return err
 }
 
-// add element ... { ... } σε batches, μέσω nft -f - (expr)
+// replaceTimeout bounds the one-transaction replace: the runner's default 10 s
+// plus 1 s per 25 000 elements. One run now carries what used to be hundreds
+// (a million addresses commit in ~3 s on an idle host).
+func replaceTimeout(n int) time.Duration {
+	return defaultNFTCommandTimeout + time.Duration(n/25_000)*time.Second
+}
+
+// replaceSetScript is the one-transaction replace: flush, then the elements in
+// `add element` statements of replaceChunk each.
+func replaceSetScript(setName string, elems []string, ttlStr string) string {
+	var sb strings.Builder
+	sb.Grow(64 + len(elems)*24)
+	fmt.Fprintf(&sb, "flush set %s %s %s\n", family, tableName, setName)
+	for i := 0; i < len(elems); i += replaceChunk {
+		writeAddElement(&sb, setName, elems[i:min(i+replaceChunk, len(elems))], ttlStr)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// replaceSetChunked is the fallback: the flush and each batch of adds are
+// separate nft runs (the set is empty, then partial, until the last one).
+func (b *Backend) replaceSetChunked(setName string, elems []string, ttlStr string) error {
+	if err := b.nftExpr(fmt.Sprintf(`flush set %s %s %s;`, family, tableName, setName)); err != nil {
+		return fmt.Errorf("flush %s: %w", setName, err)
+	}
+	return b.nftAddElementsExpr(setName, elems, ttlStr, replaceChunk)
+}
+
+// setHoldsElem asks the kernel whether set holds elem (one netlink lookup,
+// setprobe; `nft get element` would load the whole set first). Any error —
+// an old kernel that cannot answer, no netlink — reads as "no": the caller
+// then rewrites, which is always safe.
+func (b *Backend) setHoldsElem(setName, elem string) bool {
+	ok, err := setprobe.Holds(setName, elem)
+	return err == nil && ok
+}
+
+func (b *Backend) appliedMatches(setName string, h uint64) bool {
+	b.appliedMu.Lock()
+	defer b.appliedMu.Unlock()
+	prev, ok := b.appliedHash[setName]
+	return ok && prev == h
+}
+
+func (b *Backend) recordApplied(setName string, h uint64) {
+	b.appliedMu.Lock()
+	defer b.appliedMu.Unlock()
+	if b.appliedHash == nil {
+		b.appliedHash = make(map[string]uint64)
+	}
+	b.appliedHash[setName] = h
+}
+
+// forgetApplied drops a set's applied-content hash ("" = every set), so its
+// next ReplaceSetFlushAdd writes. Called wherever this backend empties or
+// deletes sets.
+func (b *Backend) forgetApplied(setName string) {
+	b.appliedMu.Lock()
+	defer b.appliedMu.Unlock()
+	if setName == "" {
+		b.appliedHash = nil
+		return
+	}
+	delete(b.appliedHash, setName)
+}
+
+// cleanElems trims the elements and drops empty ones (in place).
+func cleanElems(elems []string) []string {
+	out := elems[:0:0]
+	for _, e := range elems {
+		if e = strings.TrimSpace(e); e != "" {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// writeAddElement writes one `add element … { e1, e2 }` statement (no
+// trailing newline). Empty elements are skipped.
+func writeAddElement(sb *strings.Builder, setName string, chunk []string, ttlStr string) {
+	sb.WriteString("add element ")
+	sb.WriteString(family)
+	sb.WriteString(" ")
+	sb.WriteString(tableName)
+	sb.WriteString(" ")
+	sb.WriteString(setName)
+	sb.WriteString(" { ")
+	first := true
+	for _, e := range chunk {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if !first {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(e)
+		if ttlStr != "" {
+			sb.WriteString(" timeout ")
+			sb.WriteString(ttlStr)
+		}
+		first = false
+	}
+	sb.WriteString(" };")
+}
+
+// add element ... { ... } σε batches, μέσω nft -f - (expr); each batch is its
+// own nft run (no flush: AddElementsBulk and the replace fallback).
 func (b *Backend) nftAddElementsExpr(setName string, elems []string, ttlStr string, batchSize int) error {
 	if len(elems) == 0 {
 		return nil
@@ -1452,38 +1616,8 @@ func (b *Backend) nftAddElementsExpr(setName string, elems []string, ttlStr stri
 		batchSize = 1000
 	}
 	for i := 0; i < len(elems); i += batchSize {
-		j := i + batchSize
-		if j > len(elems) {
-			j = len(elems)
-		}
-		chunk := elems[i:j]
-
 		var sb strings.Builder
-		sb.WriteString("add element ")
-		sb.WriteString(family)
-		sb.WriteString(" ")
-		sb.WriteString(tableName)
-		sb.WriteString(" ")
-		sb.WriteString(setName)
-		sb.WriteString(" { ")
-		first := true
-		for _, e := range chunk {
-			e = strings.TrimSpace(e)
-			if e == "" {
-				continue
-			}
-			if !first {
-				sb.WriteString(", ")
-			}
-			sb.WriteString(e)
-			if ttlStr != "" {
-				sb.WriteString(" timeout ")
-				sb.WriteString(ttlStr)
-			}
-			first = false
-		}
-		sb.WriteString(" };")
-
+		writeAddElement(&sb, setName, elems[i:min(i+batchSize, len(elems))], ttlStr)
 		if err := b.nftExpr(sb.String()); err != nil {
 			return fmt.Errorf("batch add to %s failed: %w", setName, err)
 		}
@@ -1505,10 +1639,15 @@ func (b *Backend) AddElementsBulk(setName string, elems []string, ttl *time.Dura
 
 // expr runner
 func (b *Backend) nftExpr(expr string) error {
+	return b.nftExprCtx(context.Background(), expr)
+}
+
+// nftExprCtx is nftExpr under ctx (no deadline = the runner's default).
+func (b *Backend) nftExprCtx(ctx context.Context, expr string) error {
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft expr]:", expr)
 	}
-	res, err := runNFTCommandInput(context.Background(), expr+"\n", "-f", "-")
+	res, err := runNFTCommandInput(ctx, expr+"\n", "-f", "-")
 	out := []byte(res.Stdout + res.Stderr)
 	if debugEnv {
 		fmt.Fprintln(os.Stderr, "[nft] rc:", err)
@@ -1591,6 +1730,7 @@ func (b *Backend) DropFeedSets(feedName string) {
 		// αγνόησε σφάλματα αν δεν υπάρχουν ή είναι δεσμευμένα
 		_, _ = runNFTCommand(context.Background(), "flush", "set", "inet", tableName, s)
 		_, _ = runNFTCommand(context.Background(), "delete", "set", "inet", tableName, s)
+		b.forgetApplied(s)
 	}
 
 	b.unregisterFeedKey(suff)
@@ -1601,6 +1741,7 @@ func (b *Backend) DropFeedSets(feedName string) {
 
 // DropEverything: delete whole table inet cfm
 func (b *Backend) DropEverything() error {
+	b.forgetApplied("")
 	if !b.tableExists() {
 		return nil
 	}
@@ -1611,6 +1752,7 @@ func (b *Backend) DropEverything() error {
 
 // ResetTable: flush whole table (rules + sets content), κρατώντας το table
 func (b *Backend) ResetTable() error {
+	b.forgetApplied("")
 	if !b.tableExists() {
 		return nil
 	}
@@ -1618,6 +1760,7 @@ func (b *Backend) ResetTable() error {
 }
 
 func (b *Backend) ResetCFMTable() error {
+	b.forgetApplied("")
 	// Σβήσε το table αν υπάρχει (αγνόησε error αν δεν υπάρχει)
 	_ = b.nftCmd(fmt.Sprintf("delete table %s %s", family, tableName))
 	// Ξαναφτιάξ’ το άδειο
@@ -1880,6 +2023,7 @@ func (b *Backend) ListChainText(fam, table, chain string) (string, error) {
 }
 
 func (b *Backend) FlushSet(fam, table, set string) error {
+	b.forgetApplied(set)
 	res, err := runNFTCommand(context.Background(), "-n", "flush", "set", fam, table, set)
 	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
