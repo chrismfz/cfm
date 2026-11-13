@@ -1813,6 +1813,39 @@ func (b *Backend) ListTableJSON(fam, table string) ([]byte, error) {
 	return out, nil
 }
 
+// ListSetsJSON lists the sets of every table of the family WITHOUT their
+// elements: `nft -j -t list sets <family>`. Each set carries its "table"; a
+// caller keeps its own table's. A caller that only wants the sets' names and
+// key types reads this, not ListTableJSON: with a fleet feed in the table
+// (MYBLOCK, ~215k addresses on virgo) the full dump ran past its 5 s deadline
+// and `cfm search` reported the nft source as unreadable. Measured with 1M
+// addresses in a feed set and its union: `list sets` 5 ms, `list table` 32 s
+// even with -t, which still loads every element. It ends at ctx's deadline,
+// or after 15 s.
+func (b *Backend) ListSetsJSON(ctx context.Context, fam string) ([]byte, error) {
+	return nftListJSONContext(ctx, "-j", "-t", "list", "sets", fam)
+}
+
+// ListSetJSONContext is ListSetJSON ending at ctx's deadline (or after 15 s:
+// a fleet feed's set is several MB of JSON). Its error carries nft's stderr,
+// never the partial stdout of a dump cut short.
+func (b *Backend) ListSetJSONContext(ctx context.Context, fam, table, set string) ([]byte, error) {
+	return nftListJSONContext(ctx, "-j", "list", "set", fam, table, set)
+}
+
+func nftListJSONContext(ctx context.Context, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	res, err := runNFTCommand(ctx, args...)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, fmt.Errorf("nft %s: %w", strings.Join(args, " "), cerr)
+		}
+		return nil, fmt.Errorf("nft %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(res.Stderr))
+	}
+	return []byte(res.Stdout), nil
+}
+
 func (b *Backend) ListSetJSON(fam, table, set string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

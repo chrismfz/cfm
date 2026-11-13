@@ -165,7 +165,8 @@ func TestFindMany_ContextEndsBetweenSets(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "set 2 of 2") {
 		t.Fatalf("err = %v, want a partial-read error", err)
 	}
-	if calls != 1 || len(res["10.1.2.3"]) != 1 || len(res["198.51.100.9"]) != 0 {
+	// The manual block_v4 is read before the feed's set.
+	if calls != 1 || len(res["10.1.2.3"]) != 0 || len(res["198.51.100.9"]) != 1 {
 		t.Errorf("after %d dumps: %v", calls, res)
 	}
 }
@@ -293,5 +294,172 @@ func TestParseEntry(t *testing.T) {
 		if _, ok := ParseEntry(bad); ok {
 			t.Errorf("ParseEntry(%q) should fail", bad)
 		}
+	}
+}
+
+// A set whose dump fails is reported, not read as "not found": a block set
+// that timed out used to be skipped, and the IP it holds looked unblocked.
+func TestFindMany_UnreadSetIsReported(t *testing.T) {
+	be := nftlibBackend()
+	delete(be.sets, "block_v4")
+	res, err := FindMany(context.Background(), be, []string{"198.51.100.9", "10.1.2.3"})
+	if err == nil || !strings.Contains(err.Error(), "could not read 1 set(s): block_v4") {
+		t.Fatalf("err = %v, want the unread block_v4 named", err)
+	}
+	if len(res["10.1.2.3"]) != 1 {
+		t.Errorf("hits from the sets that were read must stand: %v", res)
+	}
+}
+
+// The exec backend's set listing (no elements) is used when the backend has
+// one: the full table dump carries every feed element and timed out.
+func TestFindMany_PrefersSetListing(t *testing.T) {
+	be := &setsBE{fakeBE: nftBackend()}
+	if _, err := FindMany(context.Background(), be, []string{"198.51.100.9"}); err != nil {
+		t.Fatal(err)
+	}
+	if be.lists != 1 || be.listed["table"] != 0 {
+		t.Errorf("list sets=%d full=%d, want the set listing only", be.lists, be.listed["table"])
+	}
+}
+
+// An nft that rejects the listing falls back to the full dump; one that ran
+// out of time does not (the full dump is slower), and says so.
+func TestFindMany_SetListingFallback(t *testing.T) {
+	be := &setsBE{fakeBE: nftBackend(), err: fmt.Errorf("nft: unknown option")}
+	res, err := FindMany(context.Background(), be, []string{"198.51.100.9"})
+	if err != nil || be.listed["table"] != 1 || len(res["198.51.100.9"]) != 1 {
+		t.Errorf("rejected listing: err=%v full=%d res=%v, want the full dump's answer", err, be.listed["table"], res)
+	}
+	be = &setsBE{fakeBE: nftBackend(), err: fmt.Errorf("nft -j -t list sets inet: %w", context.DeadlineExceeded)}
+	_, err = FindMany(context.Background(), be, []string{"198.51.100.9"})
+	if err == nil || !strings.Contains(err.Error(), "list sets") || be.listed["table"] != 0 {
+		t.Errorf("timed-out listing: err=%v full=%d, want the listing's error and no full dump", err, be.listed["table"])
+	}
+}
+
+type setsBE struct {
+	*fakeBE
+	lists int
+	err   error
+}
+
+func (t *setsBE) ListSetsJSON(ctx context.Context, fam string) ([]byte, error) {
+	t.lists++
+	if t.err != nil {
+		return nil, t.err
+	}
+	return t.fakeBE.table, nil
+}
+
+// A feed's union (what the rules drop on) answers; a per-feed copy is read
+// only when the union matched, to name the feed, and `nft list sets` lists
+// other tables' sets too.
+func TestFindMany_FeedUnionAnswersPerFeedNames(t *testing.T) {
+	set := func(table, name string) string {
+		return fmt.Sprintf(`{"set":{"family":"inet","name":%q,"table":%q,"type":"ipv4_addr"}}`, name, table)
+	}
+	elems := func(name, e string) string {
+		return fmt.Sprintf(`{"nftables":[{"set":{"name":%q,"table":"cfm","type":"ipv4_addr","elem":[%s]}}]}`, name, e)
+	}
+	mk := func() *fakeBE {
+		return &fakeBE{
+			table: []byte(`{"nftables":[` + set("cfm", "block_ext_v4_hosts") + `,` + set("cfm", "block_ext_v4_hosts_MYBLOCK") + `,` +
+				set("cfm", "block_ext_v4_hosts_OTHER") + `,` + set("other", "block_v4") + `]}`),
+			sets: map[string]string{
+				"block_ext_v4_hosts":         elems("block_ext_v4_hosts", `"192.0.2.7","192.0.2.8"`),
+				"block_ext_v4_hosts_MYBLOCK": elems("block_ext_v4_hosts_MYBLOCK", `"192.0.2.7"`),
+				"block_ext_v4_hosts_OTHER":   elems("block_ext_v4_hosts_OTHER", ``),
+			},
+			listed: map[string]int{},
+		}
+	}
+
+	// Not in the union: no per-feed set is read.
+	be := mk()
+	if res, err := FindMany(context.Background(), be, []string{"203.0.113.1"}); err != nil || len(res["203.0.113.1"]) != 0 {
+		t.Fatalf("res=%v err=%v", res, err)
+	}
+	if be.listed["block_ext_v4_hosts"] != 1 || be.listed["block_ext_v4_hosts_MYBLOCK"] != 0 || be.listed["block_v4"] != 0 {
+		t.Errorf("dumps = %v: only the union (and no other table's set)", be.listed)
+	}
+
+	// In the union and a copy: the copy names the feed.
+	be = mk()
+	res, err := FindMany(context.Background(), be, []string{"192.0.2.7", "192.0.2.8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := res["192.0.2.7"]; len(h) != 1 || h[0].Feed != "MYBLOCK" || h[0].Action != "BLOCK" {
+		t.Errorf("192.0.2.7 = %+v, want one MYBLOCK hit", h)
+	}
+	// In the union only (a copy left short by a failed refill): still blocked.
+	if h := res["192.0.2.8"]; len(h) != 1 || h[0].Set != "block_ext_v4_hosts" {
+		t.Errorf("192.0.2.8 = %+v, want the union's hit", h)
+	}
+
+	// A copy that can't be read leaves the union's answer, and no error.
+	be = mk()
+	delete(be.sets, "block_ext_v4_hosts_MYBLOCK")
+	res, err = FindMany(context.Background(), be, []string{"192.0.2.7"})
+	if err != nil || len(res["192.0.2.7"]) != 1 || res["192.0.2.7"][0].Set != "block_ext_v4_hosts" {
+		t.Errorf("res=%v err=%v, want the union's hit", res, err)
+	}
+}
+
+// A union with one feed is named after it without dumping the copy: the
+// second dump doubled a feed lookup's time.
+func TestFindMany_SingleFeedUnionNamedWithoutDump(t *testing.T) {
+	set := func(name string) string {
+		return fmt.Sprintf(`{"set":{"family":"inet","name":%q,"table":"cfm","type":"ipv4_addr"}}`, name)
+	}
+	be := &fakeBE{
+		table: []byte(`{"nftables":[` + set("block_ext_v4_hosts") + `,` + set("block_ext_v4_hosts_MYBLOCK") + `]}`),
+		sets: map[string]string{
+			"block_ext_v4_hosts": `{"nftables":[{"set":{"name":"block_ext_v4_hosts","type":"ipv4_addr","elem":["192.0.2.7"]}}]}`,
+		},
+		listed: map[string]int{},
+	}
+	res, err := FindMany(context.Background(), be, []string{"192.0.2.7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := res["192.0.2.7"]; len(h) != 1 || h[0].Set != "block_ext_v4_hosts" || h[0].Feed != "MYBLOCK" {
+		t.Errorf("hits = %+v, want the union's hit named MYBLOCK", h)
+	}
+	if be.listed["block_ext_v4_hosts_MYBLOCK"] != 0 {
+		t.Errorf("dumps = %v: the single feed's copy is not read", be.listed)
+	}
+}
+
+// A CIDR query over a several-feed union: the union element a copy holds is
+// named, the one no copy holds (a short copy) stays the union's.
+func TestFindMany_UnionCIDRKeepsUncoveredElements(t *testing.T) {
+	set := func(name string) string {
+		return fmt.Sprintf(`{"set":{"family":"inet","name":%q,"table":"cfm","type":"ipv4_addr"}}`, name)
+	}
+	elems := func(name, e string) string {
+		return fmt.Sprintf(`{"nftables":[{"set":{"name":%q,"table":"cfm","type":"ipv4_addr","elem":[%s]}}]}`, name, e)
+	}
+	be := &fakeBE{
+		table: []byte(`{"nftables":[` + set("block_ext_v4_hosts") + `,` + set("block_ext_v4_hosts_A") + `,` + set("block_ext_v4_hosts_B") + `]}`),
+		sets: map[string]string{
+			"block_ext_v4_hosts":   elems("block_ext_v4_hosts", `"192.0.2.7","192.0.2.8"`),
+			"block_ext_v4_hosts_A": elems("block_ext_v4_hosts_A", `"192.0.2.7"`),
+			"block_ext_v4_hosts_B": elems("block_ext_v4_hosts_B", ``),
+		},
+		listed: map[string]int{},
+	}
+	res, err := FindMany(context.Background(), be, []string{"192.0.2.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, h := range res["192.0.2.0/24"] {
+		got[h.Match] = h.Set + "/" + h.Feed
+	}
+	want := map[string]string{"192.0.2.7": "block_ext_v4_hosts_A/A", "192.0.2.8": "block_ext_v4_hosts/"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("hits = %v, want %v", got, want)
 	}
 }
