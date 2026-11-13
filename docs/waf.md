@@ -1090,8 +1090,8 @@ Current assignments:
                                        413  rule_webshell_path_known
                                        414  rule_upload_archive_php
                                        415  rule_upload_content_deep      (logonly burn-in)
-                                       416  rule_php_raw_body_untyped     (logonly, 2026-11-13: a PHP file as an
-                                                                         untyped raw POST body; see "Rules 332
+                                       416  rule_php_file_body     (logonly, 2026-11-13: a PHP file as an
+                                                                         raw POST body; see "Rules 332
                                                                          and 416")
                                        421  rule_php_split_string_canary
                                        422  rule_php_dropper_wget_curl
@@ -1492,7 +1492,7 @@ A 19 KB body already costs `check()` about 5 ms, a 32 KB one about 10 ms.
 
 Tests: `scripts/tests/cfm_waf_shell_write_exec_test.lua`.
 
-## Rules 332 and 416 — PHP code in the query, a PHP file as an untyped body
+## Rules 332 and 416 — PHP code in the query, a PHP file as the body
 
 Both logonly (burn-in), added 2026-11-13 after the dmkomotinis.gr Joomla
 compromise on earth (2026-11-12). Fabrik 3.10's listfilter evaluates
@@ -1511,7 +1511,10 @@ uploaded file on disk, and the bot then passed its splash and kept uploading.
 ### Rule 332 — `rule_php_code_args`
 
 Reason family **`WAF_RCE`**, reasons `WAF_RCE:PHP_ARGS_<TAG>`. It reads the
-query, url-decoded twice and lowercased, with `+` as a space. It fires on a
+query one parameter at a time. The raw query is split on `&` first, as PHP
+splits it, so an encoded `%26` (`&&` in a payload) stays in its parameter.
+Each parameter is then read with `+` as a space, url-decoded twice and
+lowercased. It fires on a
 call to a function that writes a file or runs code (`file_put_contents`,
 `fopen`, `fwrite`, `fputs`, `file_get_contents`, `move_uploaded_file`,
 `shell_exec`, `passthru`, `system`, `exec`, `proc_open`, `popen`,
@@ -1519,7 +1522,9 @@ call to a function that writes a file or runs code (`file_put_contents`,
 `include[_once]`, `require[_once]`, `curl_exec`).
 
 A call is `name(`, with blanks or one `/* */` comment allowed before the
-paren. It is not a call when the name is part of a longer name, a variable
+paren. `include` / `require` are language constructs, usually written without
+the paren, so for them a quote or a `$` after blanks also counts
+(`include $_GET['f'];`). It is not a call when the name is part of a longer name, a variable
 (`$exec(`), a method (`->exec(`) or a static method (`::system(`). The call
 must come with something only PHP source carries, which the tag names:
 
@@ -1528,7 +1533,7 @@ must come with something only PHP source carries, which the tag names:
 | `OPEN` | `<?php` or `<?=` |
 | `SUPERGLOBAL` | `$_GET`, `$_POST`, `$_REQUEST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_ENV`, `$GLOBALS` |
 | `DECODE` | `base64_decode(`, `hex2bin(`, `gzinflate(`, `gzuncompress(`, `gzdecode(`, `str_rot13(`, `convert_uudecode(` |
-| `RETURN` | `return` after `;`, `=`, `&`, `?` or `(` |
+| `RETURN` | `return` after `;`, `=`, `&`, `?`, `(`, `)`, `{`, `}` or `:` |
 | `ASSIGN` | `$x =` |
 | `DYNAMIC_CALL` | `$x(` |
 | `CONCAT` | `'…'.'…'` |
@@ -1555,8 +1560,14 @@ families, and no legitimate one. Most of them reached the origin:
 - Drupal `name[#suffix]=eval($_POST[c])`;
 - pearcmd `config-create /<?=@system(chr(…))`.
 
-The call and its context must sit in the same parameter (`&`-delimited, after
-decoding): `?s=operating system (linux)&tpl='a'.'b'` is not PHP. Expected
+Those figures came from a log scanner that mirrors the rule. The shipped
+detector was replayed over dmkomotinis.gr's raw edge log (1 386 queries) and
+matched 39: every request of the chain that wrote a file. It missed the
+attacker's probes (`1;`, `sleep(3);`) and one mangled payload that is not
+valid PHP (`\='file_put_'.'contents';return \(…`).
+
+The call and its context must sit in the same parameter:
+`?s=operating system (linux)&tpl='a'.'b'` is not PHP. Expected
 noise in the burn-in is a search for PHP code on a developer site
 (`?s=$x = file_get_contents(...)`), and cPanel json-api GETs that save a PHP
 file on the panel proxy hosts.
@@ -1570,11 +1581,12 @@ editors post PHP source as a field. That is the next step if the burn-in is
 clean. The rule runs late, beside 331, so a
 payload that also trips an armed block rule keeps that rule's headline.
 
-### Rule 416 — `rule_php_raw_body_untyped`
+### Rule 416 — `rule_php_file_body`
 
 Reason family **`WAF_PHP_WEBSHELL_BODY`**, reasons
-`WAF_PHP_WEBSHELL_BODY:UNTYPED_<KIND>_<CT>`:
-- KIND `PHP_FILE`: the POST body opens with `<?php` or `<?=`, after an
+`WAF_PHP_WEBSHELL_BODY:BODY_IS_<KIND>_<CT>`:
+- KIND `PHP_FILE`: the POST / PUT / PATCH body opens with `<?php` or `<?=`
+  (`php://input` reads the body of each method), after an
   optional UTF-8 BOM and blanks;
 - KIND `GIF_POLYGLOT`: a `GIF87a`/`GIF89a` header with a PHP tag in the first
   256 bytes;
@@ -1600,8 +1612,9 @@ measured before shipping. The dropper's footprint in the logs (a POST over
 dmkomotinis.gr in 7 days. The burn-in is the measurement: `cfm.waf.log`
 records `ct` with every hit.
 
-Bodies are read where cfm.lua reads them: every `*.php` path, but not an
-octet-stream body to a clean URL.
+Bodies are read where cfm.lua reads them: a POST to every `*.php` path, but
+not an octet-stream body to a clean URL; a PUT / PATCH under the size and
+type gate.
 
 ### Both rules
 

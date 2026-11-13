@@ -19,8 +19,8 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - **WAF: PHP code in the query string (rule 332, `WAF_RCE:PHP_ARGS_*`) and
-  a PHP file posted as an untyped raw body (rule 416,
-  `WAF_PHP_WEBSHELL_BODY:UNTYPED_*`), both logonly.**
+  a PHP file posted as the raw body (rule 416,
+  `WAF_PHP_WEBSHELL_BODY:BODY_IS_*`), both logonly.**
   - The case: on 2026-11-12 a Joomla site on earth (dmkomotinis.gr, Fabrik
     3.10) was compromised through the listfilter eval
     (`…[value]=$h=fopen('up.php','w');fwrite(…)&…[eval]=1`). The dropper it
@@ -32,8 +32,8 @@ back-filled here — see the git/PR history for that period.
     something only PHP source carries, in the same parameter: `<?php`, a
     superglobal, a decoder, `$x=`, `;return`, `'.'` or a `chr()` chain. It
     reads the query only, not a POST form.
-  - Rule 416 fires on a non-multipart POST body that opens with a PHP tag,
-    whatever its Content-Type says.
+  - Rule 416 fires on a non-multipart POST, PUT or PATCH body that opens
+    with a PHP tag, whatever its Content-Type says.
   - A 7-day read of the edge logs on all 8 edge nodes found about 150
     matching 332 requests, from more than 10 exploit families (Fabrik,
     ThinkPHP, SPIP, Magento, ThinkCMF, Drupal, pearcmd), most of which reached

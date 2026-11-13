@@ -8773,8 +8773,10 @@ end
 -- A name assembled from pieces (`$_f='file_put_'.'contents';$_f(…)`,
 -- `('file_put_'.'contents')(…)`) is read after the `'.'` joins are dropped.
 --
--- Input: the query, url-decoded twice and lowercased (normalize), `+` read as
--- the space it is in a query. Returns a tag or nil.
+-- Input: the RAW query string. It is split on `&` first, as PHP splits it, so
+-- an encoded `%26` (`&&` in the payload) stays in its parameter; each
+-- parameter is then read with `+` as a space and url-decoded twice and
+-- lowercased (normalize). Returns a tag or nil.
 local PHP_ARG_SINKS = {
   "file_put_contents", "fopen", "fwrite", "fputs", "file_get_contents",
   "move_uploaded_file", "shell_exec", "passthru", "system", "exec",
@@ -8790,10 +8792,17 @@ local PHP_ARG_SUPERGLOBALS = {
   "$_get", "$_post", "$_request", "$_server", "$_cookie", "$_files", "$_env", "$globals",
 }
 
+-- include / require are language constructs, mostly written without the
+-- parens: `include $_GET['f'];`, `require 'http://…/x.txt';`.
+local PHP_ARG_CONSTRUCTS = {
+  include = true, include_once = true, require = true, require_once = true,
+}
+
 -- A call of `name` at a function-call position: not preceded by a name byte,
 -- `$` (a variable), `->` / `?->` (a method) or `::` (a static method), and
 -- followed by `(` after blanks or one /* */ comment, looked for in the next
 -- 40 bytes only. A lone `>` before it is markup (`<php>file_put_contents(`).
+-- A construct (include / require) also takes a quote or a `$` after blanks.
 local function php_global_call(s, name)
   local init = 1
   while true do
@@ -8804,6 +8813,7 @@ local function php_global_call(s, name)
     if not (prev:find("^[%w_%$]$") or prev2 == "->" or prev2 == "::") then
       local after = s:sub(b + 1, b + 40)
       if after:find("^%s*%(") or after:find("^%s*/%*[^%*]*%*/%s*%(") then return true end
+      if PHP_ARG_CONSTRUCTS[name] and after:find("^%s*['\"%$]") then return true end
     end
     init = b + 1
   end
@@ -8817,7 +8827,7 @@ local function php_code_context(s)
   for i = 1, #PHP_ARG_DECODERS do
     if has(s, PHP_ARG_DECODERS[i]) then return "DECODE" end
   end
-  if s:find("[;=&%?%(]%s*return[%s%(\"']") or s:find("^return[%s%(\"']") then return "RETURN" end
+  if s:find("[;=&%?%(%){}:]%s*return[%s%(\"'%$]") or s:find("^return[%s%(\"'%$]") then return "RETURN" end
   if s:find("%$[%a_][%w_]*%s*=[^=]") or s:find("%$[%a_][%w_]*%s*=$") then return "ASSIGN" end
   if s:find("%$[%a_][%w_]*%s*%(") then return "DYNAMIC_CALL" end
   if s:find("['\"]%s*%.%s*['\"]") then return "CONCAT" end
@@ -8849,23 +8859,26 @@ local function php_code_param(p)
 end
 
 -- The sink and its context must sit in the same parameter: a search for
--- `system (linux)` next to an unrelated `tpl='a'.'b'` is not PHP. The split
--- is on the decoded string, so an encoded `&&` inside a payload cuts it in
--- two (a miss, never a false hit).
-function _M.detect_php_code_args(s)
-  if not s or s == "" or not s:find("(", 1, true) then return nil end
-  for p in s:gmatch("[^&]+") do
-    if p:find("(", 1, true) then
-      local tag = php_code_param(p)
-      if tag then return tag end
+-- `system (linux)` next to an unrelated `tpl='a'.'b'` is not PHP.
+function _M.detect_php_code_args(raw)
+  if not raw or raw == "" then return nil end
+  for rp in raw:gmatch("[^&]+") do
+    -- A call needs `(`, a construct a quote or `$`: a parameter with none of
+    -- them (raw or encoded) is skipped before it is decoded.
+    if rp:find("[%(%%'\"%$]") then
+      local p = normalize((rp:gsub("%+", " ")))
+      if p:find("[%('\"%$]") then
+        local tag = php_code_param(p)
+        if tag then return tag end
+      end
     end
   end
   return nil
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Rule 416 — a PHP file posted as the raw body, untyped
--- (WAF_PHP_WEBSHELL_BODY:UNTYPED_<KIND>_<CT>, logonly)
+-- Rule 416 — a PHP file posted as the raw body
+-- (WAF_PHP_WEBSHELL_BODY:BODY_IS_<KIND>_<CT>, logonly)
 -- ─────────────────────────────────────────────────────────────────────────────
 -- A dropper that writes php://input to the path in its query (dmkomotinis.gr's
 -- `up.php`: `fwrite(fopen($_GET['f'],'w'),file_get_contents('php://input'))`)
@@ -8874,7 +8887,7 @@ end
 -- textual (`application/octet-stream`). The 58 KB yavuzshell.php went to six
 -- paths that way, and nothing at the edge saw it.
 --
--- Fires on a non-multipart POST body that opens with a PHP tag (`<?php`,
+-- Fires on a non-multipart POST / PUT / PATCH body that opens with a PHP tag (`<?php`,
 -- `<?=`; after an optional UTF-8 BOM and blanks), or with a GIF header
 -- followed by one in its first 256 bytes. Whatever the Content-Type says:
 -- a real form body opens with a field name, JSON with `{` / `[`, XML with
@@ -8887,7 +8900,7 @@ end
 -- OTHER), which the burn-in review reads.
 -- Bodies are read on the routes cfm.lua reads them (every *.php path; an
 -- octet-stream body to a clean URL is not read at all).
-function _M.detect_php_raw_body_untyped(body, headers)
+function _M.detect_php_file_body(body, headers)
   if not body or body == "" then return nil end
   headers = headers or {}
   local ct = lower(header_string(headers["content-type"] or headers["Content-Type"]))

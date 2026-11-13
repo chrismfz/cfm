@@ -263,7 +263,7 @@ local CFG = {
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
-  rule_php_raw_body_untyped = "logonly", -- rule 416: a non-multipart POST body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Logonly through burn-in; family WAF_PHP_WEBSHELL_BODY.
+  rule_php_file_body = "logonly", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Logonly through burn-in; family WAF_PHP_WEBSHELL_BODY.
   rule_upload_content_deep = "logonly", -- 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole (added 2026-10-09; burn-in, then promote)
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
@@ -616,7 +616,7 @@ local RULE_IDS = {
   rule_upload_filename         = 401,
   rule_upload_content          = 402,
   rule_upload_content_deep     = 415,
-  rule_php_raw_body_untyped    = 416,
+  rule_php_file_body           = 416,
   rule_upload_archive_php      = 414,
   rule_upload_obfuscation      = 403,
   rule_php_webshell_body       = 404,
@@ -2565,14 +2565,14 @@ local function check_impl(ctx, st)
   -- ── 60d) PHP code in the query string (332, logonly) ────────────────────
   -- Late, beside 331: an eval payload can also carry a marker an armed
   -- block rule reads (php://, a SQLi breakout), and that rule keeps the
-  -- headline. `+` is a space in a query, as PHP reads it. Query only: the
-  -- same payload in a POST form is not read (docs/waf.md "Rules 332 and 416").
+  -- headline. The detector takes the RAW query (to the request-line budget):
+  -- it splits it on `&` before decoding, as PHP does, so an encoded `%26`
+  -- inside a payload stays in its parameter. Query only: the same payload in
+  -- a POST form is not read (docs/waf.md "Rules 332 and 416").
   do
     local mode = rule_mode(CFG.rule_php_code_args, "logonly")
     if mode ~= "disabled" and (args or "") ~= "" then
-      local s = get_norm_args_wide()
-      if s:find("+", 1, true) then s = s:gsub("%+", " ") end
-      local tag = det.detect_php_code_args(s)
+      local tag = det.detect_php_code_args(cap(args, util.uri_scan_cap()))
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_RCE:PHP_ARGS_" .. tag, ttl, mode, RULE_IDS.rule_php_code_args) then goto done end
@@ -2580,17 +2580,19 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 60e) A PHP file as an untyped raw body (416, logonly) ───────────────
+  -- ── 60e) A PHP file as the raw body (416, logonly) ─────────────────────
   -- The body a php://input dropper writes to disk, which 402 (multipart)
   -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
-  -- label a dropper puts on it.
+  -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
+  -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
   do
-    local mode = rule_mode(CFG.rule_php_raw_body_untyped, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_php_raw_body_untyped(body, headers)
+    local mode = rule_mode(CFG.rule_php_file_body, "logonly")
+    if mode ~= "disabled" and (body or "") ~= ""
+       and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
+      local tag = det.detect_php_file_body(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WEBSHELL_BODY:UNTYPED_" .. tag, ttl, mode, RULE_IDS.rule_php_raw_body_untyped) then goto done end
+        if record("WAF_PHP_WEBSHELL_BODY:BODY_IS_" .. tag, ttl, mode, RULE_IDS.rule_php_file_body) then goto done end
       end
     end
   end

