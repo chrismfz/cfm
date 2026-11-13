@@ -100,12 +100,49 @@ type nlSample struct {
 	err string
 }
 
-// countDial is the socket option for write sockets: no deadline (see above).
-func (s *nlStats) countDial(*netlink.Conn) error {
+// nlWriteBuf is the send buffer a write socket asks for. A set replace is one
+// batch (bulk.go), and a feed union of a million addresses is ~30 MB of
+// netlink messages; the default buffer (wmem_default, ~208 KiB) fails such a
+// batch with "message too long". A buffer is a cap, not an allocation.
+const nlWriteBuf = 256 << 20
+
+// nlAckBuf is the receive buffer of a write socket. Every message of a batch
+// asks for an ACK, and a million-address replace is 1 000 messages: their
+// ACKs overflowed the default receive buffer (rmem_default) and Flush failed
+// with ENOBUFS, after the kernel had committed the batch.
+const nlAckBuf = 64 << 20
+
+// countDial is the socket option for write sockets: no deadline (see above),
+// a send buffer of nlWriteBuf and a receive buffer of nlAckBuf.
+func (s *nlStats) countDial(nl *netlink.Conn) error {
 	s.mu.Lock()
 	s.dials++
 	s.mu.Unlock()
+	growBuffers(nl, nlWriteBuf, nlAckBuf)
 	return nil
+}
+
+// growBuffers raises a socket's send and receive buffers, as nft does for its
+// batches: SO_SNDBUFFORCE / SO_RCVBUFFORCE (root in the initial user
+// namespace, i.e. the daemon) pass wmem_max / rmem_max; without them
+// SO_SNDBUF / SO_RCVBUF are capped there. Best effort: a batch too large for
+// the buffers fails whole and its caller falls back to smaller ones.
+func growBuffers(nl *netlink.Conn, snd, rcv int) {
+	rc, err := nl.SyscallConn()
+	if err != nil {
+		return
+	}
+	var sndOK, rcvOK bool
+	_ = rc.Control(func(fd uintptr) {
+		sndOK = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUFFORCE, snd) == nil
+		rcvOK = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, rcv) == nil
+	})
+	if !sndOK {
+		_ = nl.SetWriteBuffer(snd)
+	}
+	if !rcvOK {
+		_ = nl.SetReadBuffer(rcv)
+	}
 }
 
 // readDeadline is the socket option for read sockets, applied at dial, i.e.

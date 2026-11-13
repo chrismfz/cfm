@@ -1,7 +1,9 @@
 package feedutil
 
 import (
+	"hash/fnv"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -105,4 +107,20 @@ func DedupKeepOrder(in []string) []string {
 		out = append(out, x)
 	}
 	return out
+}
+
+// HashElems is an order-independent content hash of a set's elements. Both
+// engines use it to skip rewriting a permanent set whose content has not
+// changed since their last successful write. Sorted so a reordered but
+// identical feed hashes the same.
+func HashElems(elems []string) uint64 {
+	cp := make([]string, len(elems))
+	copy(cp, elems)
+	sort.Strings(cp)
+	h := fnv.New64a()
+	for _, e := range cp {
+		_, _ = h.Write([]byte(e))
+		_, _ = h.Write([]byte{0})
+	}
+	return h.Sum64()
 }

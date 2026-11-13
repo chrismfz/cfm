@@ -61,6 +61,11 @@ func intervalElems(t *testing.T, m netlink.Message) (n int, pairsIntact bool) {
 // possibly as a start without its end, an interval open to the top of the
 // address space. Each message now carries at most setWriteChunk elements,
 // every start with its end.
+//
+// The replace is ONE transaction, the flush first: the set must never be seen
+// empty or half-filled (LiveNFTFeedReplaceIsAtomic runs it on a kernel). When
+// the kernel refuses that batch, the fallback writes the flush alone, then
+// one transaction per message.
 func TestReplaceSetFlushAdd_LargeIntervalSetArrivesWhole(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -72,55 +77,85 @@ func TestReplaceSetFlushAdd_LargeIntervalSetArrivesWhole(t *testing.T) {
 		{"block_ext_v4_nets", nftables.TypeIPAddr, func(i int) string { return fmt.Sprintf("10.%d.%d.0/24", i/256, i%256) }, 5000, nil},
 		{"allow_ext_v6_nets", nftables.TypeIP6Addr, func(i int) string { return fmt.Sprintf("2001:db8:%x::/48", i) }, 3000, func() *time.Duration { d := time.Hour; return &d }()},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var msgs []netlink.Message
-			var perBatch []int // NEWSETELEM messages in each transaction
-			b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
-				if !isBatch(req) {
+		for _, refuseFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/refuseFirst=%v", tc.name, refuseFirst), func(t *testing.T) {
+				var msgs []netlink.Message
+				var batches [][]int // each transaction's nftables message types, in order
+				b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+					if !isBatch(req) {
+						return nil, io.EOF
+					}
+					var types []int
+					for _, m := range req {
+						if m.Header.Type == netlink.HeaderType(unix.NFNL_MSG_BATCH_BEGIN) || m.Header.Type == netlink.HeaderType(unix.NFNL_MSG_BATCH_END) {
+							continue
+						}
+						types = append(types, nftMsgType(m))
+					}
+					batches = append(batches, types)
+					if refuseFirst && len(batches) == 1 {
+						return nil, unix.EMSGSIZE
+					}
+					for _, m := range req {
+						if nftMsgType(m) == unix.NFT_MSG_NEWSETELEM {
+							msgs = append(msgs, m)
+						}
+					}
 					return nil, io.EOF
+				})
+				b.namedSets[tc.name] = &nftables.Set{Name: tc.name, KeyType: tc.key, Interval: true, HasTimeout: true,
+					Table: &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}}
+				var elems []string
+				for i := 0; i < tc.n; i++ {
+					elems = append(elems, tc.cidrs(i))
 				}
-				n := 0
-				for _, m := range req {
-					if nftMsgType(m) == unix.NFT_MSG_NEWSETELEM {
-						msgs = append(msgs, m)
-						n++
+				if err := b.ReplaceSetFlushAdd(tc.name, elems, tc.ttl); err != nil {
+					t.Fatalf("ReplaceSetFlushAdd: %v", err)
+				}
+				total := 0
+				for i, m := range msgs {
+					n, ok := intervalElems(t, m)
+					if n > setWriteChunk+1 || !ok {
+						t.Errorf("message %d: %d elements, pairs intact=%v; want <= %d, every start with its end", i, n, ok, setWriteChunk+1)
+					}
+					total += n
+				}
+				if total != 2*tc.n {
+					t.Errorf("%d elements arrived, want %d (%d start/end pairs)", total, 2*tc.n, tc.n)
+				}
+				one := func(types []int) bool { // flush, then only adds
+					if len(types) < 2 || types[0] != unix.NFT_MSG_DELSETELEM {
+						return false
+					}
+					for _, ty := range types[1:] {
+						if ty != unix.NFT_MSG_NEWSETELEM {
+							return false
+						}
+					}
+					return true
+				}
+				if !one(batches[0]) {
+					t.Fatalf("first transaction %v, want the flush and every add", batches[0])
+				}
+				if !refuseFirst {
+					if len(batches) != 1 {
+						t.Fatalf("%d transactions, want 1: %v", len(batches), batches)
+					}
+					return
+				}
+				// Fallback: the flush alone (ENOTEMPTY otherwise on some
+				// paths), then one transaction per message.
+				rest := batches[1:]
+				if len(rest) < 2 || len(rest[0]) != 1 || rest[0][0] != unix.NFT_MSG_DELSETELEM {
+					t.Fatalf("fallback transactions %v, want the flush alone first", rest)
+				}
+				for i, types := range rest[1:] {
+					if len(types) != 1 || types[0] != unix.NFT_MSG_NEWSETELEM {
+						t.Errorf("fallback transaction %d carried %v, want one NEWSETELEM", i+1, types)
 					}
 				}
-				perBatch = append(perBatch, n)
-				return nil, io.EOF
 			})
-			b.namedSets[tc.name] = &nftables.Set{Name: tc.name, KeyType: tc.key, Interval: true, HasTimeout: true,
-				Table: &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}}
-			var elems []string
-			for i := 0; i < tc.n; i++ {
-				elems = append(elems, tc.cidrs(i))
-			}
-			if err := b.ReplaceSetFlushAdd(tc.name, elems, tc.ttl); err != nil {
-				t.Fatalf("ReplaceSetFlushAdd: %v", err)
-			}
-			total := 0
-			for i, m := range msgs {
-				n, ok := intervalElems(t, m)
-				if n > setWriteChunk+1 || !ok {
-					t.Errorf("message %d: %d elements, pairs intact=%v; want <= %d, every start with its end", i, n, ok, setWriteChunk+1)
-				}
-				total += n
-			}
-			if total != 2*tc.n {
-				t.Errorf("%d elements arrived, want %d (%d start/end pairs)", total, 2*tc.n, tc.n)
-			}
-			// The flush is its own transaction (ENOTEMPTY otherwise), then one
-			// transaction per batch: many in one would overflow the socket
-			// buffer on a large feed ("message too long").
-			if len(perBatch) < 2 || perBatch[0] != 0 {
-				t.Fatalf("transactions carried %v NEWSETELEM messages, want the flush alone first", perBatch)
-			}
-			for i, n := range perBatch[1:] {
-				if n != 1 {
-					t.Errorf("transaction %d carried %d NEWSETELEM messages, want 1", i+1, n)
-				}
-			}
-		})
+		}
 	}
 }
 
