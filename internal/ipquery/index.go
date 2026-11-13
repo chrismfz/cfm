@@ -256,10 +256,11 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 	}
 	// A feed union (block_ext_v4_hosts, …) is the set the rules drop on; the
 	// per-feed sets (…_MYBLOCK) are copies that name the feed. Dumping both
-	// cost twice the time, so the union is read, and a per-feed set only when
-	// its union matched and has more than one feed, to name the feed. The union stays the answer: a
-	// per-feed refill that failed part-way leaves the copy short, and an IP
-	// the union drops must not read as unblocked.
+	// cost twice the time, so the union is read, and a per-feed set only
+	// when its union matched and has more than one feed, to name the feed.
+	// The union stays the answer: a per-feed refill that failed part-way
+	// leaves the copy short, and an IP the union drops must not read as
+	// unblocked.
 	unions := map[string]bool{}
 	for _, sd := range sets {
 		if sd.feed == "" && strings.Contains(sd.name, "_ext_") {
@@ -330,11 +331,6 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 			}
 		}
 	}
-	// Name the feed of a union with several: a query's union hit is replaced
-	// by the per-feed hits that cover it, and kept when none does (or the copy
-	// can't be read).
-	// What a per-feed set could not be read for is not an error: the union
-	// already answered.
 	// A union with ONE feed is that feed's (it is built from the feeds'
 	// contents), so it is named without a second dump of the same size.
 	feedsOf := map[string][]setDesc{}
@@ -353,6 +349,10 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 			}
 		}
 	}
+	// A union with several feeds: each union hit the per-feed copies hold
+	// (same element) is replaced by theirs, which name the feed; one no copy
+	// holds stays as it is. A copy that can't be read is not an error: the
+	// union already answered.
 	named := map[string]map[string][]Hit{} // union -> query -> per-feed hits
 	for _, sd := range attrib {
 		u := unionOf(sd)
@@ -376,9 +376,13 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 	}
 	for u, byQ := range named {
 		for a, h := range byQ {
+			held := map[string]bool{}
+			for _, x := range h {
+				held[x.Match] = true
+			}
 			kept := out[a][:0:0]
 			for _, x := range out[a] {
-				if x.Set != u {
+				if x.Set != u || !held[x.Match] {
 					kept = append(kept, x)
 				}
 			}

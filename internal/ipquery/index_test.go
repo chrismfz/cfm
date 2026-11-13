@@ -431,3 +431,35 @@ func TestFindMany_SingleFeedUnionNamedWithoutDump(t *testing.T) {
 		t.Errorf("dumps = %v: the single feed's copy is not read", be.listed)
 	}
 }
+
+// A CIDR query over a several-feed union: the union element a copy holds is
+// named, the one no copy holds (a short copy) stays the union's.
+func TestFindMany_UnionCIDRKeepsUncoveredElements(t *testing.T) {
+	set := func(name string) string {
+		return fmt.Sprintf(`{"set":{"family":"inet","name":%q,"table":"cfm","type":"ipv4_addr"}}`, name)
+	}
+	elems := func(name, e string) string {
+		return fmt.Sprintf(`{"nftables":[{"set":{"name":%q,"table":"cfm","type":"ipv4_addr","elem":[%s]}}]}`, name, e)
+	}
+	be := &fakeBE{
+		table: []byte(`{"nftables":[` + set("block_ext_v4_hosts") + `,` + set("block_ext_v4_hosts_A") + `,` + set("block_ext_v4_hosts_B") + `]}`),
+		sets: map[string]string{
+			"block_ext_v4_hosts":   elems("block_ext_v4_hosts", `"192.0.2.7","192.0.2.8"`),
+			"block_ext_v4_hosts_A": elems("block_ext_v4_hosts_A", `"192.0.2.7"`),
+			"block_ext_v4_hosts_B": elems("block_ext_v4_hosts_B", ``),
+		},
+		listed: map[string]int{},
+	}
+	res, err := FindMany(context.Background(), be, []string{"192.0.2.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, h := range res["192.0.2.0/24"] {
+		got[h.Match] = h.Set + "/" + h.Feed
+	}
+	want := map[string]string{"192.0.2.7": "block_ext_v4_hosts_A/A", "192.0.2.8": "block_ext_v4_hosts/"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("hits = %v, want %v", got, want)
+	}
+}
