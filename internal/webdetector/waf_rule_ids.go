@@ -89,6 +89,13 @@ var wafRuleIDs = []WAFRule{
 	// (touch -d): the webshell terminal of tophair.gr, which 310-317 (query
 	// only) never read. Logonly through burn-in.
 	{ID: 331, Name: "rule_shell_write_exec", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
+	// PHP source in the query string: a call to a file writer or code runner
+	// with something only PHP source carries, in the same parameter (<?php, a superglobal, a
+	// decoder, `$x=`, `;return`, `'.'`, a chr() chain). The eval RCEs of
+	// Fabrik (dmkomotinis.gr), ThinkPHP, SPIP, Magento, Drupal, which 320
+	// (shell / jndi markers) and the body scanners never read. Logonly
+	// through burn-in.
+	{ID: 332, Name: "rule_php_code_args", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
 	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge_v2"},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge_v2"},
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "block"},
@@ -135,6 +142,12 @@ var wafRuleIDs = []WAFRule{
 	// legitimate — so it ships at `block`.
 	{ID: 414, Name: "rule_upload_archive_php", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
 	{ID: 415, Name: "rule_upload_content_deep", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "logonly"},
+	// A non-multipart POST / PUT / PATCH body that is a PHP file (opens with
+	// <?php / <?=, or a GIF header and one), whatever its Content-Type
+	// says. A php://input dropper's upload (dmkomotinis.gr's up.php took
+	// yavuzshell.php as application/octet-stream), which 402 (multipart)
+	// and 404 (textual types, 2 KB) miss. Logonly through burn-in.
+	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "logonly"},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},

@@ -8749,4 +8749,181 @@ function _M.detect_shell_write_exec(s)
   return nil
 end
 
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Rule 332 — PHP code in the query string (WAF_RCE:PHP_ARGS_<TAG>, logonly)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- An eval-style RCE takes its PHP from a request parameter: the Fabrik
+-- listfilter `<el>[value]=$h=fopen('up.php','w');fwrite($h,chr(60).…)&<el>[eval]=1`
+-- that compromised dmkomotinis.gr (earth, 2026-11-12), ThinkPHP's
+-- `?s=<?=file_put_contents(…,base64_decode(…))`, SPIP's `recherche=<?php …`,
+-- Magento's `/paypal/transparent/response/?<?=eval(hex2bin(…))`, Drupal's
+-- `name[#suffix]=eval($_POST[c])`. Rule 320 reads only shell / jndi markers and
+-- the body scanners (404, 431-439) never read the query, so every one of these
+-- reached the origin. A fleet read of 7 days of edge logs (8 nodes, 2026-11-13)
+-- found ~150 such requests from 10+ exploit families, and no legitimate one.
+--
+-- The rule wants a call to a function that writes a file or runs code
+-- (`name(`, not a method `->name(` / `::name(`, not part of a longer name)
+-- AND something only PHP source carries. Neither alone is enough: a site
+-- links `style.css?v=<?php echo rand(00000, 99999); ?>` from static HTML
+-- (Googlebot fetches it, no writer in it), and a search for
+-- `operating system (linux)` names a sink with no code around it. `chr(`
+-- alone is not a sink (Oracle / Postgres SQLi builds strings with CHR()).
+-- A name assembled from pieces (`$_f='file_put_'.'contents';$_f(…)`,
+-- `('file_put_'.'contents')(…)`) is read after the `'.'` joins are dropped.
+--
+-- Input: the RAW query string. It is split on `&` first, as PHP splits it, so
+-- an encoded `%26` (`&&` in the payload) stays in its parameter; each
+-- parameter is then read with `+` as a space and url-decoded twice and
+-- lowercased (normalize). Returns a tag or nil.
+local PHP_ARG_SINKS = {
+  "file_put_contents", "fopen", "fwrite", "fputs", "file_get_contents",
+  "move_uploaded_file", "shell_exec", "passthru", "system", "exec",
+  "proc_open", "popen", "pcntl_exec", "assert", "eval", "create_function",
+  "call_user_func", "call_user_func_array", "include", "include_once",
+  "require", "require_once", "curl_exec",
+}
+local PHP_ARG_DECODERS = {
+  "base64_decode(", "hex2bin(", "gzinflate(", "gzuncompress(", "gzdecode(",
+  "str_rot13(", "convert_uudecode(",
+}
+local PHP_ARG_SUPERGLOBALS = {
+  "$_get", "$_post", "$_request", "$_server", "$_cookie", "$_files", "$_env", "$globals",
+}
+
+-- include / require are language constructs, mostly written without the
+-- parens: `include $_GET['f'];`, `require 'http://…/x.txt';`.
+local PHP_ARG_CONSTRUCTS = {
+  include = true, include_once = true, require = true, require_once = true,
+}
+
+-- A call of `name` at a function-call position: not preceded by a name byte,
+-- `$` (a variable), `->` / `?->` (a method) or `::` (a static method), and
+-- followed by `(` after blanks or one /* */ comment, looked for in the next
+-- 40 bytes only. A lone `>` before it is markup (`<php>file_put_contents(`).
+-- A construct (include / require) also takes a quote or a `$` after blanks.
+local function php_global_call(s, name)
+  local init = 1
+  while true do
+    local a, b = s:find(name, init, true)
+    if not a then return false end
+    local prev2 = (a > 2) and s:sub(a - 2, a - 1) or ((a > 1) and s:sub(a - 1, a - 1) or "")
+    local prev = prev2:sub(-1)
+    if not (prev:find("^[%w_%$]$") or prev2 == "->" or prev2 == "::") then
+      local after = s:sub(b + 1, b + 40)
+      if after:find("^%s*%(") or after:find("^%s*/%*[^%*]*%*/%s*%(") then return true end
+      if PHP_ARG_CONSTRUCTS[name] and after:find("^%s*['\"%$]") then return true end
+    end
+    init = b + 1
+  end
+end
+
+local function php_code_context(s)
+  if has(s, "<?php") or has(s, "<?=") then return "OPEN" end
+  for i = 1, #PHP_ARG_SUPERGLOBALS do
+    if has(s, PHP_ARG_SUPERGLOBALS[i]) then return "SUPERGLOBAL" end
+  end
+  for i = 1, #PHP_ARG_DECODERS do
+    if has(s, PHP_ARG_DECODERS[i]) then return "DECODE" end
+  end
+  if s:find("[;=&%?%(%){}:]%s*return[%s%(\"'%$]") or s:find("^return[%s%(\"'%$]") then return "RETURN" end
+  if s:find("%$[%a_][%w_]*%s*=[^=]") or s:find("%$[%a_][%w_]*%s*=$") then return "ASSIGN" end
+  if s:find("%$[%a_][%w_]*%s*%(") then return "DYNAMIC_CALL" end
+  if s:find("['\"]%s*%.%s*['\"]") then return "CONCAT" end
+  if count_occurs(s, "chr(") >= 3 then return "CHR_CHAIN" end
+  return nil
+end
+
+-- One parameter (name=value, or a bare key) of the decoded query.
+local function php_code_param(p)
+  for i = 1, #PHP_ARG_SINKS do
+    if php_global_call(p, PHP_ARG_SINKS[i]) then
+      local ctx = php_code_context(p)
+      if ctx then return ctx end
+      break
+    end
+  end
+  -- A sink named in a string built from pieces, then called through a
+  -- variable or a parenthesised expression.
+  if p:find("['\"]%s*%.%s*['\"]") then
+    local j = p:gsub("['\"]%s*%.%s*['\"]", "")
+    if j:find("%$[%a_][%w_]*%s*%(") or j:find("%)%s*%(") then
+      for i = 1, #PHP_ARG_SINKS do
+        local n = PHP_ARG_SINKS[i]
+        if has(j, "'" .. n .. "'") or has(j, '"' .. n .. '"') then return "NAME_STRING" end
+      end
+    end
+  end
+  return nil
+end
+
+-- The sink and its context must sit in the same parameter: a search for
+-- `system (linux)` next to an unrelated `tpl='a'.'b'` is not PHP.
+function _M.detect_php_code_args(raw)
+  if not raw or raw == "" then return nil end
+  for rp in raw:gmatch("[^&]+") do
+    -- A call needs `(`, a construct a quote or `$`: a parameter with none of
+    -- them (raw or encoded) is skipped before it is decoded.
+    if rp:find("[%(%%'\"%$]") then
+      local p = normalize((rp:gsub("%+", " ")))
+      if p:find("[%('\"%$]") then
+        local tag = php_code_param(p)
+        if tag then return tag end
+      end
+    end
+  end
+  return nil
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Rule 416 — a PHP file posted as the raw body
+-- (WAF_PHP_WEBSHELL_BODY:BODY_IS_<KIND>_<CT>, logonly)
+-- ─────────────────────────────────────────────────────────────────────────────
+-- A dropper that writes php://input to the path in its query (dmkomotinis.gr's
+-- `up.php`: `fwrite(fopen($_GET['f'],'w'),file_get_contents('php://input'))`)
+-- receives the webshell as the whole request body, with a Content-Type that
+-- no body scanner reads: 402 reads multipart only, and 404 skips anything not
+-- textual (`application/octet-stream`). The 58 KB yavuzshell.php went to six
+-- paths that way, and nothing at the edge saw it.
+--
+-- Fires on a non-multipart POST / PUT / PATCH body that opens with a PHP
+-- tag (`<?php`, `<?=`; after an optional UTF-8 BOM and blanks), or with a GIF
+-- header followed by one in its first 256 bytes. Whatever the Content-Type says:
+-- a real form body opens with a field name, JSON with `{` / `[`, XML with
+-- `<?xml` or an element, so a body that opens with a PHP tag is a PHP file
+-- however it is labelled, and a dropper only has to relabel its upload to
+-- pass a type-keyed exclusion (404 reads 2 KB of it; yavuzshell.php's first
+-- eval is at byte 4 077). A form FIELD carrying PHP source (the cPanel File
+-- Manager editor) starts with its name and is not matched. Multipart is 402's.
+-- The tag names the Content-Type class (NONE, OCTET, TEXT, FORM, JSON, XML,
+-- OTHER), which the burn-in review reads.
+-- Bodies are read on the routes cfm.lua reads them (every *.php path; an
+-- octet-stream body to a clean URL is not read at all).
+function _M.detect_php_file_body(body, headers)
+  if not body or body == "" then return nil end
+  headers = headers or {}
+  local ct = lower(header_string(headers["content-type"] or headers["Content-Type"]))
+  if has(ct, "multipart/") then return nil end
+  local head = body:sub(1, 256)
+  local kind
+  local h = lower(head):gsub("^\239\187\191", ""):gsub("^%s+", "")
+  if h:sub(1, 5) == "<?php" or h:sub(1, 3) == "<?=" then
+    kind = "PHP_FILE"
+  elseif (h:sub(1, 6) == "gif87a" or h:sub(1, 6) == "gif89a") and (has(h, "<?php") or has(h, "<?=")) then
+    kind = "GIF_POLYGLOT"
+  else
+    return nil
+  end
+  local cls
+  if ct == "" then cls = "NONE"
+  elseif has(ct, "application/octet-stream") then cls = "OCTET"
+  elseif has(ct, "x-www-form-urlencoded") then cls = "FORM"
+  elseif has(ct, "json") then cls = "JSON"
+  elseif has(ct, "xml") then cls = "XML"
+  elseif has(ct, "text/") then cls = "TEXT"
+  else cls = "OTHER" end
+  return kind .. "_" .. cls
+end
+
 return _M

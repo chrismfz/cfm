@@ -1076,6 +1076,11 @@ Current assignments:
                                                                     .htaccess/.user.ini — or backdates one with touch -d/-t/-r; the
                                                                     tophair.gr webshell terminal's commands, which 310-317
                                                                     (query string only) never saw. See "Rule 331" below)
+                                       332  rule_php_code_args      (logonly, 2026-11-13: PHP source in the query string —
+                                                                    a call to a file writer / code runner with something
+                                                                    only PHP source carries; the eval RCEs of Fabrik,
+                                                                    ThinkPHP, SPIP, Magento, Drupal. See "Rules 332 and
+                                                                    416" below)
 
 4xx — Upload / malware
   401  rule_upload_filename            405  rule_script_obfuscation
@@ -1085,6 +1090,9 @@ Current assignments:
                                        413  rule_webshell_path_known
                                        414  rule_upload_archive_php
                                        415  rule_upload_content_deep      (logonly burn-in)
+                                       416  rule_php_file_body            (logonly, 2026-11-13: a PHP file as the
+                                                                         raw POST / PUT / PATCH body; see
+                                                                         "Rules 332 and 416")
                                        421  rule_php_split_string_canary
                                        422  rule_php_dropper_wget_curl
                                        423  rule_php_dropper_markers
@@ -1483,6 +1491,142 @@ A 19 KB body already costs `check()` about 5 ms, a 32 KB one about 10 ms.
   404/433-436 judge PHP source.
 
 Tests: `scripts/tests/cfm_waf_shell_write_exec_test.lua`.
+
+## Rules 332 and 416 — PHP code in the query, a PHP file as the body
+
+Both logonly (burn-in), added 2026-11-13 after the dmkomotinis.gr Joomla
+compromise on earth (2026-11-12). Fabrik 3.10's listfilter evaluates
+`<element>[value]` when `<element>[eval]=1`, so the attacker:
+1. wrote files with `…[value]=$h=fopen('up.php','w');fwrite($h,chr(60).chr(63)…)`;
+2. got `up.php`, a dropper that writes `php://input` to `$_GET['f']`;
+3. POSTed the 58 KB yavuzshell.php to it as `application/octet-stream`, at
+   six paths.
+
+Every request reached the origin (`up=cfm_apache`), and the WAF logged nothing
+but two Fetch Metadata notes. Imunify360 tracked the Fabrik requests
+(`77142206`, `77350942 Dangerous PHP functions in REQUEST_URI`, both
+`AccessDenied:false`). It only refused a request once it recognised the
+uploaded file on disk, and the bot then passed its splash and kept uploading.
+
+### Rule 332 — `rule_php_code_args`
+
+Reason family **`WAF_RCE`**, reasons `WAF_RCE:PHP_ARGS_<TAG>`. It reads the
+query one parameter at a time. The raw query is split on `&` first, as PHP
+splits it, so an encoded `%26` (`&&` in a payload) stays in its parameter.
+Each parameter is then read with `+` as a space, url-decoded twice and
+lowercased. It fires on a
+call to a function that writes a file or runs code (`file_put_contents`,
+`fopen`, `fwrite`, `fputs`, `file_get_contents`, `move_uploaded_file`,
+`shell_exec`, `passthru`, `system`, `exec`, `proc_open`, `popen`,
+`pcntl_exec`, `assert`, `eval`, `create_function`, `call_user_func[_array]`,
+`include[_once]`, `require[_once]`, `curl_exec`).
+
+A call is `name(`, with blanks or one `/* */` comment allowed before the
+paren. `include` / `require` are language constructs, usually written without
+the paren, so for them a quote or a `$` after blanks also counts
+(`include $_GET['f'];`). It is not a call when the name is part of a longer name, a variable
+(`$exec(`), a method (`->exec(`) or a static method (`::system(`). The call
+must come with something only PHP source carries, which the tag names:
+
+| Tag | Context |
+|---|---|
+| `OPEN` | `<?php` or `<?=` |
+| `SUPERGLOBAL` | `$_GET`, `$_POST`, `$_REQUEST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_ENV`, `$GLOBALS` |
+| `DECODE` | `base64_decode(`, `hex2bin(`, `gzinflate(`, `gzuncompress(`, `gzdecode(`, `str_rot13(`, `convert_uudecode(` |
+| `RETURN` | `return` after `;`, `=`, `&`, `?`, `(`, `)`, `{`, `}` or `:` |
+| `ASSIGN` | `$x =` |
+| `DYNAMIC_CALL` | `$x(` |
+| `CONCAT` | `'…'.'…'` |
+| `CHR_CHAIN` | three or more `chr(` |
+| `NAME_STRING` | no literal call: a sink named in a string built from pieces (`'file_put_'.'contents'`), then called through `$x(` or `)(` |
+
+Neither half alone is enough, because the fleet read showed both alone in
+real traffic:
+- gerakinisshipping.com links `style.css?v=<?php echo rand(00000, 99999); ?>`
+  from a static page, and Googlebot fetches it 38 times a week. It has the
+  opener but no writer.
+- A search for `operating system (linux)` names a sink with no code around it.
+- `chr(` is not a sink: Oracle / Postgres SQLi builds strings with `CHR()`.
+
+**Fleet read before shipping** (2026-11-13, 7 days of edge `access.log`, all
+8 edge nodes): about 150 matching requests from more than 10 exploit
+families, and no legitimate one. Most of them reached the origin:
+- Fabrik (earth, virgo);
+- ThinkPHP `?s=<?=/**/file_put_contents("runtime/archive/xz.php",base64_decode(…))`
+  from one scanner across titan, rigel, mars, virgo and qualityweb;
+- SPIP `recherche=<?php …`;
+- Magento `/paypal/transparent/response/?<?=eval(hex2bin(…))`;
+- ThinkCMF `content=<php>file_put_contents(…)`;
+- Drupal `name[#suffix]=eval($_POST[c])`;
+- pearcmd `config-create /<?=@system(chr(…))`.
+
+Those figures came from a log scanner that mirrors the rule. The shipped
+detector was replayed over dmkomotinis.gr's raw edge log (1 386 queries) and
+matched 39: every request of the chain that wrote a file. It missed the
+attacker's probes (`1;`, `sleep(3);`) and one mangled payload that is not
+valid PHP (`\='file_put_'.'contents';return \(…`).
+
+The call and its context must sit in the same parameter:
+`?s=operating system (linux)&tpl='a'.'b'` is not PHP. Expected
+noise in the burn-in is a search for PHP code on a developer site
+(`?s=$x = file_get_contents(...)`), and cPanel json-api GETs that save a PHP
+file on the panel proxy hosts.
+
+**Limit.** The query only. Fabrik, like most of these apps, reads `$_REQUEST`,
+so the same payload sent as a urlencoded POST body is not read by 332. Rule
+404 reads form bodies but needs a `<?`, `$_`, `eval`, `system` or `exec`
+marker, and `$h=fopen(…);fwrite($h,chr(…))` carries none. Reading form bodies
+here needs editor exclusions first: the cPanel File Manager and theme
+editors post PHP source as a field. That is the next step if the burn-in is
+clean. The rule runs late, beside 331, so a
+payload that also trips an armed block rule keeps that rule's headline.
+
+### Rule 416 — `rule_php_file_body`
+
+Reason family **`WAF_PHP_WEBSHELL_BODY`**, reasons
+`WAF_PHP_WEBSHELL_BODY:BODY_IS_<KIND>_<CT>`:
+- KIND `PHP_FILE`: the POST / PUT / PATCH body opens with `<?php` or `<?=`
+  (`php://input` reads the body of each method), after an
+  optional UTF-8 BOM and blanks;
+- KIND `GIF_POLYGLOT`: a `GIF87a`/`GIF89a` header with a PHP tag in the first
+  256 bytes;
+- CT `NONE`, `OCTET`, `TEXT`, `FORM`, `JSON`, `XML` or `OTHER` names the
+  Content-Type class.
+
+A multipart body never matches (rule 402 reads it). Any other Content-Type
+does, because the test is on the body's first bytes, not its label:
+- a real form body opens with a field name;
+- JSON opens with `{` / `[`;
+- XML opens with `<?xml` or an element.
+
+So a dropper cannot pass by relabelling its upload as a form. A form FIELD
+carrying PHP source (`content=<?php …`, the cPanel File Manager editor)
+starts with its name and is not matched. A raw body that IS a PHP file has
+no ordinary sender. Rule 404 does not read
+`application/octet-stream` at all, and its scorer reads only the first 2 KB:
+in yavuzshell.php the first `eval` is at byte 4 077.
+
+The access log records no Content-Type or body, so this one could not be
+measured before shipping. The dropper's footprint in the logs (a POST over
+2 KB to a `*.php` with a `.php` name in its query) matched only
+dmkomotinis.gr in 7 days. The burn-in is the measurement: `cfm.waf.log`
+records `ct` with every hit.
+
+Bodies are read where cfm.lua reads them: a POST to every `*.php` path, but
+not an octet-stream body to a clean URL; a PUT / PATCH under the size and
+type gate. A PUT / PATCH under `/remote.php/` (Nextcloud / ownCloud WebDAV)
+is skipped: a sync client uploads a user's `.php` files there as their raw
+body.
+
+### Both rules
+
+Family `WAF_RCE` is autoblock-armed for block hits only, and
+`WAF_PHP_WEBSHELL_BODY` has no block rule, so neither rule's hit bans or
+alerts. After the burn-in, review the hits (`cfm.waf.log`,
+`detection_history`), then promote per `### Promoting a rule`. A block
+promotion of 332 arms its autoblock: decide that intent in the same change.
+
+Tests: `scripts/tests/cfm_waf_php_code_args_test.lua`.
 
 ## Rule 501 — `rule_auth_burst` (login submissions)
 
