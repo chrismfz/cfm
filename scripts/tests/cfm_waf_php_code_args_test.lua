@@ -170,6 +170,10 @@ do
   fires(c, "PUT (php://input reads it too)", B .. "PHP_FILE_OCTET", 416)
   c = upload("application/octet-stream", SHELL); c.method = "PATCH"
   fires(c, "PATCH", B .. "PHP_FILE_OCTET", 416)
+  c = upload("application/octet-stream", SHELL); c.method = "PUT"; c.uri = "/remote.php/dav/files/u/site/index.php"
+  clean(c, "a Nextcloud WebDAV sync PUT of a .php file")
+  c = upload("application/octet-stream", SHELL); c.uri = "/remote.php/dav/x.php"
+  fires(c, "a POST to /remote.php is still read", B .. "PHP_FILE_OCTET", 416)
 end
 
 fires(upload("application/x-www-form-urlencoded", SHELL), "a PHP file relabelled as a form", B .. "PHP_FILE_FORM", 416)

@@ -1090,9 +1090,9 @@ Current assignments:
                                        413  rule_webshell_path_known
                                        414  rule_upload_archive_php
                                        415  rule_upload_content_deep      (logonly burn-in)
-                                       416  rule_php_file_body     (logonly, 2026-11-13: a PHP file as an
-                                                                         raw POST body; see "Rules 332
-                                                                         and 416")
+                                       416  rule_php_file_body            (logonly, 2026-11-13: a PHP file as the
+                                                                         raw POST / PUT / PATCH body; see
+                                                                         "Rules 332 and 416")
                                        421  rule_php_split_string_canary
                                        422  rule_php_dropper_wget_curl
                                        423  rule_php_dropper_markers
@@ -1614,7 +1614,9 @@ records `ct` with every hit.
 
 Bodies are read where cfm.lua reads them: a POST to every `*.php` path, but
 not an octet-stream body to a clean URL; a PUT / PATCH under the size and
-type gate.
+type gate. A PUT / PATCH under `/remote.php/` (Nextcloud / ownCloud WebDAV)
+is skipped: a sync client uploads a user's `.php` files there as their raw
+body.
 
 ### Both rules
 

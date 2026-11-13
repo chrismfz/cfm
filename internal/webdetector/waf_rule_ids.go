@@ -143,10 +143,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 414, Name: "rule_upload_archive_php", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
 	{ID: 415, Name: "rule_upload_content_deep", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "logonly"},
 	// A non-multipart POST / PUT / PATCH body that is a PHP file (opens with
-	// <?php / <?=, or a GIF header and one), whatever its Content-Type says. A php://input
-	// dropper's upload (dmkomotinis.gr's up.php took yavuzshell.php as
-	// application/octet-stream), which 402 (multipart) and 404 (textual
-	// types, 2 KB) miss. Logonly through burn-in.
+	// <?php / <?=, or a GIF header and one), whatever its Content-Type
+	// says. A php://input dropper's upload (dmkomotinis.gr's up.php took
+	// yavuzshell.php as application/octet-stream), which 402 (multipart)
+	// and 404 (textual types, 2 KB) miss. Logonly through burn-in.
 	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "logonly"},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},

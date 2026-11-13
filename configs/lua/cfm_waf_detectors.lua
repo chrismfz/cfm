@@ -8887,9 +8887,9 @@ end
 -- textual (`application/octet-stream`). The 58 KB yavuzshell.php went to six
 -- paths that way, and nothing at the edge saw it.
 --
--- Fires on a non-multipart POST / PUT / PATCH body that opens with a PHP tag (`<?php`,
--- `<?=`; after an optional UTF-8 BOM and blanks), or with a GIF header
--- followed by one in its first 256 bytes. Whatever the Content-Type says:
+-- Fires on a non-multipart POST / PUT / PATCH body that opens with a PHP
+-- tag (`<?php`, `<?=`; after an optional UTF-8 BOM and blanks), or with a GIF
+-- header followed by one in its first 256 bytes. Whatever the Content-Type says:
 -- a real form body opens with a field name, JSON with `{` / `[`, XML with
 -- `<?xml` or an element, so a body that opens with a PHP tag is a PHP file
 -- however it is labelled, and a dropper only has to relabel its upload to

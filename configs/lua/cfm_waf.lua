@@ -2585,9 +2585,13 @@ local function check_impl(ctx, st)
   -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
   -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
   -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
+  -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
+  -- /remote.php/webdav): a sync client uploads a user's .php files there
+  -- as their raw body.
   do
     local mode = rule_mode(CFG.rule_php_file_body, "logonly")
-    if mode ~= "disabled" and (body or "") ~= ""
+    local webdav = (m_lower ~= "post") and lower(uri or ""):find("/remote%.php/") ~= nil
+    if mode ~= "disabled" and (body or "") ~= "" and not webdav
        and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
       local tag = det.detect_php_file_body(body, headers)
       if tag then
