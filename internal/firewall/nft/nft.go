@@ -1451,7 +1451,9 @@ const replaceChunk = 1500
 // unprivileged user namespace it is capped at wmem_max and a large batch
 // fails with "Message too long". Then nothing changed, and the old chunked
 // write runs instead, logged: the set gets the new content, with the old gap.
-// Any other failure (an element nft or the kernel rejects) also changed
+// So does a run killed by its deadline (replaceTimeout; a loaded host): each
+// batch of the chunked write is a short run of its own, and a set that never
+// fits the deadline would otherwise never take new content. Any other failure (an element nft or the kernel rejects) also changed
 // nothing, and the set KEEPS its old content: the chunked write would flush it
 // and stop at the bad batch, leaving every address after it unblocked.
 //
@@ -1482,12 +1484,12 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 	err := b.nftExprCtx(ctx, replaceSetScript(setName, elems, ttlStr))
 	cancel()
 	if err != nil {
-		if !tooLargeForOneRun(err) {
+		if !batchedWriteMayFix(err) {
 			logging.Logf("[nft] replace set %s elems=%d failed, the set keeps its old content: %v",
 				setName, len(elems), firstLine(err.Error()))
 			return fmt.Errorf("replace %s: %w", setName, err)
 		}
-		logging.Logf("[nft] replace set %s elems=%d: too large for one transaction (%v); writing it in batches, with the set briefly partial",
+		logging.Logf("[nft] replace set %s elems=%d: too large or too slow for one transaction (%v); writing it in batches, with the set briefly partial",
 			setName, len(elems), firstLine(err.Error()))
 		err = b.replaceSetChunked(setName, elems, ttlStr)
 	}
@@ -1497,12 +1499,20 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 	return err
 }
 
-// tooLargeForOneRun reports whether a failed replace failed for its size: nft
-// prints "Message too long" (EMSGSIZE) when the batch does not fit its socket
-// buffer. Only then is the batched write a fix rather than a way to empty the
-// set.
-func tooLargeForOneRun(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Message too long")
+// batchedWriteMayFix reports whether a failed replace failed for its size,
+// not its content: nft printed "Message too long" (EMSGSIZE, the batch does
+// not fit its socket buffer), or the run hit its deadline. Only then is the
+// batched write a fix rather than a way to empty the set (a rejected element
+// fails fast, at parse or in the kernel).
+func batchedWriteMayFix(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Message too long") || strings.Contains(msg, "timed_out=true")
 }
 
 // replaceTimeout bounds the one-transaction replace: the runner's default 10 s

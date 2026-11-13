@@ -98,10 +98,11 @@ unions the base rules drop on (`block_ext_v4_hosts`, …) sat empty and then
 partial for seconds on every hourly apply. Don't split a replace into
 transactions again: the per-message element limit (nftlib's
 `setWriteChunk`) is about messages, not transactions. The batched write is
-only the logged fallback for a batch too large for the socket buffer (nftlib:
-also an interval set's ENOTEMPTY, and an ENOBUFS whose content the kernel
-does not hold); any other refusal keeps the old content, because the batched
-write flushes first and stops at the bad entry. Skip-if-unchanged
+only the logged fallback for a batch too large for the socket buffer (exec
+engine: also a run past its deadline; nftlib: also an interval set's
+ENOTEMPTY when its intervals do not overlap, and an ENOBUFS whose content the
+kernel does not hold); any other refusal keeps the old content, because the
+batched write flushes first and stops at the bad entry. Skip-if-unchanged
 (permanent sets) also asks the kernel for one element (`internal/firewall/setprobe`;
 `nft get element` loads the whole set, ~0.7 s at 200k), because the CLI can
 empty the table behind the daemon's back. Live test: `-run LiveNFTFeedReplace`

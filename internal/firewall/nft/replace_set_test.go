@@ -1,7 +1,9 @@
 package nft
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -68,20 +70,22 @@ func TestForgetApplied(t *testing.T) {
 	}
 }
 
-// Only a batch too large for one nft run may fall back to the batched write;
-// any other failure (a rejected element) must leave the set as it was.
-func TestTooLargeForOneRun(t *testing.T) {
+// Only a batch too large or too slow for one nft run may fall back to the
+// batched write; any other failure (a rejected element) must leave the set as
+// it was.
+func TestBatchedWriteMayFix(t *testing.T) {
 	for _, tc := range []struct {
 		err  error
 		want bool
 	}{
 		{errors.New(`nft -f - failed: exit status 1 stderr="netlink: Error: Could not process rule: Message too long\nPlease, rise /proc/sys/net/core/wmem_max"`), true},
 		{errors.New(`nft -f - failed: exit status 1 stderr="Error: syntax error, unexpected junk"`), false},
-		{errors.New(`nft -f - failed: timed_out=true`), false},
+		{errors.New(`nft -f - failed: signal: killed exit_code=-1 timed_out=true`), true},
+		{fmt.Errorf("nft: %w", context.DeadlineExceeded), true},
 		{nil, false},
 	} {
-		if got := tooLargeForOneRun(tc.err); got != tc.want {
-			t.Errorf("tooLargeForOneRun(%v) = %v, want %v", tc.err, got, tc.want)
+		if got := batchedWriteMayFix(tc.err); got != tc.want {
+			t.Errorf("batchedWriteMayFix(%v) = %v, want %v", tc.err, got, tc.want)
 		}
 	}
 }

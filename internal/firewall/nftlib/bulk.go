@@ -3,8 +3,10 @@
 package nftlib
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -104,8 +106,9 @@ func (b *Backend) chunkedAdd(set *nftables.Set, nftElems []nftables.SetElement, 
 	return nil
 }
 
-// replaceSet replaces set's content with nftElems (elems is the same content
-// as strings, for the kernel check below). Caller must hold b.mu.
+// replaceSet replaces set's content with nftElems. Caller must hold b.mu.
+// verified=false means the content is in place but not confirmed (the caller
+// then records no content hash, and the next apply writes again).
 //
 // It is ONE netlink batch (replaceOneBatch): the flush and every add commit
 // together, so a packet sees the old content or the new one, never an empty
@@ -117,20 +120,23 @@ func (b *Backend) chunkedAdd(set *nftables.Set, nftElems []nftables.SetElement, 
 // (growBuffers).
 //
 // A refused batch changed nothing. What happens next depends on why:
-//   - too large for the send buffer (EMSGSIZE), or, on an interval set, the
-//     ENOTEMPTY a one-batch flush-and-refill once got on this netlink path:
-//     the chunked write (chunkedAdd), logged; the set is partial meanwhile;
+//   - too large for the send buffer (EMSGSIZE), or, on an interval set whose
+//     intervals do not overlap (intervalsOverlap), the ENOTEMPTY a one-batch
+//     flush-and-refill once got on this netlink path: the chunked write
+//     (chunkedAdd), logged; the set is partial meanwhile. ENOTEMPTY is also
+//     the kernel's answer to an overlapping interval, which the chunked write
+//     would hit after its flush, so overlapping content is an error instead;
 //   - anything else (an element the kernel rejects): an error, and the set
 //     KEEPS its old content. The chunked write would flush it and stop at the
 //     bad message, leaving every address after it unblocked;
 //   - ENOBUFS: the ACKs overflowed the receive buffer, which says nothing
 //     about the batch (the kernel commits or aborts before it acks). The set
-//     is asked for elements spread across the new content: all there, the
-//     batch is taken as applied, but not as verified (applied=false, so the
-//     caller does not record its content hash and the next apply writes
-//     again); one missing, the chunked write. Seen only where SO_RCVBUFFORCE
-//     is refused and rmem_max caps the buffer.
-func (b *Backend) replaceSet(set *nftables.Set, nftElems []nftables.SetElement, elems []string) (verified bool, err error) {
+//     is asked for elements spread across the new content (probeElems): all
+//     there, the batch is taken as applied, unverified; one missing, the
+//     chunked write. A feed that changed by a few addresses can pass this on
+//     its old content, which the next apply's rewrite then corrects. Seen
+//     only where SO_RCVBUFFORCE is refused and rmem_max caps the buffer.
+func (b *Backend) replaceSet(set *nftables.Set, nftElems []nftables.SetElement) (verified bool, err error) {
 	err = b.replaceOneBatch(set, nftElems)
 	if err == nil {
 		return true, nil
@@ -138,35 +144,78 @@ func (b *Backend) replaceSet(set *nftables.Set, nftElems []nftables.SetElement, 
 	interval := len(nftElems) > 0 && nftElems[len(nftElems)-1].IntervalEnd
 	switch {
 	case isNLErr(err, unix.ENOBUFS, "no buffer space"):
-		if len(elems) > 0 && kernelHoldsAll(set.Name, spread(elems, replaceProbes)) {
+		if probes := probeElems(nftElems, replaceProbes); len(probes) > 0 && kernelHoldsAll(set.Name, probes) {
 			logging.Logf("[nftlib] replace set %s elems=%d: the ACKs overflowed (%v), and the set holds the new content; taken as applied",
 				set.Name, len(nftElems), err)
 			return false, nil
 		}
 	case isNLErr(err, unix.EMSGSIZE, "message too long"):
 	case interval && isNLErr(err, unix.ENOTEMPTY, "directory not empty"):
+		if intervalsOverlap(nftElems) {
+			return false, fmt.Errorf("one batch refused (overlapping intervals), the set keeps its old content: %w", err)
+		}
 	default:
 		return false, fmt.Errorf("one batch refused, the set keeps its old content: %w", err)
 	}
 	logging.Logf("[nftlib] replace set %s elems=%d: one batch failed (%v); writing it in batches, with the set briefly partial",
 		set.Name, len(nftElems), err)
-	return false, b.chunkedAdd(set, nftElems, true)
+	if err := b.chunkedAdd(set, nftElems, true); err != nil {
+		return false, err
+	}
+	return true, nil // the chunked write reports each transaction
 }
 
 // replaceProbes is how many elements replaceSet asks the kernel for after an
 // ENOBUFS.
 const replaceProbes = 32
 
-// spread picks up to n elements evenly across elems, first and last included.
-func spread(elems []string, n int) []string {
-	if len(elems) <= n {
-		return elems
+// probeElems picks up to n addresses evenly across what the batch wrote, as
+// strings setprobe reads: each host, or each interval's start. Taken from the
+// parsed elements, so nothing parseElems dropped is asked for.
+func probeElems(nftElems []nftables.SetElement, n int) []string {
+	var keys [][]byte
+	for i := range nftElems {
+		if !nftElems[i].IntervalEnd {
+			keys = append(keys, nftElems[i].Key)
+		}
 	}
-	out := make([]string, 0, n)
-	for i := 0; i < n; i++ {
-		out = append(out, elems[i*(len(elems)-1)/(n-1)])
+	if len(keys) > n {
+		picked := make([][]byte, 0, n)
+		for i := 0; i < n; i++ {
+			picked = append(picked, keys[i*(len(keys)-1)/(n-1)])
+		}
+		keys = picked
+	}
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if ip := keyToIP(k); ip != nil {
+			out = append(out, ip.String())
+		}
 	}
 	return out
+}
+
+// intervalsOverlap reports whether start/IntervalEnd pairs overlap. An end
+// key of all zeroes is the top of the address space (the end of a range that
+// reaches 255.255.255.255 wraps).
+func intervalsOverlap(nftElems []nftables.SetElement) bool {
+	type iv struct{ start, end []byte }
+	var ivs []iv
+	for i := 0; i+1 < len(nftElems); i += 2 {
+		if nftElems[i].IntervalEnd || !nftElems[i+1].IntervalEnd {
+			return true // not pairs: cannot tell, treat as bad content
+		}
+		ivs = append(ivs, iv{nftElems[i].Key, nftElems[i+1].Key})
+	}
+	sort.Slice(ivs, func(a, b int) bool { return bytes.Compare(ivs[a].start, ivs[b].start) < 0 })
+	top := func(k []byte) bool { return bytes.Count(k, []byte{0}) == len(k) }
+	for i := 1; i < len(ivs); i++ {
+		prev := ivs[i-1].end
+		if top(prev) || bytes.Compare(ivs[i].start, prev) < 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func kernelHoldsAll(set string, elems []string) bool {
@@ -235,8 +284,9 @@ func (b *Backend) AddElementsBulk(setName string, elems []string, ttl *time.Dura
 	return nil
 }
 
-// ReplaceSetFlushAdd flushes a set and repopulates it, chunked so a large set
-// can't overflow the netlink message limit. For PERMANENT (no-TTL) sets it skips
+// ReplaceSetFlushAdd replaces a set's content in ONE netlink batch (replaceSet:
+// the flush and every add commit together; a refused batch changes nothing,
+// and only a too-large one falls back to the chunked write). For PERMANENT (no-TTL) sets it skips
 // the write entirely when the content is unchanged since the last successful
 // apply (a blocklist that didn't change this hour is a no-op instead of
 // re-writing tens of thousands of the same elements). TTL sets are always
@@ -288,9 +338,9 @@ func (b *Backend) ReplaceSetFlushAdd(setName string, elems []string, ttl *time.D
 
 	nftElems := parseElems(set, elems, ttl)
 	n = len(nftElems)
-	verified, e := b.replaceSet(set, nftElems, elems)
+	verified, e := b.replaceSet(set, nftElems)
 	if e != nil {
-		// A multi-transaction write (chunked, or interval flush-then-add) may have
+		// A refused one batch changed nothing, but the chunked fallback may have
 		// PARTIALLY committed — the flush landed but a later add failed, leaving the
 		// kernel set empty or half-written. Drop any cached content hash so the next
 		// apply always rewrites; otherwise skip-if-unchanged could leave the set
