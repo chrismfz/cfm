@@ -1813,8 +1813,29 @@ func (b *Backend) ListTableJSON(fam, table string) ([]byte, error) {
 	return out, nil
 }
 
+// ListTableSetsJSON lists the table's sets WITHOUT their elements: `nft -j
+// -t list sets <family>`, the sets of every table of the family (a caller
+// keeps those whose "table" is its own). A caller that only wants the sets'
+// names and key types reads this, not ListTableJSON. With a fleet feed in the
+// table (MYBLOCK, ~215k addresses on virgo) the full dump ran past its 5 s
+// deadline and `cfm search` reported the nft source as unreadable. Measured
+// with 1M addresses in a feed set and its union: `list sets` 5 ms, `list
+// table` 32 s even with -t, which still loads every element.
+func (b *Backend) ListTableSetsJSON(fam, table string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	res, err := runNFTCommand(ctx, "-j", "-t", "list", "sets", fam)
+	out := []byte(res.Stdout + res.Stderr)
+	if err != nil {
+		return nil, fmt.Errorf("nft list sets %s: %v: %s", fam, err, string(out))
+	}
+	return out, nil
+}
+
+// ListSetJSON dumps one set with its elements. Its deadline is 15 s, not
+// the 5 s of the other listings: a fleet feed's set is several MB of JSON.
 func (b *Backend) ListSetJSON(fam, table, set string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	res, err := runNFTCommand(ctx, "-j", "list", "set", fam, table, set)
 	out := []byte(res.Stdout + res.Stderr)

@@ -17,7 +17,23 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **`cfm search` / `cfm which` / unblock lookups no longer time out on a node
+  with a large fleet feed.** To find the table's sets the nft lookup dumped the
+  whole `inet cfm` table, every set element included, with a 5 s deadline.
+  With MYBLOCK at ~215 000 addresses that is megabytes of JSON, and on virgo
+  (nft 1.0.4, a feed apply in progress) it ran out of time: the nft source was
+  reported as "cannot read … (maybe needs sudo?)". The lookup now lists only
+  the sets (`nft -j -t list sets`: 5 ms with a 1M-address feed, against 32 s
+  for the table), no longer dumps a feed union (`block_ext_v4_hosts`, …) that
+  only repeats its per-feed sets, reads the manual sets before the feeds, and
+  gives one set dump 15 s. Measured lookup with a manual ban and one feed:
+  1.5 s at 215k addresses, 5 s at 500k; at 1M the feed's dump still runs out
+  of time, and is reported as below.
+- **A set the lookup could not read is reported, not taken as "not there".**
+  A set dump that failed or timed out was skipped silently, so an IP in that
+  set (a MYBLOCK ban, say) read as not blocked. The answer is now marked
+  incomplete and names the set.
 
 ## 2026.11.11
 

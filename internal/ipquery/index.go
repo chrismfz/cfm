@@ -240,23 +240,39 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 		return out, nil
 	}
 
-	tblOut, err := be.ListTableJSON("inet", "cfm")
+	tblOut, err := listTableSets(be)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read nftables table inet cfm (maybe needs sudo?): %v\n%s", err, string(tblOut))
+		return nil, fmt.Errorf("cannot read nftables table inet cfm: %v", err)
 	}
 	var sets []setDesc
-	for _, sd := range cfmSets(tblOut) {
+	for _, sd := range skipFeedUnions(cfmSets(tblOut)) {
 		if fams[sd.family] {
 			sets = append(sets, sd)
 		}
 	}
-	sort.SliceStable(sets, func(i, j int) bool { return sets[i].action != "MATCH" && sets[j].action == "MATCH" })
+	// Block and allow sets first, the fleet feeds' (the big ones) after the
+	// manual and dynamic ones, the rest last: a lookup that runs out of time
+	// keeps the cheap answers.
+	rank := func(sd setDesc) int {
+		switch {
+		case sd.action == "MATCH":
+			return 2
+		case sd.feed != "":
+			return 1
+		}
+		return 0
+	}
+	sort.SliceStable(sets, func(i, j int) bool { return rank(sets[i]) < rank(sets[j]) })
+	var unread []string
 	for i, sd := range sets {
 		if err := ctx.Err(); err != nil {
-			return out, fmt.Errorf("stopped at set %d of %d: %w", i+1, len(sets), err)
+			return out, unreadErr(fmt.Errorf("stopped at set %d of %d: %w", i+1, len(sets), err), unread)
 		}
 		so, err := be.ListSetJSON("inet", "cfm", sd.name)
 		if err != nil {
+			// Not a "not found": a block set that timed out used to be
+			// skipped here, and the IP it holds read as unblocked.
+			unread = append(unread, fmt.Sprintf("%s (%v)", sd.name, err))
 			continue
 		}
 		idx := indexSet(so)
@@ -273,7 +289,57 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 			}
 		}
 	}
-	return out, nil
+	return out, unreadErr(nil, unread)
+}
+
+// skipFeedUnions drops a feed union (block_ext_v4_hosts, …) when a per-feed
+// set of the same kind exists: the union is rebuilt from the per-feed sets,
+// so its dump costs as much again and its hit only repeats one of theirs,
+// without the feed's name. A union with no per-feed set is kept.
+func skipFeedUnions(sets []setDesc) []setDesc {
+	perFeed := map[string]bool{}
+	for _, sd := range sets {
+		if sd.feed != "" {
+			perFeed[strings.TrimSuffix(sd.name, "_"+sd.feed)] = true
+		}
+	}
+	out := sets[:0:0]
+	for _, sd := range sets {
+		if sd.feed == "" && perFeed[sd.name] {
+			continue
+		}
+		out = append(out, sd)
+	}
+	return out
+}
+
+// tableSetsLister is the exec backend's terse table listing (no set
+// elements). nftlib's ListTableJSON already lists only the sets.
+type tableSetsLister interface {
+	ListTableSetsJSON(family, table string) ([]byte, error)
+}
+
+func listTableSets(be firewall.Backend) ([]byte, error) {
+	if t, ok := be.(tableSetsLister); ok {
+		if out, err := t.ListTableSetsJSON("inet", "cfm"); err == nil {
+			return out, nil
+		}
+		// An nft that refuses -t: the full dump, as before.
+	}
+	return be.ListTableJSON("inet", "cfm")
+}
+
+// unreadErr joins a stop error and the sets whose dump failed; nil when
+// there is neither. The hits FindMany returns with it stand.
+func unreadErr(stop error, unread []string) error {
+	if len(unread) == 0 {
+		return stop
+	}
+	e := fmt.Errorf("could not read %d set(s): %s", len(unread), strings.Join(unread, "; "))
+	if stop == nil {
+		return e
+	}
+	return fmt.Errorf("%w; %v", stop, e)
 }
 
 var addrType = map[string]string{"v4": "ipv4_addr", "v6": "ipv6_addr"}
@@ -285,8 +351,9 @@ var addrType = map[string]string{"v4": "ipv4_addr", "v6": "ipv6_addr"}
 // family; a concatenated type (an array in nft's JSON) is not.
 func cfmSets(tableJSON []byte) []setDesc {
 	type named struct {
-		Name string `json:"name"`
-		Type any    `json:"type"`
+		Name  string `json:"name"`
+		Table string `json:"table"` // nft's; `list sets` covers every table
+		Type  any    `json:"type"`
 	}
 	var doc struct {
 		Nftables []struct {
@@ -303,6 +370,9 @@ func cfmSets(tableJSON []byte) []setDesc {
 	}
 	var out []setDesc
 	for _, n := range all {
+		if n.Table != "" && n.Table != "cfm" {
+			continue
+		}
 		sd := classifySetName(n.Name)
 		if sd.name != "" && n.Type == addrType[sd.family] {
 			out = append(out, sd)
