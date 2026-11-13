@@ -9,6 +9,10 @@
 // Both engines use it before skipping the rewrite of an unchanged feed union,
 // so a set another process emptied or recreated (`cfm reset` / `cfm disable`
 // from the CLI) is written again; the feed live test probes with it.
+//
+// Lookup goes further: which element holds an address, the interval of an
+// interval set included. ipquery.FindMany (`cfm which` / `cfm search`, the
+// agent's locate) answers address queries with it instead of dumping sets.
 package setprobe
 
 import (

@@ -105,7 +105,13 @@ kernel does not hold); any other refusal keeps the old content, because the
 batched write flushes first and stops at the bad entry. Skip-if-unchanged
 (permanent sets) also asks the kernel for one element (`internal/firewall/setprobe`;
 `nft get element` loads the whole set, ~0.7 s at 200k), because the CLI can
-empty the table behind the daemon's back. Live test: `-run LiveNFTFeedReplace`
+empty the table behind the daemon's back. The same netlink get answers IP
+lookups (`setprobe.Lookup`: `cfm which` / `cfm search` / locate, through
+`ipquery.FindMany`); only a CIDR query, or a set the kernel can't answer for,
+still dumps. On an interval set the kernel answers with the interval's start,
+and 4.18 can wrongly say "absent" for an address that is both an interval's
+end and the next one's start, which Lookup reports as ambiguous (the caller
+then dumps the set). Live test: `-run LiveNFTFeedReplace`
 (both engines), as real root in a netns (`unshare -n`) for the daemon's
 conditions: under `unshare -r` the socket buffer is capped at `wmem_max`.
 
