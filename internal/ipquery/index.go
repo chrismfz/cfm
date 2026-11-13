@@ -129,6 +129,18 @@ func (e Entry) overlaps(p netip.Prefix) bool {
 	return p.Contains(e.addr) || p.Contains(e.to) || e.holds(p.Addr())
 }
 
+// contains reports whether the entry holds a, whatever its kind.
+func (e Entry) contains(a netip.Addr) bool {
+	switch e.kind {
+	case 'h':
+		return e.addr == a
+	case 'n':
+		return e.prefix.Contains(a)
+	}
+	return e.holds(a)
+}
+
+// holds is contains for a range.
 func (e Entry) holds(a netip.Addr) bool {
 	return e.addr.BitLen() == a.BitLen() && e.addr.Compare(a) <= 0 && a.Compare(e.to) <= 0
 }
@@ -210,9 +222,14 @@ func (x *Index[T]) Match(q Query) []T {
 	return out
 }
 
-// FindMany answers Find for many IPs/CIDRs at once: one listing of the table
-// and one dump of each relevant set, however many queries — Find used to dump
-// every set of the family for each one. Results are keyed by the argument as
+// FindMany answers Find for many IPs/CIDRs at once: one listing of the table,
+// then each relevant set read once, however many queries — Find used to dump
+// every set of the family for each one. An address query asks the kernel
+// (LookupSetElems, both engines: a few single-element netlink gets per
+// address and set, ~5 ms for a lookup against a 1M-address feed, whose dump
+// took ~16 s and ran past its deadline). A CIDR query is an overlap no
+// lookup answers, so its family's sets are dumped, as is a set the kernel
+// could not answer for. Results are keyed by the argument as
 // given; an argument that is not an IP or CIDR is an error. When ctx ends
 // between two set dumps, FindMany returns what the sets read so far hold,
 // with an error saying how far it got; the block and allow sets are read
@@ -289,9 +306,39 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 	}
 	sort.SliceStable(direct, func(i, j int) bool { return rank(direct[i]) < rank(direct[j]) })
 
+	argsOf := map[string][]string{} // family -> its queries, sorted
+	cidrIn := map[string]bool{}     // family -> it has a CIDR query
+	for a, q := range qs {
+		argsOf[q.family()] = append(argsOf[q.family()], a)
+		cidrIn[q.family()] = cidrIn[q.family()] || q.IsCIDR
+	}
+	for _, as := range argsOf {
+		sort.Strings(as)
+	}
+	looker, _ := be.(elemLooker)
 	var unread []string
-	// read dumps one set and returns each query's hits in it.
+	// read returns each query's hits in one set. With only address queries
+	// of the set's family it asks the kernel, one lookup per address
+	// (lookupSet); a CIDR query (an overlap, which no single lookup
+	// answers), a backend without lookups or a lookup that fails dumps the
+	// set.
 	read := func(sd setDesc) (map[string][]Hit, bool) {
+		hit := func(e Entry) Hit {
+			via := "cidr"
+			if e.IsAddr() {
+				via = "host"
+			}
+			return Hit{Set: sd.name, Action: sd.action, Scope: via, Match: e.String(), Feed: sd.feed, Family: sd.family, Via: via}
+		}
+		if looker != nil && !cidrIn[sd.family] {
+			if found, ok := lookupSet(ctx, looker, sd.name, argsOf[sd.family], qs); ok {
+				hits := map[string][]Hit{}
+				for a, e := range found {
+					hits[a] = append(hits[a], hit(e))
+				}
+				return hits, true
+			}
+		}
 		so, err := listSet(ctx, be, sd.name)
 		if err != nil {
 			// Not a "not found": a block set that timed out used to be
@@ -301,16 +348,9 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 		}
 		idx := indexSet(so)
 		hits := map[string][]Hit{}
-		for a, q := range qs {
-			if q.family() != sd.family {
-				continue
-			}
-			for _, e := range idx.Match(q) {
-				via := "cidr"
-				if e.IsAddr() {
-					via = "host"
-				}
-				hits[a] = append(hits[a], Hit{Set: sd.name, Action: sd.action, Scope: via, Match: e.String(), Feed: sd.feed, Family: sd.family, Via: via})
+		for _, a := range argsOf[sd.family] {
+			for _, e := range idx.Match(qs[a]) {
+				hits[a] = append(hits[a], hit(e))
 			}
 		}
 		return hits, true
@@ -396,6 +436,78 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 // block_ext_v4_hosts_MYBLOCK.
 func unionOf(sd setDesc) string {
 	return strings.TrimSuffix(sd.name, "_"+sd.feed)
+}
+
+// elemLooker asks the kernel which element of a set holds each address, one
+// lookup per address (both engines: setprobe.Lookup over netlink). The full
+// dump it replaces for address queries took ~16 s for a 1M-address feed,
+// past ListSetJSONContext's 15 s deadline, and `nft get element` is no
+// better (it loads the whole set first).
+type elemLooker interface {
+	LookupSetElems(ctx context.Context, table, set string, addrs []netip.Addr) (from, to []netip.Addr, ok []bool, err error)
+}
+
+// lookupSet answers the address queries args (all of one family) in set
+// with elemLooker: query -> the element holding it, an absent query not
+// holding any. false when the kernel could not answer (an old kernel, no
+// netlink, a boundary a 4.18 kernel answers ambiguously): the caller dumps
+// the set then.
+func lookupSet(ctx context.Context, l elemLooker, set string, args []string, qs map[string]Query) (map[string]Entry, bool) {
+	addrs := make([]netip.Addr, len(args))
+	for i, a := range args {
+		addrs[i] = qs[a].Addr
+	}
+	from, to, ok, err := l.LookupSetElems(ctx, "cfm", set, addrs)
+	if err != nil || len(from) != len(args) || len(to) != len(args) || len(ok) != len(args) {
+		return nil, false
+	}
+	out := map[string]Entry{}
+	for i, a := range args {
+		if !ok[i] {
+			continue
+		}
+		e, valid := rangeEntry(from[i], to[i])
+		if !valid || !e.contains(addrs[i]) {
+			return nil, false
+		}
+		out[a] = e
+	}
+	return out, true
+}
+
+// rangeEntry is the element [from, to] the way nft prints it, and so the way
+// a dump reads it: an address, a prefix when the range is one, a range
+// otherwise.
+func rangeEntry(from, to netip.Addr) (Entry, bool) {
+	from, to = from.Unmap(), to.Unmap()
+	if !from.IsValid() || from.BitLen() != to.BitLen() || to.Less(from) {
+		return Entry{}, false
+	}
+	if from == to {
+		return Entry{kind: 'h', addr: from}, true
+	}
+	for bits := from.BitLen() - 1; bits >= 0; bits-- {
+		p := netip.PrefixFrom(from, bits)
+		if p.Masked().Addr() != from {
+			break
+		}
+		if last := lastAddr(p); last == to {
+			return Entry{kind: 'n', prefix: p}, true
+		} else if to.Less(last) {
+			break
+		}
+	}
+	return Entry{kind: 'r', addr: from, to: to}, true
+}
+
+// lastAddr is the last address of a masked prefix.
+func lastAddr(p netip.Prefix) netip.Addr {
+	b := p.Addr().AsSlice()
+	for i := p.Bits(); i < len(b)*8; i++ {
+		b[i/8] |= 0x80 >> (i % 8)
+	}
+	a, _ := netip.AddrFromSlice(b)
+	return a
 }
 
 // The exec backend's context-bounded listings: the sets without their

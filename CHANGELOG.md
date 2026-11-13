@@ -62,6 +62,21 @@ back-filled here — see the git/PR history for that period.
   several feeds. Each dump ends at the caller's deadline, or after 15 s.
   Measured, a manual ban plus one feed: 1.5 s at 215k addresses, 5.5 s at
   500k, 17 s at 1M (near the limit).
+- **An IP lookup no longer dumps the fleet feeds: it asks the kernel.**
+  `cfm which` / `cfm search`, the unblock report and the agent's locate
+  found an address by dumping every set with `nft -j list set`, so at 1M
+  addresses one feed's dump (~16 s) passed its 15 s deadline and the answer
+  came back "incomplete". `nft get element` is no better (it loads the whole
+  set first). For an IP (not a CIDR) both engines now send single-element
+  netlink gets (`NFT_MSG_GETSETELEM` without a dump), which the kernel answers
+  with one lookup in the set, a few more for an interval set's prefix or
+  range. Measured in a netns as root, a manual ban, a 1M-address feed and
+  50 000 prefixes: 4.8 ms on the exec engine, 1.1 ms on nftlib. The answers
+  are the dump's (same set, prefix or range, feed name). A CIDR query is an
+  overlap no lookup answers, so it still dumps its family's sets, and so does
+  a set the kernel cannot answer for. That includes an IP that sits exactly
+  where an interval ends and another may start: a 4.18 kernel can answer
+  "absent" there (it stops at the end element sharing the key).
 - **A set the lookup could not read is reported, not taken as "not there".**
   A set dump that failed or timed out was skipped silently, so an IP in that
   set (a MYBLOCK ban, say) read as not blocked. The answer is now marked
