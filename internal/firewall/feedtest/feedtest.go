@@ -42,6 +42,8 @@ const DefaultHosts = 200_000
 //  3. An unchanged apply after another process emptied a union (`nft flush
 //     set`, as `cfm reset` from the CLI does to the whole table) writes it
 //     again: a skip-if-unchanged must not trust its own memory of the set.
+//  4. A replace with an element the engine cannot write applies whole or
+//     changes nothing.
 //
 // newBackend builds the engine. Gated like the other live tests; it refuses
 // to run outside an empty network namespace.
@@ -179,5 +181,20 @@ func RunFeedReplaceIsAtomic(t *testing.T, newBackend func() firewall.Backend) {
 	// 4) Unchanged again, nothing emptied: the unions are skipped (timing only;
 	// the per-feed set has no TTL here, so it is skipped too).
 	apply(round2)
+	want("block_ext_v4_hosts", kept, true)
+
+	// 5) A replace carrying an element the engine cannot write either applies
+	// whole (nftlib drops what it cannot parse) or fails and leaves the old
+	// content in place (nft refuses the whole script). Never the old batched
+	// write's flush and partial refill: the set must not lose `added`, which
+	// only the old content holds, unless the new content was applied.
+	err := be.ReplaceSetFlushAdd("block_ext_v4_hosts", []string{kept, "999.1.1.1"}, nil)
+	if err != nil {
+		t.Logf("replace with a bad element: %v", err)
+		want("block_ext_v4_hosts", added, true)
+		want("block_ext_v4_hosts", dropped, false)
+	} else {
+		want("block_ext_v4_hosts", added, false)
+	}
 	want("block_ext_v4_hosts", kept, true)
 }

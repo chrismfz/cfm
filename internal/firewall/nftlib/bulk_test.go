@@ -3,12 +3,14 @@
 package nftlib
 
 import (
+	"fmt"
 	"io"
 	"testing"
 	"time"
 
 	"github.com/google/nftables"
 	"github.com/mdlayher/netlink"
+	"golang.org/x/sys/unix"
 )
 
 func TestHashElems_OrderIndependentAndSensitive(t *testing.T) {
@@ -95,5 +97,62 @@ func TestReplaceSetFlushAdd_SkipNeedsTheKernelToHoldTheSet(t *testing.T) {
 	d := time.Hour
 	if n := write(&d); n != 1 {
 		t.Fatalf("TTL set: %d transactions, want 1 (always rewritten)", n)
+	}
+}
+
+// What a refused one-batch replace does next depends on why (replaceSet):
+// too large → the chunked write; an element the kernel rejects → an error,
+// the set keeping its old content (the chunked write would flush it and stop
+// at the bad message); ENOBUFS → taken as applied only when the kernel holds
+// the new content, and never recorded as verified.
+func TestReplaceSet_RefusedBatchByCause(t *testing.T) {
+	const name = "block_ext_v4_hosts"
+	elems := make([]string, 3000)
+	for i := range elems {
+		elems[i] = fmt.Sprintf("198.51.%d.%d", i/256, i%256)
+	}
+	for _, tc := range []struct {
+		name      string
+		firstErr  error
+		holds     bool
+		wantErr   bool
+		wantBatch int  // transactions sent
+		wantHash  bool // content hash recorded (skip next time)
+	}{
+		{"ok", nil, true, false, 1, true},
+		{"too large", unix.EMSGSIZE, true, false, 1 + 3, false},
+		{"rejected element", unix.EINVAL, true, true, 1, false},
+		{"acks overflowed, applied", unix.ENOBUFS, true, false, 1, false},
+		{"acks overflowed, not applied", unix.ENOBUFS, false, false, 1 + 3, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var batches int
+			b := nlBackend(t, func(req []netlink.Message) ([]netlink.Message, error) {
+				if !isBatch(req) {
+					return nil, io.EOF
+				}
+				batches++
+				if batches == 1 && tc.firstErr != nil {
+					return nil, tc.firstErr
+				}
+				return nil, io.EOF
+			})
+			b.namedSets[name] = &nftables.Set{Name: name, KeyType: nftables.TypeIPAddr, HasTimeout: true,
+				Table: &nftables.Table{Name: cfmTableName, Family: nftables.TableFamilyINet}}
+			orig := kernelHolds
+			kernelHolds = func(string, string) bool { return tc.holds }
+			t.Cleanup(func() { kernelHolds = orig })
+
+			err := b.ReplaceSetFlushAdd(name, elems, nil)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if batches != tc.wantBatch {
+				t.Fatalf("%d transactions, want %d", batches, tc.wantBatch)
+			}
+			if _, ok := b.appliedHash[name]; ok != tc.wantHash {
+				t.Fatalf("content hash recorded = %v, want %v", ok, tc.wantHash)
+			}
+		})
 	}
 }

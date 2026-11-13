@@ -32,10 +32,13 @@ back-filled here — see the git/PR history for that period.
   during the apply never found a kept address missing (the old code: 53 901
   misses at 200k). nft and nftlib raise their netlink socket buffers for the
   batch (nftlib also its receive buffer: a million-address batch's ACKs
-  overflowed it), so even 2M addresses fit. If the kernel still refuses the
-  batch (in an unprivileged user namespace, or a malformed feed entry),
-  nothing changed and the old batched write runs, with a
-  `replace set … one transaction failed` / `one batch failed` log line.
+  overflowed it), so even 2M addresses fit. A batch too large for its socket
+  buffer (in an unprivileged user namespace) changed nothing, and the old
+  batched write runs, logged (`too large for one transaction` / `one batch
+  failed`). Any other refusal (an element nft or the kernel rejects) now
+  leaves the set with its old content and reports the error: the batched
+  write would flush the set and stop at the bad entry, unblocking every
+  address after it until the next apply.
 - **An unchanged feed apply no longer rewrites the unions.** The exec engine
   now skips a permanent set whose content is the same as at its last write,
   as nftlib already did (1M addresses: ~1 s for the whole apply, from ~6 s).
