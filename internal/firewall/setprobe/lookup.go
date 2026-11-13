@@ -55,11 +55,15 @@ func Lookup(ctx context.Context, table, set string, addrs []netip.Addr) ([]Match
 }
 
 // ErrChanged is Lookup's answer when the ruleset changed under every
-// attempt (see lookup): the caller reads the set some other way.
+// attempt at one address (see lookup): the caller reads the set some other
+// way.
 var ErrChanged = errors.New("setprobe: the ruleset changed during the lookup")
 
-// genAttempts bounds how often lookup starts again after a change.
-const genAttempts = 3
+// genAttempts bounds how often one address's lookup starts again after a
+// change; retryPause is the wait before attempt n (n >= 1), a var for tests.
+const genAttempts = 5
+
+var retryPause = func(n int) { time.Sleep(time.Duration(n) * time.Millisecond) }
 
 // kernel is what lookup asks the kernel: the set's flags and key length,
 // the ruleset generation, one element. nlKernel asks it over netlink; the
@@ -70,56 +74,38 @@ type kernel interface {
 	get(key netip.Addr, elemFlags uint32) (netip.Addr, uint32, bool, error)
 }
 
-// lookup is Lookup on a kernel. An interval's end takes several gets, and a
-// feed replace (one transaction) committed between two of them would mix
-// the old content with the new: a start from one, an end from the other, a
-// prefix that never existed. So the ruleset generation (NFT_MSG_GETGEN,
-// which every committed transaction bumps) is read before and after, and a
-// lookup that saw it change starts again, up to genAttempts times, then
-// fails with ErrChanged. Each answer then comes from one generation, as a
-// dump's does.
+// lookup is Lookup on a kernel. In a hash set an answer is one get, a
+// single lookup in one generation. An interval takes several gets, and a
+// transaction committed between two of them (a feed replace) would mix the
+// old content with the new: a start from one, an end from the other, a
+// prefix that never existed. So each interval-set address is looked up
+// between two reads of the ruleset generation (NFT_MSG_GETGEN, which every
+// committed transaction bumps) and looked up again when it moved, whatever
+// that attempt answered (an ErrAmbiguous or a bad reply from a mixed view
+// included), up to genAttempts times with a short pause, then ErrChanged.
+// The generation is the whole ruleset's, so any ban the daemon adds moves
+// it too: checking per address keeps the window to a few gets, and the
+// pauses let a burst of bans pass.
 func lookup(k kernel, set string, addrs []netip.Addr) ([]Match, []bool, error) {
 	flags, klen, err := k.setInfo()
 	if err != nil {
 		return nil, nil, err
 	}
 	p := &prober{k: k, set: set}
-	for attempt := 0; attempt < genAttempts; attempt++ {
-		g0, err := k.gen()
-		if err != nil {
-			return nil, nil, err
-		}
-		out, ok, err := p.lookupAll(flags, klen, addrs)
-		if err != nil {
-			return nil, nil, err
-		}
-		g1, err := k.gen()
-		if err != nil {
-			return nil, nil, err
-		}
-		if g0 == g1 {
-			return out, ok, nil
-		}
-	}
-	return nil, nil, fmt.Errorf("%w (%s, %d attempts)", ErrChanged, set, genAttempts)
-}
-
-func (p *prober) lookupAll(flags, klen uint32, addrs []netip.Addr) ([]Match, []bool, error) {
 	out := make([]Match, len(addrs))
 	ok := make([]bool, len(addrs))
-	var err error
 	for i, a := range addrs {
 		a = a.Unmap()
 		if a.BitLen()/8 != int(klen) {
-			return nil, nil, fmt.Errorf("setprobe: %s has %d-byte keys, %s is not one", p.set, klen, a)
+			return nil, nil, fmt.Errorf("setprobe: %s has %d-byte keys, %s is not one", set, klen, a)
 		}
 		if flags&unix.NFT_SET_INTERVAL != 0 {
-			out[i], ok[i], err = p.interval(a)
+			out[i], ok[i], err = p.consistentInterval(a)
 		} else {
-			var k netip.Addr
-			k, _, ok[i], err = p.k.get(a, 0)
-			if ok[i] && k != a {
-				err = fmt.Errorf("setprobe: %s answered %s for %s", p.set, k, a)
+			var key netip.Addr
+			key, _, ok[i], err = k.get(a, 0)
+			if ok[i] && key != a {
+				err = fmt.Errorf("setprobe: %s answered %s for %s", set, key, a)
 			}
 			out[i] = Match{From: a, To: a}
 		}
@@ -128,6 +114,29 @@ func (p *prober) lookupAll(flags, klen uint32, addrs []netip.Addr) ([]Match, []b
 		}
 	}
 	return out, ok, nil
+}
+
+// consistentInterval is interval with every get in one generation (see
+// lookup).
+func (p *prober) consistentInterval(a netip.Addr) (Match, bool, error) {
+	for attempt := 0; attempt < genAttempts; attempt++ {
+		if attempt > 0 {
+			retryPause(attempt)
+		}
+		g0, err := p.k.gen()
+		if err != nil {
+			return Match{}, false, err
+		}
+		m, ok, err := p.interval(a)
+		g1, gerr := p.k.gen()
+		if gerr != nil {
+			return Match{}, false, gerr
+		}
+		if g0 == g1 {
+			return m, ok, err // an error from a stable view stands
+		}
+	}
+	return Match{}, false, fmt.Errorf("%w (%s, %s, %d attempts)", ErrChanged, p.set, a, genAttempts)
 }
 
 type prober struct {

@@ -22,12 +22,14 @@ import (
 // meets. Only this machine's kernel runs the live test; this is what pins
 // Lookup's answers on the fleet's 4.18 (EL8) and 5.14 (EL9).
 type rbKernel struct {
-	root  *rbNode
-	v418  bool
-	gens  []uint32 // gen() answers, in turn; the last repeats
-	nGen  int
-	nGet  int
-	onGet func(n int) // called before each get (tests change the set)
+	root   *rbNode
+	v418   bool
+	gens   []uint32 // gen() answers, in turn; the last repeats
+	bump   bool     // gen() answers a new generation every time
+	nGen   int
+	nGet   int
+	onGet  func(n int)   // called before each get (tests change the set)
+	failAt map[int]error // get number -> the error it returns
 }
 
 type rbNode struct {
@@ -59,6 +61,10 @@ func (k *rbKernel) insert(key uint32, end bool) {
 func (k *rbKernel) setInfo() (uint32, uint32, error) { return unix.NFT_SET_INTERVAL, 4, nil }
 
 func (k *rbKernel) gen() (uint32, error) {
+	if k.bump {
+		k.nGen++
+		return uint32(k.nGen), nil
+	}
 	if len(k.gens) == 0 {
 		return 1, nil
 	}
@@ -72,6 +78,9 @@ func (k *rbKernel) get(key netip.Addr, flags uint32) (netip.Addr, uint32, bool, 
 		k.onGet(k.nGet)
 	}
 	k.nGet++
+	if err := k.failAt[k.nGet-1]; err != nil {
+		return netip.Addr{}, 0, false, err
+	}
 	b := key.As4()
 	q := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
 	wantEnd := flags&unix.NFT_SET_ELEM_INTERVAL_END != 0
@@ -256,12 +265,18 @@ func TestLookupOnModelledRBTrees(t *testing.T) {
 	}
 }
 
-// A lookup that saw the generation change is done again, and fails with
-// ErrChanged when it changes every time. Here a feed replace commits in the
-// middle of an interval-end search: the set first holds 10.0.0.0/8, then
-// 10.0.0.0/16. A lookup that mixed the two would report a range that never
-// existed.
+func noPause(t *testing.T) {
+	p := retryPause
+	retryPause = func(int) {}
+	t.Cleanup(func() { retryPause = p })
+}
+
+// A lookup that saw the generation change is done again. Here a feed
+// replace commits in the middle of an interval-end search: the set first
+// holds 10.0.0.0/8, then 10.0.0.0/16. A lookup that mixed the two would
+// report a range that never existed.
 func TestLookupRetriesWhenTheRulesetChanges(t *testing.T) {
+	noPause(t)
 	rng := rand.New(rand.NewSource(1))
 	old := []iv{{a4("10.0.0.0"), a4("10.255.255.255")}}
 	repl := []iv{{a4("10.0.0.0"), a4("10.0.255.255")}}
@@ -282,10 +297,76 @@ func TestLookupRetriesWhenTheRulesetChanges(t *testing.T) {
 	if k.nGen != 4 {
 		t.Errorf("generation read %d times, want 4 (two attempts)", k.nGen)
 	}
+}
 
-	k = build(old, false, rng)
-	k.gens = []uint32{1, 2, 3, 4, 5, 6, 7}
-	if _, _, err := lookup(k, "n4", []netip.Addr{netip.MustParseAddr("10.0.7.9")}); !errors.Is(err, ErrChanged) {
-		t.Errorf("a generation that keeps changing: err %v, want ErrChanged", err)
+// The generation is the whole ruleset's: a node adding bans moves it on
+// most attempts. Every address gets genAttempts attempts of its own, and
+// only a generation that moves on all of them is ErrChanged.
+func TestLookupRidesOutABurstOfCommits(t *testing.T) {
+	noPause(t)
+	rng := rand.New(rand.NewSource(2))
+	ivs := []iv{{a4("10.0.0.0"), a4("10.255.255.255")}}
+	k := build(ivs, false, rng)
+	// Moves on the first four attempts at each address, holds on the fifth.
+	k.gens = []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 18}
+	addrs := []netip.Addr{netip.MustParseAddr("10.0.7.9"), netip.MustParseAddr("10.200.0.1")}
+	m, ok, err := lookup(k, "n4", addrs)
+	if err != nil || !ok[0] || !ok[1] || m[0].To != netip.MustParseAddr("10.255.255.255") {
+		t.Fatalf("m=%v ok=%v err=%v", m, ok, err)
 	}
+
+	k = build(ivs, false, rng)
+	k.bump = true
+	if _, _, err := lookup(k, "n4", addrs[:1]); !errors.Is(err, ErrChanged) {
+		t.Errorf("a generation that moves every time: err %v, want ErrChanged", err)
+	}
+	if k.nGen != 2*genAttempts {
+		t.Errorf("generation read %d times, want %d", k.nGen, 2*genAttempts)
+	}
+}
+
+// An attempt that failed while the generation moved (a mixed view can look
+// ambiguous, or like a bad reply) is retried; one that failed in a stable
+// generation is the answer.
+func TestLookupRetriesAnErrorFromAChangedGeneration(t *testing.T) {
+	noPause(t)
+	rng := rand.New(rand.NewSource(3))
+	ivs := []iv{{a4("10.0.0.0"), a4("10.255.255.255")}}
+	boom := errors.New("bad reply")
+
+	k := build(ivs, false, rng)
+	k.gens = []uint32{1, 2, 2, 2}
+	k.failAt = map[int]error{0: boom}
+	if _, ok, err := lookup(k, "n4", []netip.Addr{netip.MustParseAddr("10.0.7.9")}); err != nil || !ok[0] {
+		t.Errorf("error under a moved generation: ok=%v err=%v, want a retried hit", ok, err)
+	}
+
+	k = build(ivs, false, rng)
+	k.failAt = map[int]error{0: boom}
+	if _, _, err := lookup(k, "n4", []netip.Addr{netip.MustParseAddr("10.0.7.9")}); !errors.Is(err, boom) {
+		t.Errorf("error under a stable generation: err %v, want it returned", err)
+	}
+}
+
+// A hash set's answer is one get: no generation reads.
+func TestLookupHashSetReadsNoGeneration(t *testing.T) {
+	k := &hashKernel{elems: map[netip.Addr]bool{netip.MustParseAddr("192.0.2.7"): true}}
+	_, ok, err := lookup(k, "h4", []netip.Addr{netip.MustParseAddr("192.0.2.7"), netip.MustParseAddr("192.0.2.8")})
+	if err != nil || !ok[0] || ok[1] {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if k.nGen != 0 {
+		t.Errorf("generation read %d times, want 0", k.nGen)
+	}
+}
+
+type hashKernel struct {
+	elems map[netip.Addr]bool
+	nGen  int
+}
+
+func (k *hashKernel) setInfo() (uint32, uint32, error) { return 0, 4, nil }
+func (k *hashKernel) gen() (uint32, error)             { k.nGen++; return uint32(k.nGen), nil }
+func (k *hashKernel) get(a netip.Addr, _ uint32) (netip.Addr, uint32, bool, error) {
+	return a, 0, k.elems[a], nil
 }
