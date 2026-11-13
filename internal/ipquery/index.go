@@ -3,6 +3,7 @@ package ipquery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -215,7 +216,10 @@ func (x *Index[T]) Match(q Query) []T {
 // given; an argument that is not an IP or CIDR is an error. When ctx ends
 // between two set dumps, FindMany returns what the sets read so far hold,
 // with an error saying how far it got; the block and allow sets are read
-// first, so those are the answers a slow lookup keeps.
+// first, so those are the answers a slow lookup keeps. A set whose dump
+// fails is named in the error too (the hits read stand): it is not "not
+// found". A feed's hit is its union's, named by the per-feed set that
+// holds it when that one reads.
 //
 // It reads both backends' JSON: the nft backend's `nft -j` output
 // ({"nftables":[…]}) and nftlib's own ({"set_info":[…]} for the table,
@@ -240,42 +244,62 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 		return out, nil
 	}
 
-	tblOut, err := listTableSets(be)
+	tblOut, err := listTableSets(ctx, be)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read nftables table inet cfm: %v", err)
 	}
 	var sets []setDesc
-	for _, sd := range skipFeedUnions(cfmSets(tblOut)) {
+	for _, sd := range cfmSets(tblOut) {
 		if fams[sd.family] {
 			sets = append(sets, sd)
 		}
 	}
-	// Block and allow sets first, the fleet feeds' (the big ones) after the
+	// A feed union (block_ext_v4_hosts, …) is the set the rules drop on; the
+	// per-feed sets (…_MYBLOCK) are copies that name the feed. Dumping both
+	// cost twice the time, so the union is read, and a per-feed set only when
+	// its union matched and has more than one feed, to name the feed. The union stays the answer: a
+	// per-feed refill that failed part-way leaves the copy short, and an IP
+	// the union drops must not read as unblocked.
+	unions := map[string]bool{}
+	for _, sd := range sets {
+		if sd.feed == "" && strings.Contains(sd.name, "_ext_") {
+			unions[sd.name] = true
+		}
+	}
+	var direct, attrib []setDesc
+	for _, sd := range sets {
+		if sd.feed != "" && unions[unionOf(sd)] {
+			attrib = append(attrib, sd)
+		} else {
+			direct = append(direct, sd)
+		}
+	}
+	// Block and allow sets first, the fleet feeds (the big ones) after the
 	// manual and dynamic ones, the rest last: a lookup that runs out of time
 	// keeps the cheap answers.
 	rank := func(sd setDesc) int {
 		switch {
 		case sd.action == "MATCH":
 			return 2
-		case sd.feed != "":
+		case strings.Contains(sd.name, "_ext_"):
 			return 1
 		}
 		return 0
 	}
-	sort.SliceStable(sets, func(i, j int) bool { return rank(sets[i]) < rank(sets[j]) })
+	sort.SliceStable(direct, func(i, j int) bool { return rank(direct[i]) < rank(direct[j]) })
+
 	var unread []string
-	for i, sd := range sets {
-		if err := ctx.Err(); err != nil {
-			return out, unreadErr(fmt.Errorf("stopped at set %d of %d: %w", i+1, len(sets), err), unread)
-		}
-		so, err := be.ListSetJSON("inet", "cfm", sd.name)
+	// read dumps one set and returns each query's hits in it.
+	read := func(sd setDesc) (map[string][]Hit, bool) {
+		so, err := listSet(ctx, be, sd.name)
 		if err != nil {
 			// Not a "not found": a block set that timed out used to be
 			// skipped here, and the IP it holds read as unblocked.
 			unread = append(unread, fmt.Sprintf("%s (%v)", sd.name, err))
-			continue
+			return nil, false
 		}
 		idx := indexSet(so)
+		hits := map[string][]Hit{}
 		for a, q := range qs {
 			if q.family() != sd.family {
 				continue
@@ -285,48 +309,130 @@ func FindMany(ctx context.Context, be firewall.Backend, args []string) (map[stri
 				if e.IsAddr() {
 					via = "host"
 				}
-				out[a] = append(out[a], Hit{Set: sd.name, Action: sd.action, Scope: via, Match: e.String(), Feed: sd.feed, Family: sd.family, Via: via})
+				hits[a] = append(hits[a], Hit{Set: sd.name, Action: sd.action, Scope: via, Match: e.String(), Feed: sd.feed, Family: sd.family, Via: via})
 			}
+		}
+		return hits, true
+	}
+	matched := map[string]map[string]bool{} // union -> queries it matched
+	for i, sd := range direct {
+		if err := ctx.Err(); err != nil {
+			return out, unreadErr(fmt.Errorf("stopped at set %d of %d: %w", i+1, len(direct), err), unread)
+		}
+		hits, _ := read(sd)
+		for a, h := range hits {
+			out[a] = append(out[a], h...)
+			if unions[sd.name] {
+				if matched[sd.name] == nil {
+					matched[sd.name] = map[string]bool{}
+				}
+				matched[sd.name][a] = true
+			}
+		}
+	}
+	// Name the feed of a union with several: a query's union hit is replaced
+	// by the per-feed hits that cover it, and kept when none does (or the copy
+	// can't be read).
+	// What a per-feed set could not be read for is not an error: the union
+	// already answered.
+	// A union with ONE feed is that feed's (it is built from the feeds'
+	// contents), so it is named without a second dump of the same size.
+	feedsOf := map[string][]setDesc{}
+	for _, sd := range attrib {
+		feedsOf[unionOf(sd)] = append(feedsOf[unionOf(sd)], sd)
+	}
+	for u, fs := range feedsOf {
+		if len(fs) != 1 {
+			continue
+		}
+		for a := range matched[u] {
+			for i := range out[a] {
+				if out[a][i].Set == u {
+					out[a][i].Feed = fs[0].feed
+				}
+			}
+		}
+	}
+	named := map[string]map[string][]Hit{} // union -> query -> per-feed hits
+	for _, sd := range attrib {
+		u := unionOf(sd)
+		if len(feedsOf[u]) == 1 || len(matched[u]) == 0 || ctx.Err() != nil {
+			continue
+		}
+		n := len(unread)
+		hits, ok := read(sd)
+		unread = unread[:n]
+		if !ok {
+			continue
+		}
+		for a, h := range hits {
+			if matched[u][a] {
+				if named[u] == nil {
+					named[u] = map[string][]Hit{}
+				}
+				named[u][a] = append(named[u][a], h...)
+			}
+		}
+	}
+	for u, byQ := range named {
+		for a, h := range byQ {
+			kept := out[a][:0:0]
+			for _, x := range out[a] {
+				if x.Set != u {
+					kept = append(kept, x)
+				}
+			}
+			out[a] = append(kept, h...)
 		}
 	}
 	return out, unreadErr(nil, unread)
 }
 
-// skipFeedUnions drops a feed union (block_ext_v4_hosts, …) when a per-feed
-// set of the same kind exists: the union is rebuilt from the per-feed sets,
-// so its dump costs as much again and its hit only repeats one of theirs,
-// without the feed's name. A union with no per-feed set is kept.
-func skipFeedUnions(sets []setDesc) []setDesc {
-	perFeed := map[string]bool{}
-	for _, sd := range sets {
-		if sd.feed != "" {
-			perFeed[strings.TrimSuffix(sd.name, "_"+sd.feed)] = true
-		}
-	}
-	out := sets[:0:0]
-	for _, sd := range sets {
-		if sd.feed == "" && perFeed[sd.name] {
-			continue
-		}
-		out = append(out, sd)
-	}
-	return out
+// unionOf is the union a per-feed set is copied into: block_ext_v4_hosts for
+// block_ext_v4_hosts_MYBLOCK.
+func unionOf(sd setDesc) string {
+	return strings.TrimSuffix(sd.name, "_"+sd.feed)
 }
 
-// tableSetsLister is the exec backend's terse table listing (no set
-// elements). nftlib's ListTableJSON already lists only the sets.
-type tableSetsLister interface {
-	ListTableSetsJSON(family, table string) ([]byte, error)
+// The exec backend's context-bounded listings: the sets without their
+// elements, and one set's dump, each ending at ctx's deadline (the plain
+// Backend methods carry their own). nftlib reads over netlink and lists only
+// the sets in ListTableJSON already.
+type setsLister interface {
+	ListSetsJSON(ctx context.Context, family string) ([]byte, error)
 }
 
-func listTableSets(be firewall.Backend) ([]byte, error) {
-	if t, ok := be.(tableSetsLister); ok {
-		if out, err := t.ListTableSetsJSON("inet", "cfm"); err == nil {
-			return out, nil
-		}
-		// An nft that refuses -t: the full dump, as before.
+type setDumper interface {
+	ListSetJSONContext(ctx context.Context, family, table, set string) ([]byte, error)
+}
+
+// listTableSets lists the sets. The full table dump, every element
+// included, is the fallback only for an nft that rejects the listing; a
+// listing that ran out of time is reported, since the full dump is slower.
+func listTableSets(ctx context.Context, be firewall.Backend) ([]byte, error) {
+	l, ok := be.(setsLister)
+	if !ok {
+		return be.ListTableJSON("inet", "cfm")
 	}
-	return be.ListTableJSON("inet", "cfm")
+	out, err := l.ListSetsJSON(ctx, "inet")
+	if err == nil {
+		return out, nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return nil, err
+	}
+	full, ferr := be.ListTableJSON("inet", "cfm")
+	if ferr != nil {
+		return nil, fmt.Errorf("%v; full table: %v", err, ferr)
+	}
+	return full, nil
+}
+
+func listSet(ctx context.Context, be firewall.Backend, set string) ([]byte, error) {
+	if d, ok := be.(setDumper); ok {
+		return d.ListSetJSONContext(ctx, "inet", "cfm", set)
+	}
+	return be.ListSetJSON("inet", "cfm", set)
 }
 
 // unreadErr joins a stop error and the sets whose dump failed; nil when

@@ -313,42 +313,110 @@ func TestFindMany_UnreadSetIsReported(t *testing.T) {
 
 // The exec backend's set listing (no elements) is used when the backend has
 // one: the full table dump carries every feed element and timed out.
-func TestFindMany_PrefersTerseTableListing(t *testing.T) {
-	be := &terseBE{fakeBE: nftBackend()}
+func TestFindMany_PrefersSetListing(t *testing.T) {
+	be := &setsBE{fakeBE: nftBackend()}
 	if _, err := FindMany(context.Background(), be, []string{"198.51.100.9"}); err != nil {
 		t.Fatal(err)
 	}
-	if be.terse != 1 || be.listed["table"] != 0 {
-		t.Errorf("terse=%d full=%d, want the set listing only", be.terse, be.listed["table"])
+	if be.lists != 1 || be.listed["table"] != 0 {
+		t.Errorf("list sets=%d full=%d, want the set listing only", be.lists, be.listed["table"])
 	}
 }
 
-type terseBE struct {
-	*fakeBE
-	terse int
+// An nft that rejects the listing falls back to the full dump; one that ran
+// out of time does not (the full dump is slower), and says so.
+func TestFindMany_SetListingFallback(t *testing.T) {
+	be := &setsBE{fakeBE: nftBackend(), err: fmt.Errorf("nft: unknown option")}
+	res, err := FindMany(context.Background(), be, []string{"198.51.100.9"})
+	if err != nil || be.listed["table"] != 1 || len(res["198.51.100.9"]) != 1 {
+		t.Errorf("rejected listing: err=%v full=%d res=%v, want the full dump's answer", err, be.listed["table"], res)
+	}
+	be = &setsBE{fakeBE: nftBackend(), err: fmt.Errorf("nft -j -t list sets inet: %w", context.DeadlineExceeded)}
+	_, err = FindMany(context.Background(), be, []string{"198.51.100.9"})
+	if err == nil || !strings.Contains(err.Error(), "list sets") || be.listed["table"] != 0 {
+		t.Errorf("timed-out listing: err=%v full=%d, want the listing's error and no full dump", err, be.listed["table"])
+	}
 }
 
-func (t *terseBE) ListTableSetsJSON(fam, table string) ([]byte, error) {
-	t.terse++
+type setsBE struct {
+	*fakeBE
+	lists int
+	err   error
+}
+
+func (t *setsBE) ListSetsJSON(ctx context.Context, fam string) ([]byte, error) {
+	t.lists++
+	if t.err != nil {
+		return nil, t.err
+	}
 	return t.fakeBE.table, nil
 }
 
-// A feed union is not dumped when its per-feed sets are (it repeats them at
-// the same cost), and `nft list sets` lists other tables' sets too.
-func TestFindMany_SkipsFeedUnionAndOtherTables(t *testing.T) {
+// A feed's union (what the rules drop on) answers; a per-feed copy is read
+// only when the union matched, to name the feed, and `nft list sets` lists
+// other tables' sets too.
+func TestFindMany_FeedUnionAnswersPerFeedNames(t *testing.T) {
 	set := func(table, name string) string {
 		return fmt.Sprintf(`{"set":{"family":"inet","name":%q,"table":%q,"type":"ipv4_addr"}}`, name, table)
 	}
 	elems := func(name, e string) string {
 		return fmt.Sprintf(`{"nftables":[{"set":{"name":%q,"table":"cfm","type":"ipv4_addr","elem":[%s]}}]}`, name, e)
 	}
+	mk := func() *fakeBE {
+		return &fakeBE{
+			table: []byte(`{"nftables":[` + set("cfm", "block_ext_v4_hosts") + `,` + set("cfm", "block_ext_v4_hosts_MYBLOCK") + `,` +
+				set("cfm", "block_ext_v4_hosts_OTHER") + `,` + set("other", "block_v4") + `]}`),
+			sets: map[string]string{
+				"block_ext_v4_hosts":         elems("block_ext_v4_hosts", `"192.0.2.7","192.0.2.8"`),
+				"block_ext_v4_hosts_MYBLOCK": elems("block_ext_v4_hosts_MYBLOCK", `"192.0.2.7"`),
+				"block_ext_v4_hosts_OTHER":   elems("block_ext_v4_hosts_OTHER", ``),
+			},
+			listed: map[string]int{},
+		}
+	}
+
+	// Not in the union: no per-feed set is read.
+	be := mk()
+	if res, err := FindMany(context.Background(), be, []string{"203.0.113.1"}); err != nil || len(res["203.0.113.1"]) != 0 {
+		t.Fatalf("res=%v err=%v", res, err)
+	}
+	if be.listed["block_ext_v4_hosts"] != 1 || be.listed["block_ext_v4_hosts_MYBLOCK"] != 0 || be.listed["block_v4"] != 0 {
+		t.Errorf("dumps = %v: only the union (and no other table's set)", be.listed)
+	}
+
+	// In the union and a copy: the copy names the feed.
+	be = mk()
+	res, err := FindMany(context.Background(), be, []string{"192.0.2.7", "192.0.2.8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := res["192.0.2.7"]; len(h) != 1 || h[0].Feed != "MYBLOCK" || h[0].Action != "BLOCK" {
+		t.Errorf("192.0.2.7 = %+v, want one MYBLOCK hit", h)
+	}
+	// In the union only (a copy left short by a failed refill): still blocked.
+	if h := res["192.0.2.8"]; len(h) != 1 || h[0].Set != "block_ext_v4_hosts" {
+		t.Errorf("192.0.2.8 = %+v, want the union's hit", h)
+	}
+
+	// A copy that can't be read leaves the union's answer, and no error.
+	be = mk()
+	delete(be.sets, "block_ext_v4_hosts_MYBLOCK")
+	res, err = FindMany(context.Background(), be, []string{"192.0.2.7"})
+	if err != nil || len(res["192.0.2.7"]) != 1 || res["192.0.2.7"][0].Set != "block_ext_v4_hosts" {
+		t.Errorf("res=%v err=%v, want the union's hit", res, err)
+	}
+}
+
+// A union with one feed is named after it without dumping the copy: the
+// second dump doubled a feed lookup's time.
+func TestFindMany_SingleFeedUnionNamedWithoutDump(t *testing.T) {
+	set := func(name string) string {
+		return fmt.Sprintf(`{"set":{"family":"inet","name":%q,"table":"cfm","type":"ipv4_addr"}}`, name)
+	}
 	be := &fakeBE{
-		table: []byte(`{"nftables":[` + set("cfm", "block_ext_v4_hosts") + `,` + set("cfm", "block_ext_v4_hosts_MYBLOCK") + `,` +
-			set("cfm", "allow_ext_v4_hosts") + `,` + set("other", "block_v4") + `]}`),
+		table: []byte(`{"nftables":[` + set("block_ext_v4_hosts") + `,` + set("block_ext_v4_hosts_MYBLOCK") + `]}`),
 		sets: map[string]string{
-			"block_ext_v4_hosts":         elems("block_ext_v4_hosts", `"192.0.2.7"`),
-			"block_ext_v4_hosts_MYBLOCK": elems("block_ext_v4_hosts_MYBLOCK", `"192.0.2.7"`),
-			"allow_ext_v4_hosts":         elems("allow_ext_v4_hosts", ``),
+			"block_ext_v4_hosts": `{"nftables":[{"set":{"name":"block_ext_v4_hosts","type":"ipv4_addr","elem":["192.0.2.7"]}}]}`,
 		},
 		listed: map[string]int{},
 	}
@@ -356,10 +424,10 @@ func TestFindMany_SkipsFeedUnionAndOtherTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if h := res["192.0.2.7"]; len(h) != 1 || h[0].Feed != "MYBLOCK" {
-		t.Errorf("hits = %+v, want the one per-feed hit", h)
+	if h := res["192.0.2.7"]; len(h) != 1 || h[0].Set != "block_ext_v4_hosts" || h[0].Feed != "MYBLOCK" {
+		t.Errorf("hits = %+v, want the union's hit named MYBLOCK", h)
 	}
-	if be.listed["block_ext_v4_hosts"] != 0 || be.listed["allow_ext_v4_hosts"] != 1 {
-		t.Errorf("dumps = %v: the union with a per-feed set is skipped, the one without is read", be.listed)
+	if be.listed["block_ext_v4_hosts_MYBLOCK"] != 0 {
+		t.Errorf("dumps = %v: the single feed's copy is not read", be.listed)
 	}
 }

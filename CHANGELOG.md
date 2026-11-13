@@ -25,11 +25,12 @@ back-filled here — see the git/PR history for that period.
   (nft 1.0.4, a feed apply in progress) it ran out of time: the nft source was
   reported as "cannot read … (maybe needs sudo?)". The lookup now lists only
   the sets (`nft -j -t list sets`: 5 ms with a 1M-address feed, against 32 s
-  for the table), no longer dumps a feed union (`block_ext_v4_hosts`, …) that
-  only repeats its per-feed sets, reads the manual sets before the feeds, and
-  gives one set dump 15 s. Measured lookup with a manual ban and one feed:
-  1.5 s at 215k addresses, 5 s at 500k; at 1M the feed's dump still runs out
-  of time, and is reported as below.
+  for the table) and reads the manual sets before the feeds. A feed is read
+  once, from its union (`block_ext_v4_hosts`, the set the rules drop on), and
+  named after the feed; its per-feed copy is read only when a union holds
+  several feeds. Each dump ends at the caller's deadline, or after 15 s.
+  Measured, a manual ban plus one feed: 1.5 s at 215k addresses, 5.5 s at
+  500k, 17 s at 1M (near the limit).
 - **A set the lookup could not read is reported, not taken as "not there".**
   A set dump that failed or timed out was skipped silently, so an IP in that
   set (a MYBLOCK ban, say) read as not blocked. The answer is now marked
