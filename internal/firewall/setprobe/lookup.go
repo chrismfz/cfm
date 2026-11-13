@@ -31,8 +31,9 @@ type Match struct{ From, To netip.Addr }
 // the set (nft_get_set_elem → set->ops->get), whatever the set's size. The
 // result is aligned with addrs; ok[i] is false when the kernel answered that
 // no element holds addrs[i]. Any failure — no netlink, a kernel that cannot
-// answer a get, ErrAmbiguous — is an error for the whole call, and the
-// caller dumps the set instead.
+// answer a get, ErrAmbiguous, ErrChanged (the ruleset changed under every
+// attempt, see lookup) — is an error for the whole call, and the caller
+// dumps the set instead.
 //
 // A hash set answers an exact match. An interval set (rbtree) answers with
 // the START of the interval holding the key (on 4.18, 5.14 and 6.x: the
@@ -50,25 +51,75 @@ func Lookup(ctx context.Context, table, set string, addrs []netip.Addr) ([]Match
 		return nil, nil, fmt.Errorf("setprobe: dial: %w", err)
 	}
 	defer c.Close()
-	p := &prober{c: c, ctx: ctx, table: table, set: set}
-	flags, klen, err := p.setInfo()
+	return lookup(&nlKernel{c: c, ctx: ctx, table: table, set: set}, set, addrs)
+}
+
+// ErrChanged is Lookup's answer when the ruleset changed under every
+// attempt (see lookup): the caller reads the set some other way.
+var ErrChanged = errors.New("setprobe: the ruleset changed during the lookup")
+
+// genAttempts bounds how often lookup starts again after a change.
+const genAttempts = 3
+
+// kernel is what lookup asks the kernel: the set's flags and key length,
+// the ruleset generation, one element. nlKernel asks it over netlink; the
+// unit tests give it a model of each kernel's rbtree.
+type kernel interface {
+	setInfo() (flags, klen uint32, err error)
+	gen() (uint32, error)
+	get(key netip.Addr, elemFlags uint32) (netip.Addr, uint32, bool, error)
+}
+
+// lookup is Lookup on a kernel. An interval's end takes several gets, and a
+// feed replace (one transaction) committed between two of them would mix
+// the old content with the new: a start from one, an end from the other, a
+// prefix that never existed. So the ruleset generation (NFT_MSG_GETGEN,
+// which every committed transaction bumps) is read before and after, and a
+// lookup that saw it change starts again, up to genAttempts times, then
+// fails with ErrChanged. Each answer then comes from one generation, as a
+// dump's does.
+func lookup(k kernel, set string, addrs []netip.Addr) ([]Match, []bool, error) {
+	flags, klen, err := k.setInfo()
 	if err != nil {
 		return nil, nil, err
 	}
+	p := &prober{k: k, set: set}
+	for attempt := 0; attempt < genAttempts; attempt++ {
+		g0, err := k.gen()
+		if err != nil {
+			return nil, nil, err
+		}
+		out, ok, err := p.lookupAll(flags, klen, addrs)
+		if err != nil {
+			return nil, nil, err
+		}
+		g1, err := k.gen()
+		if err != nil {
+			return nil, nil, err
+		}
+		if g0 == g1 {
+			return out, ok, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("%w (%s, %d attempts)", ErrChanged, set, genAttempts)
+}
+
+func (p *prober) lookupAll(flags, klen uint32, addrs []netip.Addr) ([]Match, []bool, error) {
 	out := make([]Match, len(addrs))
 	ok := make([]bool, len(addrs))
+	var err error
 	for i, a := range addrs {
 		a = a.Unmap()
 		if a.BitLen()/8 != int(klen) {
-			return nil, nil, fmt.Errorf("setprobe: %s has %d-byte keys, %s is not one", set, klen, a)
+			return nil, nil, fmt.Errorf("setprobe: %s has %d-byte keys, %s is not one", p.set, klen, a)
 		}
 		if flags&unix.NFT_SET_INTERVAL != 0 {
 			out[i], ok[i], err = p.interval(a)
 		} else {
 			var k netip.Addr
-			k, _, ok[i], err = p.get(a, 0)
+			k, _, ok[i], err = p.k.get(a, 0)
 			if ok[i] && k != a {
-				err = fmt.Errorf("setprobe: %s answered %s for %s", set, k, a)
+				err = fmt.Errorf("setprobe: %s answered %s for %s", p.set, k, a)
 			}
 			out[i] = Match{From: a, To: a}
 		}
@@ -80,12 +131,18 @@ func Lookup(ctx context.Context, table, set string, addrs []netip.Addr) ([]Match
 }
 
 type prober struct {
+	k   kernel
+	set string
+}
+
+// nlKernel is kernel over one netlink connection.
+type nlKernel struct {
 	c          *netlink.Conn
 	ctx        context.Context
 	table, set string
 }
 
-func (p *prober) execute(typ int, data []byte) ([]netlink.Message, error) {
+func (p *nlKernel) execute(typ int, data []byte) ([]netlink.Message, error) {
 	if err := p.ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -127,8 +184,32 @@ func (p *prober) execute(typ int, data []byte) ([]netlink.Message, error) {
 	}
 }
 
+// gen reads the ruleset generation (NFT_MSG_GETGEN).
+func (p *nlKernel) gen() (uint32, error) {
+	msgs, err := p.execute(unix.NFT_MSG_GETGEN, []byte{unix.AF_UNSPEC, unix.NFNETLINK_V0, 0, 0})
+	if err != nil {
+		return 0, fmt.Errorf("setprobe: get generation: %w", err)
+	}
+	for _, m := range msgs {
+		if len(m.Data) < 4 {
+			continue
+		}
+		ad, err := netlink.NewAttributeDecoder(m.Data[4:])
+		if err != nil {
+			return 0, fmt.Errorf("setprobe: generation: %w", err)
+		}
+		ad.ByteOrder = binary.BigEndian
+		for ad.Next() {
+			if ad.Type() == unix.NFTA_GEN_ID {
+				return ad.Uint32(), ad.Err()
+			}
+		}
+	}
+	return 0, errors.New("setprobe: the generation reply carries no id")
+}
+
 // setInfo reads the set's flags and key length (NFT_MSG_GETSET, one set).
-func (p *prober) setInfo() (flags, klen uint32, err error) {
+func (p *nlKernel) setInfo() (flags, klen uint32, err error) {
 	ae := netlink.NewAttributeEncoder()
 	ae.String(unix.NFTA_SET_TABLE, p.table)
 	ae.String(unix.NFTA_SET_NAME, p.set)
@@ -170,7 +251,7 @@ func (p *prober) setInfo() (flags, klen uint32, err error) {
 // get sends one GETSETELEM for key (with elemFlags, 0 or
 // NFT_SET_ELEM_INTERVAL_END) and returns the element the kernel answered
 // with: its key and flags, found=false on ENOENT.
-func (p *prober) get(key netip.Addr, elemFlags uint32) (netip.Addr, uint32, bool, error) {
+func (p *nlKernel) get(key netip.Addr, elemFlags uint32) (netip.Addr, uint32, bool, error) {
 	ae := netlink.NewAttributeEncoder()
 	ae.String(unix.NFTA_SET_ELEM_LIST_TABLE, p.table)
 	ae.String(unix.NFTA_SET_ELEM_LIST_SET, p.set)
@@ -222,7 +303,7 @@ var errNoElem = errors.New("the kernel acknowledged the get without an element")
 
 // getEnd is get for an END element, errNoElem read as "none".
 func (p *prober) getEnd(key netip.Addr) (netip.Addr, uint32, bool, error) {
-	k, f, ok, err := p.get(key, unix.NFT_SET_ELEM_INTERVAL_END)
+	k, f, ok, err := p.k.get(key, unix.NFT_SET_ELEM_INTERVAL_END)
 	if errors.Is(err, errNoElem) {
 		return netip.Addr{}, 0, false, nil
 	}
@@ -278,7 +359,7 @@ func parseElem(b []byte) (netip.Addr, uint32, bool, error) {
 
 // interval finds the interval of an interval set that holds a.
 func (p *prober) interval(a netip.Addr) (Match, bool, error) {
-	start, f, ok, err := p.get(a, 0)
+	start, f, ok, err := p.k.get(a, 0)
 	if err != nil {
 		return Match{}, false, err
 	}
@@ -300,7 +381,7 @@ func (p *prober) interval(a netip.Addr) (Match, bool, error) {
 		if !next.IsValid() {
 			return Match{}, false, ErrAmbiguous
 		}
-		start, f, ok, err = p.get(next, 0)
+		start, f, ok, err = p.k.get(next, 0)
 		if err != nil {
 			return Match{}, false, err
 		}
@@ -343,7 +424,7 @@ func (p *prober) exactEnd(a netip.Addr) (netip.Addr, uint32, bool, error) {
 // gets confirm it, so most lookups take three gets, not 32 or 128.
 func (p *prober) intervalEnd(start, a netip.Addr) (netip.Addr, error) {
 	in := func(x netip.Addr) (bool, error) {
-		k, f, ok, err := p.get(x, 0)
+		k, f, ok, err := p.k.get(x, 0)
 		return ok && k == start && f&unix.NFT_SET_ELEM_INTERVAL_END == 0, err
 	}
 	if end, f, ok, err := p.getEnd(a); err != nil {

@@ -102,8 +102,14 @@ func TestLiveNFTFindManyScale(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root")
 	}
-	if out, err := exec.Command("nft", "list", "table", "inet", "cfm").CombinedOutput(); err == nil && strings.Contains(string(out), "hook input") {
-		t.Fatalf("refusing to run: a live `inet cfm` table exists — run this test inside an isolated netns (unshare -rn)")
+	// The same guard as TestLiveNFTFindMany: the test flushes the table, so
+	// a table with cfm's sets (TTL bans live only there) or its input hook
+	// is a live one, even before EnsureBase added the chain.
+	if out, err := exec.Command("nft", "list", "table", "inet", "cfm").CombinedOutput(); err == nil {
+		s := string(out)
+		if strings.Contains(s, "allow_v4") || strings.Contains(s, "block_v4") || strings.Contains(s, "hook input") {
+			t.Fatalf("refusing to run: a populated `inet cfm` table already exists — run this test inside an isolated netns (unshare -rn)")
+		}
 	}
 	var b strings.Builder
 	b.WriteString("add table inet cfm\nflush table inet cfm\n" +

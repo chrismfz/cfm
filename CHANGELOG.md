@@ -76,7 +76,10 @@ back-filled here — see the git/PR history for that period.
   overlap no lookup answers, so it still dumps its family's sets, and so does
   a set the kernel cannot answer for. That includes an IP that sits exactly
   where an interval ends and another may start: a 4.18 kernel can answer
-  "absent" there (it stops at the end element sharing the key).
+  "absent" there (it stops at the end element sharing the key). An
+  interval's end takes several gets, so each set's lookups are checked
+  against the ruleset generation and done again if a transaction (a feed
+  replace) committed in between; an answer never mixes old and new content.
 - **A set the lookup could not read is reported, not taken as "not there".**
   A set dump that failed or timed out was skipped silently, so an IP in that
   set (a MYBLOCK ban, say) read as not blocked. The answer is now marked
