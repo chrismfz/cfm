@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.13
+
 ### Added
 - **WAF: PHP code in the query string (rule 332, `WAF_RCE:PHP_ARGS_*`) and
   a PHP file posted as the raw body (rule 416,
