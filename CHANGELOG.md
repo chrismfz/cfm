@@ -17,6 +17,31 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **WAF: PHP code in the query string (rule 332, `WAF_RCE:PHP_ARGS_*`) and
+  a PHP file posted as an untyped raw body (rule 416,
+  `WAF_PHP_WEBSHELL_BODY:UNTYPED_*`), both logonly.**
+  - The case: on 2026-11-12 a Joomla site on earth (dmkomotinis.gr, Fabrik
+    3.10) was compromised through the listfilter eval
+    (`…[value]=$h=fopen('up.php','w');fwrite(…)&…[eval]=1`). The dropper it
+    wrote took yavuzshell.php as `application/octet-stream`, at six paths.
+    Every request reached the origin with nothing logged at the edge: rule 320
+    reads only shell / jndi markers, the body scanners never read the query,
+    402 reads multipart only and 404 reads textual types only.
+  - Rule 332 fires on a call to a file writer or code runner together with
+    something only PHP source carries, in the same parameter: `<?php`, a
+    superglobal, a decoder, `$x=`, `;return`, `'.'` or a `chr()` chain. It
+    reads the query only, not a POST form.
+  - Rule 416 fires on a non-multipart POST body that opens with a PHP tag,
+    whatever its Content-Type says.
+  - A 7-day read of the edge logs on all 8 edge nodes found about 150
+    matching 332 requests, from more than 10 exploit families (Fabrik,
+    ThinkPHP, SPIP, Magento, ThinkCMF, Drupal, pearcmd), most of which reached
+    the origin, and no legitimate one. A static page linking
+    `?v=<?php echo rand(…); ?>` is why a PHP tag alone does not count.
+  - Logonly through a burn-in of a few days, then promote. A block promotion
+    of 332 arms `WAF_RCE`'s autoblock. See `docs/waf.md` "Rules 332 and 416".
+
 ### Fixed
 - **`cfm search` / `cfm which` / unblock lookups no longer time out on a node
   with a large fleet feed.** To find the table's sets the nft lookup dumped the
