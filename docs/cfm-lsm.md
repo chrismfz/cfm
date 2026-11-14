@@ -1064,7 +1064,10 @@ decisions, not TODOs.
   correlation value (`.php` dropped within 30s of suspicious POST)
   belongs in `webdetector`, not in an LSM hook. The LSM hook would
   only generate the event; the decision logic is HTTP-layer
-  correlation.
+  correlation. *(Revisited 2026-11-14 as a design proposal, not shipped:
+  [`lsm-php-drop-detection.md`](./lsm-php-drop-detection.md) proposes
+  `CFML-FS-009` on exactly that split. The hook only emits, and the daemon
+  scans, attributes and decides.)*
 
 - **`CFML-CRED-001` (capability watch).** LVE and CageFS already
   constrain the realistic per-user capability surface on CloudLinux,

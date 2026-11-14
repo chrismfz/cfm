@@ -201,6 +201,20 @@ that can drift" rule.
   `docs/under-attack-mode.md`. Their embedded phase checklists are frozen and
   defer to the master plan.
 
+## 10. Webshell-drop safety net (cfm-lsm → ClamAV → edge attribution)
+
+Design: `docs/lsm-php-drop-detection.md` (2026-11-14, after the dmkomotinis.gr
+Fabrik compromise on earth). `CFML-FS-009` watches the PHP tier
+create/overwrite/rename a PHP-executable file under a docroot. The daemon then
+scans exactly that file with ClamAV, records it, and ties it to the edge
+request so the IP can be banned.
+
+- **P0 count-only** — [next, after operator answers the doc's §11]. Slices 1–2
+  of the doc's §12: `panelmap.Docroots()`, then the BPF policy (own ringbuf,
+  monitor-only) and the `php_drops` MCP aggregates. A fleet count gates every
+  later phase (scan → suspect alerts/quarantine opt-in → autoblock); kernel deny
+  is not planned.
+
 ---
 
 _Larger design docs live under `docs/`; this roadmap only indexes them. See
