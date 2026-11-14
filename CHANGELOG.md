@@ -23,8 +23,9 @@ back-filled here — see the git/PR history for that period.
     ChallengeV2, the same page with the humanity check at verify. So do the
     cfm-admin Tier picker and the customer panic button on their new
     "Default" option, the live view and the bots page. `--rung v1` (or
-    Standard) still arms the plain challenge. Re-arming a vhost without a
-    tier keeps the tier it has.
+    Standard) still arms the plain challenge. Arming a vhost without a tier
+    keeps the tier of a manual challenge already on it (or on its apex, for
+    a `www.` host).
   - Why: the automatic vhost challenges have run at v2 since 2026-10-22. A
     fleet read on 2026-11-14 (11 729 rejects, 13 nodes) found the rejects
     under manual v2 arms all from one farm fingerprint, and no reject from a

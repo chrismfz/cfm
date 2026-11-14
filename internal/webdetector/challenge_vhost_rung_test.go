@@ -215,11 +215,13 @@ func TestHandleChallengeVhostAdd_TierlessWWWKeepsApexTier(t *testing.T) {
 	}
 }
 
-// vhost/status names what a new tier-less arm would get: v2 by default, v1 on
-// a wildcard host (the add handler's own answer, manualDefaultRungFor).
+// vhost/status names what a tier-less arm would get there (the add handler's
+// own answer, tierlessArmRung): v2 by default, v1 on a wildcard host, and the
+// covering arm's tier on a host an active manual arm covers (own or apex).
 func TestHandleChallengeVhostStatus_ManualDefaultRung(t *testing.T) {
 	e := newTestEngineForChallengeHandlers()
-	for host, want := range map[string]string{"plain.gr": "v2", "*.wild.gr": "v1"} {
+	e.ManualChallengeVhost("armed.gr", time.Hour, "manual", "")
+	for host, want := range map[string]string{"plain.gr": "v2", "*.wild.gr": "v1", "armed.gr": "v1", "www.armed.gr": "v1"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/challenge/vhost/status?host="+host, nil)
 		rr := httptest.NewRecorder()
 		e.handleChallengeVhostStatus(rr, req)
