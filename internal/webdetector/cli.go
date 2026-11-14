@@ -91,7 +91,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge            # active vhost challenge list")
 	fmt.Println("  cfm webtop challenge host <H>   # vhost details + recent events")
 	fmt.Println("  cfm webtop challenge events [N] # last N challenge events")
-	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m] [--rung v2] [--lockdown [--lockdown-ttl 30m]]  # manually challenge a vhost (v2 = humanity-gated verify)")
+	fmt.Println("  cfm webtop challenge add <H> [--ttl 30m] [--rung v1|v2] [--lockdown [--lockdown-ttl 30m]]  # manually challenge a vhost (default v2 = humanity-gated verify; --rung v1 = plain)")
 	fmt.Println("  cfm webtop challenge remove <H>           # remove manual challenge")
 	fmt.Println("  cfm webtop challenge status <H>           # check challenge status (incl. lockdown)")
 	fmt.Println("  cfm webtop challenge lockdown <H> on|off [--ttl 30m]  # LOCKDOWN on a manually challenged vhost (below)")
@@ -1545,7 +1545,9 @@ func runAttackStatus(baseURL string) error {
 	return nil
 }
 
-// runChallengeAdd handles: cfm webtop challenge add <vhost> [--ttl 30m] [--reason manual] [--rung v2]
+// runChallengeAdd handles: cfm webtop challenge add <vhost> [--ttl 30m] [--reason manual] [--rung v1|v2]
+// Without --rung a NEW arm gets the node default (CHALLENGE_V2_MANUAL, v2) and
+// a re-arm keeps the arm's tier; the daemon decides, so no rung is sent.
 func runChallengeAdd(baseURL string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text] [--rung v1|v2] [--lockdown[=on|off]] [--lockdown-ttl 30m]")
@@ -1634,8 +1636,15 @@ func runChallengeAdd(baseURL string, args []string) error {
 		return fmt.Errorf("challenge add error: %s", errMsg)
 	}
 
-	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s  rung=%v\n",
-		result["host"], result["ttl"], result["expires_at"], result["reason"], result["rung"])
+	rungSuffix := ""
+	if result["rung_default"] == true && result["rung"] == "v2" {
+		rungSuffix = " (node default; --rung v1 for plain)"
+	}
+	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s  rung=%v%s\n",
+		result["host"], result["ttl"], result["expires_at"], result["reason"], result["rung"], rungSuffix)
+	if note, ok := result["rung_note"].(string); ok && note != "" {
+		fmt.Printf("  note: %s\n", note)
+	}
 	printLockdownLine(result)
 	// A manual v1 arm does not downgrade an automatic v2: say what the solves
 	// are actually held to when it differs from the arm's own rung.

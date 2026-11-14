@@ -19,9 +19,12 @@ type chalVhostAddRequest struct {
 	Host   string `json:"host"`
 	TTL    string `json:"ttl"`    // e.g. "30m", "1h" — optional, default 30m
 	Reason string `json:"reason"` // optional, default "manual"
-	// Rung: "v1" (default; plain challenge) or "v2"/"challenge_v2"
-	// (ChallengeV2: same challenge page, but a solve failing the Rung-1
-	// humanity check earns NO clearance). Challenge-tier either way, so
+	// Rung: "v1" (plain challenge) or "v2"/"challenge_v2" (ChallengeV2:
+	// same challenge page, but a solve failing the Rung-1 humanity check
+	// earns NO clearance). Absent: the tier of the manual arm covering the
+	// host (its own, else the apex's for a www. host), else the node default
+	// (CHALLENGE_V2_MANUAL, v2 unless turned off; v1 on a wildcard host —
+	// tierlessArmRung). Challenge-tier either way, so
 	// scoped tokens may set it for their own vhosts like any manual
 	// challenge — there is no deny here to escalate to.
 	Rung string `json:"rung"`
@@ -41,6 +44,11 @@ type chalVhostAddResponse struct {
 	TTL       string    `json:"ttl"`
 	Reason    string    `json:"reason"`
 	Rung      string    `json:"rung"` // "v1" | "v2"
+	// RungDefault: the caller named no tier and no manual arm covered the
+	// host, so Rung is the node default (CHALLENGE_V2_MANUAL). RungNote: why a tier-less
+	// arm did NOT get the v2 default (a wildcard host).
+	RungDefault bool   `json:"rung_default,omitempty"`
+	RungNote    string `json:"rung_note,omitempty"`
 	// TTLCapped is set when a scoped caller asked for more than the scoped
 	// TTL ceiling and the arm was clamped (slice D). The TTL/ExpiresAt
 	// fields always carry the EFFECTIVE values, so a capped arm is visible,
@@ -232,12 +240,19 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1 or v2)"})
 		return
 	}
-	// An ABSENT tier preserves an existing arm's rung: a TTL extension or
-	// re-challenge from a rung-unaware surface (live view, bots drilldown,
-	// plain CLI) must not silently disarm v2 (review finding). An explicit
-	// rung=v1 still downgrades — that is the operator saying so.
+	// An ABSENT tier preserves the tier of the manual arm COVERING the host
+	// (its own, else the apex's for a www. host — manualRungTarget's
+	// resolution): a TTL extension or re-challenge from a rung-unaware
+	// surface (live view, bots drilldown, plain CLI) must not silently
+	// re-tier it either way (review finding), nor shadow an apex arm the
+	// operator set to v1 with a v2 arm on www. A host no manual arm covers
+	// gets the node default (CHALLENGE_V2_MANUAL, v2 since 2026-11-14) —
+	// except a wildcard host, which the v2 gate cannot match yet (below):
+	// that one stays v1 and the response says why. An explicit rung=v1
+	// still downgrades — the operator saying so.
+	rungDefaulted, rungNote := false, ""
 	if strings.TrimSpace(req.Rung) == "" {
-		rung = e.manualChal.rung(req.Host)
+		rung, rungNote, rungDefaulted = e.tierlessArmRung(req.Host)
 	}
 	// Wildcard hosts (*.example.com / cpanel.*) are challengeable, but the
 	// verify-side rung lookup is exact+www only — a wildcard v2 arm would
@@ -286,6 +301,8 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		TTL:            ttl.String(),
 		Reason:         req.Reason,
 		Rung:           rungOrV1(rung),
+		RungDefault:    rungDefaulted,
+		RungNote:       rungNote,
 		TTLCapped:      ttlCapped,
 		Tier:           tierJSON(tier),
 		LockdownCapped: lockCapped,
@@ -855,6 +872,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	lockUntilJSON := lockdownPtr(lockUntil)
 
 	tier := e.challengeV2VhostTierForScope(host)
+	defaultRung, _, _ := e.tierlessArmRung(host)
 	// An automatic vhost challenge the store never records (uniqpaths_short
 	// writes no row) is still live and still carries a tier: report it as
 	// auto-active, or the pages drop the host — and its "→ v1 (pin)"
@@ -876,6 +894,11 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"rung_trigger": tier.Trigger,
 		"rung_pin":     tier.Pin,
 		"rung_auto":    tier.AutoRung,
+		// The tier a tier-less manual arm (the pickers' "Default") would get
+		// on this host right now (tierlessArmRung): the covering manual arm's
+		// tier when one is active, else CHALLENGE_V2_MANUAL's (v1 on a
+		// wildcard host).
+		"manual_default_rung": rungOrV1(defaultRung),
 		// true when the caller is a scoped token and the operator set the
 		// pin: the tenant's surfaces hide the pin controls (the write 403s).
 		"rung_pin_locked":   tier.pinLockedFor(vhostScopeFromContext(r.Context())),

@@ -3,6 +3,7 @@
 // once here — previously duplicated across page copies.
 
 import {
+  manualArmBody,
   tierButtonLabel,
   tierButtonTitle,
   tierSuffix,
@@ -31,8 +32,13 @@ export const challengeMixin = {
       // Challenge tier applied by the same buttons. v2 = ChallengeV2: the
       // SAME challenge page is served, but a solve must also pass the passive
       // humanity check to earn clearance (headless farms solve for nothing).
-      challengeRung: "v1",
+      // "" = no rung sent: a NEW arm gets the node default
+      // (CHALLENGE_V2_MANUAL, v2 unless turned off), a re-arm keeps its tier.
+      challengeRung: "",
       challengeRungChoices: [
+        // The label cannot name the tier: the vhost list carries no node
+        // default, and the action message shows what the arm got.
+        { value: "", label: "node default" },
         { value: "v1", label: "challenge" },
         { value: "v2", label: "challenge v2" },
       ],
@@ -168,10 +174,10 @@ export const challengeMixin = {
           await this.postJSON("v1/challenge/vhost/remove", { host });
           this.actionMsg = `Challenge removed for ${host}`;
         } else {
-          const body = { host, ttl: this.challengeTTL, reason: "cfm-admin-ui" };
-          if (typeof tier === "string" && tier) body.rung = tier;
-          await this.postJSON("v1/challenge/vhost/add", body);
-          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel}${body.rung ? ", " + body.rung : ""})`;
+          const body = manualArmBody(host, this.challengeTTL, "cfm-admin-ui", tier);
+          const res = await this.postJSON("v1/challenge/vhost/add", body);
+          this.actionMsg = `Challenge enabled for ${host} (${this.challengeTTLLabel}, ${res?.rung || body.rung || "?"})` +
+            (res?.rung_note ? ` — ${res.rung_note}` : "");
         }
         await this.refreshChallengeVhosts();
       } catch (err) {
@@ -182,10 +188,10 @@ export const challengeMixin = {
     async manualChallenge(host, tier) {
       if (!host) return;
       try {
-        const body = { host, ttl: this.challengeTTL, reason: "cfm-admin-ui-manual" };
-        if (typeof tier === "string" && tier) body.rung = tier;
-        await this.postJSON("v1/challenge/vhost/add", body);
-        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel}${body.rung ? ", " + body.rung : ""})`;
+        const body = manualArmBody(host, this.challengeTTL, "cfm-admin-ui-manual", tier);
+        const res = await this.postJSON("v1/challenge/vhost/add", body);
+        this.actionMsg = `Manual challenge enabled for ${host} (${this.challengeTTLLabel}, ${res?.rung || body.rung || "?"})` +
+          (res?.rung_note ? ` — ${res.rung_note}` : "");
         await this.refreshChallengeVhosts();
       } catch (err) {
         this.actionMsg = `Manual challenge failed for ${host}: ${err}`;

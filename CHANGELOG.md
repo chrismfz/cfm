@@ -17,7 +17,34 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **A manual vhost challenge is armed at v2 unless you say v1.**
+  - What: `cfm webtop challenge add <vhost>` without `--rung` now arms
+    ChallengeV2, the same page with the humanity check at verify. So do the
+    cfm-admin Tier picker and the customer panic button on their new
+    "Default" option, the live view and the bots page. `--rung v1` (or
+    Standard) still arms the plain challenge. Arming a vhost without a tier
+    keeps the tier of a manual challenge already on it (or on its apex, for
+    a `www.` host).
+  - Why: the automatic vhost challenges have run at v2 since 2026-10-22. A
+    fleet read on 2026-11-14 (11 729 rejects, 13 nodes) found the rejects
+    under manual v2 arms all from one farm fingerprint, and no reject from a
+    likely human.
+  - Wildcard hosts (`*.example.com`) stay v1, because the v2 check cannot
+    match them yet; the CLI and the page say so.
+  - Knob: `[webdetector] CHALLENGE_V2_MANUAL = 0` turns the default back to
+    v1 node-wide. It is also v1 while `CHALLENGE_V2_PASSIVE = 0`.
+- **WAF rule 102 (`rule_long_path_segment`) now challenges at v2**, the last
+  WAF rule still at the plain challenge.
+  - Why it was held: a JS-rendering crawler such as Googlebot could fail the
+    v2 check and be refused.
+  - Why that no longer applies: Google's and Bing's crawlers never reach the
+    WAF, since the bypass list skips it for them, in a lockdown too. Over 7
+    days the rule fired 11 854 times on 4 nodes and none of those hits came
+    from a crawler range. Most of them (11 757) were Amazonbot looping on
+    one Joomla feed URL, which the plain challenge already stopped.
+  - To revert on a node: `rule_long_path_segment = "challenge"` in
+    `/etc/cfm/cfm_waf_config.lua`.
 
 ## 2026.11.13
 

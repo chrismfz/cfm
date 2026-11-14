@@ -379,6 +379,11 @@ type challengeV2State struct {
 	// (challengeV2PathsArms): CHALLENGE_V2_PATHS, default on. Off, a
 	// malpath challenge writes no mark and is solved at v1 as before.
 	pathsMark bool
+	// manualV2 is the tier a NEW manual vhost arm gets when the caller names
+	// none (challengeV2ManualDefaultRung): CHALLENGE_V2_MANUAL, default on
+	// since 2026-11-14. Off, a tier-less manual arm is v1 as before. An
+	// explicit rung always wins, and a re-arm without one keeps the arm's.
+	manualV2 bool
 	// hostTier answers "is this host's vhost tier v2" plus what put it there
 	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
 	// resolution — NewEngine wires challengeV2GateTier (challenge_v2_auto.go:
@@ -400,7 +405,7 @@ type challengeV2State struct {
 	lockdown func(host string) bool
 }
 
-var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true}
+var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true, manualV2: true}
 
 // ConfigureChallengeV2HWTells applies [webdetector] CHALLENGE_V2_HW_TELLS
 // (every reload; see challengeV2State.hwTells).
@@ -424,6 +429,33 @@ func ConfigureChallengeV2Paths(on bool) {
 	challengeV2.mu.Lock()
 	challengeV2.pathsMark = on
 	challengeV2.mu.Unlock()
+}
+
+// ConfigureChallengeV2Manual applies [webdetector] CHALLENGE_V2_MANUAL (every
+// reload; see challengeV2State.manualV2).
+func ConfigureChallengeV2Manual(on bool) {
+	challengeV2.mu.Lock()
+	challengeV2.manualV2 = on
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2ManualDefaultRung is the stored tier ("v2", or "" for v1) of a
+// NEW manual vhost arm whose caller named no tier — the CLI without --rung,
+// the cfm-admin and cPanel pickers on "default", the live view, the bots
+// page. v2 while CHALLENGE_V2_MANUAL and the rung (CHALLENGE_V2_PASSIVE) are
+// on: with the rung off a v2 arm would claim a gate that does not run.
+//
+// Why v2 (2026-11-14 fleet read, 11 729 rejects over 13 nodes): the 76 rejects
+// under a manual v2 arm were all one farm fingerprint (95070673, hc=640), and
+// no reject came from a likely human — the automatic vhost challenges have
+// armed v2 on every source since 2026-10-22, at the same false-reject cost.
+func challengeV2ManualDefaultRung() string {
+	challengeV2.mu.RLock()
+	defer challengeV2.mu.RUnlock()
+	if challengeV2.enabled && challengeV2.manualV2 {
+		return "v2"
+	}
+	return ""
 }
 
 // challengeV2PathsReason is the bridge reason the CHALLENGE_PATHS challenge

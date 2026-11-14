@@ -1121,6 +1121,34 @@ Build the stack classes from the data by cipher list, restrict to UAs with
 nothing appended, exclude vhost-bound (front-proxy) lists, and keep it in the
 device-claim group.
 
+#### Manual arms default to v2 (2026-11-14)
+
+A NEW manual vhost challenge whose caller names no tier is armed at v2:
+`cfm webtop challenge add <vhost>` without `--rung`, the cfm-admin Tier
+picker and the customer panic button on "Default", the live view, the bots
+page. `[webdetector] CHALLENGE_V2_MANUAL = 0` puts it back at v1, and so does
+the rung being off (`CHALLENGE_V2_PASSIVE = 0`). Unchanged: an explicit
+`--rung v1` / `rung=v1` arms plain, an arm without a tier keeps the tier of
+the manual arm covering the host (its own, or the apex's for a `www.` host),
+and a tier-less wildcard host is armed v1 (`rung_note` says why: the v2
+gate cannot match a wildcard). `vhost/add` answers `rung_default=true` when
+the tier was the default; `vhost/status` carries `manual_default_rung`, which
+names the picker's "Default".
+
+**Measured first.** `detection_history type=challenge_v2_reject node="all"`
+on 2026-11-14: 11 729 rejects on 8 of 13 nodes (windows from 2 h on the
+busiest nodes to 11 days on earth). 93% came from the two convicted farm
+fingerprints (`c28caa00` 8 876, `95070673` 2 186), the rest webdriver /
+`ua_lie` / `linux_sw` solves from datacenter ASNs. The 76 rejects under a
+MANUAL v2 arm (kontopanagiotisjewellers.gr, virgo) were all `95070673` from
+US/SE, reporting `hc=640`. The 33 rejects carrying any input were all
+datacenter ASNs with a phone UA and `mobile_hw_lie` (above the rescue cap).
+GR/CY: 4 rejects from 2 IPs (Starlink GR, a Cosmote CGN address), both on
+virgo, both the farm's exact profile (Chrome/157 X11, swiftshader, no input,
+`95070673`). Against that, 268 GR/CY solves passed under an arm on titan
+(~1 day) and 67 on virgo (~7 days). No solve in either window needed the
+rescue or the waiver.
+
 #### Auto-v2 — automatic vhost challenges at the v2 tier (2026-09-29)
 
 Until now the vhost grain was armed only by a MANUAL arm at `rung=v2`. Since

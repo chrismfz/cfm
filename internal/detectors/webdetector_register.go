@@ -1037,6 +1037,8 @@ func init() {
 		webdet.ConfigureLoginSignals(kvBool(kv, "LOGIN_SIGNALS", true))
 		// The malpath (CHALLENGE_PATHS) challenge at the v2 tier; default on.
 		webdet.ConfigureChallengeV2Paths(kvBool(kv, "CHALLENGE_V2_PATHS", true))
+		// The tier of a manual vhost arm that names none; default v2.
+		webdet.ConfigureChallengeV2Manual(kvBool(kv, "CHALLENGE_V2_MANUAL", true))
 		// The malpath challenge also revokes the IP's clearance cookie; default on.
 		webdet.ConfigureClearanceRevoke(kvBool(kv, "CHALLENGE_PATHS_REVOKE", true))
 		// Failed v2 visits from a malpath-marked IP that ban it; 0 = off.

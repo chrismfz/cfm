@@ -175,6 +175,19 @@ func (s *manualChalState) rung(host string) string {
 	return e.Rung
 }
 
+// activeRung returns the tier of host's active (non-expired) manual arm and
+// whether there is one, under ONE lock (rung alone cannot tell a v1 arm
+// from none).
+func (s *manualChalState) activeRung(host string) (rung string, active bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.vhosts[host]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		return "", false
+	}
+	return e.Rung, true
+}
+
 // setRung re-tiers an ACTIVE manual challenge on host, keeping its expiry,
 // granted TTL and reason. Returns the previous rung and ok=false when host has
 // no active (non-expired) entry — re-tiering never creates or extends an arm.
@@ -529,31 +542,62 @@ func (e *Engine) IsManualChallengeActive(host string) (bool, time.Time, string) 
 // challenged when the operator challenged the apex. The reverse does not
 // hold — a manual challenge on "www.example.com" does not expand to the apex.
 func (e *Engine) manualChallengeCovering(host string) (bool, time.Time, string) {
-	if ok, exp, reason := e.manualChal.active(host); ok {
-		return ok, exp, reason
-	}
-	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
-		if ok, exp, reason := e.manualChal.active(apex); ok {
-			return ok, exp, reason
-		}
+	if target := e.manualRungTarget(host); target != "" {
+		return e.manualChal.active(target)
 	}
 	return false, time.Time{}, ""
 }
 
-// manualRungTarget is the host whose manual arm covers host (manualChallenge-
-// Covering's resolution): host itself when it has an active arm, else its
-// apex for a www. host, else "". The ONE resolver for both reading the manual
-// arm's tier (challengeV2VhostTier) and changing it (SetManualChallengeRungAs).
-func (e *Engine) manualRungTarget(host string) string {
-	if ok, _, _ := e.manualChal.active(host); ok {
-		return host
+// coveringManualArm resolves the manual arm covering host: host itself when it
+// has an active arm, else its apex for a www. host (the bridge expands an apex
+// arm to www, vhostVariantsForBridge). It returns that arm's host and tier,
+// each lookup one locked read. The ONE covering resolver: manualRungTarget
+// (reading and changing the arm's tier) and the tier-less add's preserve rule
+// both go through it.
+func (e *Engine) coveringManualArm(host string) (target, rung string, ok bool) {
+	if r, active := e.manualChal.activeRung(host); active {
+		return host, r, true
 	}
 	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
-		if ok, _, _ := e.manualChal.active(apex); ok {
-			return apex
+		if r, active := e.manualChal.activeRung(apex); active {
+			return apex, r, true
 		}
 	}
-	return ""
+	return "", "", false
+}
+
+// manualRungTarget is the host whose manual arm covers host
+// (coveringManualArm), or "". The resolver for both reading the manual arm's
+// tier (challengeV2VhostTier) and changing it (SetManualChallengeRungAs).
+func (e *Engine) manualRungTarget(host string) string {
+	target, _, _ := e.coveringManualArm(host)
+	return target
+}
+
+// tierlessArmRung is the tier a manual arm on host gets when its caller names
+// none: the covering arm's tier when one covers host (a re-arm never re-tiers,
+// and a www. arm never shadows its apex's), else the node default
+// (manualDefaultRungFor; note says why a wildcard host is not at it).
+// defaulted reports that the node default applied. The add handler and the
+// status endpoint's manual_default_rung both answer through it.
+func (e *Engine) tierlessArmRung(host string) (rung, note string, defaulted bool) {
+	if _, r, covered := e.coveringManualArm(host); covered {
+		return r, "", false
+	}
+	rung, note = manualDefaultRungFor(host)
+	return rung, note, note == ""
+}
+
+// manualDefaultRungFor is the tier a NEW tier-less manual arm on host gets:
+// the node default (challengeV2ManualDefaultRung), except v1 on a wildcard
+// host, which the v2 gate cannot match. The add handler and the status
+// endpoint's manual_default_rung both answer through it.
+func manualDefaultRungFor(host string) (rung, note string) {
+	def := challengeV2ManualDefaultRung()
+	if def == "v2" && strings.Contains(host, "*") {
+		return "", "wildcard host: armed at v1 (the v2 gate cannot match a wildcard yet) — arm the concrete vhost(s) for v2"
+	}
+	return def, ""
 }
 
 // rungOrV1 renders a rung for logs/UI: "" reads as "v1".
