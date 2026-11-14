@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.14
+
 ### Changed
 - **A manual vhost challenge is armed at v2 unless you say v1.**
   - What: `cfm webtop challenge add <vhost>` without `--rung` now arms
