@@ -19,9 +19,10 @@ type chalVhostAddRequest struct {
 	Host   string `json:"host"`
 	TTL    string `json:"ttl"`    // e.g. "30m", "1h" — optional, default 30m
 	Reason string `json:"reason"` // optional, default "manual"
-	// Rung: "v1" (default; plain challenge) or "v2"/"challenge_v2"
-	// (ChallengeV2: same challenge page, but a solve failing the Rung-1
-	// humanity check earns NO clearance). Challenge-tier either way, so
+	// Rung: "v1" (plain challenge) or "v2"/"challenge_v2" (ChallengeV2:
+	// same challenge page, but a solve failing the Rung-1 humanity check
+	// earns NO clearance). Absent: a re-arm keeps the arm's tier, a new arm
+	// gets the node default (CHALLENGE_V2_MANUAL, v2 unless turned off). Challenge-tier either way, so
 	// scoped tokens may set it for their own vhosts like any manual
 	// challenge — there is no deny here to escalate to.
 	Rung string `json:"rung"`
@@ -41,6 +42,11 @@ type chalVhostAddResponse struct {
 	TTL       string    `json:"ttl"`
 	Reason    string    `json:"reason"`
 	Rung      string    `json:"rung"` // "v1" | "v2"
+	// RungDefault: the caller named no tier and this was a NEW arm, so Rung
+	// is the node default (CHALLENGE_V2_MANUAL). RungNote: why a tier-less
+	// arm did NOT get the v2 default (a wildcard host).
+	RungDefault bool   `json:"rung_default,omitempty"`
+	RungNote    string `json:"rung_note,omitempty"`
 	// TTLCapped is set when a scoped caller asked for more than the scoped
 	// TTL ceiling and the arm was clamped (slice D). The TTL/ExpiresAt
 	// fields always carry the EFFECTIVE values, so a capped arm is visible,
@@ -234,10 +240,20 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 	}
 	// An ABSENT tier preserves an existing arm's rung: a TTL extension or
 	// re-challenge from a rung-unaware surface (live view, bots drilldown,
-	// plain CLI) must not silently disarm v2 (review finding). An explicit
-	// rung=v1 still downgrades — that is the operator saying so.
+	// plain CLI) must not silently re-tier it either way (review finding).
+	// A NEW arm without a tier gets the node default (CHALLENGE_V2_MANUAL,
+	// v2 since 2026-11-14) — except on a wildcard host, which the v2 gate
+	// cannot match yet (below): that one stays v1 and the response says
+	// why. An explicit rung=v1 still downgrades — the operator saying so.
+	rungDefaulted, rungNote := false, ""
 	if strings.TrimSpace(req.Rung) == "" {
-		rung = e.manualChal.rung(req.Host)
+		if on, _, _ := e.manualChal.active(req.Host); on {
+			rung = e.manualChal.rung(req.Host)
+		} else if def := challengeV2ManualDefaultRung(); def == "v2" && strings.Contains(req.Host, "*") {
+			rungNote = "wildcard host: armed at v1 (the v2 gate cannot match a wildcard yet) — arm the concrete vhost(s) for v2"
+		} else {
+			rung, rungDefaulted = def, true
+		}
 	}
 	// Wildcard hosts (*.example.com / cpanel.*) are challengeable, but the
 	// verify-side rung lookup is exact+www only — a wildcard v2 arm would
@@ -286,6 +302,8 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		TTL:            ttl.String(),
 		Reason:         req.Reason,
 		Rung:           rungOrV1(rung),
+		RungDefault:    rungDefaulted,
+		RungNote:       rungNote,
 		TTLCapped:      ttlCapped,
 		Tier:           tierJSON(tier),
 		LockdownCapped: lockCapped,
@@ -876,6 +894,9 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"rung_trigger": tier.Trigger,
 		"rung_pin":     tier.Pin,
 		"rung_auto":    tier.AutoRung,
+		// The tier a NEW tier-less manual arm would get here
+		// (CHALLENGE_V2_MANUAL): the pickers' "default" option names it.
+		"manual_default_rung": rungOrV1(challengeV2ManualDefaultRung()),
 		// true when the caller is a scoped token and the operator set the
 		// pin: the tenant's surfaces hide the pin controls (the write 403s).
 		"rung_pin_locked":   tier.pinLockedFor(vhostScopeFromContext(r.Context())),

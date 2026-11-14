@@ -811,7 +811,8 @@ still serves the same challenge page as `challenge` (the rung difference is
 enforced at verify, not at serve). The verify gate ORs four arm grains:
 fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL
 vhost challenge — arm-surfaces slice A: API/CLI/cfm-admin Tier picker;
-persisted with the challenge — or, since 2026-09-29, an AUTOMATIC vhost
+persisted with the challenge; since 2026-11-14 the tier of every NEW manual
+arm that names none, panic button included, `CHALLENGE_V2_MANUAL` — or, since 2026-09-29, an AUTOMATIC vhost
 challenge whose source is in `CHALLENGE_V2_AUTO_VHOST`, default
 `suspicious_vhost,uniqpaths_short,under_attack,vhost_config` (a D5 amendment:
 TTL'd by the challenge, sized from the `src=` corpus first — except

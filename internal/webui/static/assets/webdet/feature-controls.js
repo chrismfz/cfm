@@ -43,7 +43,10 @@ export const controlsMixin = {
       // vhost surface (v1/challenge/vhost/status), a single request for the
       // selected host — never a per-row fan-out.
       panicHost: "",
-      panicTier: "v1", // "v1" plain | "v2" strict (humanity-gated at verify)
+      // "" = the server's default for a NEW arm (CHALLENGE_V2_MANUAL: strict
+      // v2 unless turned off; a re-arm keeps the arm's tier) | "v1" plain |
+      // "v2" strict (humanity-gated at verify).
+      panicTier: "",
       panicTTL: "1h",  // scoped callers are server-clamped to 24h (ttl_capped)
       panicStatus: null,
       panicMsg: "",
@@ -385,12 +388,9 @@ export const controlsMixin = {
       const host = String(this.panicHost || "").trim();
       if (!host) { this.panicMsg = "Pick a vhost first."; return; }
       try {
-        const res = await this.postJSON("v1/challenge/vhost/add", {
-          host,
-          ttl: this.panicTTL,
-          rung: this.panicTier,
-          reason: "panic-button",
-        });
+        const body = { host, ttl: this.panicTTL, reason: "panic-button" };
+        if (this.panicTier) body.rung = this.panicTier; // "" = server default
+        const res = await this.postJSON("v1/challenge/vhost/add", body);
         const rung = res?.rung === "v2" ? "strict (v2)" : "standard";
         this.panicMsg = `Challenge armed on ${host} (${rung}, ${res?.ttl || this.panicTTL})` +
           (res?.ttl_capped ? " — requested duration was capped to the 24h customer limit" : "") +
@@ -413,6 +413,14 @@ export const controlsMixin = {
     },
     panicSwitchIsPin() {
       return Boolean(this.panicSwitchTarget()) && tierSwitchIsPin(this.panicStatus || {});
+    },
+    // The "Default" option's label: what a new tier-less arm gets on this
+    // node (status manual_default_rung; absent from an older daemon).
+    panicDefaultLabel() {
+      const d = this.panicStatus && this.panicStatus.manual_default_rung;
+      if (d === "v2") return "strict (v2)";
+      if (d === "v1") return "standard";
+      return "server's choice";
     },
     panicTierPinned() {
       return tierUnpinnable(this.panicStatus || {});

@@ -39,7 +39,8 @@
           <label>Vhost</label>
           <input class="input input-wide" type="text" v-model.trim="panicHost" placeholder="example.com" list="cfm-vhost-list" @change="refreshPanicStatus" />
           <label>Mode</label>
-          <select class="input" v-model="panicTier" title="Standard serves the normal challenge. Strict additionally rejects solves that look automated (headless evidence) — same page, stricter verification.">
+          <select class="input" v-model="panicTier" title="Standard serves the normal challenge. Strict additionally rejects solves that look automated (headless evidence) — same page, stricter verification. Default = the server's choice for a new challenge (strict unless the operator turned it off).">
+            <option value="">Default ({{ panicDefaultLabel() }})</option>
             <option value="v1">Standard</option>
             <option value="v2">Strict (v2)</option>
           </select>
