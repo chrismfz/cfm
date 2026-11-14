@@ -411,8 +411,9 @@ already opened.
           XSS probes like `?q=<script>alert('XSS')</script>` are a scanner
           smoke test, so their solvers face the humanity gate; revert per
           fleet with `rule_xss = "challenge"`). **Since 2026-09-23 the whole
-          WAF challenge tier ships at `challenge_v2`** except rule 102
-          (`rule_long_path_segment`, held for rendering crawlers); see
+          WAF challenge tier ships at `challenge_v2`** (rule 102,
+          `rule_long_path_segment`, held for rendering crawlers until
+          2026-11-14: the bypass list keeps them out of the WAF); see
           `docs/waf.md`, "The `challenge_v2` tier".
           As-built: cfm_waf.lua accepts the mode (rule_mode/set_rule),
           severity challenge(2) < challenge_v2(3) < block(4) — only block

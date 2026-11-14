@@ -77,12 +77,21 @@ gone (it bypassed the verify location's header clears). Semantics to know:
   2026-09-22). The rationale is uniform: a v1 challenge is a paper wall against
   a JS-capable bot (it solves the PoW and passes), while v2 scores the solve for
   headless evidence at verify and costs a real human nothing (absence never
-  convicts). **One rule is deliberately held at plain `challenge`:**
-  **`rule_long_path_segment` (102)** — a rendering search crawler (Googlebot
-  runs JS, follows long URLs) can trip it and would be wrongly rejected, since a
-  WAF-rule mark is not good-bot-waived (a silent de-index risk; the length
-  heuristic is FP-prone — see FP case 1 — and wants a narrowing fix before it
-  can move). (`rule_bad_ua` (201) IS in the sweep: a JS-capable headless browser
+  convicts). **`rule_long_path_segment` (102) was the one rule held at plain
+  `challenge` until 2026-11-14**, for a rendering search crawler (Googlebot
+  runs JS, follows long URLs) that v2 would wrongly reject, since a WAF-rule
+  mark is not good-bot-waived. That crawler never reaches the WAF: the bypass
+  list (`challenge_waf_bypass.conf`, Google's and Bing's crawler ranges among
+  others) skips it at `cfm.lua` Step 0, and a crawler a vhost lockdown holds
+  skips the inline WAF too. The 7-day fleet read before the move: 11 854 hits on
+  4 nodes, none from a crawler range (the 28 Google-ASN hits were
+  `*.bc.googleusercontent.com`, i.e. Google Cloud customers); 11 757 were
+  Amazonbot looping on one Joomla K2 feed URL; it was already challenged at
+  v1, and v2 changes only what a solve earns. A crawler OUTSIDE the bypass list that renders JS (PetalBot,
+  YouBot hit it too) can now be rejected; its long-URL hit was challenged at v1
+  already. The length heuristic is still FP-prone (FP case 1): narrow it, do
+  not move it back down.
+  (`rule_bad_ua` (201) IS in the sweep: a JS-capable headless browser
   hiding behind an empty/library UA solves a v1 challenge and passes, and v2
   scores it; a real user's UA never trips the scored tier and a non-JS script
   never solves, so there is no added FP, and score ≥ 99 still hard-blocks.)

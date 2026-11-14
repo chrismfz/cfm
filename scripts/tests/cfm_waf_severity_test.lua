@@ -1696,17 +1696,17 @@ do
   local snap = fresh_waf.get_config()
   -- Every challenge-tier rule serves the same page, so as of 2026-09-23 the
   -- whole tier is challenge_v2 (the solve is scored for headless evidence at
-  -- verify; a real user's solve still passes — absence never convicts). ONLY
-  -- ONE rule stays at plain "challenge", and this is the invariant the sweep
-  -- must preserve in BOTH directions:
-  --   * rule_long_path_segment (102): a rendering crawler (Googlebot executes
-  --     JS, follows long URLs) can trip it AND solve; a WAF-rule mark is not
-  --     good-bot-waived, so v2 would reject it — a silent de-indexing FP. The
-  --     length heuristic is FP-prone and wants a narrowing fix before it moves.
+  -- verify; a real user's solve still passes — absence never convicts). Since
+  -- 2026-11-14 NO rule stays at plain "challenge": rule_long_path_segment (102)
+  -- was held for a rendering crawler (Googlebot) that v2 would reject, but the
+  -- bypass list keeps the Google/Bing crawler ranges out of the WAF entirely
+  -- (cfm.lua Step 0, and a lockdown-held crawler skips the inline WAF too), and
+  -- a 7-day fleet read found no crawler-range hit on it. A rule added here
+  -- needs a reason that still holds.
   -- (rule_bad_ua (201) is NOT held: a JS-capable headless browser hiding behind
   --  an empty/library UA solves a v1 challenge and passes; v2 scores it. A real
   --  user's UA never trips the scored tier, so no FP.)
-  local challenge_ok = { rule_long_path_segment = true }
+  local challenge_ok = {}
   for name, mode in pairs(snap) do
     if name:sub(1, 5) == "rule_" and mode == "challenge" then
       check(challenge_ok[name] == true,
@@ -1723,13 +1723,13 @@ do
     "rule_php_webshell_body", "rule_cmd_params", "rule_cmd_payload", "rule_bad_ua",
     -- logonly→challenge_v2 2026-09-23 (PR3): attack-only, a human's solve passes.
     "rule_crlf_injection", "rule_superglobal_override",
+    -- challenge→challenge_v2 2026-11-14: the last v1 hold.
+    "rule_long_path_segment",
   }
   for _, name in ipairs(must_be_challenge_v2) do
     check(snap[name] == "challenge_v2",
           "71: " .. name .. " ships as 'challenge_v2' (got " .. tostring(snap[name]) .. ")")
   end
-  -- The one held rule stays plain challenge.
-  check(snap["rule_long_path_segment"] == "challenge", "71: rule_long_path_segment held at challenge (Googlebot FP)")
   -- rule_bad_utf8 (611) ships DISABLED 2026-09-23: fleet-proven FP-only (2 hits/
   -- 30d both FP + 772 historical). Detector + regression tests kept; `disabled`
   -- skips the per-request UTF-8 walk. An accidental re-enable is caught here.

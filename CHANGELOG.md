@@ -33,6 +33,17 @@ back-filled here — see the git/PR history for that period.
     match them yet; the CLI and the page say so.
   - Knob: `[webdetector] CHALLENGE_V2_MANUAL = 0` turns the default back to
     v1 node-wide. It is also v1 while `CHALLENGE_V2_PASSIVE = 0`.
+- **WAF rule 102 (`rule_long_path_segment`) now challenges at v2**, the last
+  WAF rule still at the plain challenge.
+  - Why it was held: a JS-rendering crawler such as Googlebot could fail the
+    v2 check and be refused.
+  - Why that no longer applies: Google's and Bing's crawlers never reach the
+    WAF, since the bypass list skips it for them, in a lockdown too. Over 7
+    days the rule fired 11 854 times on 4 nodes and none of those hits came
+    from a crawler range. Most of them (11 757) were Amazonbot looping on
+    one Joomla feed URL, which the plain challenge already stopped.
+  - To revert on a node: `rule_long_path_segment = "challenge"` in
+    `/etc/cfm/cfm_waf_config.lua`.
 
 ## 2026.11.13
 

@@ -58,7 +58,7 @@ var wafRuleIDs = []WAFRule{
 	// panel-port gate (cfm_panel.lua) enforces, so traversal now denies on the
 	// cPanel/WHM/webmail ports too (7-day panel burn-in: 0 hits, six servers).
 	{ID: 101, Name: "rule_traversal", ReasonFamily: "WAF_TRAVERSAL", DefaultMode: "block"},
-	{ID: 102, Name: "rule_long_path_segment", ReasonFamily: "WAF_LONG_PATH", DefaultMode: "challenge"},
+	{ID: 102, Name: "rule_long_path_segment", ReasonFamily: "WAF_LONG_PATH", DefaultMode: "challenge_v2"},
 	// 103 (2026-09-22): a `..` segment in the RAW request path — ngx.var.uri,
 	// which rule 101 scans, is already dot-segment-resolved by nginx, so the
 	// WordPress pretty-permalink route of CVE-2026-87902 was invisible. Block

@@ -327,8 +327,13 @@ local CFG = {
   -- URL segments), B4 (oversized header bag).
   rule_smuggling_cl      = "challenge_v2", -- Content-Length + Transfer-Encoding both present, multi-CL, malformed CL
                                         -- (RFC-violating header combos used for request smuggling)
-  rule_long_path_segment = "challenge", -- single URL path segment ≥ 800 bytes (Greek/CJK
+  rule_long_path_segment = "challenge_v2", -- single URL path segment ≥ 800 bytes (Greek/CJK
                                         -- slug-safe; observed abuse is base64 stuffing >1 KB)
+                                        -- (challenge→challenge_v2 2026-11-14: held at v1 for
+                                        --  Googlebot, which the bypass list keeps out of the WAF
+                                        --  entirely, lockdown included; 7-day fleet read: 11 854
+                                        --  hits, none from a crawler range, mostly Amazonbot on
+                                        --  one Joomla feed loop, already challenged at v1)
   rule_header_flood      = "challenge_v2", -- total header bag > 16 KB excluding Cookie/Authorization volume
                                        -- (challenge→challenge_v2 2026-09-23: single-scanner traffic;
                                        --  solves get the Rung-1 humanity gate)
