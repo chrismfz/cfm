@@ -186,6 +186,51 @@ func TestHandleChallengeVhostAdd_ManualDefaultKnob(t *testing.T) {
 	}
 }
 
+// A tier-less arm on a www. host keeps the tier of the apex arm covering it,
+// rather than taking the v2 default and shadowing an operator's v1 apex arm
+// (the gate reads the host's own arm first, manualRungTarget).
+func TestHandleChallengeVhostAdd_TierlessWWWKeepsApexTier(t *testing.T) {
+	e := newTestEngineForChallengeHandlers()
+	add := func(qs string) map[string]any {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/add?"+qs, nil)
+		rr := httptest.NewRecorder()
+		e.handleChallengeVhostAdd(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("add %s: code=%d body=%s", qs, rr.Code, rr.Body.String())
+		}
+		var m map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &m)
+		return m
+	}
+	add("host=shop.gr&ttl=1h&rung=v1")
+	if m := add("host=www.shop.gr&ttl=1h"); m["rung"] != "v1" || m["rung_default"] != nil {
+		t.Fatalf("tier-less www arm under a v1 apex arm: rung=%v rung_default=%v, want v1 kept", m["rung"], m["rung_default"])
+	}
+	if got := e.manualChallengeRung("www.shop.gr"); got != "" {
+		t.Fatalf("www arm shadows the v1 apex at %q", got)
+	}
+	// With no covering arm, www gets the default like any host.
+	if m := add("host=www.other.gr&ttl=1h"); m["rung"] != "v2" || m["rung_default"] != true {
+		t.Fatalf("uncovered www arm: rung=%v rung_default=%v, want the v2 default", m["rung"], m["rung_default"])
+	}
+}
+
+// vhost/status names what a new tier-less arm would get: v2 by default, v1 on
+// a wildcard host (the add handler's own answer, manualDefaultRungFor).
+func TestHandleChallengeVhostStatus_ManualDefaultRung(t *testing.T) {
+	e := newTestEngineForChallengeHandlers()
+	for host, want := range map[string]string{"plain.gr": "v2", "*.wild.gr": "v1"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/challenge/vhost/status?host="+host, nil)
+		rr := httptest.NewRecorder()
+		e.handleChallengeVhostStatus(rr, req)
+		var m map[string]any
+		_ = json.Unmarshal(rr.Body.Bytes(), &m)
+		if m["manual_default_rung"] != want {
+			t.Fatalf("status %s: manual_default_rung=%v, want %s (code=%d)", host, m["manual_default_rung"], want, rr.Code)
+		}
+	}
+}
+
 func TestChallengeV2HostArmed_ApexCoversWWWAndWiring(t *testing.T) {
 	e := newTestEngineForChallengeHandlers()
 	// The production resolver (a manual-only engine: no bridge, no notes).

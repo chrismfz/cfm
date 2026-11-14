@@ -238,21 +238,23 @@ func (e *Engine) handleChallengeVhostAdd(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rung: " + req.Rung + " (use v1 or v2)"})
 		return
 	}
-	// An ABSENT tier preserves an existing arm's rung: a TTL extension or
-	// re-challenge from a rung-unaware surface (live view, bots drilldown,
-	// plain CLI) must not silently re-tier it either way (review finding).
-	// A NEW arm without a tier gets the node default (CHALLENGE_V2_MANUAL,
-	// v2 since 2026-11-14) — except on a wildcard host, which the v2 gate
-	// cannot match yet (below): that one stays v1 and the response says
-	// why. An explicit rung=v1 still downgrades — the operator saying so.
+	// An ABSENT tier preserves the tier of the manual arm COVERING the host
+	// (its own, else the apex's for a www. host — manualRungTarget's
+	// resolution): a TTL extension or re-challenge from a rung-unaware
+	// surface (live view, bots drilldown, plain CLI) must not silently
+	// re-tier it either way (review finding), nor shadow an apex arm the
+	// operator set to v1 with a v2 arm on www. A host no manual arm covers
+	// gets the node default (CHALLENGE_V2_MANUAL, v2 since 2026-11-14) —
+	// except a wildcard host, which the v2 gate cannot match yet (below):
+	// that one stays v1 and the response says why. An explicit rung=v1
+	// still downgrades — the operator saying so.
 	rungDefaulted, rungNote := false, ""
 	if strings.TrimSpace(req.Rung) == "" {
-		if on, _, _ := e.manualChal.active(req.Host); on {
-			rung = e.manualChal.rung(req.Host)
-		} else if def := challengeV2ManualDefaultRung(); def == "v2" && strings.Contains(req.Host, "*") {
-			rungNote = "wildcard host: armed at v1 (the v2 gate cannot match a wildcard yet) — arm the concrete vhost(s) for v2"
+		if r, covered := e.coveringManualRung(req.Host); covered {
+			rung = r
 		} else {
-			rung, rungDefaulted = def, true
+			rung, rungNote = manualDefaultRungFor(req.Host)
+			rungDefaulted = rungNote == ""
 		}
 	}
 	// Wildcard hosts (*.example.com / cpanel.*) are challengeable, but the
@@ -873,6 +875,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	lockUntilJSON := lockdownPtr(lockUntil)
 
 	tier := e.challengeV2VhostTierForScope(host)
+	defaultRung, _ := manualDefaultRungFor(host)
 	// An automatic vhost challenge the store never records (uniqpaths_short
 	// writes no row) is still live and still carries a tier: report it as
 	// auto-active, or the pages drop the host — and its "→ v1 (pin)"
@@ -896,7 +899,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"rung_auto":    tier.AutoRung,
 		// The tier a NEW tier-less manual arm would get here
 		// (CHALLENGE_V2_MANUAL): the pickers' "default" option names it.
-		"manual_default_rung": rungOrV1(challengeV2ManualDefaultRung()),
+		"manual_default_rung": rungOrV1(defaultRung),
 		// true when the caller is a scoped token and the operator set the
 		// pin: the tenant's surfaces hide the pin controls (the write 403s).
 		"rung_pin_locked":   tier.pinLockedFor(vhostScopeFromContext(r.Context())),

@@ -1637,7 +1637,7 @@ func runChallengeAdd(baseURL string, args []string) error {
 	}
 
 	rungSuffix := ""
-	if result["rung_default"] == true {
+	if result["rung_default"] == true && result["rung"] == "v2" {
 		rungSuffix = " (node default; --rung v1 for plain)"
 	}
 	fmt.Printf("✓ Challenge active for %s  ttl=%s  expires=%s  reason=%s  rung=%v%s\n",

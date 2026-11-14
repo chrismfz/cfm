@@ -1128,8 +1128,9 @@ A NEW manual vhost challenge whose caller names no tier is armed at v2:
 picker and the customer panic button on "Default", the live view, the bots
 page. `[webdetector] CHALLENGE_V2_MANUAL = 0` puts it back at v1, and so does
 the rung being off (`CHALLENGE_V2_PASSIVE = 0`). Unchanged: an explicit
-`--rung v1` / `rung=v1` arms plain, a re-arm without a tier keeps the arm's
-tier, and a tier-less wildcard host is armed v1 (`rung_note` says why: the v2
+`--rung v1` / `rung=v1` arms plain, an arm without a tier keeps the tier of
+the manual arm covering the host (its own, or the apex's for a `www.` host),
+and a tier-less wildcard host is armed v1 (`rung_note` says why: the v2
 gate cannot match a wildcard). `vhost/add` answers `rung_default=true` when
 the tier was the default; `vhost/status` carries `manual_default_rung`, which
 names the picker's "Default".

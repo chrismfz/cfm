@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   TIER_SOURCE_LABELS,
+  manualArmBody,
   tierButtonTitle,
   effectiveTier,
   tierSourceLabel,
@@ -147,4 +148,20 @@ test("a manual v2 arm over an automatic v2 drops to v1 in one click: re-tier + p
   assert.match(tierButtonTitle(pinned, "a.gr"), /v2 pin holds/);
   // No automatic v2 underneath: one call.
   assert.equal(tierSwitchRequests("a.gr", { ...s, rung_auto: "" }, "v1").length, 1);
+});
+
+test("a manual arm on Default sends no rung; an explicit tier is sent", () => {
+  assert.deepEqual(manualArmBody("a.gr", "1h", "panic-button", ""), { host: "a.gr", ttl: "1h", reason: "panic-button" });
+  assert.deepEqual(manualArmBody("a.gr", "1h", "panic-button", undefined), { host: "a.gr", ttl: "1h", reason: "panic-button" });
+  assert.deepEqual(manualArmBody("a.gr", "1h", "x", "v1"), { host: "a.gr", ttl: "1h", reason: "x", rung: "v1" });
+  assert.deepEqual(manualArmBody("a.gr", "1h", "x", "v2"), { host: "a.gr", ttl: "1h", reason: "x", rung: "v2" });
+});
+
+test("the panic card and the Tier picker start on Default and build the body through manualArmBody", () => {
+  const controls = readFileSync(new URL("./feature-controls.js", import.meta.url), "utf8");
+  const challenge = readFileSync(new URL("./feature-challenge.js", import.meta.url), "utf8");
+  assert.match(controls, /panicTier:\s*"",/);
+  assert.match(challenge, /challengeRung:\s*"",/);
+  assert.match(controls, /manualArmBody\(host, this\.panicTTL, "panic-button", this\.panicTier\)/);
+  assert.equal((challenge.match(/manualArmBody\(/g) || []).length, 2);
 });

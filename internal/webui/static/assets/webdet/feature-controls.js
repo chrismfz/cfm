@@ -4,6 +4,7 @@
 
 import {
   effectiveTier,
+  manualArmBody,
   tierPinned,
   tierSwitchIsPin,
   tierUnpinnable,
@@ -388,8 +389,7 @@ export const controlsMixin = {
       const host = String(this.panicHost || "").trim();
       if (!host) { this.panicMsg = "Pick a vhost first."; return; }
       try {
-        const body = { host, ttl: this.panicTTL, reason: "panic-button" };
-        if (this.panicTier) body.rung = this.panicTier; // "" = server default
+        const body = manualArmBody(host, this.panicTTL, "panic-button", this.panicTier);
         const res = await this.postJSON("v1/challenge/vhost/add", body);
         const rung = res?.rung === "v2" ? "strict (v2)" : "standard";
         this.panicMsg = `Challenge armed on ${host} (${rung}, ${res?.ttl || this.panicTTL})` +

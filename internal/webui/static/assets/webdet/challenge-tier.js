@@ -179,3 +179,15 @@ export function tierButtonTitle(s, host) {
     ? "Pin this vhost's automatic challenges to plain v1 (the emergency drop-back): stays until you unpin it (a customer's pin expires after 24h)"
     : "Pin this vhost's automatic challenges to v2: solves must also pass the passive humanity check; stays until you unpin it (a customer's pin expires after 24h)";
 }
+
+// manualArmBody: the v1/challenge/vhost/add body for a manual arm from a Tier
+// picker. tier "" (the picker's Default) sends NO rung, so the daemon decides:
+// a new arm gets the node default (CHALLENGE_V2_MANUAL, v2 unless turned off;
+// v1 on a wildcard host), a re-arm keeps the covering arm's tier. Sending
+// rung:"" or a literal "v1" for Default would quietly arm every tier-less
+// click at v1 again.
+export function manualArmBody(host, ttl, reason, tier) {
+  const body = { host, ttl, reason };
+  if (tier === "v1" || tier === "v2") body.rung = tier;
+  return body;
+}

@@ -175,6 +175,19 @@ func (s *manualChalState) rung(host string) string {
 	return e.Rung
 }
 
+// activeRung returns the tier of host's active (non-expired) manual arm and
+// whether there is one, under ONE lock (rung alone cannot tell a v1 arm
+// from none).
+func (s *manualChalState) activeRung(host string) (rung string, active bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.vhosts[host]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		return "", false
+	}
+	return e.Rung, true
+}
+
 // setRung re-tiers an ACTIVE manual challenge on host, keeping its expiry,
 // granted TTL and reason. Returns the previous rung and ok=false when host has
 // no active (non-expired) entry — re-tiering never creates or extends an arm.
@@ -554,6 +567,33 @@ func (e *Engine) manualRungTarget(host string) string {
 		}
 	}
 	return ""
+}
+
+// coveringManualRung is the tier of the manual arm covering host
+// (manualRungTarget's resolution: host's own arm, else its apex's for a www.
+// host) and whether one covers it — each lookup a single locked read.
+func (e *Engine) coveringManualRung(host string) (string, bool) {
+	if r, ok := e.manualChal.activeRung(host); ok {
+		return r, true
+	}
+	if apex, found := strings.CutPrefix(host, "www."); found && apex != "" {
+		if r, ok := e.manualChal.activeRung(apex); ok {
+			return r, true
+		}
+	}
+	return "", false
+}
+
+// manualDefaultRungFor is the tier a NEW tier-less manual arm on host gets:
+// the node default (challengeV2ManualDefaultRung), except v1 on a wildcard
+// host, which the v2 gate cannot match. The add handler and the status
+// endpoint's manual_default_rung both answer through it.
+func manualDefaultRungFor(host string) (rung, note string) {
+	def := challengeV2ManualDefaultRung()
+	if def == "v2" && strings.Contains(host, "*") {
+		return "", "wildcard host: armed at v1 (the v2 gate cannot match a wildcard yet) — arm the concrete vhost(s) for v2"
+	}
+	return def, ""
 }
 
 // rungOrV1 renders a rung for logs/UI: "" reads as "v1".
