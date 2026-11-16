@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.16
+
 ### Fixed
 - **cfm-lsm runs again on CloudLinux 8 (lve 4.18).**
   - What: on earth, mars, orion and virgo cfm-lsm attached no policy at
