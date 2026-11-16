@@ -676,3 +676,34 @@ func TestPresenceGatedAllowComm_AtPresent(t *testing.T) {
 		t.Errorf("crontab missing when at(1) absent (should not be presence-gated): got %v", eff)
 	}
 }
+
+// TestEventFilter_PolicyDefaults_OBS004ProcessListers pins the
+// compiled-in, OBS-004-scoped allowlist (DefaultPolicyAllowComm). It
+// must apply with NO lsm.conf entry (upgraded hosts keep their old
+// conffile), must not leak into other comm-consulting policies
+// (allow_comm is spoofable), and must leave lsphp — the sibling-worker
+// credential-theft shape — reporting.
+func TestEventFilter_PolicyDefaults_OBS004ProcessListers(t *testing.T) {
+	f := BuildEventFilter(DefaultConf())
+	for _, comm := range []string{"ps", "pgrep", "pkill", "pidof", "cpanel", "cloudlinux-stat", "lve_suwrapper"} {
+		if !f.Match(Event{PolicyID: PolicyPtraceAccess, Comm: comm, Filename: "lsphp"}) {
+			t.Errorf("expected default conf to suppress OBS-004 comm=%q", comm)
+		}
+	}
+	for _, comm := range []string{"lsphp", "php-fpm", "gdb", "python3"} {
+		if f.Match(Event{PolicyID: PolicyPtraceAccess, Comm: comm, Filename: "lsphp"}) {
+			t.Errorf("OBS-004 comm=%q must still report", comm)
+		}
+	}
+	for _, p := range AllPolicies() {
+		if p.ID == PolicyPtraceAccess {
+			continue
+		}
+		eff := DefaultConf().AllowCommFor(p.ID)
+		for _, comm := range DefaultPolicyAllowComm[PolicyPtraceAccess] {
+			if indexOf(eff, comm) >= 0 && indexOf(DefaultGlobalAllowComm, comm) < 0 {
+				t.Errorf("OBS-004-only default %q leaked into %s's allowlist", comm, p.ID)
+			}
+		}
+	}
+}

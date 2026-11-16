@@ -201,11 +201,11 @@ func RunPreflight() Preflight {
 }
 
 func checkPolicyAvailability() []PolicyAvailability {
-	return []PolicyAvailability{
+	return applyPerfLinkAvailability([]PolicyAvailability{
 		checkCredEscalAvailability(),
 		checkDirectCredInstallAvailability(),
 		checkKexecLoadAvailability(),
-	}
+	})
 }
 
 // checkCredEscalAvailability reports whether CFML-CRED-002 can attach.

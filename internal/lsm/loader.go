@@ -327,7 +327,17 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
 
+	// Tracepoint links on a kernel without BPF perf links cannot be
+	// pinned (perflink_probe.go); attaching them would fail pinAll and
+	// take every other policy down with it. Same belt-and-suspenders
+	// role as the task-storage guard below: the enable paths already
+	// drop these via PolicyAvailability.
+	skipTracepoints := opts.PinDir != "" && perfLinkUnsupported()
 	for _, id := range wanted {
+		if skipTracepoints && isTracepointPolicy(id) {
+			l.attach.Failed[id] = errors.New("unavailable: " + perfLinkUnavailableReason)
+			continue
+		}
 		// On a task-storage-downgraded load, CFML-CRED-002/003 were
 		// neutralised to no-ops (their map is a HASH placeholder), so
 		// attaching them would hook dead programs. Record them as

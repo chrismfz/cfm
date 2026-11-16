@@ -1442,7 +1442,9 @@ tiny HASH placeholders and removes every loaded reference to them —
 neutralising `cfm_cred002`/`cfm_cred003` (dropping CFML-CRED-002/003) and
 forcing `cfm_fs005_web_origin_monitor = 0` so the verifier
 dead-code-eliminates FS-005's `bpf_task_storage_get` calls. The object
-then loads and the remaining ~15 policies attach normally, including
+then loads and the remaining policies attach (minus the three tracepoint
+policies on a kernel without perf links — see the per-policy probes
+below), including
 FS-005's core inode hooks (only its web-origin enrichment tag is lost).
 CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
 per-policy probes (see below), not as a component FAIL — the host runs
@@ -1471,6 +1473,18 @@ policies from attaching. Today they are:
   both depend on `cfm_cred_transition_tasks` and are dropped on partial
   backports that lack it (see "Task-local storage" above).
 - **`CFML-EXEC-008`** — whether the kexec syscall tracepoints are exposed.
+- **`CFML-BPF-001`, `CFML-EXEC-007`, `CFML-EXEC-008`** — whether the
+  kernel has BPF perf-event links (`BPF_LINK_TYPE_PERF_EVENT`, upstream
+  5.15; EL9's 5.14 backports them). These three attach to syscall
+  tracepoints, and without perf links cilium/ebpf falls back to the
+  `PERF_EVENT_IOC_SET_BPF` ioctl, whose attachment cannot be pinned to
+  bpffs. Every enable path pins, so on such a kernel the first
+  tracepoint pin (`perf event ioctl pin: not supported`) used to fail the
+  WHOLE load: CloudLinux 8's lve 4.18 hosts ran no cfm-lsm policy at all,
+  retrying every 30 minutes, until 2026-11-16. They are now reported
+  unavailable there (`internal/lsm/perflink_probe.go`) and the remaining
+  LSM-hook / fentry policies attach. Module loads stay covered by
+  `kernsec`.
 
 ### CLI surface
 
