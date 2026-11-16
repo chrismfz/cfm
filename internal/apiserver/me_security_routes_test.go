@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -180,8 +181,15 @@ func TestHandleMePasswordChange_LimitsWrongGuesses(t *testing.T) {
 			t.Fatalf("guess %d: status %d, want 401", i, code)
 		}
 	}
-	if code := post(); code != http.StatusTooManyRequests {
-		t.Fatalf("guess past the lock threshold: status %d, want 429", code)
+	req := httptest.NewRequest(http.MethodPost, "https://host/api/v1/me/password",
+		bytes.NewBufferString(`{"current_password":"a guess","new_password":"new-password-123"}`))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("guess past the lock threshold: status %d, want 429", rr.Code)
+	}
+	if got, want := rr.Header().Get("Retry-After"), strconv.Itoa(int(loginLockWindow/time.Second)); got != want {
+		t.Fatalf("Retry-After on a locked account = %q, want %q (the lock's length)", got, want)
 	}
 	if guesses != loginLockThreshold {
 		t.Fatalf("password checked %d times, want %d (none once locked)", guesses, loginLockThreshold)

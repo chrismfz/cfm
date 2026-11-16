@@ -86,7 +86,7 @@ fleet controller + admin SSO sessions) get
 
 - New `RateLimitMiddleware`, wired **inside** `TokenMiddleware` (so the identity
   context is populated) and skipping MCP + public/health paths. Execution order:
-  `… → TokenMiddleware → CSRF → RateLimit → MFARollout → mux`.
+  `… → TokenMiddleware → CSRF → RateLimit → mux`.
 - **Enforce by default, in code** — no `cfm.conf` entry required (secure-fleet
   default). An optional `RATE_LIMIT_MODE` selects:
   - `enforce` (**default**): over-ceiling → `429` + `Retry-After` (from the bucket

@@ -84,7 +84,9 @@ func TestSetMFARolloutPolicyFromConfig(t *testing.T) {
 
 // The enrollment gate is retired: whatever the two old keys say, enrollment
 // answers. (It never did anything else: the gate matched paths enrollment is
-// not served at. This pins that the keys now change nothing on purpose.)
+// not served at.) This covers the policy and the /me/security mount; the gate's
+// middleware itself is deleted, so it cannot be back in Start's chain without
+// this file failing to compile somewhere.
 func TestRetiredTOTPEnrollKeysDoNotGateEnrollment(t *testing.T) {
 	const password = "a long enough password"
 	mgr, err := goauth.New(goauth.Config{
@@ -137,5 +139,49 @@ func TestRetiredTOTPEnrollKeysDoNotGateEnrollment(t *testing.T) {
 	}
 	if rr := post(totpEnrollStartPath, `{"password":"`+password+`"}`); rr.Code != http.StatusOK {
 		t.Fatalf("enrollment start with the retired keys set against it: %d %s, want 200", rr.Code, rr.Body.String())
+	}
+}
+
+// With the login MFA step off, enrolling would lock the account out.
+func TestTOTPEnrollRefusedWhileLoginVerifyIsOff(t *testing.T) {
+	origPolicy := activeMFARolloutPolicy
+	t.Cleanup(func() { activeMFARolloutPolicy = origPolicy })
+	activeMFARolloutPolicy = mfaRolloutPolicy{loginVerifyEnabled: false}
+
+	reached := false
+	routes := http.NewServeMux()
+	routes.HandleFunc("POST "+totpEnrollStartPath, func(w http.ResponseWriter, _ *http.Request) { reached = true })
+	routes.HandleFunc("GET /me/security/factors", func(w http.ResponseWriter, _ *http.Request) {})
+	h := meSecurityHandler(routes)
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "https://host"+totpEnrollStartPath, strings.NewReader(`{}`)))
+	if rr.Code != http.StatusConflict || reached {
+		t.Fatalf("enroll start with login verify off: status %d, reached goauth=%v; want 409, not reached", rr.Code, reached)
+	}
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "https://host/me/security/factors", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("other security routes with login verify off: status %d, want 200", rr.Code)
+	}
+}
+
+// The bare /me/security path must not redirect: behind the edge the
+// /cfm-admin prefix is gone, and the redirect would leave it.
+func TestMeSecurityBarePathDoesNotRedirect(t *testing.T) {
+	origAuth := Auth
+	t.Cleanup(func() { Auth = origAuth })
+	mgr, err := goauth.New(goauth.Config{DBPath: filepath.Join(t.TempDir(), "auth.db"), MFAEncryptionKey: "0123456789abcdef", CookieName: "sid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { mgr.Close() })
+	Auth = mgr
+	mux := http.NewServeMux()
+	registerMeSecurityRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "https://host/me/security", nil))
+	if rr.Code >= 300 && rr.Code < 400 {
+		t.Fatalf("GET /me/security redirected (%d to %q)", rr.Code, rr.Header().Get("Location"))
 	}
 }

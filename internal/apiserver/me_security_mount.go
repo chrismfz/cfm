@@ -26,6 +26,14 @@ const totpEnrollStartPath = "/me/security/mfa/totp/enroll/start"
 func meSecurityHandler(routes http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == totpEnrollStartPath {
+			// With the login MFA step switched off, an account with TOTP
+			// cannot log in at all (goauth stops at "MFA pending" and
+			// /login/verify answers 404), so a new enrollment would only
+			// lock its owner out.
+			if !mfaLoginVerifyEnabled() {
+				writeJSONError(w, http.StatusConflict, "TOTP enrollment is unavailable while AUTH_MFA_LOGIN_VERIFY_ENABLED is off: an account with TOTP could not log in")
+				return
+			}
 			serveTOTPEnrollStartWithQR(w, r, routes)
 			return
 		}

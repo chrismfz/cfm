@@ -7,11 +7,17 @@ This runbook stages MFA in phases so existing API/automation auth remains stable
 1. Deploy code with `AUTH_MFA_LOGIN_VERIFY_ENABLED=true` (default).
 2. Verify `/cfm-admin/login` still accepts password-only users and only redirects to `/cfm-admin/login/verify` for MFA-required sessions.
 3. If rollback is needed, set `AUTH_MFA_LOGIN_VERIFY_ENABLED=false` and restart cfm.
+   **This locks out every account that has TOTP enabled**: their login stops
+   at the MFA step, which is then switched off. Before rolling back, reset
+   MFA for those accounts (`cfm auth mfa reset --username <user> ...`, Phase 3)
+   or keep the switch on. While it is off, enrollment start answers `409`, so
+   no account enrolls into that state.
 
 ## Phase 2 — TOTP enrollment from user settings
 
-Enrollment is available to every cfm-admin user. There is no rollout switch
-for it: `AUTH_MFA_TOTP_ENROLL_ENABLED` and `AUTH_MFA_TOTP_PILOT_USERS` were
+Enrollment is available to every cfm-admin user while
+`AUTH_MFA_LOGIN_VERIFY_ENABLED` is on (with it off, enrollment start answers
+`409`: see Phase 1). There is no other rollout switch for it: `AUTH_MFA_TOTP_ENROLL_ENABLED` and `AUTH_MFA_TOTP_PILOT_USERS` were
 retired in 2026-11. Their gate matched `/mfa/totp/enroll/*`, while enrollment
 is served at `/me/security/mfa/totp/enroll/*`, so it never restricted anyone.
 The keys are still accepted in `cfm.conf` and ignored; the daemon logs a note

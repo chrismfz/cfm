@@ -41,6 +41,10 @@ back-filled here — see the git/PR history for that period.
     does not stop a logged-in owner from changing the password. It had no
     limit. Settings also no longer posts the passwords to a second URL that
     was not an API endpoint.
+  - **TOTP enrollment start answers `409` while
+    `AUTH_MFA_LOGIN_VERIFY_ENABLED` is off.** With that switch off an
+    account with TOTP cannot log in, so enrolling would lock its owner out.
+    The MFA rollout checklist now says the same about the switch's rollback.
   - **The TOTP secret no longer leaves the node during enrollment.** The
     Settings page drew the enrollment QR code by sending the `otpauth://`
     URI, which contains the secret, to `api.qrserver.com`, on every

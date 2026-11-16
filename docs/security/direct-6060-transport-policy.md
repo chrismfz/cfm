@@ -182,7 +182,7 @@ Current stack, outer→inner (`apiserver.go:322-331`; the file-header comment th
 is stale — trust the code):
 
 ```
-RequestLog → APISecurityAnomaly → PprofWriteTimeout → LoadAndSave → Token → CSRF → MFARollout → mux
+RequestLog → APISecurityAnomaly → PprofWriteTimeout → LoadAndSave → Token → CSRF → mux
 ```
 
 Insert `AdminTransportRedirect` **outside `TokenMiddleware`** (pre-auth) and

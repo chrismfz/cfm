@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
+	"time"
 
 	"cfm/internal/logging"
 	"github.com/chrismfz/goauth"
@@ -84,6 +86,10 @@ func registerMeSecurityRoutes(mux *http.ServeMux) {
 		routes := http.NewServeMux()
 		if authRegisterMeSecurityRoutes(Auth, routes) {
 			mux.Handle("/me/security/", meSecurityHandler(routes))
+			// Without this the mux answers the bare path with a redirect to
+			// "/me/security/", which behind the edge (prefix stripped) sends
+			// the browser out of /cfm-admin.
+			mux.Handle("/me/security", http.NotFoundHandler())
 		}
 	}
 	registerFallbackPasswordRoute(mux)
@@ -131,7 +137,11 @@ func handleMePasswordChange(w http.ResponseWriter, r *http.Request) {
 	if !decision.Allow {
 		attempt.Result, attempt.Status = "rate_limited", http.StatusTooManyRequests
 		auditAuthAttempt(r, attempt)
-		w.Header().Set("Retry-After", "60")
+		retry := loginRateLimitShortWindow
+		if decision.Cause == "lock" {
+			retry = loginLockWindow
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry/time.Second)))
 		writeJSONError(w, http.StatusTooManyRequests, "too many attempts, try again later")
 		return
 	}
