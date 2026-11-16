@@ -115,6 +115,30 @@ dashboard), gets a `303` to `/cfm-admin/webdetector/controls/`. Assets and
 - `/api/v1/system/journal` (`system_status_endpoint.go`, `handleSystemJournal` → `cfmlog.TailJournal`) — `RequireAdmin`; bounded `journalctl -n` tail of an **allow-listed** systemd unit (cfm + hosting-stack units; an arbitrary unit is rejected 400, so the read surface can't reach any unit on the box). Host-wide unit journals, so admin-only by construction. Backs the MCP `journal_tail` tool.
 - `/api/v1/mail/runtime` (`system_status_endpoint.go`, `handleMailRuntime` → `mailruntime.Live` + `Discover{EximMaxima,SpamdMaxChildren}`) — `RequireAdmin`; SMTP/spamd runtime saturation snapshot (current inbound SMTP sessions vs `smtp_accept_max`, active spamd children vs `--max-children`, each as utilisation% + `ok`/`warn`/`critical`; `unknown` when a cap can't be resolved). Host-wide daemon capacity (whole-box SMTP listener + spamd pool, not per-vhost), so admin-only by construction. Backs the MCP `mail_runtime` tool.
 
+### Self-service account security (goauth login session only)
+
+Neither scoped-allowed nor admin-only: these accept **only a goauth cfm-admin
+login session** (goauth `Require`). A bearer token (admin or scoped), the
+admin SSO cookie and the scoped embed cookie alone get `401`; every caller
+acts on its own account only.
+
+- `/me/security/*` (`me_security_routes.go` `registerMeSecurityRoutes`) —
+  goauth's `RegisterMeSecurityRoutes` (password, TOTP enroll start/confirm,
+  MFA disable, recovery-code regenerate, passkey register start/finish,
+  factors), registered on a mux of their own and mounted through
+  `meSecurityHandler` (`me_security_mount.go`). The wrapper adds the
+  server-made QR image to enrollment start, and refuses enrollment start
+  (`409`) while `AUTH_MFA_LOGIN_VERIFY_ENABLED` is off. Changing a factor
+  needs the password or an MFA proof from the last 10 minutes (goauth).
+- `/api/v1/me/password` (`handleMePasswordChange`) — goauth `Require`;
+  current-password guesses limited by `passwordChangeLimiter` (the login
+  limiter's rules, its own state); keeps the caller's session
+  (`KeepSession`) and ends the user's others.
+- Edge case: an embedded request carrying both the scoped embed cookie and
+  the admin's own goauth cookie (WHM "log in as user" in the same browser) is
+  tagged scoped by `TokenMiddleware`, but these routes act as the goauth
+  user, i.e. the admin's own account. CSRF still applies.
+
 ## Edge-served admin endpoints (OpenResty / Angie)
 
 Rendered entirely inside the edge proxy (Go cannot read nginx shdicts), so their

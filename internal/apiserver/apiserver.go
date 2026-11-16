@@ -18,7 +18,7 @@
 // Handler stack (outermost → innermost — see Start()):
 //   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
 //   → PprofWriteTimeout → SessionCookieTransport → Auth.LoadAndSave → TokenMiddleware
-//   → CSRF → RateLimit → MFARollout → mux
+//   → CSRF → RateLimit → mux
 // SecurityHeaders (R10) sits outside AdminTransportRedirect so redirects/refusals
 // carry the baseline headers too, and gives the direct :6060/:6061 listeners the
 // same nosniff/Referrer-Policy the edge adds.
@@ -347,7 +347,7 @@ func Start(
 	// Execution order (outermost → innermost):
 	//   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
 	//   → PprofWriteTimeout → SessionCookieTransport → LoadAndSave → TokenMiddleware
-	//   → CSRF → RateLimit → MFARollout → mux
+	//   → CSRF → RateLimit → mux
 	// SessionCookieTransport (Step 6) wraps LoadAndSave so the session cookie's Secure
 	// flag is automatic: goauth always emits Secure; the middleware translates to a
 	// distinct non-Secure fallback cookie only in the degraded plaintext :6060 window.
@@ -365,7 +365,7 @@ func Start(
 	logging.LogfAPI("[apiserver] rate limiting: mode=%s scale=%.2g", rlModeName(rlMode), rlScale)
 
 	var handler http.Handler
-	handler = MFARolloutMiddleware(m)
+	handler = m
 	handler = RateLimitMiddleware(rlMode, rlScale)(handler)
 	handler = CSRFMiddleware(handler)
 	if adminIPMode, adminIPKnown := normalizeAdminIPMode(cfg.API.AdminTokenIPBinding); !adminIPKnown {

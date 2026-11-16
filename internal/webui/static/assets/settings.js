@@ -1,8 +1,10 @@
 (() => {
+  // goauth's account-security routes. Each list once had a second, "legacy"
+  // /cfm-admin/mfa/... path; nothing ever served those.
   const ROUTES = {
-    totpEnrollStart: ['/cfm-admin/me/security/mfa/totp/enroll/start', '/cfm-admin/mfa/totp/enroll/start'],
-    totpEnrollConfirm: ['/cfm-admin/me/security/mfa/totp/enroll/confirm', '/cfm-admin/mfa/totp/enroll/confirm'],
-    recoveryRegenerate: ['/cfm-admin/me/security/recovery-codes/regenerate', '/cfm-admin/mfa/recovery/regenerate'],
+    totpEnrollStart: ['/cfm-admin/me/security/mfa/totp/enroll/start'],
+    totpEnrollConfirm: ['/cfm-admin/me/security/mfa/totp/enroll/confirm'],
+    recoveryRegenerate: ['/cfm-admin/me/security/recovery-codes/regenerate'],
   };
 
   function normalizeCode(raw) {
@@ -26,8 +28,9 @@
       body: body == null ? undefined : JSON.stringify(body),
     });
     if (!res.ok) {
-      const error = await parseAPIError(res, 'Security request failed');
-      throw new Error(error);
+      const error = new Error(await parseAPIError(res, 'Security request failed'));
+      error.status = res.status;
+      throw error;
     }
     try {
       return await res.json();
@@ -47,6 +50,13 @@
         const payload = await requestJSON(path, options);
         return { payload, endpoint: path };
       } catch (err) {
+        // Only a route that is not there (404/405, or a non-JSON page served
+        // in its place, which carries no status) is a reason to try the next
+        // path. Any other answer is this route's answer and is the one to
+        // show: a wrong or missing password, a rate limit, "no pending
+        // enrollment". Falling through would replace it with the legacy
+        // path's "not found" and send the request body there as well.
+        if (err && err.status && err.status !== 404 && err.status !== 405) throw err;
         lastErr = err;
       }
     }
@@ -60,21 +70,22 @@
     if (String(newPassword).length < 12) {
       throw new Error('New password must be at least 12 characters.');
     }
-    try {
-      await requestJSON('/cfm-admin/me/password', {
-        body: { current_password: currentPassword, new_password: newPassword },
-      });
-      return { endpoint: '/cfm-admin/me/password' };
-    } catch (_) {
-      await requestJSON('/cfm-admin/api/v1/me/password', {
-        body: { current_password: currentPassword, new_password: newPassword },
-      });
-      return { endpoint: '/cfm-admin/api/v1/me/password' };
-    }
+    // One route. This used to try /cfm-admin/me/password first, which is not
+    // an API endpoint (the page shell answers it), so both passwords were
+    // posted there on every change before the real request.
+    await requestJSON('/cfm-admin/api/v1/me/password', {
+      body: { current_password: currentPassword, new_password: newPassword },
+    });
+    return { endpoint: '/cfm-admin/api/v1/me/password' };
   }
 
-  async function startTotpEnrollment() {
-    const { payload, endpoint } = await requestJSONWithFallback(ROUTES.totpEnrollStart, { body: {} });
+  // Starting an enrollment changes a sign-in factor, so the server asks for the
+  // account password with it (goauth: "re-authentication required"), unless
+  // this session passed an MFA check in the last 10 minutes. The password is
+  // sent as typed: it is not trimmed anywhere on the server either.
+  async function startTotpEnrollment({ password } = {}) {
+    const body = password ? { password: String(password) } : {};
+    const { payload, endpoint } = await requestJSONWithFallback(ROUTES.totpEnrollStart, { body });
     const nested = payload && typeof payload.data === 'object' ? payload.data : {};
 
     const readFirstNonEmpty = (...values) => {
@@ -112,9 +123,11 @@
   }
 
   async function regenerateRecoveryCodes({ password }) {
-    const trimmed = String(password || '').trim();
-    if (!trimmed) throw new Error('Re-authentication password is required to regenerate recovery codes.');
-    const { payload } = await requestJSONWithFallback(ROUTES.recoveryRegenerate, { body: { password: trimmed } });
+    // Sent as typed: a password is not trimmed at login or when it is set, so
+    // trimming it here made one with a leading or trailing space fail.
+    const typed = String(password || '');
+    if (!typed.trim()) throw new Error('Re-authentication password is required to regenerate recovery codes.');
+    const { payload } = await requestJSONWithFallback(ROUTES.recoveryRegenerate, { body: { password: typed } });
     return payload;
   }
 
@@ -269,14 +282,17 @@
 
     document.getElementById('startTotpBtn')?.addEventListener('click', async () => {
       try {
-        const result = await startTotpEnrollment();
+        const password = document.getElementById('totpPassword')?.value || '';
+        const result = await startTotpEnrollment({ password });
+        const totpPasswordEl = document.getElementById('totpPassword');
+        if (totpPasswordEl) totpPasswordEl.value = '';
         const qrSVG = typeof result?.qr_svg === 'string' ? result.qr_svg.trim() : '';
         const otpauthURI = typeof result?.otpauth_uri === 'string' ? result.otpauth_uri.trim() : '';
 
         if (qrSVG.startsWith('<svg')) {
           totpQRSurface.innerHTML = qrSVG;
-        } else if (qrSVG.startsWith('data:image/')) {
-          totpQRSurface.innerHTML = `<img alt="TOTP enrollment QR code" src="${qrSVG}" />`;
+        } else if (/^data:image\/(png|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(qrSVG)) {
+          totpQRSurface.innerHTML = `<img alt="TOTP enrollment QR code" src="${qrSVG}" style="display:block;max-width:240px;border-radius:0.5rem;" />`;
         } else if (qrSVG) {
           const escapedQR = qrSVG
             .replace(/&/g, '&amp;')
@@ -289,23 +305,17 @@
             <pre style="white-space:pre-wrap;word-break:break-all;">${escapedQR}</pre>
           `;
         } else if (otpauthURI) {
+          // No image from the server: show the URI for manual entry. It must
+          // never go to an outside QR service, as it once did: the URI
+          // contains the TOTP secret.
           const escapedURI = otpauthURI
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
-          const qrImageURL = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=0&data=${encodeURIComponent(
-            otpauthURI
-          )}`;
           totpQRSurface.innerHTML = `
-            <p style="margin-bottom:0.5rem;">QR generated from enrollment URI (fallback mode):</p>
-            <img
-              alt="Generated TOTP enrollment QR code"
-              src="${qrImageURL}"
-              style="display:block;max-width:220px;border:1px solid rgba(255,255,255,0.15);border-radius:0.5rem;margin-bottom:0.75rem;"
-            />
-            <p style="margin-bottom:0.5rem;">If image loading is blocked, use this enrollment URI manually:</p>
+            <p style="margin-bottom:0.5rem;">No QR image is available. Add the account to your authenticator app with this enrollment URI:</p>
             <pre style="white-space:pre-wrap;word-break:break-all;">${escapedURI}</pre>
           `;
         }

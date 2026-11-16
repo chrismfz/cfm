@@ -87,8 +87,9 @@ type DebugConfig struct {
 	AuthSessionDBPath          string        // AUTH_SESSION_DB_PATH (optional; separate DB for sessions)
 	AuthMFAEncryptionKey       string        // AUTH_MFA_ENCRYPTION_KEY (optional; 16/24/32-byte raw, hex, or base64)
 	AuthMFALoginVerifyEnabled  bool          // AUTH_MFA_LOGIN_VERIFY_ENABLED (default true)
-	AuthMFATOTPEnrollEnabled   bool          // AUTH_MFA_TOTP_ENROLL_ENABLED (default false)
-	AuthMFATOTPPilotUsers      []string      // AUTH_MFA_TOTP_PILOT_USERS (comma-separated usernames)
+	AuthMFATOTPEnrollEnabled   bool          // AUTH_MFA_TOTP_ENROLL_ENABLED — RETIRED: parsed so old configs load, ignored (see apiserver/mfa_rollout.go)
+	AuthMFATOTPPilotUsers      []string      // AUTH_MFA_TOTP_PILOT_USERS — RETIRED, as above
+	AuthMFATOTPEnrollKeysSet   bool          // either retired key is present in cfm.conf (the daemon logs a note)
 	SessionTTL                 time.Duration // AUTH_SESSION_TTL (default 8h)
 	SecureCookie               bool          // AUTH_SECURE_COOKIE (DEPRECATED — Secure is now automatic from effective scheme; parsed for compat, ignored)
 	SecureCookieExplicit       bool          // true if AUTH_SECURE_COOKIE was present in the config (drives a one-time deprecation warning)
@@ -916,8 +917,10 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Debug.AuthMFALoginVerifyEnabled = parseBool(val)
 		case "AUTH_MFA_TOTP_ENROLL_ENABLED":
 			cfg.Debug.AuthMFATOTPEnrollEnabled = parseBool(val)
+			cfg.Debug.AuthMFATOTPEnrollKeysSet = true
 		case "AUTH_MFA_TOTP_PILOT_USERS":
 			cfg.Debug.AuthMFATOTPPilotUsers = append(cfg.Debug.AuthMFATOTPPilotUsers, splitCSV(val)...)
+			cfg.Debug.AuthMFATOTPEnrollKeysSet = true
 		case "AUTH_SESSION_TTL":
 			if d, err := time.ParseDuration(val); err == nil {
 				cfg.Debug.SessionTTL = d

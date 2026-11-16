@@ -1,16 +1,24 @@
 package apiserver
 
 import (
-	"net/http"
-	"strings"
-
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/logging"
 )
 
+// mfaRolloutPolicy is what is left of the staged MFA rollout: the switch for
+// the verification step at login.
+//
+// There used to be a second gate, for TOTP enrollment
+// (AUTH_MFA_TOTP_ENROLL_ENABLED, AUTH_MFA_TOTP_PILOT_USERS), enforced by a
+// middleware that matched /mfa/totp/enroll/*. Enrollment is served at
+// /me/security/mfa/totp/enroll/*, so the gate never matched a real request:
+// enrollment was open to every cfm-admin user on every node, whatever the two
+// keys said. It was retired (2026-11) rather than repaired, because repairing
+// it would have switched enrollment off wherever the keys still held their
+// shipped defaults. The keys are still parsed, so an existing cfm.conf loads,
+// and are ignored.
 type mfaRolloutPolicy struct {
 	loginVerifyEnabled bool
-	totpEnrollEnabled  bool
-	pilotUsers         map[string]struct{}
 }
 
 var activeMFARolloutPolicy = mfaRolloutPolicy{loginVerifyEnabled: true}
@@ -23,52 +31,12 @@ func setMFARolloutPolicyFromConfig(cfg *cfgpkg.Config) {
 	}
 
 	policy.loginVerifyEnabled = cfg.Debug.AuthMFALoginVerifyEnabled
-	policy.totpEnrollEnabled = cfg.Debug.AuthMFATOTPEnrollEnabled
-	if len(cfg.Debug.AuthMFATOTPPilotUsers) > 0 {
-		policy.pilotUsers = make(map[string]struct{}, len(cfg.Debug.AuthMFATOTPPilotUsers))
-		for _, u := range cfg.Debug.AuthMFATOTPPilotUsers {
-			u = strings.ToLower(strings.TrimSpace(u))
-			if u != "" {
-				policy.pilotUsers[u] = struct{}{}
-			}
-		}
+	if cfg.Debug.AuthMFATOTPEnrollKeysSet {
+		logging.LogfAPI("[apiserver] NOTE: AUTH_MFA_TOTP_ENROLL_ENABLED and AUTH_MFA_TOTP_PILOT_USERS are retired and ignored — TOTP enrollment is available to every cfm-admin user (it always was: the gate never matched the enrollment routes). Remove them from cfm.conf.")
 	}
 	activeMFARolloutPolicy = policy
 }
 
 func mfaLoginVerifyEnabled() bool {
 	return activeMFARolloutPolicy.loginVerifyEnabled
-}
-
-func MFARolloutMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isTOTPEnrollPath(r.URL.Path) {
-			if !activeMFARolloutPolicy.totpEnrollEnabled {
-				http.Error(w, `{"error":"totp enrollment rollout is disabled"}`, http.StatusNotFound)
-				return
-			}
-			if !isTOTPPilotUser(r) {
-				http.Error(w, `{"error":"totp enrollment not enabled for this account"}`, http.StatusForbidden)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func isTOTPEnrollPath(path string) bool {
-	return path == "/mfa/totp/enroll/start" || path == "/mfa/totp/enroll/confirm" ||
-		path == "/cfm-admin/mfa/totp/enroll/start" || path == "/cfm-admin/mfa/totp/enroll/confirm"
-}
-
-func isTOTPPilotUser(r *http.Request) bool {
-	if len(activeMFARolloutPolicy.pilotUsers) == 0 {
-		return true
-	}
-	user, ok := authUserFromContext(r.Context())
-	if !ok {
-		return false
-	}
-	_, ok = activeMFARolloutPolicy.pilotUsers[strings.ToLower(strings.TrimSpace(user.Username))]
-	return ok
 }

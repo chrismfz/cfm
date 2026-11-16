@@ -24,6 +24,11 @@ AUTH_MFA_ENCRYPTION_KEY=abc123
 	if got := len(cfg.Debug.AuthMFATOTPPilotUsers); got != 2 {
 		t.Fatalf("expected 2 pilot users, got %d", got)
 	}
+	// The two enrollment keys are retired: still parsed (an old cfm.conf must
+	// load) and flagged, so the daemon can say they are ignored.
+	if !cfg.Debug.AuthMFATOTPEnrollKeysSet {
+		t.Fatal("expected the retired enrollment keys to be flagged as present")
+	}
 	if cfg.Debug.AuthMFAEncryptionKey != "abc123" {
 		t.Fatalf("expected mfa encryption key to parse, got %q", cfg.Debug.AuthMFAEncryptionKey)
 	}
@@ -36,6 +41,9 @@ func TestParseCFMConf_MFALoginVerifyDefaultsEnabled(t *testing.T) {
 	}
 	if !cfg.Debug.AuthMFALoginVerifyEnabled {
 		t.Fatal("expected default AUTH_MFA_LOGIN_VERIFY_ENABLED=true")
+	}
+	if cfg.Debug.AuthMFATOTPEnrollKeysSet {
+		t.Fatal("retired enrollment keys flagged as present in an empty config")
 	}
 }
 
