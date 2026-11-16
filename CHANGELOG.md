@@ -41,12 +41,31 @@ back-filled here — see the git/PR history for that period.
     does not stop a logged-in owner from changing the password. It had no
     limit. Settings also no longer posts the passwords to a second URL that
     was not an API endpoint.
+  - **The TOTP secret no longer leaves the node during enrollment.** The
+    Settings page drew the enrollment QR code by sending the `otpauth://`
+    URI, which contains the secret, to `api.qrserver.com`, on every
+    enrollment. The QR is now made by the daemon and sent with the
+    enrollment answer; the page contacts no other host. **Anyone who enrolled
+    an authenticator through Settings before this release has had that secret
+    sent to a third party: re-enroll those accounts** (Settings → Start
+    enrollment; the old authenticator works until the new one is confirmed).
   - Login no longer shows by its response time whether a username exists.
   - Session tokens are stored hashed in the auth database. Open sessions
     survive the upgrade; a downgrade to an older package logs everyone out,
     and so does running `cfm auth ...` from the new binary while the old
     daemon is still up (a package upgrade restarts it, so this needs a manual
     binary swap).
+
+### Removed
+- **`AUTH_MFA_TOTP_ENROLL_ENABLED` and `AUTH_MFA_TOTP_PILOT_USERS` are retired.**
+  They were meant to keep TOTP enrollment off, or limited to pilot users,
+  during the MFA rollout. The check matched `/mfa/totp/enroll/*` while
+  enrollment is served at `/me/security/mfa/totp/enroll/*`, so it never
+  applied: enrollment has been open to every cfm-admin user on every node,
+  including those with `AUTH_MFA_TOTP_ENROLL_ENABLED = false`. Nothing changes
+  in behaviour. The keys are still accepted in `cfm.conf` and ignored, the
+  daemon logs a note at start when either is present, and they are gone from
+  the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
 ### Fixed
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like

@@ -17,6 +17,8 @@ type passwordChangeRequest struct {
 	NewPassword     string `json:"new_password"`
 }
 
+var errNotOTPAuthURI = errors.New("not an otpauth URI")
+
 var (
 	authRequireAny = func(next http.Handler) http.Handler {
 		if Auth == nil {
@@ -77,7 +79,12 @@ var passwordChangeLimiter = newLoginRateLimiter()
 
 func registerMeSecurityRoutes(mux *http.ServeMux) {
 	if Auth != nil {
-		authRegisterMeSecurityRoutes(Auth, mux)
+		// On a mux of their own, mounted through one wrapper (see
+		// me_security_mount.go).
+		routes := http.NewServeMux()
+		if authRegisterMeSecurityRoutes(Auth, routes) {
+			mux.Handle("/me/security/", meSecurityHandler(routes))
+		}
 	}
 	registerFallbackPasswordRoute(mux)
 }

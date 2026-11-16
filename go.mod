@@ -3,6 +3,7 @@ module cfm
 go 1.26.0
 
 require (
+	github.com/boombuler/barcode v1.1.0
 	github.com/chrismfz/goauth v0.0.0-20261116175351-e13a2b01ab9c
 	github.com/cilium/ebpf v0.22.0
 	github.com/florianl/go-nflog/v2 v2.3.0
@@ -30,7 +31,6 @@ require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/alexedwards/argon2id v1.0.0 // indirect
 	github.com/alexedwards/scs/v2 v2.9.0 // indirect
-	github.com/boombuler/barcode v1.1.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.10.0 // indirect

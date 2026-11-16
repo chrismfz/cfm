@@ -8,29 +8,29 @@ This runbook stages MFA in phases so existing API/automation auth remains stable
 2. Verify `/cfm-admin/login` still accepts password-only users and only redirects to `/cfm-admin/login/verify` for MFA-required sessions.
 3. If rollback is needed, set `AUTH_MFA_LOGIN_VERIFY_ENABLED=false` and restart cfm.
 
-## Phase 2 — Pilot-only TOTP enrollment from user settings
+## Phase 2 — TOTP enrollment from user settings
 
-1. Keep global gate off initially: `AUTH_MFA_TOTP_ENROLL_ENABLED=false`.
-2. Define pilot users:
-   - `AUTH_MFA_TOTP_PILOT_USERS=""` (default: no pilot users)
-   - `AUTH_MFA_TOTP_PILOT_USERS=alice,bob` (comma-separated usernames; pilot-only behavior applies when global enrollment remains disabled)
-3. Enable enrollment gate:
-   - `AUTH_MFA_TOTP_ENROLL_ENABLED=true`
-4. Confirm only pilot users can access:
-   - `POST /cfm-admin/mfa/totp/enroll/start`
-   - `POST /cfm-admin/mfa/totp/enroll/confirm`
-5. Check re-authentication on enrollment start (goauth, since 2026-11). The
-   routes Settings uses are `POST /cfm-admin/me/security/mfa/totp/enroll/start`
-   and `.../confirm`; the `/cfm-admin/mfa/...` paths in step 4 are the legacy
-   ones the rollout gate matches, and do not reach goauth:
-   - `enroll/start` with a session alone answers `401 re-authentication
-     required (password or recent MFA proof)`; with `{"password": "..."}` it
-     answers 200. Settings sends the password from the field next to the
-     button. Within 10 minutes of an MFA login no password is needed.
-   - Starting an enrollment on an account that already has MFA leaves MFA on:
-     the old authenticator keeps working until the new code is confirmed.
-   - The code used to confirm cannot be used again to log in; the next one
-     works.
+Enrollment is available to every cfm-admin user. There is no rollout switch
+for it: `AUTH_MFA_TOTP_ENROLL_ENABLED` and `AUTH_MFA_TOTP_PILOT_USERS` were
+retired in 2026-11. Their gate matched `/mfa/totp/enroll/*`, while enrollment
+is served at `/me/security/mfa/totp/enroll/*`, so it never restricted anyone.
+The keys are still accepted in `cfm.conf` and ignored; the daemon logs a note
+at start when either is present.
+
+Check, in Settings or with `POST /cfm-admin/me/security/mfa/totp/enroll/start`
+and `.../confirm`:
+
+1. `enroll/start` with a session alone answers `401 re-authentication
+   required (password or recent MFA proof)`; with `{"password": "..."}` it
+   answers 200. Settings sends the password from the field next to the
+   button. Within 10 minutes of an MFA login no password is needed.
+2. The answer carries `qr_data_url`, a PNG made on the node. The page shows
+   it and makes no request to any other host (browser network tab). The
+   `otpauth://` URI contains the TOTP secret and must not leave the node.
+3. Starting an enrollment on an account that already has MFA leaves MFA on:
+   the old authenticator keeps working until the new code is confirmed.
+4. The code used to confirm cannot be used again to log in; the next one
+   works.
 
 ## Phase 3 — CLI admin recovery/reset tooling for support
 

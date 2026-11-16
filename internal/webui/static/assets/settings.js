@@ -1,8 +1,10 @@
 (() => {
+  // goauth's account-security routes. Each list once had a second, "legacy"
+  // /cfm-admin/mfa/... path; nothing ever served those.
   const ROUTES = {
-    totpEnrollStart: ['/cfm-admin/me/security/mfa/totp/enroll/start', '/cfm-admin/mfa/totp/enroll/start'],
-    totpEnrollConfirm: ['/cfm-admin/me/security/mfa/totp/enroll/confirm', '/cfm-admin/mfa/totp/enroll/confirm'],
-    recoveryRegenerate: ['/cfm-admin/me/security/recovery-codes/regenerate', '/cfm-admin/mfa/recovery/regenerate'],
+    totpEnrollStart: ['/cfm-admin/me/security/mfa/totp/enroll/start'],
+    totpEnrollConfirm: ['/cfm-admin/me/security/mfa/totp/enroll/confirm'],
+    recoveryRegenerate: ['/cfm-admin/me/security/recovery-codes/regenerate'],
   };
 
   function normalizeCode(raw) {
@@ -289,8 +291,8 @@
 
         if (qrSVG.startsWith('<svg')) {
           totpQRSurface.innerHTML = qrSVG;
-        } else if (qrSVG.startsWith('data:image/')) {
-          totpQRSurface.innerHTML = `<img alt="TOTP enrollment QR code" src="${qrSVG}" />`;
+        } else if (/^data:image\/(png|svg\+xml);base64,[A-Za-z0-9+/=]+$/.test(qrSVG)) {
+          totpQRSurface.innerHTML = `<img alt="TOTP enrollment QR code" src="${qrSVG}" style="display:block;max-width:240px;border-radius:0.5rem;" />`;
         } else if (qrSVG) {
           const escapedQR = qrSVG
             .replace(/&/g, '&amp;')
@@ -303,23 +305,17 @@
             <pre style="white-space:pre-wrap;word-break:break-all;">${escapedQR}</pre>
           `;
         } else if (otpauthURI) {
+          // No image from the server: show the URI for manual entry. It must
+          // never go to an outside QR service, as it once did: the URI
+          // contains the TOTP secret.
           const escapedURI = otpauthURI
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
-          const qrImageURL = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=0&data=${encodeURIComponent(
-            otpauthURI
-          )}`;
           totpQRSurface.innerHTML = `
-            <p style="margin-bottom:0.5rem;">QR generated from enrollment URI (fallback mode):</p>
-            <img
-              alt="Generated TOTP enrollment QR code"
-              src="${qrImageURL}"
-              style="display:block;max-width:220px;border:1px solid rgba(255,255,255,0.15);border-radius:0.5rem;margin-bottom:0.75rem;"
-            />
-            <p style="margin-bottom:0.5rem;">If image loading is blocked, use this enrollment URI manually:</p>
+            <p style="margin-bottom:0.5rem;">No QR image is available. Add the account to your authenticator app with this enrollment URI:</p>
             <pre style="white-space:pre-wrap;word-break:break-all;">${escapedURI}</pre>
           `;
         }

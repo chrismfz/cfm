@@ -59,45 +59,23 @@ test('start/confirm/regenerate mfa happy path', async () => {
   ]);
 });
 
-test('totp/recovery endpoints fall back to legacy cfm routes when new routes are unavailable', async () => {
+test('totp/recovery requests go to goauth\'s routes and nowhere else', async () => {
   const calls = [];
   global.fetch = async (url) => {
     calls.push(url);
-    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
-      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-    }
-    if (url === '/cfm-admin/mfa/totp/enroll/start') {
-      return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Legacy?secret=START' }) };
-    }
-    if (url === '/cfm-admin/me/security/mfa/totp/enroll/confirm') {
-      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-    }
-    if (url === '/cfm-admin/mfa/totp/enroll/confirm') {
-      return { ok: true, status: 200, json: async () => ({ ok: true }) };
-    }
-    if (url === '/cfm-admin/me/security/recovery-codes/regenerate') {
-      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-    }
-    if (url === '/cfm-admin/mfa/recovery/regenerate') {
-      return { ok: true, status: 200, json: async () => ({ codes: ['LEGACY-CODE'] }) };
-    }
-    throw new Error(`unexpected url ${url}`);
+    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
   };
 
-  const started = await startTotpEnrollment();
-  assert.equal(started.otpauth_uri, 'otpauth://totp/Legacy?secret=START');
-  const confirmed = await confirmTotpEnrollment({ code: '123456' });
-  assert.equal(confirmed.ok, true);
-  const regenerated = await regenerateRecoveryCodes({ password: 'current-password' });
-  assert.deepEqual(getRecoveryCodes(regenerated), ['LEGACY-CODE']);
+  // Even a 404 is the answer: the /cfm-admin/mfa/... paths this page once
+  // retried on were never served by anything.
+  await assert.rejects(() => startTotpEnrollment({ password: 'pw' }), /not found/);
+  await assert.rejects(() => confirmTotpEnrollment({ code: '123456' }), /not found/);
+  await assert.rejects(() => regenerateRecoveryCodes({ password: 'current-password' }), /not found/);
 
   assert.deepEqual(calls, [
     '/cfm-admin/me/security/mfa/totp/enroll/start',
-    '/cfm-admin/mfa/totp/enroll/start',
     '/cfm-admin/me/security/mfa/totp/enroll/confirm',
-    '/cfm-admin/mfa/totp/enroll/confirm',
     '/cfm-admin/me/security/recovery-codes/regenerate',
-    '/cfm-admin/mfa/recovery/regenerate',
   ]);
 });
 
@@ -149,7 +127,7 @@ test('mountSettingsPage displays returned recovery codes from legacy payload fie
   assert.equal(elements.recoveryCodes.textContent, 'LEGACY-1\nLEGACY-2');
 });
 
-test('mountSettingsPage generates fallback QR image when only otpauth_uri is returned', async () => {
+test('mountSettingsPage shows the URI, and contacts no QR service, when only otpauth_uri is returned', async () => {
   const elements = createSettingsDOM();
 
   global.document = {
@@ -166,8 +144,31 @@ test('mountSettingsPage generates fallback QR image when only otpauth_uri is ret
   mountSettingsPage();
   await elements.startTotpBtn.handlers.click();
 
-  assert.match(elements.totpQRSurface.innerHTML, /api\.qrserver\.com\/v1\/create-qr-code/);
+  assert.doesNotMatch(elements.totpQRSurface.innerHTML, /https?:\/\//);
+  assert.doesNotMatch(elements.totpQRSurface.innerHTML, /<img/);
   assert.match(elements.totpQRSurface.innerHTML, /otpauth:\/\/totp\/Test\?secret=ONLY_URI/);
+});
+
+test('mountSettingsPage shows the QR image the server made', async () => {
+  const elements = createSettingsDOM();
+  global.document = { getElementById: (id) => elements[id] || null };
+  const dataURL = 'data:image/png;base64,iVBORw0KGgo=';
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ otpauth_uri: 'otpauth://totp/Test?secret=SECRETVALUE', qr_data_url: dataURL }),
+  });
+
+  mountSettingsPage();
+  await elements.startTotpBtn.handlers.click();
+
+  assert.match(elements.totpQRSurface.innerHTML, /<img[^>]+src="data:image\/png;base64,iVBORw0KGgo="/);
+  assert.doesNotMatch(elements.totpQRSurface.innerHTML, /https?:\/\//);
+});
+
+test('no file under the settings assets names an outside QR service', () => {
+  const src = require('node:fs').readFileSync(require('node:path').join(__dirname, 'settings.js'), 'utf8');
+  assert.doesNotMatch(src, /qrserver|chart\.googleapis|quickchart/i);
 });
 
 test('startTotpEnrollment still supports legacy qr_svg-only payloads', async () => {
@@ -266,22 +267,12 @@ test('startTotpEnrollment surfaces non-JSON success responses with endpoint cont
         text: async () => '<html>route mismatch</html>',
       };
     }
-    if (url === '/cfm-admin/mfa/totp/enroll/start') {
-      return {
-        ok: true,
-        status: 200,
-        json: async () => {
-          throw new Error('invalid json');
-        },
-        text: async () => '<html>route mismatch legacy</html>',
-      };
-    }
     throw new Error(`unexpected url ${url}`);
   };
 
   await assert.rejects(
     () => startTotpEnrollment(),
-    /Security endpoint returned non-JSON payload \(HTTP 200, path=\/cfm-admin\/mfa\/totp\/enroll\/start, body=<html>route mismatch legacy<\/html>\)\./
+    /Security endpoint returned non-JSON payload \(HTTP 200, path=\/cfm-admin\/me\/security\/mfa\/totp\/enroll\/start, body=<html>route mismatch<\/html>\)\./
   );
 });
 
@@ -327,28 +318,13 @@ test('startTotpEnrollment sends the re-authentication password as typed', async 
   assert.deepEqual(bodies[1].body, {}); // a recent MFA proof needs no password
 });
 
-test('a refusal from the current route is shown, not the legacy route\'s answer', async () => {
-  const urls = [];
-  global.fetch = async (url) => {
-    urls.push(url);
-    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
-      return { ok: false, status: 401, json: async () => ({ error: 're-authentication required (password or recent MFA proof)' }) };
-    }
-    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-  };
+test('a refusal is shown as the server worded it', async () => {
+  global.fetch = async () => ({
+    ok: false,
+    status: 401,
+    json: async () => ({ error: 're-authentication required (password or recent MFA proof)' }),
+  });
   await assert.rejects(() => startTotpEnrollment(), /re-authentication required/);
-  assert.deepEqual(urls, ['/cfm-admin/me/security/mfa/totp/enroll/start']);
-});
-
-test('a missing current route still falls back to the legacy one', async () => {
-  global.fetch = async (url) => {
-    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
-      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-    }
-    return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Legacy?secret=OLD' }) };
-  };
-  const started = await startTotpEnrollment({ password: 'pw' });
-  assert.equal(started.otpauth_uri, 'otpauth://totp/Legacy?secret=OLD');
 });
 
 test('regenerateRecoveryCodes sends the password untrimmed', async () => {
