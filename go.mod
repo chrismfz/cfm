@@ -3,7 +3,7 @@ module cfm
 go 1.26.0
 
 require (
-	github.com/chrismfz/goauth v0.0.0-20261116170037-9f84f3e64d92
+	github.com/chrismfz/goauth v0.0.0-20261116175351-e13a2b01ab9c
 	github.com/cilium/ebpf v0.22.0
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/fsnotify/fsnotify v1.10.1
@@ -60,7 +60,7 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
-	modernc.org/libc v1.81.2 // indirect
+	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.13.0 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )

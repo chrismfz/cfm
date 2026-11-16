@@ -15,22 +15,16 @@ test('normalizeCode strips non-digits and truncates to 6', () => {
   assert.equal(normalizeCode('1a2b3c4d5e6f7'), '123456');
 });
 
-test('updatePassword prefers goauth self endpoint then falls back to cfm endpoint', async () => {
+test('updatePassword posts the passwords to the one API route only', async () => {
   const calls = [];
   global.fetch = async (url) => {
     calls.push(url);
-    if (url === '/cfm-admin/me/password') {
-      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-    }
-    if (url === '/cfm-admin/api/v1/me/password') {
-      return { ok: true, status: 200, json: async () => ({ ok: true }) };
-    }
-    throw new Error(`unexpected url ${url}`);
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
   };
 
   const out = await updatePassword({ currentPassword: 'old-password', newPassword: 'new-password-123' });
   assert.equal(out.endpoint, '/cfm-admin/api/v1/me/password');
-  assert.deepEqual(calls, ['/cfm-admin/me/password', '/cfm-admin/api/v1/me/password']);
+  assert.deepEqual(calls, ['/cfm-admin/api/v1/me/password']);
 });
 
 test('start/confirm/regenerate mfa happy path', async () => {
@@ -366,4 +360,14 @@ test('regenerateRecoveryCodes sends the password untrimmed', async () => {
   await regenerateRecoveryCodes({ password: ' padded ' });
   assert.deepEqual(sent, { password: ' padded ' });
   await assert.rejects(() => regenerateRecoveryCodes({ password: '   ' }), /password is required/);
+});
+
+test('any answer from an existing route is final, not only 401/403/429', async () => {
+  const urls = [];
+  global.fetch = async (url) => {
+    urls.push(url);
+    return { ok: false, status: 400, json: async () => ({ error: 'no pending TOTP enrollment' }) };
+  };
+  await assert.rejects(() => confirmTotpEnrollment({ code: '123456' }), /no pending TOTP enrollment/);
+  assert.deepEqual(urls, ['/cfm-admin/me/security/mfa/totp/enroll/confirm']);
 });

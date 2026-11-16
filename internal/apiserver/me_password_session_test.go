@@ -28,9 +28,9 @@ func TestMePasswordChange_KeepsThisSessionEndsOthers(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	origAuth, origLimiter := Auth, globalLoginRateLimiter
-	Auth, globalLoginRateLimiter = mgr, newLoginRateLimiter()
-	t.Cleanup(func() { Auth, globalLoginRateLimiter = origAuth, origLimiter })
+	origAuth, origLimiter, origLogin := Auth, passwordChangeLimiter, globalLoginRateLimiter
+	Auth, passwordChangeLimiter, globalLoginRateLimiter = mgr, newLoginRateLimiter(), newLoginRateLimiter()
+	t.Cleanup(func() { Auth, passwordChangeLimiter, globalLoginRateLimiter = origAuth, origLimiter, origLogin })
 
 	mux := http.NewServeMux()
 	mux.Handle("/login", mgr.LoginHandler())
@@ -66,6 +66,15 @@ func TestMePasswordChange_KeepsThisSessionEndsOthers(t *testing.T) {
 	}
 
 	here, elsewhere := login(oldPassword), login(oldPassword)
+
+	// Someone failing alice's /login until the account is locked there must
+	// not stop alice, who is logged in, from changing the password.
+	for i := 0; i < loginLockThreshold; i++ {
+		globalLoginRateLimiter.ObserveResult("203.0.113.9", "alice", false)
+	}
+	if d := globalLoginRateLimiter.Evaluate("203.0.113.9", "alice"); d.Allow {
+		t.Fatalf("test setup: the login limiter did not lock the account")
+	}
 	if code := do(here, http.MethodPost, "/api/v1/me/password",
 		`{"current_password":"`+oldPassword+`","new_password":"`+newPassword+`"}`); code != http.StatusOK {
 		t.Fatalf("password change: status %d", code)

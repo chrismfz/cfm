@@ -68,6 +68,13 @@ var (
 	}
 )
 
+// passwordChangeLimiter counts current-password guesses on the password-change
+// route. It has the login limiter's rules but its own state: the login
+// limiter's lock is account-wide and anyone can set it by failing that
+// account's /login ten times, and an owner who is logged in must still be able
+// to change the password while someone is doing that.
+var passwordChangeLimiter = newLoginRateLimiter()
+
 func registerMeSecurityRoutes(mux *http.ServeMux) {
 	if Auth != nil {
 		authRegisterMeSecurityRoutes(Auth, mux)
@@ -106,19 +113,32 @@ func handleMePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The current-password check is a password guess like any other, so it
-	// goes through the login limiter (per IP and account: backoff, throttle,
-	// lock). It had no limit: a stolen session could try passwords here as
-	// fast as Argon2 allowed.
-	if !protectLoginAttempt(w, r, user.Username) {
+	// The current-password check is a password guess like any other, so it is
+	// limited like a login (per IP and account: backoff, throttle, lock). It
+	// had no limit: a stolen session could try passwords here as fast as
+	// Argon2 allowed.
+	ip := normalizeChallengeIP(realIPFromRequest(r))
+	account := normalizeLoginUsername(user.Username)
+	attempt := authAttemptAudit{Kind: "password_change", AuthMech: "session_cookie", User: account}
+	decision := passwordChangeLimiter.Evaluate(ip, account)
+	if !decision.Allow {
+		attempt.Result, attempt.Status = "rate_limited", http.StatusTooManyRequests
+		auditAuthAttempt(r, attempt)
+		w.Header().Set("Retry-After", "60")
+		writeJSONError(w, http.StatusTooManyRequests, "too many attempts, try again later")
+		return
+	}
+	if decision.Delay > 0 && !sleepWithContext(r.Context(), decision.Delay) {
 		return
 	}
 	if err := authValidateCurrentPassword(user.Username, req.CurrentPassword); err != nil {
-		recordLoginLimiterResult(r, user.Username, http.StatusUnauthorized)
+		passwordChangeLimiter.ObserveResult(ip, account, false)
+		attempt.Result, attempt.Status = "fail", http.StatusUnauthorized
+		auditAuthAttempt(r, attempt)
 		writeJSONError(w, http.StatusUnauthorized, "current password is invalid")
 		return
 	}
-	recordLoginLimiterResult(r, user.Username, http.StatusOK)
+	passwordChangeLimiter.ObserveResult(ip, account, true)
 	if err := authSetPassword(user.Username, req.NewPassword); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("password update failed: %v", err))
 		return

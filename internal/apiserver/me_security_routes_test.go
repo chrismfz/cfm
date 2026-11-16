@@ -72,15 +72,15 @@ func TestHandleMePasswordChange_HappyPath(t *testing.T) {
 	origValidate := authValidateCurrentPassword
 	origSet := authSetPassword
 	origKeep := authKeepSession
-	origLimiter := globalLoginRateLimiter
-	globalLoginRateLimiter = newLoginRateLimiter()
+	origLimiter := passwordChangeLimiter
+	passwordChangeLimiter = newLoginRateLimiter()
 	t.Cleanup(func() {
 		authRequireAny = origRequire
 		authUserFromContext = origUserFromContext
 		authValidateCurrentPassword = origValidate
 		authSetPassword = origSet
 		authKeepSession = origKeep
-		globalLoginRateLimiter = origLimiter
+		passwordChangeLimiter = origLimiter
 	})
 	// goauth ends every session of the user on a password change; the one
 	// that made the change must be kept.
@@ -134,21 +134,21 @@ func TestHandleMePasswordChange_LimitsWrongGuesses(t *testing.T) {
 	origValidate := authValidateCurrentPassword
 	origSet := authSetPassword
 	origKeep := authKeepSession
-	origLimiter := globalLoginRateLimiter
+	origLimiter := passwordChangeLimiter
 	limiter := newLoginRateLimiter()
 	// Each read of the clock is six minutes on: past the adaptive backoff's
 	// 5-minute memory (so the test does not sleep) and inside the 10-minute
 	// lock that the tenth failure sets. The failure count alone decides.
 	clock := time.Now()
 	limiter.now = func() time.Time { clock = clock.Add(6 * time.Minute); return clock }
-	globalLoginRateLimiter = limiter
+	passwordChangeLimiter = limiter
 	t.Cleanup(func() {
 		authRequireAny = origRequire
 		authUserFromContext = origUserFromContext
 		authValidateCurrentPassword = origValidate
 		authSetPassword = origSet
 		authKeepSession = origKeep
-		globalLoginRateLimiter = origLimiter
+		passwordChangeLimiter = origLimiter
 	})
 
 	authRequireAny = func(next http.Handler) http.Handler {

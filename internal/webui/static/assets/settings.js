@@ -48,10 +48,13 @@
         const payload = await requestJSON(path, options);
         return { payload, endpoint: path };
       } catch (err) {
-        // A route that exists has answered: its refusal (wrong or missing
-        // password, rate limit) is the answer to show. Falling through to the
-        // legacy path would replace it with that path's "not found".
-        if (err && (err.status === 401 || err.status === 403 || err.status === 429)) throw err;
+        // Only a route that is not there (404/405, or a non-JSON page served
+        // in its place, which carries no status) is a reason to try the next
+        // path. Any other answer is this route's answer and is the one to
+        // show: a wrong or missing password, a rate limit, "no pending
+        // enrollment". Falling through would replace it with the legacy
+        // path's "not found" and send the request body there as well.
+        if (err && err.status && err.status !== 404 && err.status !== 405) throw err;
         lastErr = err;
       }
     }
@@ -65,17 +68,13 @@
     if (String(newPassword).length < 12) {
       throw new Error('New password must be at least 12 characters.');
     }
-    try {
-      await requestJSON('/cfm-admin/me/password', {
-        body: { current_password: currentPassword, new_password: newPassword },
-      });
-      return { endpoint: '/cfm-admin/me/password' };
-    } catch (_) {
-      await requestJSON('/cfm-admin/api/v1/me/password', {
-        body: { current_password: currentPassword, new_password: newPassword },
-      });
-      return { endpoint: '/cfm-admin/api/v1/me/password' };
-    }
+    // One route. This used to try /cfm-admin/me/password first, which is not
+    // an API endpoint (the page shell answers it), so both passwords were
+    // posted there on every change before the real request.
+    await requestJSON('/cfm-admin/api/v1/me/password', {
+      body: { current_password: currentPassword, new_password: newPassword },
+    });
+    return { endpoint: '/cfm-admin/api/v1/me/password' };
   }
 
   // Starting an enrollment changes a sign-in factor, so the server asks for the

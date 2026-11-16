@@ -19,7 +19,10 @@ This runbook stages MFA in phases so existing API/automation auth remains stable
 4. Confirm only pilot users can access:
    - `POST /cfm-admin/mfa/totp/enroll/start`
    - `POST /cfm-admin/mfa/totp/enroll/confirm`
-5. Check re-authentication on enrollment start (goauth, since 2026-11):
+5. Check re-authentication on enrollment start (goauth, since 2026-11). The
+   routes Settings uses are `POST /cfm-admin/me/security/mfa/totp/enroll/start`
+   and `.../confirm`; the `/cfm-admin/mfa/...` paths in step 4 are the legacy
+   ones the rollout gate matches, and do not reach goauth:
    - `enroll/start` with a session alone answers `401 re-authentication
      required (password or recent MFA proof)`; with `{"password": "..."}` it
      answers 200. Settings sends the password from the field next to the

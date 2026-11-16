@@ -22,8 +22,8 @@ back-filled here — see the git/PR history for that period.
   library behind the cfm-admin login was audited and fixed. What changes on a
   node:
   - **Changing a password, deactivating or deleting a user ends that user's
-    open sessions** within a few seconds (`cfm auth user ...` included), and a
-    role change applies to open sessions. Before, a session stayed valid until
+    open sessions** within a few seconds (`cfm auth user ...` included).
+    Before, a session stayed valid until
     it expired (8 hours), so a stolen one survived the password reset meant
     to stop it. The tab you change your own password in stays logged in.
   - **Starting a TOTP enrollment no longer switches MFA off.** It used to, at
@@ -35,12 +35,18 @@ back-filled here — see the git/PR history for that period.
   - **An authenticator code works once**, and MFA codes are limited to 5
     tries per user per 15 minutes. Right after enrolling, log in with the
     next code, not the one used to confirm.
-  - **The password change in Settings is rate limited** like the login
+  - **The password change in Settings is rate limited**
     (`/api/v1/me/password`): wrong current passwords back off, throttle and
-    lock. It had no limit.
+    lock, by the login's rules but counted separately, so a locked login
+    does not stop a logged-in owner from changing the password. It had no
+    limit. Settings also no longer posts the passwords to a second URL that
+    was not an API endpoint.
   - Login no longer shows by its response time whether a username exists.
   - Session tokens are stored hashed in the auth database. Open sessions
-    survive the upgrade; a downgrade to an older package logs everyone out.
+    survive the upgrade; a downgrade to an older package logs everyone out,
+    and so does running `cfm auth ...` from the new binary while the old
+    daemon is still up (a package upgrade restarts it, so this needs a manual
+    binary swap).
 
 ### Fixed
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
