@@ -46,7 +46,9 @@ back-filled here — see the git/PR history for that period.
     (`lsphp`) reading a sibling still reports.
   - Also: a comm match now only hides a ptrace READ. An attach
     (`ptrace=attach`) always reports, whatever the comm, so a webshell
-    that renames itself `pgrep` or `ps` can't hide a real attach.
+    that renames itself `pgrep` or `ps` can't hide a real attach. This
+    includes your own `allow_comm` lines: to silence a known attach (you
+    gdb'ing a tenant's worker), use `exclude_user` for that account.
 
 ## 2026.11.14
 

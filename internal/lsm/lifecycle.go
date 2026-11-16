@@ -280,6 +280,14 @@ func (l *Lifecycle) ApplyConfig(ctx context.Context) {
 	go l.run(loader)
 
 	attach := loader.Attach()
+	// Partial mode: say which policies did not make it and why (e.g. an
+	// unpinnable tracepoint link dropped by pinAll). Without this the
+	// daemon path was silent; only the CLI printed Failed.
+	for _, p := range AllPolicies() {
+		if e, ok := attach.Failed[p.ID]; ok {
+			logging.LogfLSM("[lsm] %s not attached: %v", p.ID, e)
+		}
+	}
 	summary := policyModeSummary(conf, attach.Attached)
 	if fresh {
 		logging.LogfLSM("[lsm] auto-enabled at %s (policies: %v)", DefaultPinDir, attach.Attached)

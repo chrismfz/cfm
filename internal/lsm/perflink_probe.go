@@ -56,6 +56,10 @@ const perfLinkUnavailableReason = "kernel lacks BPF perf-event links (BPF_LINK_T
 // is retried on the next call.
 var preflightPerfLinkProbe = memoPerfLinkProbe
 
+// perfLinkRawProbe is the uncached probe memoPerfLinkProbe calls; a var so
+// the cache behaviour can be tested without a syscall.
+var perfLinkRawProbe = probePerfEventLink
+
 var (
 	perfLinkProbeMu   sync.Mutex
 	perfLinkProbeDone bool
@@ -68,7 +72,7 @@ func memoPerfLinkProbe() error {
 	if perfLinkProbeDone {
 		return perfLinkProbeErr
 	}
-	err := probePerfEventLink()
+	err := perfLinkRawProbe()
 	if err == nil || errors.Is(err, ebpf.ErrNotSupported) {
 		perfLinkProbeDone, perfLinkProbeErr = true, err
 	}

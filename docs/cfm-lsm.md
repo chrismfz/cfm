@@ -270,7 +270,9 @@ merged at lookup like the global defaults, so an upgrade over an old
 `lsm.conf` still gets it. A comm match only ever hides a ptrace READ: an
 event carrying `PTRACE_MODE_ATTACH` (`ptrace=attach`/`attach+read`)
 always reports, because `task->comm` is spoofable and none of the listed
-tools attaches.
+tools attaches. That includes operator `allow_comm` lines: to silence a
+known attach (an operator gdb'ing a tenant's worker), use `exclude_user`
+for that account.
 
 Rules absent from this table (`CFML-EXEC-001` / `004` / `007` /
 `008`, `CFML-FS-006` / `007` / `008`, `CFML-CRED-003`,

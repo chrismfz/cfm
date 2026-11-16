@@ -68,14 +68,30 @@ func TestTracepointPoliciesMatchProgramsFor(t *testing.T) {
 }
 
 func TestMemoPerfLinkProbe_CachesOnlyDefiniteAnswers(t *testing.T) {
+	prevRaw := perfLinkRawProbe
 	reset := func() { perfLinkProbeDone, perfLinkProbeErr = false, nil }
 	reset()
-	t.Cleanup(reset)
+	t.Cleanup(func() { perfLinkRawProbe = prevRaw; reset() })
 
-	// A definite answer is cached: a second call must not re-probe.
-	perfLinkProbeDone, perfLinkProbeErr = true, ebpf.ErrNotSupported
-	if err := memoPerfLinkProbe(); !errors.Is(err, ebpf.ErrNotSupported) {
-		t.Fatalf("cached answer not returned: %v", err)
+	calls := 0
+	answers := []error{errors.New("operation not permitted"), ebpf.ErrNotSupported, nil}
+	perfLinkRawProbe = func() error {
+		e := answers[calls]
+		calls++
+		return e
+	}
+	// Inconclusive: returned, not cached, so the next call re-probes.
+	if err := memoPerfLinkProbe(); err == nil || errors.Is(err, ebpf.ErrNotSupported) {
+		t.Fatalf("first call: want the inconclusive error, got %v", err)
+	}
+	// Definite "not supported": cached from here on.
+	for i := 0; i < 3; i++ {
+		if err := memoPerfLinkProbe(); !errors.Is(err, ebpf.ErrNotSupported) {
+			t.Fatalf("call %d: want cached ErrNotSupported, got %v", i, err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("raw probe ran %d times; want 2 (inconclusive retried once, then cached)", calls)
 	}
 }
 

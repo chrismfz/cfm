@@ -517,7 +517,11 @@ func (l *Loader) pinAll(pinDir string) error {
 				}
 				delete(l.links, id)
 				l.dropAttached(id)
-				l.attach.Failed[id] = fmt.Errorf("unavailable: pin link %s: %w (%s)", path, err, perfLinkUnavailableReason)
+				reason := "this kernel cannot pin the link kind"
+				if isTracepointPolicy(id) {
+					reason = perfLinkUnavailableReason
+				}
+				l.attach.Failed[id] = fmt.Errorf("unavailable: pin link %s: %w (%s)", path, err, reason)
 				break
 			}
 			pinned = append(pinned, path)
