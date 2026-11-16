@@ -265,7 +265,7 @@ registrations (from `internal/lsm/conf.go::allowExePolicy()` /
 
 ¹ OBS-004 also has a compiled-in, policy-scoped comm list
 (`DefaultPolicyAllowComm` in `internal/lsm/conf.go`: `ps`, `pgrep`,
-`pkill`, `pidof`, the cPanel / CloudLinux API comms, `cloudlinux-stat`),
+`pkill`, `pidof`, `killall`, the cPanel / CloudLinux API comms, `cloudlinux-stat`),
 merged at lookup like the global defaults, so an upgrade over an old
 `lsm.conf` still gets it. A comm match only ever hides a ptrace READ: an
 event carrying `PTRACE_MODE_ATTACH` (`ptrace=attach`/`attach+read`)

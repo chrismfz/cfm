@@ -598,9 +598,10 @@ var DefaultPolicyAllowComm = map[PolicyID][]string{
 	// /proc/<pid>/{stat,exe,status} reads go through ptrace_may_access
 	// (PTRACE_MODE_READ), so every process lister trips the hook once
 	// per target. All same-uid, not cross-tenant.
-	//   ps, pgrep, pkill, pidof   — process listers; a tenant's
+	//   ps, pgrep, pkill, pidof, killall — process listers; a tenant's
 	//       `while pgrep …; sleep 20` watchdog loop sent ~150 mails a
-	//       day from one node (rigel, 2026-11).
+	//       day from one node (rigel, 2026-11); killall showed up on
+	//       orion the minute cfm-lsm first attached there.
 	//   cpanel, cpapi2, uapi, cloudlinux-cli-, lve_suwrapper — the
 	//       cPanel / CloudLinux API machinery servicing a user call.
 	//   cloudlinux-stat — cloudlinux-statistics.rust /
@@ -613,6 +614,7 @@ var DefaultPolicyAllowComm = map[PolicyID][]string{
 		"pgrep",
 		"pkill",
 		"pidof",
+		"killall",
 		"cpanel",
 		"cpapi2",
 		"uapi",
