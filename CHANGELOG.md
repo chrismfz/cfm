@@ -17,7 +17,12 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
+  `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
+  it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It
+  showed up on orion the minute cfm-lsm first attached there. An attach
+  still reports, whatever the comm.
 
 ## 2026.11.16
 

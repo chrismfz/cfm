@@ -685,7 +685,7 @@ func TestPresenceGatedAllowComm_AtPresent(t *testing.T) {
 // credential-theft shape — reporting.
 func TestEventFilter_PolicyDefaults_OBS004ProcessListers(t *testing.T) {
 	f := BuildEventFilter(DefaultConf())
-	for _, comm := range []string{"ps", "pgrep", "pkill", "pidof", "cpanel", "cloudlinux-stat", "lve_suwrapper"} {
+	for _, comm := range []string{"ps", "pgrep", "pkill", "pidof", "killall", "cpanel", "cloudlinux-stat", "lve_suwrapper"} {
 		if !f.Match(Event{PolicyID: PolicyPtraceAccess, Comm: comm, Filename: "lsphp"}) {
 			t.Errorf("expected default conf to suppress OBS-004 comm=%q", comm)
 		}
