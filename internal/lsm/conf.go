@@ -583,6 +583,45 @@ var DefaultGlobalAllowExe = []string{
 	// rather than baking it into the global list.
 }
 
+// DefaultPolicyAllowComm holds compiled-in comm allowlists scoped to ONE
+// policy. They merge at lookup time like the global defaults (see
+// AllowExeFor for the %config(noreplace) upgrade gap this closes): the
+// CFML-OBS-004 entries used to live only in the reference lsm.conf, so a
+// host upgraded over an older lsm.conf never got them.
+//
+// Scoped per policy on purpose: allow_comm matches the spoofable
+// task->comm (prctl PR_SET_NAME), and a global entry would also exempt
+// the name from CRED-002 / CRED-004 / EXEC-003. Here the blind spot is
+// ptrace TELEMETRY only; the block layer is kernsec yama.ptrace_scope=2.
+var DefaultPolicyAllowComm = map[PolicyID][]string{
+	// CFML-OBS-004: a web-class uid reading its OWN process tree.
+	// /proc/<pid>/{stat,exe,status} reads go through ptrace_may_access
+	// (PTRACE_MODE_READ), so every process lister trips the hook once
+	// per target. All same-uid, not cross-tenant.
+	//   ps, pgrep, pkill, pidof   — process listers; a tenant's
+	//       `while pgrep …; sleep 20` watchdog loop sent ~150 mails a
+	//       day from one node (rigel, 2026-11).
+	//   cpanel, cpapi2, uapi, cloudlinux-cli-, lve_suwrapper — the
+	//       cPanel / CloudLinux API machinery servicing a user call.
+	//   cloudlinux-stat — cloudlinux-statistics.rust /
+	//       cloudlinux-statsnotifier.rust run as the user (titan: ~800
+	//       alerts a month).
+	// `lsphp` is deliberately NOT listed: a PHP worker ptracing a
+	// sibling worker is the credential-theft pattern OBS-004 exists for.
+	PolicyPtraceAccess: {
+		"ps",
+		"pgrep",
+		"pkill",
+		"pidof",
+		"cpanel",
+		"cpapi2",
+		"uapi",
+		"cloudlinux-cli-",
+		"lve_suwrapper",
+		"cloudlinux-stat",
+	},
+}
+
 // DefaultGlobalAllowComm is the curated cross-distro list of comm
 // names whose detector match is structural rather than evidence of
 // compromise. Comm strings are truncated to TASK_COMM_LEN-1 (15
@@ -937,6 +976,7 @@ func (c *Conf) AllowCommFor(id PolicyID) []string {
 			out = append(out, c.AllowComm[id]...)
 		}
 	}
+	out = append(out, DefaultPolicyAllowComm[id]...)
 	return dedupePreservingOrder(out)
 }
 

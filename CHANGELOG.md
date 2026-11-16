@@ -17,7 +17,38 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **cfm-lsm runs again on CloudLinux 8 (lve 4.18).**
+  - What: on earth, mars, orion and virgo cfm-lsm attached no policy at
+    all. It retried every 30 minutes with `pin link
+    …/cfm_bpf001: perf event ioctl pin: not supported`, while
+    `cfm lsm status` showed every policy as "would-attach".
+  - Why: CFML-BPF-001, CFML-EXEC-007 and CFML-EXEC-008 attach to syscall
+    tracepoints. A kernel without BPF perf-event links (upstream 5.15) gets
+    an ioctl attachment that cannot be pinned, and one failed pin rolled
+    back the whole load.
+  - Now: those three policies are reported unavailable on such a kernel,
+    like CRED-002/003 already are there, and the rest of cfm-lsm attaches
+    on the next auto-enable try. No operator action is needed. Kernel
+    module loads remain covered by kernsec.
+- **Far fewer CFML-OBS-004 (ptrace) mails from tenants listing their own
+  processes.**
+  - What: `pgrep`, `pkill`, `pidof` and `cloudlinux-stat` (CloudLinux's
+    per-user statistics tools) no longer raise OBS-004. Each read of
+    `/proc/<pid>/stat` goes through the kernel's ptrace check, so one
+    tenant's `while pgrep …; sleep 20` loop sent ~150 mails a day from
+    rigel, and the CloudLinux statistics tools ~800 alerts a month from
+    titan. All are same-uid reads of the tenant's own processes.
+  - How: the OBS-004 comm allowlist (with the existing `ps`, `cpanel`,
+    `cpapi2`, `uapi`, `cloudlinux-cli-`, `lve_suwrapper`) now ships in
+    the binary, scoped to OBS-004 only. Until now it lived only in the
+    reference `lsm.conf`, which an upgrade never replaces. A PHP worker
+    (`lsphp`) reading a sibling still reports.
+  - Also: a comm match now only hides a ptrace READ. An attach
+    (`ptrace=attach`) always reports, whatever the comm, so a webshell
+    that renames itself `pgrep` or `ps` can't hide a real attach. This
+    includes your own `allow_comm` lines: to silence a known attach (you
+    gdb'ing a tenant's worker), use `exclude_user` for that account.
 
 ## 2026.11.14
 

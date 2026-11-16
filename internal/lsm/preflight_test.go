@@ -2,8 +2,10 @@ package lsm
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -55,6 +57,13 @@ type stubProc struct {
 	// kernel (e.g. CloudLinux 8 lve 4.18) that loads BPF LSM programs
 	// but rejects task-local storage maps.
 	taskStorageProbeErr error
+
+	// perfLinkProbeErr is the value the stubbed preflightPerfLinkProbe
+	// returns. nil (the default) models a kernel with BPF perf-event
+	// links (5.15+, EL9 5.14). Set to an error wrapping
+	// ebpf.ErrNotSupported to model CloudLinux 8 lve 4.18, where a
+	// tracepoint attach cannot be pinned.
+	perfLinkProbeErr error
 }
 
 func (s stubProc) install(t *testing.T) {
@@ -126,6 +135,7 @@ func (s stubProc) install(t *testing.T) {
 	prevKallsyms := preflightProcKallsyms
 	prevProbe := preflightProgramTypeProbe
 	prevTaskStorageProbe := preflightTaskStorageMapProbe
+	prevPerfLinkProbe := preflightPerfLinkProbe
 
 	preflightProcVersionPath = procVerPath
 	preflightProcConfigGzPath = configGzPath
@@ -142,6 +152,8 @@ func (s stubProc) install(t *testing.T) {
 	preflightProgramTypeProbe = func() error { return probeErr }
 	taskStorageErr := s.taskStorageProbeErr
 	preflightTaskStorageMapProbe = func() error { return taskStorageErr }
+	perfLinkErr := s.perfLinkProbeErr
+	preflightPerfLinkProbe = func() error { return perfLinkErr }
 
 	t.Cleanup(func() {
 		preflightProcVersionPath = prevVersion
@@ -155,6 +167,7 @@ func (s stubProc) install(t *testing.T) {
 		preflightProcKallsyms = prevKallsyms
 		preflightProgramTypeProbe = prevProbe
 		preflightTaskStorageMapProbe = prevTaskStorageProbe
+		preflightPerfLinkProbe = prevPerfLinkProbe
 	})
 }
 
@@ -723,5 +736,96 @@ func TestKallsymsHasSymbol(t *testing.T) {
 	}
 	if kallsymsHasSymbol(body, "not_commit_creds") {
 		t.Fatal("unexpected symbol match")
+	}
+}
+
+func TestPreflight_NoPerfLinks_TracepointPoliciesUnavailable(t *testing.T) {
+	// CloudLinux 8 lve 4.18 as seen on the fleet: everything component-wide
+	// passes, but tracepoint links are the legacy ioctl kind and cannot be
+	// pinned. BPF-001 / EXEC-007 / EXEC-008 must be reported unavailable
+	// (so the enable paths drop them) while preflight stays OK.
+	stub := stubProc{
+		procVersion:         "Linux version 4.18.0-553.123.2.lve.el8.x86_64 (mockbuild) #1 SMP",
+		bootConfig:          "CONFIG_BPF_LSM=y\n",
+		lsmList:             "capability,yama,bpf",
+		btfPresent:          true,
+		procStatus:          "CapEff:\t000001ffffffffff\n",
+		bpffsMountpoint:     "/sys/fs/bpf",
+		taskStorageProbeErr: ebpf.ErrNotSupported,
+		perfLinkProbeErr:    fmt.Errorf("probe: %w", ebpf.ErrNotSupported),
+	}
+	stub.install(t)
+
+	pf := RunPreflight()
+	if !pf.OK {
+		t.Fatalf("missing perf links must not gate the component; got: %+v", pf)
+	}
+	got := map[PolicyID]PolicyAvailability{}
+	for _, pa := range pf.PolicyAvailability {
+		got[pa.PolicyID] = pa
+	}
+	for _, id := range []PolicyID{PolicyUnexpectedBPF, PolicyKernelModuleLoad, PolicyKexecLoad} {
+		pa, ok := got[id]
+		if !ok {
+			t.Errorf("no PolicyAvailability entry for %s", id)
+			continue
+		}
+		if pa.Available {
+			t.Errorf("%s: expected unavailable without perf links", id)
+		}
+		// EXEC-008 may already be unavailable for its own reason (no
+		// kexec tracepoints in this sandbox's tracefs); that one is kept.
+		if id != PolicyKexecLoad && !strings.Contains(pa.Reason, "BPF_LINK_TYPE_PERF_EVENT") {
+			t.Errorf("%s: reason should name the missing perf links, got %q", id, pa.Reason)
+		}
+	}
+	// LSM-hook policies are untouched (they pin as tracing links).
+	if pa, ok := got[PolicyPtraceAccess]; ok && !pa.Available {
+		t.Errorf("%s must stay available: %+v", PolicyPtraceAccess, pa)
+	}
+}
+
+func TestPreflight_PerfLinkProbe_SupportedOrInconclusiveKeepsTracepoints(t *testing.T) {
+	for name, perr := range map[string]error{
+		"supported":    nil,
+		"inconclusive": errors.New("operation not permitted"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := stubProc{
+				procVersion:      "Linux version 5.14.0-611.49.1.el9_7.x86_64 (mockbuild) #1 SMP",
+				bootConfig:       "CONFIG_BPF_LSM=y\n",
+				lsmList:          "lockdown,capability,yama,bpf",
+				btfPresent:       true,
+				procStatus:       "CapEff:\t000001ffffffffff\n",
+				bpffsMountpoint:  "/sys/fs/bpf",
+				perfLinkProbeErr: perr,
+			}
+			stub.install(t)
+			for _, pa := range RunPreflight().PolicyAvailability {
+				if (pa.PolicyID == PolicyUnexpectedBPF || pa.PolicyID == PolicyKernelModuleLoad) && !pa.Available {
+					t.Errorf("%s unexpectedly unavailable: %s", pa.PolicyID, pa.Reason)
+				}
+				if pa.PolicyID == PolicyKexecLoad && strings.Contains(pa.Reason, "PERF_EVENT") {
+					t.Errorf("EXEC-008 must keep its own tracefs reason, got %q", pa.Reason)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyPerfLinkAvailability_KeepsExistingUnavailableReason(t *testing.T) {
+	prev := preflightPerfLinkProbe
+	preflightPerfLinkProbe = func() error { return ebpf.ErrNotSupported }
+	t.Cleanup(func() { preflightPerfLinkProbe = prev })
+
+	in := []PolicyAvailability{{PolicyID: PolicyKexecLoad, Available: false, Reason: "no kexec tracepoints"}}
+	out := applyPerfLinkAvailability(in)
+	for _, pa := range out {
+		if pa.PolicyID == PolicyKexecLoad && pa.Reason != "no kexec tracepoints" {
+			t.Errorf("an already-unavailable entry must keep its reason, got %q", pa.Reason)
+		}
+	}
+	if len(out) != 3 {
+		t.Errorf("want one entry per tracepoint policy, got %d: %+v", len(out), out)
 	}
 }

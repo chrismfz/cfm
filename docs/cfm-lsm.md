@@ -259,10 +259,24 @@ registrations (from `internal/lsm/conf.go::allowExePolicy()` /
 | `CFML-EXEC-006`  (ephemeral exec) | ✓ | ✓ | — |
 | `CFML-CRED-002`  (privesc no setuid) | ✓ | ✓ | ✓ |
 | `CFML-BPF-001`   (unexpected BPF) | — | ✓ | — |
+| `CFML-OBS-004`   (ptrace by web user) | — | ✓ ¹ | — |
+| `CFML-CRED-004`  (cap raise) | — | ✓ | — |
+| `CFML-FS-005`    (sensitive write) | — | ✓ | — |
+
+¹ OBS-004 also has a compiled-in, policy-scoped comm list
+(`DefaultPolicyAllowComm` in `internal/lsm/conf.go`: `ps`, `pgrep`,
+`pkill`, `pidof`, the cPanel / CloudLinux API comms, `cloudlinux-stat`),
+merged at lookup like the global defaults, so an upgrade over an old
+`lsm.conf` still gets it. A comm match only ever hides a ptrace READ: an
+event carrying `PTRACE_MODE_ATTACH` (`ptrace=attach`/`attach+read`)
+always reports, because `task->comm` is spoofable and none of the listed
+tools attaches. That includes operator `allow_comm` lines: to silence a
+known attach (an operator gdb'ing a tenant's worker), use `exclude_user`
+for that account.
 
 Rules absent from this table (`CFML-EXEC-001` / `004` / `007` /
-`008`, `CFML-FS-005` / `006` / `007` / `008`, `CFML-CRED-003` /
-`004`, `CFML-OBS-004`, `CFML-NET-002`) **do not consult the
+`008`, `CFML-FS-006` / `007` / `008`, `CFML-CRED-003`,
+`CFML-NET-002`) **do not consult the
 allowlist surface at all** — per-policy and global `[allow]`
 entries are ignored for those rules. NET-002 is the notable case
 because its filename payload is `proto=NN` (a stringified
@@ -1442,7 +1456,9 @@ tiny HASH placeholders and removes every loaded reference to them —
 neutralising `cfm_cred002`/`cfm_cred003` (dropping CFML-CRED-002/003) and
 forcing `cfm_fs005_web_origin_monitor = 0` so the verifier
 dead-code-eliminates FS-005's `bpf_task_storage_get` calls. The object
-then loads and the remaining ~15 policies attach normally, including
+then loads and the remaining policies attach (minus the three tracepoint
+policies on a kernel without perf links — see the per-policy probes
+below), including
 FS-005's core inode hooks (only its web-origin enrichment tag is lost).
 CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
 per-policy probes (see below), not as a component FAIL — the host runs
@@ -1471,6 +1487,18 @@ policies from attaching. Today they are:
   both depend on `cfm_cred_transition_tasks` and are dropped on partial
   backports that lack it (see "Task-local storage" above).
 - **`CFML-EXEC-008`** — whether the kexec syscall tracepoints are exposed.
+- **`CFML-BPF-001`, `CFML-EXEC-007`, `CFML-EXEC-008`** — whether the
+  kernel has BPF perf-event links (`BPF_LINK_TYPE_PERF_EVENT`, upstream
+  5.15; EL9's 5.14 backports them). These three attach to syscall
+  tracepoints, and without perf links cilium/ebpf falls back to the
+  `PERF_EVENT_IOC_SET_BPF` ioctl, whose attachment cannot be pinned to
+  bpffs. Every enable path pins, so on such a kernel the first
+  tracepoint pin (`perf event ioctl pin: not supported`) used to fail the
+  WHOLE load: CloudLinux 8's lve 4.18 hosts ran no cfm-lsm policy at all,
+  retrying every 30 minutes, until 2026-11-16. They are now reported
+  unavailable there (`internal/lsm/perflink_probe.go`) and the remaining
+  LSM-hook / fentry policies attach. Module loads stay covered by
+  `kernsec`.
 
 ### CLI surface
 

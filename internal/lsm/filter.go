@@ -97,7 +97,13 @@ func (f *EventFilter) Match(ev Event) bool {
 			return true
 		}
 	}
-	if len(rule.comms) > 0 && ev.Comm != "" {
+	// An OBS-004 attach (PTRACE_MODE_ATTACH: modify the target, read its
+	// memory) is never hidden by a comm match. task->comm is spoofable
+	// (prctl PR_SET_NAME), and the listed comms (ps, pgrep, cpanel …)
+	// only ever READ /proc; a "pgrep" that attaches to a sibling worker is
+	// the credential-theft shape the policy exists for.
+	obsAttach := ev.PolicyID == PolicyPtraceAccess && ev.Flags&EventFlagPtraceAttach != 0
+	if len(rule.comms) > 0 && ev.Comm != "" && !obsAttach {
 		if _, hit := rule.comms[ev.Comm]; hit {
 			return true
 		}

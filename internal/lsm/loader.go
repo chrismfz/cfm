@@ -327,7 +327,17 @@ func NewLoader(opts LoaderOptions) (*Loader, error) {
 		return nil, fmt.Errorf("%w: load BPF objects: %v", ErrBPFLSMUnavailable, err)
 	}
 
+	// Tracepoint links on a kernel without BPF perf links cannot be
+	// pinned (perflink_probe.go); attaching them would fail pinAll and
+	// take every other policy down with it. Same belt-and-suspenders
+	// role as the task-storage guard below: the enable paths already
+	// drop these via PolicyAvailability.
+	skipTracepoints := opts.PinDir != "" && perfLinkUnsupported()
 	for _, id := range wanted {
+		if skipTracepoints && isTracepointPolicy(id) {
+			l.attach.Failed[id] = errors.New("unavailable: " + perfLinkUnavailableReason)
+			continue
+		}
 		// On a task-storage-downgraded load, CFML-CRED-002/003 were
 		// neutralised to no-ops (their map is a HASH placeholder), so
 		// attaching them would hook dead programs. Record them as
@@ -487,14 +497,51 @@ func (l *Loader) pinAll(pinDir string) error {
 		if len(entries) != len(links) {
 			return fmt.Errorf("internal: policy %s has %d links but %d entries", id, len(links), len(entries))
 		}
+		var pinned []string
 		for i, lk := range links {
 			path := filepath.Join(linksDir, entries[i].pinName)
 			if err := lk.Pin(path); err != nil {
-				return fmt.Errorf("pin link %s: %w", path, err)
+				if !errors.Is(err, link.ErrNotSupported) {
+					return fmt.Errorf("pin link %s: %w", path, err)
+				}
+				// The kernel cannot pin this link kind (a legacy
+				// perf-event ioctl tracepoint attach on a kernel without
+				// BPF perf links). Normally the perf-link probe already
+				// kept the policy out; if it was inconclusive, drop just
+				// this policy rather than every other one with it.
+				for _, p := range pinned {
+					_ = os.Remove(p)
+				}
+				for _, other := range links {
+					_ = other.Close()
+				}
+				delete(l.links, id)
+				l.dropAttached(id)
+				reason := "this kernel cannot pin the link kind"
+				if isTracepointPolicy(id) {
+					reason = perfLinkUnavailableReason
+				}
+				l.attach.Failed[id] = fmt.Errorf("unavailable: pin link %s: %w (%s)", path, err, reason)
+				break
 			}
+			pinned = append(pinned, path)
 		}
 	}
+	if len(l.attach.Attached) == 0 {
+		return errors.New("no policy link could be pinned")
+	}
 	return nil
+}
+
+// dropAttached removes id from the attach result's Attached list.
+func (l *Loader) dropAttached(id PolicyID) {
+	out := l.attach.Attached[:0]
+	for _, a := range l.attach.Attached {
+		if a != id {
+			out = append(out, a)
+		}
+	}
+	l.attach.Attached = out
 }
 
 // pinLinkFile returns the bpffs filename to use for a given
