@@ -42,11 +42,12 @@
       <section class="card wide">
         <h2>TOTP authenticator enrollment</h2>
         <div class="toolbar wrap">
+          <input id="totpPassword" class="input input-wide" type="password" autocomplete="current-password" placeholder="Confirm password to start enrollment" />
           <button id="startTotpBtn">Start enrollment</button>
           <input id="totpCode" class="input" maxlength="6" inputmode="numeric" placeholder="6-digit code" />
           <button id="confirmTotpBtn" class="btn-quiet">Confirm enrollment</button>
         </div>
-        <p class="muted">Enrollment QR is shown once per enrollment start.</p>
+        <p class="muted">Enrollment QR is shown once per enrollment start. Your current authenticator, if you have one, keeps working until the new one is confirmed.</p>
         <div id="totpQRSurface" class="table-wrap" aria-live="polite"></div>
       </section>
 

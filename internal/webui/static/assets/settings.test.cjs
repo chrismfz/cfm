@@ -320,3 +320,50 @@ function createSettingsDOM() {
     reauthPassword: createElement(),
   };
 }
+
+test('startTotpEnrollment sends the re-authentication password as typed', async () => {
+  const bodies = [];
+  global.fetch = async (url, options = {}) => {
+    bodies.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Example?secret=ABC123' }) };
+  };
+  await startTotpEnrollment({ password: '  spaces count  ' });
+  await startTotpEnrollment();
+  assert.deepEqual(bodies[0].body, { password: '  spaces count  ' });
+  assert.deepEqual(bodies[1].body, {}); // a recent MFA proof needs no password
+});
+
+test('a refusal from the current route is shown, not the legacy route\'s answer', async () => {
+  const urls = [];
+  global.fetch = async (url) => {
+    urls.push(url);
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
+      return { ok: false, status: 401, json: async () => ({ error: 're-authentication required (password or recent MFA proof)' }) };
+    }
+    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+  };
+  await assert.rejects(() => startTotpEnrollment(), /re-authentication required/);
+  assert.deepEqual(urls, ['/cfm-admin/me/security/mfa/totp/enroll/start']);
+});
+
+test('a missing current route still falls back to the legacy one', async () => {
+  global.fetch = async (url) => {
+    if (url === '/cfm-admin/me/security/mfa/totp/enroll/start') {
+      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ otpauth_uri: 'otpauth://totp/Legacy?secret=OLD' }) };
+  };
+  const started = await startTotpEnrollment({ password: 'pw' });
+  assert.equal(started.otpauth_uri, 'otpauth://totp/Legacy?secret=OLD');
+});
+
+test('regenerateRecoveryCodes sends the password untrimmed', async () => {
+  let sent;
+  global.fetch = async (_url, options = {}) => {
+    sent = JSON.parse(options.body);
+    return { ok: true, status: 200, json: async () => ({ codes: ['A1-B2-C3'] }) };
+  };
+  await regenerateRecoveryCodes({ password: ' padded ' });
+  assert.deepEqual(sent, { password: ' padded ' });
+  await assert.rejects(() => regenerateRecoveryCodes({ password: '   ' }), /password is required/);
+});

@@ -17,6 +17,31 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **cfm-admin logins: goauth updated to its audited release.** The session
+  library behind the cfm-admin login was audited and fixed. What changes on a
+  node:
+  - **Changing a password, deactivating or deleting a user ends that user's
+    open sessions** within a few seconds (`cfm auth user ...` included), and a
+    role change applies to open sessions. Before, a session stayed valid until
+    it expired (8 hours), so a stolen one survived the password reset meant
+    to stop it. The tab you change your own password in stays logged in.
+  - **Starting a TOTP enrollment no longer switches MFA off.** It used to, at
+    once and without asking for anything, so an open session was enough to
+    remove someone's second factor. The new authenticator now replaces the
+    old one only when its code is confirmed, and Settings asks for the
+    account password to start (not needed in the 10 minutes after an MFA
+    login).
+  - **An authenticator code works once**, and MFA codes are limited to 5
+    tries per user per 15 minutes. Right after enrolling, log in with the
+    next code, not the one used to confirm.
+  - **The password change in Settings is rate limited** like the login
+    (`/api/v1/me/password`): wrong current passwords back off, throttle and
+    lock. It had no limit.
+  - Login no longer shows by its response time whether a username exists.
+  - Session tokens are stored hashed in the auth database. Open sessions
+    survive the upgrade; a downgrade to an older package logs everyone out.
+
 ### Fixed
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process

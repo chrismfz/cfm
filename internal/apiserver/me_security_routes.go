@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 
+	"cfm/internal/logging"
 	"github.com/chrismfz/goauth"
 )
 
@@ -41,6 +42,17 @@ var (
 			return errors.New("auth not configured")
 		}
 		return Auth.Users.SetPassword(username, newPassword)
+	}
+
+	// authKeepSession keeps the caller logged in after their own password
+	// change. goauth's SetPassword ends every session of the user (that is
+	// what makes a password change lock out a stolen session); without this
+	// the user is logged out of the tab they changed it in as well.
+	authKeepSession = func(r *http.Request) error {
+		if Auth == nil {
+			return errors.New("auth not configured")
+		}
+		return Auth.KeepSession(r)
 	}
 
 	authRegisterMeSecurityRoutes = func(manager *goauth.Manager, mux *http.ServeMux) bool {
@@ -94,13 +106,27 @@ func handleMePasswordChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The current-password check is a password guess like any other, so it
+	// goes through the login limiter (per IP and account: backoff, throttle,
+	// lock). It had no limit: a stolen session could try passwords here as
+	// fast as Argon2 allowed.
+	if !protectLoginAttempt(w, r, user.Username) {
+		return
+	}
 	if err := authValidateCurrentPassword(user.Username, req.CurrentPassword); err != nil {
+		recordLoginLimiterResult(r, user.Username, http.StatusUnauthorized)
 		writeJSONError(w, http.StatusUnauthorized, "current password is invalid")
 		return
 	}
+	recordLoginLimiterResult(r, user.Username, http.StatusOK)
 	if err := authSetPassword(user.Username, req.NewPassword); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, fmt.Sprintf("password update failed: %v", err))
 		return
+	}
+	if err := authKeepSession(r); err != nil {
+		// The password is changed; the worst case is that this tab has to log
+		// in again with it.
+		logging.LogfAPI("[apiserver] password changed for %q but the session could not be kept: %v", user.Username, err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

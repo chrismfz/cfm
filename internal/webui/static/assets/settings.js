@@ -26,8 +26,9 @@
       body: body == null ? undefined : JSON.stringify(body),
     });
     if (!res.ok) {
-      const error = await parseAPIError(res, 'Security request failed');
-      throw new Error(error);
+      const error = new Error(await parseAPIError(res, 'Security request failed'));
+      error.status = res.status;
+      throw error;
     }
     try {
       return await res.json();
@@ -47,6 +48,10 @@
         const payload = await requestJSON(path, options);
         return { payload, endpoint: path };
       } catch (err) {
+        // A route that exists has answered: its refusal (wrong or missing
+        // password, rate limit) is the answer to show. Falling through to the
+        // legacy path would replace it with that path's "not found".
+        if (err && (err.status === 401 || err.status === 403 || err.status === 429)) throw err;
         lastErr = err;
       }
     }
@@ -73,8 +78,13 @@
     }
   }
 
-  async function startTotpEnrollment() {
-    const { payload, endpoint } = await requestJSONWithFallback(ROUTES.totpEnrollStart, { body: {} });
+  // Starting an enrollment changes a sign-in factor, so the server asks for the
+  // account password with it (goauth: "re-authentication required"), unless
+  // this session passed an MFA check in the last 10 minutes. The password is
+  // sent as typed: it is not trimmed anywhere on the server either.
+  async function startTotpEnrollment({ password } = {}) {
+    const body = password ? { password: String(password) } : {};
+    const { payload, endpoint } = await requestJSONWithFallback(ROUTES.totpEnrollStart, { body });
     const nested = payload && typeof payload.data === 'object' ? payload.data : {};
 
     const readFirstNonEmpty = (...values) => {
@@ -112,9 +122,11 @@
   }
 
   async function regenerateRecoveryCodes({ password }) {
-    const trimmed = String(password || '').trim();
-    if (!trimmed) throw new Error('Re-authentication password is required to regenerate recovery codes.');
-    const { payload } = await requestJSONWithFallback(ROUTES.recoveryRegenerate, { body: { password: trimmed } });
+    // Sent as typed: a password is not trimmed at login or when it is set, so
+    // trimming it here made one with a leading or trailing space fail.
+    const typed = String(password || '');
+    if (!typed.trim()) throw new Error('Re-authentication password is required to regenerate recovery codes.');
+    const { payload } = await requestJSONWithFallback(ROUTES.recoveryRegenerate, { body: { password: typed } });
     return payload;
   }
 
@@ -269,7 +281,10 @@
 
     document.getElementById('startTotpBtn')?.addEventListener('click', async () => {
       try {
-        const result = await startTotpEnrollment();
+        const password = document.getElementById('totpPassword')?.value || '';
+        const result = await startTotpEnrollment({ password });
+        const totpPasswordEl = document.getElementById('totpPassword');
+        if (totpPasswordEl) totpPasswordEl.value = '';
         const qrSVG = typeof result?.qr_svg === 'string' ? result.qr_svg.trim() : '';
         const otpauthURI = typeof result?.otpauth_uri === 'string' ? result.otpauth_uri.trim() : '';
 

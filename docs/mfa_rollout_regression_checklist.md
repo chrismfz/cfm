@@ -19,6 +19,15 @@ This runbook stages MFA in phases so existing API/automation auth remains stable
 4. Confirm only pilot users can access:
    - `POST /cfm-admin/mfa/totp/enroll/start`
    - `POST /cfm-admin/mfa/totp/enroll/confirm`
+5. Check re-authentication on enrollment start (goauth, since 2026-11):
+   - `enroll/start` with a session alone answers `401 re-authentication
+     required (password or recent MFA proof)`; with `{"password": "..."}` it
+     answers 200. Settings sends the password from the field next to the
+     button. Within 10 minutes of an MFA login no password is needed.
+   - Starting an enrollment on an account that already has MFA leaves MFA on:
+     the old authenticator keeps working until the new code is confirmed.
+   - The code used to confirm cannot be used again to log in; the next one
+     works.
 
 ## Phase 3 — CLI admin recovery/reset tooling for support
 

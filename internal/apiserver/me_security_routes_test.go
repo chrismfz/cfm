@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/chrismfz/goauth"
 )
@@ -69,12 +71,21 @@ func TestHandleMePasswordChange_HappyPath(t *testing.T) {
 	origUserFromContext := authUserFromContext
 	origValidate := authValidateCurrentPassword
 	origSet := authSetPassword
+	origKeep := authKeepSession
+	origLimiter := globalLoginRateLimiter
+	globalLoginRateLimiter = newLoginRateLimiter()
 	t.Cleanup(func() {
 		authRequireAny = origRequire
 		authUserFromContext = origUserFromContext
 		authValidateCurrentPassword = origValidate
 		authSetPassword = origSet
+		authKeepSession = origKeep
+		globalLoginRateLimiter = origLimiter
 	})
+	// goauth ends every session of the user on a password change; the one
+	// that made the change must be kept.
+	kept := false
+	authKeepSession = func(*http.Request) error { kept = true; return nil }
 
 	authRequireAny = func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +120,71 @@ func TestHandleMePasswordChange_HappyPath(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !kept {
+		t.Fatalf("the session that changed the password was not kept")
+	}
+}
+
+// The current-password check is a password guess: it runs out like a login's
+// does, and a refused guess neither sets a password nor touches the session.
+func TestHandleMePasswordChange_LimitsWrongGuesses(t *testing.T) {
+	origRequire := authRequireAny
+	origUserFromContext := authUserFromContext
+	origValidate := authValidateCurrentPassword
+	origSet := authSetPassword
+	origKeep := authKeepSession
+	origLimiter := globalLoginRateLimiter
+	limiter := newLoginRateLimiter()
+	// Each read of the clock is six minutes on: past the adaptive backoff's
+	// 5-minute memory (so the test does not sleep) and inside the 10-minute
+	// lock that the tenth failure sets. The failure count alone decides.
+	clock := time.Now()
+	limiter.now = func() time.Time { clock = clock.Add(6 * time.Minute); return clock }
+	globalLoginRateLimiter = limiter
+	t.Cleanup(func() {
+		authRequireAny = origRequire
+		authUserFromContext = origUserFromContext
+		authValidateCurrentPassword = origValidate
+		authSetPassword = origSet
+		authKeepSession = origKeep
+		globalLoginRateLimiter = origLimiter
+	})
+
+	authRequireAny = func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), any("goauth_user"), &goauth.User{Username: "alice"})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+	authUserFromContext = func(ctx context.Context) (*goauth.User, bool) {
+		u, ok := ctx.Value(any("goauth_user")).(*goauth.User)
+		return u, ok
+	}
+	guesses := 0
+	authValidateCurrentPassword = func(string, string) error { guesses++; return errors.New("wrong") }
+	authSetPassword = func(string, string) error { t.Fatal("password set after a wrong guess"); return nil }
+	authKeepSession = func(*http.Request) error { t.Fatal("session touched after a wrong guess"); return nil }
+
+	mux := http.NewServeMux()
+	registerFallbackPasswordRoute(mux)
+	post := func() int {
+		req := httptest.NewRequest(http.MethodPost, "https://host/api/v1/me/password",
+			bytes.NewBufferString(`{"current_password":"a guess","new_password":"new-password-123"}`))
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	for i := 0; i < loginLockThreshold; i++ {
+		if code := post(); code != http.StatusUnauthorized {
+			t.Fatalf("guess %d: status %d, want 401", i, code)
+		}
+	}
+	if code := post(); code != http.StatusTooManyRequests {
+		t.Fatalf("guess past the lock threshold: status %d, want 429", code)
+	}
+	if guesses != loginLockThreshold {
+		t.Fatalf("password checked %d times, want %d (none once locked)", guesses, loginLockThreshold)
 	}
 }
 
