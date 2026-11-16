@@ -44,6 +44,9 @@ back-filled here — see the git/PR history for that period.
     the binary, scoped to OBS-004 only. Until now it lived only in the
     reference `lsm.conf`, which an upgrade never replaces. A PHP worker
     (`lsphp`) reading a sibling still reports.
+  - Also: a comm match now only hides a ptrace READ. An attach
+    (`ptrace=attach`) always reports, whatever the comm, so a webshell
+    that renames itself `pgrep` or `ps` can't hide a real attach.
 
 ## 2026.11.14
 

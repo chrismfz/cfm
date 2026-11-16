@@ -3,6 +3,7 @@ package lsm
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -25,8 +26,11 @@ import (
 // every 30 min). The fix reports these three policies as unavailable, as
 // CRED-002/003 already are there, and loads the rest.
 
-// tracepointPolicies are the policies whose programs attach only to
-// tracepoints. Keep in sync with programsFor (tracepointProgramEntry*).
+// tracepointPolicies are the policies whose programs attach to
+// tracepoints. TestTracepointPoliciesMatchProgramsFor reads programsFor's
+// source and fails if a tracepoint-backed case is missing here (or a
+// listed one stops using tracepoints); the pinAll fallback still drops
+// an unpinnable policy that slips past both.
 var tracepointPolicies = []PolicyID{PolicyUnexpectedBPF, PolicyKernelModuleLoad, PolicyKexecLoad}
 
 func isTracepointPolicy(id PolicyID) bool {
@@ -46,8 +50,30 @@ const perfLinkUnavailableReason = "kernel lacks BPF perf-event links (BPF_LINK_T
 // BPF_LINK_TYPE_PERF_EVENT. nil = supported, an error wrapping
 // ebpf.ErrNotSupported = not supported, any other error = inconclusive
 // (treated as available; the loader's pin is then the final word).
-// Declared as a var so tests can stub it without a syscall.
-var preflightPerfLinkProbe = probePerfEventLink
+// Declared as a var so tests can stub it without a syscall. The default
+// caches a definite answer for the process (the kernel cannot change
+// under it), like cilium/ebpf's own feature probes; an inconclusive one
+// is retried on the next call.
+var preflightPerfLinkProbe = memoPerfLinkProbe
+
+var (
+	perfLinkProbeMu   sync.Mutex
+	perfLinkProbeDone bool
+	perfLinkProbeErr  error
+)
+
+func memoPerfLinkProbe() error {
+	perfLinkProbeMu.Lock()
+	defer perfLinkProbeMu.Unlock()
+	if perfLinkProbeDone {
+		return perfLinkProbeErr
+	}
+	err := probePerfEventLink()
+	if err == nil || errors.Is(err, ebpf.ErrNotSupported) {
+		perfLinkProbeDone, perfLinkProbeErr = true, err
+	}
+	return err
+}
 
 // bpfAttrLinkCreatePerfEvent is the BPF_LINK_CREATE prefix of union
 // bpf_attr used for a perf_event link (prog_fd, target_fd, attach_type,

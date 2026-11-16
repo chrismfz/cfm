@@ -259,10 +259,22 @@ registrations (from `internal/lsm/conf.go::allowExePolicy()` /
 | `CFML-EXEC-006`  (ephemeral exec) | ✓ | ✓ | — |
 | `CFML-CRED-002`  (privesc no setuid) | ✓ | ✓ | ✓ |
 | `CFML-BPF-001`   (unexpected BPF) | — | ✓ | — |
+| `CFML-OBS-004`   (ptrace by web user) | — | ✓ ¹ | — |
+| `CFML-CRED-004`  (cap raise) | — | ✓ | — |
+| `CFML-FS-005`    (sensitive write) | — | ✓ | — |
+
+¹ OBS-004 also has a compiled-in, policy-scoped comm list
+(`DefaultPolicyAllowComm` in `internal/lsm/conf.go`: `ps`, `pgrep`,
+`pkill`, `pidof`, the cPanel / CloudLinux API comms, `cloudlinux-stat`),
+merged at lookup like the global defaults, so an upgrade over an old
+`lsm.conf` still gets it. A comm match only ever hides a ptrace READ: an
+event carrying `PTRACE_MODE_ATTACH` (`ptrace=attach`/`attach+read`)
+always reports, because `task->comm` is spoofable and none of the listed
+tools attaches.
 
 Rules absent from this table (`CFML-EXEC-001` / `004` / `007` /
-`008`, `CFML-FS-005` / `006` / `007` / `008`, `CFML-CRED-003` /
-`004`, `CFML-OBS-004`, `CFML-NET-002`) **do not consult the
+`008`, `CFML-FS-006` / `007` / `008`, `CFML-CRED-003`,
+`CFML-NET-002`) **do not consult the
 allowlist surface at all** — per-policy and global `[allow]`
 entries are ignored for those rules. NET-002 is the notable case
 because its filename payload is `proto=NN` (a stringified

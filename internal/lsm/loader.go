@@ -497,14 +497,47 @@ func (l *Loader) pinAll(pinDir string) error {
 		if len(entries) != len(links) {
 			return fmt.Errorf("internal: policy %s has %d links but %d entries", id, len(links), len(entries))
 		}
+		var pinned []string
 		for i, lk := range links {
 			path := filepath.Join(linksDir, entries[i].pinName)
 			if err := lk.Pin(path); err != nil {
-				return fmt.Errorf("pin link %s: %w", path, err)
+				if !errors.Is(err, link.ErrNotSupported) {
+					return fmt.Errorf("pin link %s: %w", path, err)
+				}
+				// The kernel cannot pin this link kind (a legacy
+				// perf-event ioctl tracepoint attach on a kernel without
+				// BPF perf links). Normally the perf-link probe already
+				// kept the policy out; if it was inconclusive, drop just
+				// this policy rather than every other one with it.
+				for _, p := range pinned {
+					_ = os.Remove(p)
+				}
+				for _, other := range links {
+					_ = other.Close()
+				}
+				delete(l.links, id)
+				l.dropAttached(id)
+				l.attach.Failed[id] = fmt.Errorf("unavailable: pin link %s: %w (%s)", path, err, perfLinkUnavailableReason)
+				break
 			}
+			pinned = append(pinned, path)
 		}
 	}
+	if len(l.attach.Attached) == 0 {
+		return errors.New("no policy link could be pinned")
+	}
 	return nil
+}
+
+// dropAttached removes id from the attach result's Attached list.
+func (l *Loader) dropAttached(id PolicyID) {
+	out := l.attach.Attached[:0]
+	for _, a := range l.attach.Attached {
+		if a != id {
+			out = append(out, a)
+		}
+	}
+	l.attach.Attached = out
 }
 
 // pinLinkFile returns the bpffs filename to use for a given
