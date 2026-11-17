@@ -294,7 +294,7 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	// the fleet list), published under it only while this runner is still the
 	// feed's: a fetch that finishes after Reload removed the feed (and dropped
 	// it from the filter) must not bring it back.
-	prep := proxyipfilter.PrepareFeed(r.feed.Name, r.feed.Type == TypeAllow, r.feed.TTL, res.V4, res.V6)
+	prep := proxyipfilter.PrepareFeed(r.feed.Name, r.feed.Type == TypeAllow, res.V4, res.V6)
 	m.mu.Lock()
 	if cur, ok := m.runs[r.feed.Name]; ok && cur == r && ctx.Err() == nil {
 		prep.Publish()

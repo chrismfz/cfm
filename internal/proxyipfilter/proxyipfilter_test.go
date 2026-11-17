@@ -67,8 +67,8 @@ func TestTableLargeAndAllocFree(t *testing.T) {
 func TestVerdictOrderAndModes(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
-	SetFeed("MYBLOCK", false, nil, []string{"20.43.87.186", "45.138.12.0/24"}, []string{"2001:db8::/32"})
-	SetFeed("MYALLOW", true, nil, []string{"45.138.12.99"}, nil)
+	SetFeed("MYBLOCK", false, []string{"20.43.87.186", "45.138.12.0/24"}, []string{"2001:db8::/32"})
+	SetFeed("MYALLOW", true, []string{"45.138.12.99"}, nil)
 	setLocal("block_v4", false, []string{"20.43.87.186", "5.6.7.8"})
 	setLocal("allow_dyn_v4", true, []string{"5.6.7.8"})
 
@@ -122,12 +122,16 @@ func TestDecideLogsOncePerWindow(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
-	logNow = func() time.Time { return now }
-	t.Cleanup(func() { logNow = time.Now })
-	SetFeed("MYBLOCK", false, nil, []string{"20.43.87.186"}, nil)
+	setClock(func() time.Time { return now })
+	SetFeed("MYBLOCK", false, []string{"20.43.87.186"}, nil)
 
 	if enf, listed := Decide("20.43.87.186", "shop.gr"); enf || !listed {
 		t.Fatal("log mode: listed, not enforced")
+	}
+	SetFeed("MYALLOW", true, []string{"20.43.87.187"}, nil)
+	SetFeed("MYBLOCK2", false, []string{"20.43.87.187"}, nil)
+	if enf, listed := Decide("20.43.87.187", "shop.gr"); enf || listed {
+		t.Fatal("an allow-cancelled block is neither enforced nor listed (its allow stays cacheable)")
 	}
 	if enf, listed := Decide("1.1.1.1", "shop.gr"); enf || listed {
 		t.Fatal("a clean client is neither")
@@ -205,10 +209,11 @@ func TestForget(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
 	clock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
-	now = func() time.Time { return clock }
-	SetFeed("MYBLOCK", false, nil, []string{"20.43.87.186"}, nil)
+	setClock(func() time.Time { return clock })
+	SetFeed("MYBLOCK", false, []string{"20.43.87.186"}, nil)
 	setLocal("block_v4", false, []string{"20.43.87.186", "5.6.7.8"})
 	Forget("20.43.87.186")
+	Forget("20.43.87.186") // again: one override
 	Forget("garbage")
 	if Check("20.43.87.186").Listed() || !Check("5.6.7.8").Listed() {
 		t.Fatal("forget")
@@ -216,42 +221,55 @@ func TestForget(t *testing.T) {
 	if Check("::ffff:20.43.87.186").Listed() {
 		t.Fatal("a v4-mapped form of a forgotten address")
 	}
+	if Stats()["forgotten"].(int64) != 1 {
+		t.Fatalf("forgotten = %v", Stats()["forgotten"])
+	}
 	clock = clock.Add(forgetFor)
 	if !Check("20.43.87.186").Listed() {
 		t.Fatal("still on the lists after the override: listed again")
 	}
-	if Stats()["forgotten"].(int) != 1 {
-		t.Fatal("the expired entry is pruned on the next Forget, not before")
+	if Stats()["forgotten"].(int64) != 0 {
+		t.Fatal("an expired override a request met is dropped")
 	}
 	Forget("5.6.7.8")
-	if Stats()["forgotten"].(int) != 1 {
-		t.Fatal("expired entry pruned")
+	clock = clock.Add(forgetFor)
+	pruneForgotten()
+	if Stats()["forgotten"].(int64) != 0 {
+		t.Fatal("the refresh prunes expired overrides nobody asked about")
 	}
 }
 
-// A feed with a per-element TTL stops answering when nft's elements expire.
-func TestFeedTTL(t *testing.T) {
+// A mass unblock: Forget is a map store, not a snapshot copy per address.
+func TestForgetMassIsCheap(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	start := time.Now()
+	for i := 0; i < 20000; i++ {
+		Forget(fmt.Sprintf("10.%d.%d.%d", i>>16, (i>>8)&255, i&255))
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("20 000 Forgets took %v", d)
+	}
+	if Stats()["forgotten"].(int64) != 20000 {
+		t.Fatal("count")
+	}
+}
+
+// A feed's per-element TTL is not part of nft's verdict (the base rules drop
+// on the union sets, rebuilt without a TTL): the feed answers until its next
+// apply, there as here.
+func TestFeedHoldsUntilNextApply(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
 	clock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
-	now = func() time.Time { return clock }
-	ttl := time.Hour
-	SetFeed("SHORT", false, &ttl, []string{"198.51.100.1"}, nil)
-	SetFeed("ALLOWTTL", true, &ttl, []string{"198.51.100.2"}, nil)
-	SetFeed("LONG", false, nil, []string{"198.51.100.2"}, nil)
-	if !Check("198.51.100.1").Listed() || Check("198.51.100.2").Enforce {
-		t.Fatal("inside the TTL")
+	setClock(func() time.Time { return clock })
+	SetFeed("SHORT", false, []string{"198.51.100.1"}, nil)
+	clock = clock.Add(48 * time.Hour)
+	if !Check("198.51.100.1").Listed() {
+		t.Fatal("a feed stopped answering before its next apply")
 	}
-	SetModes("enforce", "log")
-	clock = clock.Add(ttl)
+	SetFeed("SHORT", false, nil, nil)
 	if Check("198.51.100.1").Listed() {
-		t.Fatal("the TTL feed still answers after nft expired it")
-	}
-	if !Check("198.51.100.2").Enforce {
-		t.Fatal("an expired allow feed must stop cancelling")
-	}
-	st := Stats()["sources"].(map[string]any)["feed:short"].(map[string]any)
-	if st["expired"] != true {
-		t.Fatalf("stats %+v", st)
+		t.Fatal("the next apply replaces it")
 	}
 }

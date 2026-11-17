@@ -31,8 +31,9 @@ about 4 hours), a job nothing in CFM did.
 - **Sources.** Feeds: `blocklists.Manager` hands every successfully applied
   feed over (built outside its lock, published under it only while the feed is
   still configured, so a fetch that finishes after a Reload removed the feed
-  does not bring it back). A feed with a per-element TTL (`|TTL=1h`) stops
-  answering when nft's elements expire, until the next apply. The
+  does not bring it back). A feed holds until its next apply, as in nft: a
+  per-element TTL (`|TTL=1h`) times only the per-feed set, while the base
+  rules drop on the union sets, which are rebuilt without one. The
   node's own sets of `inet cfm input` are read from the kernel every minute
   (`StartLocalRefresh`, the backend's `ListSetElementsRaw`): `block_v4/v6`,
   `block_v4/v6_nets`, `allow_v4/v6`, `allow_v4/v6_nets`, `allow_dyn_v4/v6`.
@@ -53,8 +54,8 @@ about 4 hours), a job nothing in CFM did.
   request that came through a trusted proxy (`px=1`), after IGNORE_IPS / the
   static bypass and the edge ban store. No new round trip: the edge asks the
   bridge for every request it has no cached clean allow for, and a `block` is
-  never cached. In log mode the allow for a listed client carries
-  `rule_action=observe`, which the edge does not cache either (cfm.lua acts on
+  never cached. In log mode the allow for a listed client (one no allow
+  cancels) carries `rule_action=observe`, which the edge does not cache either (cfm.lua acts on
   block / challenge / throttle only, so it is an allow), so the counts are
   per request, as enforce would see them. Not covered: the static location
   (css/js/images, which checks only the edge copy of `edgeban`) and URLs a

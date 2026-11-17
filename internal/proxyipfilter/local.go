@@ -51,6 +51,7 @@ func StartLocalRefresh(ctx context.Context, list func(set string) ([]string, err
 			}
 			setLocal(ls.set, ls.allow, elems)
 		}
+		pruneForgotten()
 	}
 	go func() {
 		refresh()

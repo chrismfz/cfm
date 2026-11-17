@@ -230,8 +230,8 @@ func TestDecisionProxiedIPFilter(t *testing.T) {
 	installEdgeBans(t)
 	proxyipfilter.ResetForTest()
 	t.Cleanup(proxyipfilter.ResetForTest)
-	proxyipfilter.SetFeed("MYBLOCK", false, nil, []string{"20.43.87.186", "45.138.12.0/24"}, nil)
-	proxyipfilter.SetFeed("MYALLOW", true, nil, []string{"45.138.12.99"}, nil)
+	proxyipfilter.SetFeed("MYBLOCK", false, []string{"20.43.87.186", "45.138.12.0/24"}, nil)
+	proxyipfilter.SetFeed("MYALLOW", true, []string{"45.138.12.99"}, nil)
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 
 	// Log mode: an allow, but marked so the edge does not cache it (every
@@ -250,8 +250,8 @@ func TestDecisionProxiedIPFilter(t *testing.T) {
 	if got["ip_action"] != "block" || hdr.Get("X-CFM-Proxied-IPFilter") != "1" || hdr.Get("X-CFM-Edge-Ban") != "" {
 		t.Fatalf("enforce: %+v %v", got, hdr)
 	}
-	if got, _ := edgeDecide(b, "45.138.12.99", "olicatessen.gr", ""); got["ip_action"] == "block" {
-		t.Fatal("a fleet allow must cancel the block")
+	if got, _ := edgeDecide(b, "45.138.12.99", "olicatessen.gr", ""); got["ip_action"] == "block" || got["rule_action"] != nil {
+		t.Fatalf("a fleet allow must cancel the block, and its allow stays cacheable: %+v", got)
 	}
 	if got, _ := edgeDecideDirect(b, "20.43.87.186", "olicatessen.gr"); got["ip_action"] == "block" {
 		t.Fatal("a direct client is nft's")

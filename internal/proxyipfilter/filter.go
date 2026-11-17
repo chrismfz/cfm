@@ -53,30 +53,32 @@ const (
 )
 
 type source struct {
-	label   string // what the log names: "feed:myblock", "block_v4", "allow_dyn_v4"
-	group   string // GroupFeed / GroupLocal for a block source; "" for an allow
-	allow   bool
-	t       table
-	expires time.Time // a feed with a per-element TTL: when nft drops what it applied (zero: never)
+	label string // what the log names: "feed:myblock", "block_v4", "allow_dyn_v4"
+	group string // GroupFeed / GroupLocal for a block source; "" for an allow
+	allow bool
+	t     table
 }
-
-func (s *source) live(now time.Time) bool { return s.expires.IsZero() || now.Before(s.expires) }
 
 type snapshot struct {
 	blocks, allows []*source
-	// forgotten: addresses an unblock or allow just cleared (Forget), until
-	// the sets read next show the kernel's own view of them.
-	forgotten map[netip.Addr]time.Time
-	expiring  bool // a source has an expiry: Check needs the clock
 }
 
 var (
-	mu        sync.Mutex
-	feeds     = map[string]*source{} // by feed name
-	locals    = map[string]*source{} // by set name
-	forgotten = map[netip.Addr]time.Time{}
-	cur       atomic.Pointer[snapshot]
-	now       = time.Now
+	mu     sync.Mutex
+	feeds  = map[string]*source{} // by feed name
+	locals = map[string]*source{} // by set name
+	cur    atomic.Pointer[snapshot]
+
+	// forgotten: addresses an unblock or allow just cleared (Forget), each with
+	// the time the override ends. Outside the snapshot, so a mass unblock (5 000
+	// edgeban.Unban calls) is 5 000 map stores, not 5 000 snapshot copies;
+	// nForgotten lets Check skip the map while it is empty.
+	forgotten  sync.Map // netip.Addr -> time.Time
+	nForgotten atomic.Int64
+
+	// clock is time.Now; tests swap it (an atomic: Check and the refresh
+	// goroutine read it while a test may set it).
+	clock atomic.Pointer[func() time.Time]
 
 	modeFeed  atomic.Value // string
 	modeLocal atomic.Value // string
@@ -88,7 +90,12 @@ func init() {
 	modeFeed.Store(ModeLog)
 	modeLocal.Store(ModeLog)
 	cur.Store(&snapshot{})
+	setClock(time.Now)
 }
+
+func now() time.Time { return (*clock.Load())() }
+
+func setClock(f func() time.Time) { clock.Store(&f) }
 
 // SetModes sets the mode of each group; an empty or unknown value is "log",
 // the safe default (logged, so a typo is visible).
@@ -128,15 +135,15 @@ type PreparedFeed struct {
 }
 
 // PrepareFeed builds one feed's table. allow: an ALLOW feed (MYALLOW), which
-// cancels a block. ttl: the feed's per-element timeout (cfm.blocklists
-// `|TTL=`), after which nft no longer holds what this apply added; nil = none.
-func PrepareFeed(name string, allow bool, ttl *time.Duration, v4, v6 []string) PreparedFeed {
+// cancels a block. A feed's per-element TTL (cfm.blocklists `|TTL=`) is not
+// applied here, as it is not in nft's verdict: it times the per-feed set's
+// elements, while the base rules drop on the union sets (block_ext_v4_hosts,
+// allow_ext_*), which RebuildExternalUnions rebuilds without a TTL on both
+// engines. A feed holds until its next apply, there as here.
+func PrepareFeed(name string, allow bool, v4, v6 []string) PreparedFeed {
 	s := &source{label: "feed:" + strings.ToLower(name), allow: allow, t: buildTable(v4, v6)}
 	if !allow {
 		s.group = GroupFeed
-	}
-	if ttl != nil && *ttl > 0 {
-		s.expires = now().Add(*ttl)
 	}
 	return PreparedFeed{name: name, s: s}
 }
@@ -153,8 +160,8 @@ func (p PreparedFeed) Publish() {
 }
 
 // SetFeed is PrepareFeed then Publish.
-func SetFeed(name string, allow bool, ttl *time.Duration, v4, v6 []string) {
-	PrepareFeed(name, allow, ttl, v4, v6).Publish()
+func SetFeed(name string, allow bool, v4, v6 []string) {
+	PrepareFeed(name, allow, v4, v6).Publish()
 }
 
 // DropFeed forgets a feed the configuration no longer has.
@@ -194,27 +201,41 @@ func Forget(ip string) {
 	if err != nil {
 		return
 	}
-	a = a.Unmap()
-	mu.Lock()
-	t := now()
-	for k, exp := range forgotten {
-		if !t.Before(exp) {
-			delete(forgotten, k)
-		}
+	if _, loaded := forgotten.Swap(a.Unmap(), now().Add(forgetFor)); !loaded {
+		nForgotten.Add(1)
 	}
-	forgotten[a] = t.Add(forgetFor)
-	publishLocked()
-	mu.Unlock()
+}
+
+// forgottenNow reports whether a is under a Forget override; an expired one is
+// removed on the way.
+func forgottenNow(a netip.Addr) bool {
+	v, ok := forgotten.Load(a)
+	if !ok {
+		return false
+	}
+	if now().Before(v.(time.Time)) {
+		return true
+	}
+	if forgotten.CompareAndDelete(a, v) {
+		nForgotten.Add(-1)
+	}
+	return false
+}
+
+// pruneForgotten drops the expired overrides of addresses no request asked
+// about since (StartLocalRefresh, every minute).
+func pruneForgotten() {
+	t := now()
+	forgotten.Range(func(k, v any) bool {
+		if !t.Before(v.(time.Time)) && forgotten.CompareAndDelete(k, v) {
+			nForgotten.Add(-1)
+		}
+		return true
+	})
 }
 
 func publishLocked() {
 	snap := &snapshot{}
-	if len(forgotten) > 0 {
-		snap.forgotten = make(map[netip.Addr]time.Time, len(forgotten))
-		for k, v := range forgotten {
-			snap.forgotten[k] = v
-		}
-	}
 	add := func(s *source) {
 		if s.allow {
 			snap.allows = append(snap.allows, s)
@@ -233,13 +254,6 @@ func publishLocked() {
 	}
 	byLabel(snap.blocks)
 	byLabel(snap.allows)
-	for _, l := range [][]*source{snap.blocks, snap.allows} {
-		for _, x := range l {
-			if !x.expires.IsZero() {
-				snap.expiring = true
-			}
-		}
-	}
 	cur.Store(snap)
 }
 
@@ -261,17 +275,13 @@ func Check(ip string) Verdict {
 		return v
 	}
 	a = a.Unmap()
-	snap := cur.Load()
-	var t time.Time
-	if len(snap.forgotten) > 0 || snap.expiring {
-		t = now()
-	}
-	if exp, ok := snap.forgotten[a]; ok && t.Before(exp) {
+	if nForgotten.Load() > 0 && forgottenNow(a) {
 		return v
 	}
+	snap := cur.Load()
 	for _, s := range snap.blocks {
 		m := groupMode(s.group)
-		if m == ModeOff || !s.live(t) || !s.t.contains(a) {
+		if m == ModeOff || !s.t.contains(a) {
 			continue
 		}
 		v.Blocks = append(v.Blocks, s.label)
@@ -283,7 +293,7 @@ func Check(ip string) Verdict {
 		return v
 	}
 	for _, s := range snap.allows {
-		if s.live(t) && s.t.contains(a) {
+		if s.t.contains(a) {
 			v.Allows = append(v.Allows, s.label)
 		}
 	}
@@ -294,8 +304,10 @@ func Check(ip string) Verdict {
 }
 
 // Decide is the bridge's question for a proxied web request: should it answer
-// block, and is the client on a list at all (the bridge then keeps the edge
-// from caching an allow for it, so every request is decided and counted)? It
+// block, and is the client on a block list with no allow cancelling it
+// (listed: the bridge then keeps the edge from caching its allow, so every
+// request a log-mode block stands for is decided and counted)? An address an
+// allow cancels gets neither: its allow is final, and stays cacheable. It
 // logs what it found, once per client and outcome per logEvery.
 func Decide(ip, host string) (enforce, listed bool) {
 	nChecks.Add(1)
@@ -324,7 +336,7 @@ func Decide(ip, host string) (enforce, listed bool) {
 			what, ip, orDash(host), strings.Join(v.Blocks, ","), allow,
 			modeFeed.Load().(string), modeLocal.Load().(string), n)
 	}
-	return v.Enforce, true
+	return v.Enforce, len(v.Allows) == 0
 }
 
 // orDash makes a value the edge passed safe for one log line: no whitespace,
@@ -361,13 +373,12 @@ type seen struct {
 var (
 	logMu   sync.Mutex
 	logSeen = map[string]*seen{}
-	logNow  = time.Now
 )
 
 // logDue counts one occurrence of key and reports whether a line is due, with
 // the occurrences since the last line.
 func logDue(key string) (int, bool) {
-	now := logNow()
+	now := now()
 	logMu.Lock()
 	defer logMu.Unlock()
 	s := logSeen[key]
@@ -399,15 +410,9 @@ func logDue(key string) (int, bool) {
 func Stats() map[string]any {
 	snap := cur.Load()
 	srcs := map[string]any{}
-	t := now()
 	for _, l := range [][]*source{snap.blocks, snap.allows} {
 		for _, s := range l {
-			st := map[string]any{"entries": s.t.n, "unparsed": s.t.bad}
-			if !s.expires.IsZero() {
-				st["expires"] = s.expires.UTC().Format(time.RFC3339)
-				st["expired"] = !s.live(t)
-			}
-			srcs[s.label] = st
+			srcs[s.label] = map[string]int{"entries": s.t.n, "unparsed": s.t.bad}
 		}
 	}
 	return map[string]any{
@@ -417,7 +422,7 @@ func Stats() map[string]any {
 		"would_block": nWould.Load(),
 		"blocked":     nBlocked.Load(),
 		"allowed":     nAllowed.Load(),
-		"forgotten":   len(snap.forgotten),
+		"forgotten":   nForgotten.Load(),
 		"sources":     srcs,
 	}
 }
@@ -428,8 +433,6 @@ func Stats() map[string]any {
 func ResetForTest() {
 	mu.Lock()
 	feeds, locals = map[string]*source{}, map[string]*source{}
-	forgotten = map[netip.Addr]time.Time{}
-	now = time.Now
 	publishLocked()
 	mu.Unlock()
 	logMu.Lock()
@@ -437,4 +440,11 @@ func ResetForTest() {
 	logMu.Unlock()
 	modeFeed.Store(ModeLog)
 	modeLocal.Store(ModeLog)
+	forgotten.Range(func(k, _ any) bool { forgotten.Delete(k); return true })
+	nForgotten.Store(0)
+	nChecks.Store(0)
+	nWould.Store(0)
+	nBlocked.Store(0)
+	nAllowed.Store(0)
+	setClock(time.Now)
 }

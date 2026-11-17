@@ -61,7 +61,7 @@ func TestManagerFeedsTheProxiedIPFilter(t *testing.T) {
 	}
 
 	// An ALLOW feed cancels.
-	proxyipfilter.SetFeed("MYBLOCK", false, nil, []string{"192.0.2.7"}, nil)
+	proxyipfilter.SetFeed("MYBLOCK", false, []string{"192.0.2.7"}, nil)
 	allow := Feed{Name: "MYALLOW", Type: TypeAllow, URL: ts.URL}
 	ra := &runner{feed: allow}
 	body.Store("192.0.2.7\n")

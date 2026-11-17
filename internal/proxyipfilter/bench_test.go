@@ -18,7 +18,7 @@ func loadEarthSized(tb testing.TB) {
 	for i := 0; i < 339; i++ {
 		feed = append(feed, fmt.Sprintf("100.%d.%d.0/24", i>>8, i&255))
 	}
-	SetFeed("MYBLOCK", false, nil, feed, nil)
+	SetFeed("MYBLOCK", false, feed, nil)
 	local := make([]string, 0, 13794)
 	for i := 0; i < 13794; i++ {
 		local = append(local, fmt.Sprintf("150.%d.%d.%d", i>>16, (i>>8)&255, i&255))
@@ -28,7 +28,7 @@ func loadEarthSized(tb testing.TB) {
 	for i := 0; i < 885; i++ {
 		allow = append(allow, fmt.Sprintf("160.0.%d.%d", i>>8, i&255))
 	}
-	SetFeed("MYALLOW", true, nil, allow, nil)
+	SetFeed("MYALLOW", true, allow, nil)
 	setLocal("allow_dyn_v4", true, []string{"170.0.0.1"})
 }
 
