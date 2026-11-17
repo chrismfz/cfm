@@ -1559,29 +1559,13 @@ local function check_impl(ctx, st)
   -- ── 15) Raw PHP webshell body (scored) ───────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_webshell_body, "logonly")
-    local head_tag
     if mode ~= "disabled" and body_inspect_ok then
-      head_tag = det.detect_php_webshell_body(body, headers)
+      local head_tag = det.detect_php_webshell_body(body, headers)
+      -- 417 (late, below) reads the whole body only when the head scored nothing.
+      st.php_body_head_hit = head_tag ~= nil
       if head_tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_PHP_WEBSHELL_BODY:" .. head_tag, ttl, mode, RULE_IDS.rule_php_webshell_body) then goto done end
-      end
-    end
-    -- ── 15b) The same scorer over the whole body (417, burn-in) ────────────
-    -- Only when the head scored nothing and the body goes past it: PHP saved
-    -- through a form field (an editor, a file manager's put) sits wherever
-    -- the file puts it. detect_php_webshell_body's cheap raw gate keeps a
-    -- body with no `<?` / `$_` (or an escape of one) from being decoded.
-    local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
-    if dmode ~= "disabled" and body_inspect_ok and not head_tag then
-      local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
-      local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
-      if #body > head_len and deep_len > head_len then
-        local tag = det.detect_php_webshell_body(body, headers, deep_len)
-        if tag then
-          local ttl = (dmode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-          if record("WAF_PHP_WEBSHELL_BODY:DEEP_" .. tag, ttl, dmode, RULE_IDS.rule_php_webshell_body_deep) then goto done end
-        end
       end
     end
   end
@@ -2905,6 +2889,29 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_ADMIN_XSCREEN:" .. tag, ttl, mode, RULE_IDS.rule_wp_admin_cross_screen) then goto done end
+      end
+    end
+  end
+
+  -- ── 404's scorer over the whole body (417, logonly burn-in) ──────────────
+  -- Only when 404's 2 KB head scored nothing and the body goes past it: PHP
+  -- saved through a form field (an editor, a file manager's put) sits wherever
+  -- the file puts it. detect_php_webshell_body's cheap raw gate keeps a body
+  -- with no `<?` / `$_` (or an escape of one) from being decoded. Late, before
+  -- only 612 and 530: cfm.lua pushes the headline hit alone, and at step 15
+  -- it took the headline (and the push) from the logonly body rules that run
+  -- after it (331 on a wget || curl dropper, 421-425, 430-439, 330).
+  do
+    local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
+    if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit then
+      local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+      local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
+      if #body > head_len and deep_len > head_len then
+        local tag = det.detect_php_webshell_body(body, headers, deep_len)
+        if tag then
+          local ttl = (dmode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_PHP_WEBSHELL_BODY:DEEP_" .. tag, ttl, dmode, RULE_IDS.rule_php_webshell_body_deep) then goto done end
+        end
       end
     end
   end

