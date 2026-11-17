@@ -832,6 +832,30 @@ already opened.
             alone. As built:
             `docs/traffic-classifier.md`, "`linux_sw`". Next read: does the
             farm flip its UA, and does any Linux human land at 110.
+          - **Read 7 decision (operator, 2026-11-17): no more score tells for
+            this farm; design the targeted challenge.** `linux_sw` rejected
+            ~166 000 farm solves (catch rate 14 % → 52 %) with no human
+            rejected, and stays. Within a day `c28caa00` moved its passes to
+            Windows / Mac UAs with no software renderer, at hs 0, from
+            residential proxies: a tell buys about a day, and at hs 0 D5b
+            lets none reject alone. The Mac `dpr:1` reading was measured
+            (66 829 farm vs 32 GR consumer) and is not shipped. Sized on the
+            week's 192 390 automatic-vhost-challenge solves: "not GR/CY"
+            covers 87 % and challenges no GR/CY visitor; the farm fingerprint
+            covers 93 % but holds 15 108 Greek-audience solves; no-input
+            catches 85 % of the Greek visitors. So the next step is WHO an
+            automatic arm covers, not how a solve is scored. Design:
+            `docs/targeted-challenge-design.md`:
+            - an **audience floor** on the automatic vhost challenges;
+            - a **confirm step** (one native button, no puzzle) for no-input
+              solves outside the audience while the vhost is UNDER_ATTACK.
+
+            The confirm step gives the UNDER_ATTACK state (§3 row 9) a
+            consumer. I3–I5 stay frozen (row 10). It is candidate 4 with a
+            new trigger. No code before read 8 measures the per-vhost
+            audience estimate and how stable it is. Each step (S1–S5 there)
+            is its own reviewed PR, shadow first. The D5 amendment it needs
+            is ratified with S2.
 
           Weekly reads from 2026-10-06 are recorded in
           `docs/abuse-defense-progress.md`, not here; this plan keeps the
@@ -872,6 +896,10 @@ already opened.
    2026-09-29: the real-input rescue (shipped, `v2_rescued=input`), then the
    log-only trajectory readings (shipped), then the confirm step. It is for the
    rejected humans who did not move a pointer (keyboard, touch-less kiosk).
+   *2026-11-17 (read 7):* re-scoped as the under-attack confirm step, shown
+   to a no-input solve outside the vhost's audience while it is UNDER_ATTACK
+   (`docs/targeted-challenge-design.md` §4). It comes after the audience
+   floor (§3 there), and both come before candidates 5 and 6.
 5. **A `CHALLENGE_V2_ENFORCE` kill switch.** v2 bites fleet-wide by default
    now (the WAF challenge tier, the automatic vhost challenges), and no
    single switch stops the rejects while keeping the telemetry:
@@ -954,6 +982,7 @@ thresholds, 16/20 against the then-shipped 40/40); the orphan
 | Track-2 per-IP score design detail — plan section frozen | `docs/challenge-score.md` |
 | B2 decision record (as-built `cfm_pcw`; retire proposed 2026-09-18, REVERSED 2026-09-22 on fleet evidence — §3 row 8) | `docs/challenge-score-b2.md` |
 | Under-attack state machine design — increments frozen | `docs/under-attack-mode.md` |
+| Targeted challenges (audience floor + under-attack confirm step) — design, not built | `docs/targeted-challenge-design.md` |
 | Historical context for the abuse_shadow signals | `docs/webdetector-refactor.md` |
 | Archived (superseded, kept for archaeology) | `docs/archive/solver-farm-fingerprint-concentration.md` · `docs/archive/solver-farm-cross-host-phase2.md` · `docs/archive/fleet-fingerprint-reputation.md` |
 

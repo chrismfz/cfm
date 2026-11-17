@@ -167,7 +167,11 @@
   read 7's proposals. It watches the farm's hs-0 Windows / Mac profile, the
   catch rate per node, human rejects under every v2 source, the
   `solver_farm` humanity lines, and, for the audience floor, each vhost's
-  GR/CY share of unchallenged requests and how stable it is. The `hid:1`
+  GR/CY share of unchallenged requests and how stable it is
+  (`docs/targeted-challenge-design.md` §8 has the method). It also counts
+  the vhosts whose `solver_farm` findings would have entered UNDER_ATTACK
+  (≥ 80 % of the passed solves outside the audience), none of which may be
+  a Greek audience. The `hid:1`
   watch on `95070673` closed in read 7.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
@@ -494,7 +498,12 @@ audience estimate. Candidate 6 (a faster in-page PoW solver) and candidate 5
 (`CHALLENGE_V2_ENFORCE`) stay behind it. The #1637 open item (the humanity
 line before the UA lines in `alerts.db`) is still open.
 
-- **Actions:** none. Read-only.
+- **Actions:** the operator approved (a), and the design behind (b), on
+  2026-11-17. The design note is `docs/targeted-challenge-design.md`. It adds
+  a confirm step (one native button) for no-input solves outside the
+  audience while a vhost is UNDER_ATTACK, the operator's "under attack mode
+  becomes interaction". No code before read 8. Master plan §5: read 7
+  decision.
 
 ### 2026-11-10 — read 6 (window: 2026-11-03 09:05 to 2026-11-10 09:05 Athens, 7 days)
 
