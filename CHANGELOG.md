@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.17
+
 ### Added
 - **WAF rule 10029: the Fabrik list-filter eval (CVE-2026-67282), logonly.**
   The Joomla Fabrik flaw behind the dmkomotinis.gr compromise (earth,
