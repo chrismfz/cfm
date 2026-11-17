@@ -38,6 +38,7 @@ import (
 
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+	"cfm/internal/proxyipfilter"
 )
 
 // DefaultPath is where the daemon persists the store (a restart keeps the
@@ -703,8 +704,15 @@ func Ban(ip net.IP, ttl *time.Duration, source string, exact bool) {
 	Default().Add(ip, ttl, source, exact)
 }
 
-// Unban drops ip from the Default store (no-op without one).
-func Unban(ip string) { Default().Remove(ip) }
+// Unban drops ip from the Default store (no-op without one), and clears it
+// from the proxied-client IP filter's lists until they are next read
+// (internal/proxyipfilter): every unblock and allow path calls Unban, and the
+// address must stop being blocked behind a trusted proxy as soon as nft stops
+// dropping it.
+func Unban(ip string) {
+	Default().Remove(ip)
+	proxyipfilter.Forget(ip)
+}
 
 // IsBanned asks the Default store (false without one).
 func IsBanned(ip string) (bool, time.Duration) { return Default().Banned(ip) }

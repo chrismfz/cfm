@@ -13,6 +13,7 @@ import (
 
 	"cfm/internal/edgeban"
 	"cfm/internal/firewall"
+	"cfm/internal/proxyipfilter"
 )
 
 // installEdgeBans installs a ready Default store holding ips (permanent),
@@ -217,5 +218,57 @@ func TestForceUnblockHandlerUnbansWithoutBridge(t *testing.T) {
 	}
 	if ok, _ := s.Banned("203.0.113.95"); ok {
 		t.Fatal("force-unblock with no bridge left the edge ban")
+	}
+}
+
+// A client behind a trusted proxy that this node holds no web ban for, but
+// that nft's IP filter would drop if it came direct (earth, 2026-11-17: an
+// address orion fleet-banned for WAF/WEBSHELL reached the origin through
+// Cloudflare): logged in log mode, answered block in enforce mode, never
+// for a direct client, and an allow cancels it.
+func TestDecisionProxiedIPFilter(t *testing.T) {
+	installEdgeBans(t)
+	proxyipfilter.ResetForTest()
+	t.Cleanup(proxyipfilter.ResetForTest)
+	proxyipfilter.SetFeed("MYBLOCK", false, []string{"20.43.87.186", "45.138.12.0/24"}, nil)
+	proxyipfilter.SetFeed("MYALLOW", true, []string{"45.138.12.99"}, nil)
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+
+	// Log mode: an allow, but marked so the edge does not cache it (every
+	// request of a listed client is decided and counted).
+	if got, hdr := edgeDecide(b, "20.43.87.186", "olicatessen.gr", ""); got["ip_action"] != "allow" || got["rule_action"] != "observe" || hdr.Get("X-CFM-Proxied-IPFilter") != "" {
+		t.Fatalf("log mode answered: %+v", got)
+	}
+	if got, _ := edgeDecide(b, "203.0.113.5", "olicatessen.gr", ""); got["rule_action"] != nil {
+		t.Fatalf("a clean client's allow stays cacheable: %+v", got)
+	}
+	if got, _ := edgeDecideDirect(b, "20.43.87.186", "olicatessen.gr"); got["rule_action"] != nil {
+		t.Fatalf("a direct client is not marked: %+v", got)
+	}
+	proxyipfilter.SetModes("enforce", "log")
+	got, hdr := edgeDecide(b, "20.43.87.186", "olicatessen.gr", "")
+	if got["ip_action"] != "block" || hdr.Get("X-CFM-Proxied-IPFilter") != "1" || hdr.Get("X-CFM-Edge-Ban") != "" {
+		t.Fatalf("enforce: %+v %v", got, hdr)
+	}
+	if got, _ := edgeDecide(b, "45.138.12.99", "olicatessen.gr", ""); got["ip_action"] == "block" || got["rule_action"] != nil {
+		t.Fatalf("a fleet allow must cancel the block, and its allow stays cacheable: %+v", got)
+	}
+	if got, _ := edgeDecideDirect(b, "20.43.87.186", "olicatessen.gr"); got["ip_action"] == "block" {
+		t.Fatal("a direct client is nft's")
+	}
+	if got, _ := edgeDecide(b, "20.43.87.186", "olicatessen.gr", "panel"); got["ip_action"] == "block" {
+		t.Fatal("the panel scope is left alone")
+	}
+	// An unblock (edgeban.Unban) lifts it at once.
+	edgeban.Unban("45.138.12.7")
+	if got, _ := edgeDecide(b, "45.138.12.7", "olicatessen.gr", ""); got["ip_action"] == "block" {
+		t.Fatal("unblocked, still blocked behind the proxy")
+	}
+	if got, _ := edgeDecide(b, "45.138.12.8", "olicatessen.gr", ""); got["ip_action"] != "block" {
+		t.Fatal("its neighbour stays blocked")
+	}
+	b.SetBypassFunc(func(ip string) bool { return ip == "20.43.87.186" })
+	if got, _ := edgeDecide(b, "20.43.87.186", "olicatessen.gr", ""); got["ip_action"] == "block" {
+		t.Fatal("IGNORE_IPS / the static bypass wins")
 	}
 }
