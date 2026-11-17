@@ -32,17 +32,19 @@ back-filled here — see the git/PR history for that period.
   more: cloud service-account key files (`/key.json`, `/gcp-key.json`,
   `/google-credentials.json`, … — 275-420 IPs each), the cPanel `error_log`
   PHP writes into the docroot, WordPress backups / logs / install screens
-  (`/ai1wm-backups/`, `/wp-content/updraft/`, `wc-logs/`, `installer.php`,
+  (`/ai1wm-backups/`, `/wp-content/updraft/`, `wc-logs/`,
   `/wp-admin/install.php`), whole-site archives (`/backup.zip`, `/www.zip`, …),
   composer manifests, `.NET`/Java probes, `/_ignition/`, `adminer`, shell
   history and a `/.well-knownold/` webshell stash. A third read (earth, mars,
   titan, virgo: ~107 M requests) adds 45 seen on all four at 100-300 IPs each:
   more service-account / `.env`-style files, CI build specs, shell and git
   dotfiles, private keys, monorepo manifests and build-tool directories
-  (`/.vercel/`, `/.netlify/`, `/.turbo/`, `/.output/`, …). 170 new entries in all;
+  (`/.vercel/`, `/.netlify/`, `/.turbo/`, `/.output/`, …). 169 new entries in all;
   every 200 on them was a site's catch-all page. Generic names a site may
   really serve (`/config.json`, `/settings.json`, `/phpmyadmin`,
-  `/server-status`, `/cgi-bin/`) stay out. They feed both
+  `/server-status`, `/cgi-bin/`) stay out, and so do Duplicator's
+  `/installer.php` and `/dup-installer/`: a site migration runs them, and the
+  challenge would cut its AJAX calls off half-way. They feed both
   the per-IP malpath challenge and the MALPATH flood ban. An unmodified list
   is refreshed by the upgrade; a locally edited one is not (rpm writes
   `.rpmnew`).

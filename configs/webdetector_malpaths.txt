@@ -307,10 +307,14 @@ phpinfo.php
 /wp-content/uploads/wc-logs/
 /wp-content/updraft/
 /ai1wm-backups/
-/installer.php
 /wp-admin/install.php
 /wp-admin/setup-config.php
 /wp-config.txt
+# NOT /installer.php or /dup-installer/: Duplicator's own migration runs
+# them (titan, 2026-11-18: ~allcan's dup-installer, 52 AJAX POSTs from one
+# GR address). The malpath challenge lands after the first logged hit and
+# revokes the cookie, so the installer's next AJAX calls would get the
+# challenge page instead of JSON and the migration would die mid-way.
 # Whole-site archives
 /backup.zip
 /backup.tar.gz
