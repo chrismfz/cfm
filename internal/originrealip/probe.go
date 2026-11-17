@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -58,6 +59,13 @@ type Probe struct {
 	Source    string `json:"source,omitempty"`    // file holding the loopback trust
 	Header    string `json:"header,omitempty"`    // the effective header the origin reads the client from, when known
 	Note      string `json:"note,omitempty"`      // why it is not trusted, or other context
+
+	// nginx: the site server{} blocks read, and how many of them do not trust
+	// the edge (0 and 0 when the http-level settings decided).
+	Servers          int `json:"servers,omitempty"`
+	UntrustedServers int `json:"untrusted_servers,omitempty"`
+
+	ng *nginxVerdict // nginx: what the plan needs
 }
 
 // edgeHeaders are the headers every edge origin location sets to the client
@@ -99,12 +107,13 @@ type layout struct {
 	activeStack func() (stack string, fromListener bool)
 
 	// fix targets (fix.go)
-	cpanelApacheDir  string // cPanel: conf.d, included by httpd.conf
-	debApacheDir     string // Debian/Ubuntu: conf-enabled
-	elApacheDir      string // EL: conf.d
-	daApacheIncludes string // DirectAdmin: the operator include file httpd.conf loads
-	nginxConfD       string
-	daNginxIncludes  string // DirectAdmin: the operator include file nginx.conf loads in http{}
+	cpanelApacheDir           string // cPanel: conf.d, included by httpd.conf
+	debApacheDir              string // Debian/Ubuntu: conf-enabled
+	elApacheDir               string // EL: conf.d
+	daApacheIncludes          string // DirectAdmin: the operator include file httpd.conf loads
+	nginxConfD                string
+	cpanelNginxServerIncludes string // cPanel ea-nginx: included by every site server{} block
+	daNginxIncludes           string // DirectAdmin: the operator include file nginx.conf loads in http{}
 }
 
 type apacheMain struct{ conf, serverRoot string }
@@ -121,16 +130,17 @@ var system = layout{
 		{"/etc/apache2/apache2.conf", "/etc/apache2"},    // Debian / Ubuntu
 		{"/etc/httpd/conf/httpd.conf", "/etc/httpd"},     // EL, DirectAdmin
 	},
-	nginxMain:        "/etc/nginx/nginx.conf",
-	nginxPrefix:      "/etc/nginx",
-	lsConfig:         "/usr/local/lsws/conf/httpd_config.xml",
-	activeStack:      activeOriginStack,
-	cpanelApacheDir:  "/etc/apache2/conf.d",
-	debApacheDir:     "/etc/apache2/conf-enabled",
-	elApacheDir:      "/etc/httpd/conf.d",
-	daApacheIncludes: "/etc/httpd/conf/extra/httpd-includes.conf",
-	nginxConfD:       "/etc/nginx/conf.d",
-	daNginxIncludes:  "/etc/nginx/nginx-includes.conf",
+	nginxMain:                 "/etc/nginx/nginx.conf",
+	nginxPrefix:               "/etc/nginx",
+	lsConfig:                  "/usr/local/lsws/conf/httpd_config.xml",
+	activeStack:               activeOriginStack,
+	cpanelApacheDir:           "/etc/apache2/conf.d",
+	debApacheDir:              "/etc/apache2/conf-enabled",
+	elApacheDir:               "/etc/httpd/conf.d",
+	daApacheIncludes:          "/etc/httpd/conf/extra/httpd-includes.conf",
+	nginxConfD:                "/etc/nginx/conf.d",
+	cpanelNginxServerIncludes: "/etc/nginx/conf.d/server-includes",
+	daNginxIncludes:           "/etc/nginx/nginx-includes.conf",
 }
 
 // fs maps a logical path to where it is on disk.
@@ -188,8 +198,9 @@ func (l layout) probe(upstream string) Probe {
 	if stack == "" {
 		stack = l.resolveOriginStack(upstream)
 	}
-	p := l.probeStack(stack)
-	p.Panel = l.panel()
+	panel := l.panel()
+	p := l.probeStack(stack, panel)
+	p.Panel = panel
 	if !p.Trusted && p.Panel == PanelNGM && p.Stack == StackNginx {
 		p.Note += "; NGM renders nginx itself, so the trust has to come from NGM's templates (a hand-written file is overwritten on apply)"
 	}
@@ -209,7 +220,7 @@ func (l layout) panel() string {
 	}
 }
 
-func (l layout) probeStack(stack string) Probe {
+func (l layout) probeStack(stack, panel string) Probe {
 	switch stack {
 	case StackApache:
 		return l.probeApache(StackApache)
@@ -225,7 +236,7 @@ func (l layout) probeStack(stack string) Probe {
 		}
 		return Probe{Stack: StackLiteSpeed, Note: "httpd_config.xml has no useIpInProxyHeader 1, or 2 with 127.0.0.1T in the allow list, and no Apache RemoteIP trust of 127.0.0.1"}
 	case StackNginx:
-		return l.probeNginx()
+		return l.probeNginx(panel)
 	default:
 		return Probe{Stack: StackUnknown, Note: "no apache/litespeed/nginx origin detected on disk"}
 	}
@@ -247,7 +258,7 @@ func (l layout) probeApache(stack string) Probe {
 	if main == nil {
 		return Probe{Stack: stack, Note: "no Apache main config found"}
 	}
-	ds := l.apacheDirectives(main.conf, main.serverRoot, "remoteipinternalproxy", "remoteiptrustedproxy", "remoteipheader")
+	ds, truncated := l.apacheDirectives(main.conf, main.serverRoot, "remoteipinternalproxy", "remoteiptrustedproxy", "remoteipheader")
 	trust, header, scoped := "", "", 0
 	for _, d := range ds {
 		switch {
@@ -273,55 +284,291 @@ func (l layout) probeApache(stack string) Probe {
 	if scoped > 0 {
 		p.Note = joinNote(p.Note, strconv.Itoa(scoped)+" RemoteIP directive(s) inside <VirtualHost> blocks override the server-level ones for those sites")
 	}
+	if truncated {
+		p.Note = joinNote(p.Note, truncatedNote)
+	}
 	return p
 }
 
-// probeNginx: set_real_ip_from 127.0.0.1 at http level is enough with nginx's
-// default real_ip_header (X-Real-IP), or with one the edge sets. Read along
-// nginx's include chain; a server{}'s own set_real_ip_from REPLACES the http
-// list for that site.
-func (l layout) probeNginx() Probe {
-	ds := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from", "real_ip_header")
-	trust, header, scoped := "", "", 0
+// probeNginx: nginx resolves the client per server{}. A server{} with its own
+// set_real_ip_from list uses that list, and the http-level one only when it has
+// none; its own real_ip_header likewise beats the http-level one (default
+// X-Real-IP). So the verdict is per server{} block: each must end up trusting
+// 127.0.0.1 with a header the edge sets. cPanel's ea-nginx includes
+// cloudflare.conf (Cloudflare's ranges + real_ip_header CF-Connecting-IP) in
+// every server{}, so an http-level trust reaches none of them; what reaches the
+// site blocks is a file in conf.d/server-includes/ (Imunify360's webshield
+// file, or the one `cfm realip fix` writes). earth (2026-11-17) logged real IPs
+// through that file while the http-level reading warned. On cPanel the
+// proxy-subdomain blocks (cpanel. / webmail. / whm. ...) do not include
+// server-includes/; they proxy to cpsrvd, and only ea-nginx's own log reads
+// 127.0.0.1 for them, so they are reported, not counted. Read along nginx's
+// include chain. With no server{} block found, the http-level settings decide.
+func (l layout) probeNginx(panel string) Probe {
+	ds, servers, truncated := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from", "real_ip_header")
+	trust, header, inLocation, httpList := "", "", 0, false
+	type own struct {
+		list, loopback bool
+		src, header    string
+	}
+	per := make([]own, len(servers))
 	for _, d := range ds {
 		switch {
-		case d.scoped:
+		case d.location:
 			if d.name == "set_real_ip_from" {
-				scoped++
+				inLocation++
+			}
+		case d.server >= 0:
+			o := &per[d.server]
+			switch {
+			case d.name == "real_ip_header" && len(d.args) > 0:
+				o.header = d.args[0]
+			case d.name == "set_real_ip_from":
+				o.list = true
+				if !o.loopback && anyLoopback(d.args) {
+					o.loopback, o.src = true, l.display(d.file)
+				}
 			}
 		case d.name == "real_ip_header" && len(d.args) > 0:
 			header = d.args[0]
-		case d.name == "set_real_ip_from" && trust == "" && anyLoopback(d.args):
-			trust = l.display(d.file)
+		case d.name == "set_real_ip_from":
+			httpList = true
+			if trust == "" && anyLoopback(d.args) {
+				trust = l.display(d.file)
+			}
 		}
 	}
-	shown := header
-	if shown == "" {
-		shown = "X-Real-IP (default)"
+	p := Probe{Stack: StackNginx, Source: trust, ng: &nginxVerdict{httpList: httpList}}
+	if header != "" && !edgeHeaders[strings.ToLower(header)] {
+		p.ng.httpBadHeader = header
 	}
-	p := Probe{Stack: StackNginx, Source: trust, Header: shown}
-	switch {
-	case trust == "":
-		p.Note = "no http-level set_real_ip_from 127.0.0.1 in the nginx config"
-	case header != "" && !edgeHeaders[strings.ToLower(header)]:
-		p.Note = "real_ip_header " + header + " is not a header the edge sets (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)"
-	default:
-		p.Trusted, p.Directive = true, "set_real_ip_from 127.0.0.1"
+
+	serverIncludes := l.fs(l.cpanelNginxServerIncludes)
+	headers := map[string]bool{}
+	ownOK, proxyUntrusted, inherit, ownNoLoop, internal := 0, 0, 0, 0, 0
+	badHeaders := map[string]bool{}
+	for i, srv := range servers {
+		o := per[i]
+		hdr := o.header
+		if hdr == "" {
+			hdr = header
+		}
+		loop := trust != ""
+		if o.list {
+			loop = o.loopback
+		}
+		edgeHdr := hdr == "" || edgeHeaders[strings.ToLower(hdr)]
+		if !srv.edgeFacing() {
+			// Listens only where the edge never proxies to (a status page on
+			// 127.0.0.1:8090, a unix socket): no visitor reaches it through the edge.
+			internal++
+			continue
+		}
+		if panel == PanelCPanel && cpanelProxyServer(srv.names) {
+			if !loop || !edgeHdr {
+				proxyUntrusted++
+			}
+			continue
+		}
+		p.Servers++
+		shown := hdr
+		if shown == "" {
+			shown = "X-Real-IP (default)"
+		}
+		headers[shown] = true
+		if loop && edgeHdr {
+			if o.list {
+				ownOK++
+				if p.Source == "" {
+					p.Source = o.src
+				}
+			}
+			continue
+		}
+		u := nginxSite{names: srv.names, ownList: o.list}
+		switch {
+		case !edgeHdr:
+			// The header has to be fixed by hand first, loopback or not.
+			u.badHeader = hdr
+			badHeaders[hdr] = true
+		case o.list:
+			ownNoLoop++
+		default:
+			inherit++
+		}
+		for _, d := range srv.includeDirs {
+			if d == serverIncludes {
+				u.serverIncludes = true
+			}
+		}
+		p.ng.untrusted = append(p.ng.untrusted, u)
 	}
-	if scoped > 0 {
-		p.Note = joinNote(p.Note, strconv.Itoa(scoped)+" set_real_ip_from line(s) inside server{} blocks replace the http-level list for those sites")
+	p.UntrustedServers = len(p.ng.untrusted)
+
+	if p.Servers == 0 {
+		// No site server{} to read: the http-level settings stand for the host.
+		p.Servers, p.UntrustedServers, p.ng.untrusted = 0, 0, nil
+		p.Header = header
+		if p.Header == "" {
+			p.Header = "X-Real-IP (default)"
+		}
+		switch {
+		case trust == "":
+			p.Note = "no http-level set_real_ip_from 127.0.0.1 in the nginx config"
+		case p.ng.httpBadHeader != "":
+			p.Note = "real_ip_header " + header + " is not a header the edge sets (X-Forwarded-For, X-Real-IP, CF-Connecting-IP)"
+		default:
+			p.Trusted, p.Directive = true, "set_real_ip_from 127.0.0.1"
+		}
+	} else {
+		p.Header = joinSorted(headers)
+		if len(p.ng.untrusted) == 0 {
+			p.Trusted = true
+			if ownOK == 0 {
+				p.Directive = "set_real_ip_from 127.0.0.1"
+			} else {
+				p.Directive = "set_real_ip_from 127.0.0.1 in every server{} (" + strconv.Itoa(ownOK) + " through their own list)"
+			}
+		} else {
+			p.Note = strconv.Itoa(len(p.ng.untrusted)) + " of " + strconv.Itoa(p.Servers) + " server{} block(s) do not trust 127.0.0.1 (e.g. " + siteExamples(p.ng.untrusted) + ")"
+			if inherit > 0 {
+				p.Note += "; " + strconv.Itoa(inherit) + " inherit the http-level list, which has no 127.0.0.1"
+			}
+			if ownNoLoop > 0 {
+				p.Note += "; " + strconv.Itoa(ownNoLoop) + " keep their own set_real_ip_from list without 127.0.0.1, which replaces the http-level one"
+			}
+			if len(badHeaders) > 0 {
+				p.Note += "; real_ip_header " + joinSorted(badHeaders) + " is not a header the edge sets"
+			}
+		}
+	}
+	if proxyUntrusted > 0 {
+		p.Note = joinNote(p.Note, strconv.Itoa(proxyUntrusted)+" cPanel proxy-subdomain server{} block(s) (cpanel./webmail./whm./...) "+
+			"do not trust 127.0.0.1: they proxy to cpsrvd and only ea-nginx's own log reads 127.0.0.1 for them (not counted)")
+	}
+	if internal > 0 {
+		p.Note = joinNote(p.Note, strconv.Itoa(internal)+" server{} block(s) listening only off :80/:443, where the edge never proxies (not counted)")
+	}
+	if inLocation > 0 {
+		p.Note = joinNote(p.Note, strconv.Itoa(inLocation)+" set_real_ip_from line(s) inside location{} blocks: they apply to those locations only, "+
+			"so the verdict reads the server{} level")
+	}
+	if truncated {
+		p.Note = joinNote(p.Note, truncatedNote)
 	}
 	return p
 }
 
+// truncatedNote: a walk limit stopped the read, so the verdict is partial.
+const truncatedNote = "the configuration walk stopped at a limit (include depth, files or inclusions), so the verdict reads part of it only"
+
+// nginxVerdict is what the plan needs from an nginx probe.
+type nginxVerdict struct {
+	httpBadHeader string // an http-level real_ip_header the edge does not set
+	httpList      bool   // http{} has its own set_real_ip_from list (a server-level list replaces it)
+	untrusted     []nginxSite
+}
+
+// nginxSite is a server{} block that does not trust the edge.
+type nginxSite struct {
+	names          []string
+	ownList        bool   // it has its own set_real_ip_from list (an http-level trust does not reach it)
+	badHeader      string // it trusts the loopback but reads a header the edge does not set
+	serverIncludes bool   // it includes cPanel's conf.d/server-includes/
+}
+
+// cpanelProxyPrefixes are the service subdomains ea-nginx proxies to cpsrvd.
+var cpanelProxyPrefixes = []string{"autoconfig.", "autodiscover.", "cpanel.", "cpcalendars.", "cpcontacts.", "webdisk.", "webmail.", "whm."}
+
+// cpanelProxyServer reports whether every name of a server{} is a cPanel
+// service subdomain (cpanel.example.gr, a wildcard cpanel.*, or a regex
+// ~^cpanel\.).
+func cpanelProxyServer(names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, n := range names {
+		for _, c := range nameCandidates(n) {
+			hit := false
+			for _, pre := range cpanelProxyPrefixes {
+				if strings.HasPrefix(c, pre) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// nameCandidates is what a server_name can start with: the name itself, or
+// for a regex (~^...) each option of a leading group, `~^(cpanel|webmail)\.`
+// or `~^(?<sub>cpanel|whm)\.` included.
+func nameCandidates(n string) []string {
+	n = strings.ToLower(n)
+	if !strings.HasPrefix(n, "~") {
+		return []string{n}
+	}
+	n = strings.ReplaceAll(strings.TrimLeft(n, "~^"), `\.`, ".")
+	if !strings.HasPrefix(n, "(") {
+		return []string{n}
+	}
+	j := strings.Index(n, ")")
+	if j < 0 {
+		return []string{n}
+	}
+	inner, rest := n[1:j], n[j+1:]
+	switch {
+	case strings.HasPrefix(inner, "?:"):
+		inner = inner[2:]
+	case strings.HasPrefix(inner, "?<") || strings.HasPrefix(inner, "?p<"):
+		if k := strings.Index(inner, ">"); k >= 0 {
+			inner = inner[k+1:]
+		}
+	}
+	var out []string
+	for _, opt := range strings.Split(inner, "|") {
+		out = append(out, opt+rest)
+	}
+	return out
+}
+
+func siteExamples(us []nginxSite) string {
+	var ex []string
+	for _, u := range us {
+		name := "(no server_name)"
+		if len(u.names) > 0 {
+			name = u.names[0]
+		}
+		ex = append(ex, name)
+		if len(ex) == 3 {
+			break
+		}
+	}
+	return strings.Join(ex, ", ")
+}
+
+func joinSorted(set map[string]bool) string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return strings.Join(out, " / ")
+}
+
 // anyLoopback reports whether one of a trust directive's arguments covers the
-// edge's address: 127.0.0.1 or ::1, alone or as a loopback-only network
-// (127.0.0.0/8 .. /32, ::1/128). 127.0.0.1/1 covers half the internet and is
-// not a loopback trust.
+// edge's address: 127.0.0.1, alone or as a loopback-only network (127.0.0.0/8
+// .. /32). The edge proxies from 127.0.0.1 (proxy_bind), so ::1 alone does not
+// trust it: a list holding only ::1 still logs 127.0.0.1. 127.0.0.1/1 covers
+// half the internet and is not a loopback trust.
 func anyLoopback(args []string) bool {
 	for _, a := range args {
 		if ip := net.ParseIP(a); ip != nil {
-			if ip.Equal(net.ParseIP("127.0.0.1")) || ip.Equal(net.IPv6loopback) {
+			if ip.Equal(net.ParseIP("127.0.0.1")) {
 				return true
 			}
 			continue
@@ -330,16 +577,8 @@ func anyLoopback(args []string) bool {
 		if err != nil {
 			continue
 		}
-		ones, bits := n.Mask.Size()
-		switch bits {
-		case 32:
-			if ones >= 8 && n.IP.IsLoopback() && n.Contains(net.ParseIP("127.0.0.1")) {
-				return true
-			}
-		case 128:
-			if ones == 128 && n.IP.Equal(net.IPv6loopback) {
-				return true
-			}
+		if ones, bits := n.Mask.Size(); bits == 32 && ones >= 8 && n.IP.IsLoopback() && n.Contains(net.ParseIP("127.0.0.1")) {
+			return true
 		}
 	}
 	return false

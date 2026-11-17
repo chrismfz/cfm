@@ -18,6 +18,16 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **`edge_health` check H, `web-dnat-order`: is web traffic reaching the
+  edge?** A connection is NAT'd once, by the first nat chain that rewrites it.
+  Imunify360 DNATs its sets to WebShield at priority -100, and CFM's web
+  redirect defaults to -99 ("Imunify first"). On a cPanel node that set holds
+  Cloudflare's ranges, so every Cloudflare visitor bypassed the edge's WAF,
+  challenge and edge bans. earth sent ~29% of its web requests to WebShield
+  for months; the edge saw 235 Cloudflare requests an hour. The check warns
+  when a non-CFM DNAT of tcp/80 or 443 runs before CFM's redirect AND
+  WebShield served 100+ requests in the last 15 min, and names the fix
+  (`NFT_DNAT_PRIORITY = -101`). The warning reaches `whats_wrong`.
 - **The fleet blacklist and the node's own IP lists now reach visitors behind
   Cloudflare (log mode).** nft sees only the proxy's address, so cfm-web's
   blacklist (~270k addresses), `cfm.deny` and the TTL bans never applied to a
@@ -147,6 +157,23 @@ back-filled here — see the git/PR history for that period.
   the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
 ### Fixed
+- **`cfm realip` now reads nginx per site, so cPanel ea-nginx nodes are
+  judged correctly.** nginx takes the client from each `server{}`'s own
+  `set_real_ip_from` list when it has one, and cPanel's ea-nginx gives every
+  vhost one (`cloudflare.conf`, Cloudflare's ranges only). The check read only
+  the http-level settings. On earth it warned "logs 127.0.0.1 for every
+  visitor" while the sites logged real IPs, because Imunify360's
+  `server-includes/imunify360-webshield.conf` trusts 127.0.0.1 in every site
+  block. Worse, `cfm realip fix` would have written an http-level file that
+  reaches no vhost and turned the check green. Now each site `server{}` must
+  trust the edge (`servers` / `untrusted_servers` in `edge_health`
+  evidence). On cPanel the fix writes `/etc/nginx/conf.d/server-includes/cfm-realip.conf`,
+  which every site block includes. Elsewhere, when every untrusted block keeps
+  its own list, it names those blocks and leaves the change to the operator
+  instead of writing a file that changes nothing. cPanel's proxy-subdomain
+  blocks (`cpanel.` / `webmail.` / `whm.` ...) proxy to cpsrvd and are
+  reported but not counted. On earth they are where 127.0.0.1 shows, in
+  ea-nginx's own log only.
 - **Edge: a cert name the daemon dropped is no longer served until a
   reload.** The edge's per-worker cert store only ever added names from the
   sslcollector list. When AutoSSL replaced a new account's cPanel self-signed

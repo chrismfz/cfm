@@ -603,6 +603,16 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   20 k), asked by the same decision, after the edge ban store, allows first as
   in `inet cfm input`. `[webdetector] PROXIED_IPFILTER_FEED` / `_LOCAL` =
   `log` (default) | `enforce` | `off` (`docs/proxied-ipfilter.md`).
+- **A connection is NAT'd once, by the first nat chain that rewrites it.**
+  Imunify360 DNATs its sets to WebShield at -100 (`ip nat PREROUTING`), and its
+  `remote_proxy_static` set holds Cloudflare's ranges. With CFM's web redirect
+  at the -99 default, every Cloudflare visitor skipped the edge on earth for
+  months (~29% of its web requests, 2026-11-17). Imunify nodes run
+  `NFT_DNAT_PRIORITY = -101`; `edge_health` check H (`web-dnat-order`) warns
+  when a DNAT runs ahead while WebShield serves real traffic. With CFM first,
+  a graylisted direct visitor is dropped by Imunify's own filter (it accepts
+  that set only on WebShield's ports), never challenged. What WebShield did
+  that CFM lost, measured: `docs/imunify-webshield-parity.md`.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
