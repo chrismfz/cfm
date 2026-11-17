@@ -86,6 +86,19 @@ back-filled here — see the git/PR history for that period.
   See `docs/waf.md`, "Rule 530".
 
 ### Security
+- **WAF rules 601 (control characters) and 611 (bad UTF-8) read a body by its
+  media type, as PHP does.** They skipped any body whose Content-Type line
+  merely mentioned `multipart/form-data`, so
+  `application/x-www-form-urlencoded; x=multipart/form-data`, which PHP
+  parses into `$_POST`, hid control bytes and overlong UTF-8 from both. The
+  check now takes the media type (the Content-Type up to its first `;`, `,`
+  or space, every Content-Type line joined as Apache hands them to PHP), in
+  one helper; 601 had its own copy of the substring test. A parameter can no
+  longer change the answer either way: `image/jpeg; x=text/plain` is no
+  longer read as text. Rule 404's 2 KB head pass shares the helper and now
+  reads such a body too. 601 ships at `challenge_v2`, 611 disabled. The
+  upload rules' (401 / 402 / 414 / 415) multipart gates stay substring tests:
+  they over-read, and miss no body PHP parses as multipart.
 - **The dovecot detector no longer takes the address or the verdict from the
   username.** Before, a username such as `rip=203.0.113.50,a@b.gr` made it ban
   the address in the username instead of the client's, and report it to the
