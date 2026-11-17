@@ -22,7 +22,9 @@ back-filled here — see the git/PR history for that period.
   WooCommerce's authenticated REST API (`/wp-json/wc/v1`–`v3`, legacy
   `/wc-api/v1`–`v3`, at the site root or one install directory down) no longer
   count toward the per-IP challenges (`CHALLENGE_UNIQPATHS_IP`,
-  `CHALLENGE_ERR_RATIO`, `CHALLENGE_RPS_4XX/5XX`, `CHALLENGE_POST_RATIO`). A
+  `CHALLENGE_ERR_RATIO`, `CHALLENGE_RPS_TOTAL`, `CHALLENGE_RPS_4XX/5XX`,
+  `CHALLENGE_POST_RATIO`): they leave the IP's total for those triggers, and
+  the IP's other requests decide alone. A
   product sync to kiamaia.gr (mars, 2026-11-17) writes a new
   `/products/<id>/variations/<id>` per request, and some come back 404: it was
   put under a challenge it cannot solve, the challenge page's 403s fed

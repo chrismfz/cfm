@@ -7,8 +7,10 @@ import "strings"
 // v2 or v3, or the legacy /wc-api/v1-v3, at the site root or one install
 // directory down (/shop/wp-json/wc/v3/…).
 //
-// The per-IP challenge counters (CHALLENGE_UNIQPATHS_IP, CHALLENGE_ERR_RATIO,
-// CHALLENGE_RPS_4XX/5XX, CHALLENGE_POST_RATIO) skip these requests. Their
+// The per-IP challenge triggers (CHALLENGE_UNIQPATHS_IP, CHALLENGE_ERR_RATIO,
+// CHALLENGE_RPS_TOTAL, CHALLENGE_RPS_4XX/5XX, CHALLENGE_POST_RATIO) leave these
+// requests out: they count toward no rate, ratio or path set, and leave the
+// IP's total for those triggers (the IP's other requests decide alone). Their
 // callers are server-to-server clients (ERP, stock and price sync, marketplace
 // connectors) that cannot solve a challenge: on 2026-11-17 a product sync to
 // kiamaia.gr (mars) POSTed ~13 requests a second to a new
@@ -28,10 +30,9 @@ import "strings"
 //   - a route that takes a credential (token, login, auth, jwt, password)
 //     never matches;
 //   - it only stops these requests from COUNTING toward a per-IP challenge.
-//     It lifts no challenge or block already on the IP, the request still
-//     counts in the IP's total, and the WAF, the 403 / 404 / 40x_combo
-//     counters, agent_flood and the IP's requests to any other path are
-//     unchanged.
+//     It lifts no challenge or block already on the IP, and the WAF, the
+//     403 / 404 / 40x_combo counters, agent_flood and the IP's requests to
+//     any other path are unchanged.
 func isWooAdminAPIPath(p string) bool {
 	lp := strings.ToLower(p)
 	if strings.ContainsRune(lp, '?') {
@@ -40,7 +41,7 @@ func isWooAdminAPIPath(p string) bool {
 	if route, ok := wpRestRoute(lp); ok {
 		return wooVersionedRoute(route, "/wc/") && !wpRestCredentialRoute(route)
 	}
-	_, rest, ok := wpStripInstall(lp, "/wc-api/", false)
+	_, rest, ok := wpStripInstall(lp, "/wc-api/", true)
 	if !ok || strings.Contains(rest, "%") || !strings.HasPrefix(rest, "/wc-api/") {
 		return false
 	}

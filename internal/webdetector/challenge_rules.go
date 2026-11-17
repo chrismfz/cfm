@@ -869,6 +869,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             cPOST int
             cNoUA int
             cH10  int
+            exempt int // isWooAdminAPIPath requests: out of total
         }
         st := make(map[string]*agg2)
 
@@ -922,6 +923,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                             a.cH10 += n
                         }
                     }
+                    for ip, n := range b.ipsChalExempt {
+                        a := st[ip]
+                        if a == nil { a = &agg2{}; st[ip] = a }
+                        a.exempt += n
+                    }
                 }
             }
             // snapshot last ctx under same lock
@@ -938,7 +944,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         const minReqForRatio = 20
 
         for ipStr, a := range st {
-            if a == nil || a.total <= 0 { continue }
+            if a == nil { continue }
+            // WooCommerce REST calls set no rate or ratio (isWooAdminAPIPath):
+            // a sync at 13 req/s sat just under CHALLENGE_RPS_TOTAL_MIN 15.
+            a.total -= a.exempt
+            if a.total <= 0 { continue }
 
             rps := float64(a.total) / winSec
             rps4 := float64(a.c4xx) / winSec

@@ -230,13 +230,16 @@ type bucketSW struct {
 	ipsChalRule map[string]map[int]int // ip -> ruleIndex -> count
 
 	// Lightweight per-IP counters for challenge thresholds
-	ips4xx       map[string]int
-	ips5xx       map[string]int
-	ipsPOST      map[string]int
-	ipsNoUA      map[string]int
-	ipsHTTP10    map[string]int
-	ipsMalformed map[string]int                 // 400+414+431 per IP
-	ipsUniqUA    map[string]map[uint64]struct{} // UA churn: ip -> set(hash(ua))
+	ips4xx    map[string]int
+	ips5xx    map[string]int
+	ipsPOST   map[string]int
+	ipsNoUA   map[string]int
+	ipsHTTP10 map[string]int
+	// ipsChalExempt: requests the per-IP challenge triggers leave out of the
+	// IP's total (isWooAdminAPIPath), so they set no rate or ratio either.
+	ipsChalExempt map[string]int
+	ipsMalformed  map[string]int                 // 400+414+431 per IP
+	ipsUniqUA     map[string]map[uint64]struct{} // UA churn: ip -> set(hash(ua))
 
 	// 40x combo support (403+404) for IP-level detectors
 	ips40x     map[string]int
@@ -1777,7 +1780,9 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	skip := skip403(rec)
 	// wooAPI: a WooCommerce authenticated REST call, which the per-IP
 	// challenge counters below do not count (isWooAdminAPIPath).
-	wooAPI := isWooAdminAPIPath(p)
+	// The "wc" test keeps the full match off the hot path for almost every
+	// record.
+	wooAPI := (strings.Contains(p, "wc") || strings.Contains(p, "WC")) && isWooAdminAPIPath(p)
 
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
@@ -2019,6 +2024,12 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// Per-IP challenge counters (only allocate maps if a related threshold is enabled)
 	if rec.IP != "" {
+		if wooAPI {
+			if b.ipsChalExempt == nil {
+				b.ipsChalExempt = make(map[string]int)
+			}
+			b.ipsChalExempt[rec.IP]++
+		}
 		// status class counters. A skip403 403 is no client error here either:
 		// on 2026-11-17 a traffic rule's refusals put a shopper's home IP
 		// under CHALLENGE_ERR_RATIO next to the 403_flood ban (rigel).
