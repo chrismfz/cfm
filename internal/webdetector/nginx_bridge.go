@@ -34,6 +34,7 @@ import (
 	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/proxyipfilter"
 	"cfm/internal/safefs"
 	"cfm/internal/sslcollector"
 	"context"
@@ -2114,29 +2115,49 @@ func decisionConcurrencyCap() int {
 // allow nets, dyndns) decide for it; an older edge that sends no px gets
 // nothing from here. A panel-scope decision is left alone: the panel ports
 // get their own, separately rolled-out check.
-func (b *NginxBridge) writeEdgeBan(w http.ResponseWriter, r *http.Request) bool {
+//
+// listed: the client is on one of nft's block lists (internal/proxyipfilter)
+// but not answered block (log mode, or an allow cancelled it). The caller
+// then marks its own answer rule_action=observe, which the edge treats as an
+// allow it must not cache (cfm_decision.lua caches only a clean allow with no
+// rule_action; cfm.lua acts on block / challenge / throttle only), so every
+// request of a listed client is decided and counted, as enforce would be.
+func (b *NginxBridge) writeEdgeBan(w http.ResponseWriter, r *http.Request) (handled, listed bool) {
 	q := r.URL.Query()
 	if q.Get("px") != "1" {
-		return false
+		return false, false
 	}
 	if sc := strings.TrimSpace(q.Get("scope")); sc != "" && sc != "web" {
-		return false
+		return false, false
 	}
 	ip := strings.TrimSpace(q.Get("ip"))
 	if b.bypassFunc != nil && b.bypassFunc(ip) {
-		return false
+		return false, false
 	}
 	if ok, _ := edgeban.IsBanned(ip); !ok {
-		return false
+		// Not one of this node's web bans: the verdict nft's IP filter would
+		// give the visitor if it came direct (fleet blacklist, local bans,
+		// every allow first; internal/proxyipfilter). Logged in log mode,
+		// answered only in enforce mode.
+		enforce, onList := proxyipfilter.Decide(ip, q.Get("host"))
+		if !enforce {
+			return false, onList
+		}
+		w.Header().Set("X-CFM-Proxied-IPFilter", "1")
+	} else {
+		w.Header().Set("X-CFM-Edge-Ban", "1")
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-CFM-Edge-Ban", "1")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"ip_action":    "block",
 		"vhost_action": "allow",
 	})
-	return true
+	return true, false
 }
+
+// ruleActionObserve marks an allow the edge must not cache: the client is on
+// one of nft's block lists in log mode (writeEdgeBan).
+const ruleActionObserve = "observe"
 
 func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	if !b.checkToken(r) {
@@ -2178,7 +2199,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		b.stats.shedCount++
 		b.stats.mu.Unlock()
 		// An edge ban is a map lookup: it holds even while the bridge sheds.
-		if b.writeEdgeBan(w, r) {
+		// (A shed answer is never cached: rule_action=shed.)
+		if handled, _ := b.writeEdgeBan(w, r); handled {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -2262,7 +2284,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// ignored address stays ignored), before every allow below: the host
 	// bypass, the solved-ok state, the exemptions and the traffic rules never
 	// lift a ban, as nft's drop would not.
-	if b.writeEdgeBan(w, r) {
+	handledBan, pxListed := b.writeEdgeBan(w, r)
+	if handledBan {
 		return
 	}
 	// ── NEW: host-level static bypass (CHALLENGE_HOST_BYPASS) ─────────────────
@@ -2474,6 +2497,9 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		"ip_action":    ipAction, // "allow" | "challenge" | "block"
 		"vhost_action": vhAction, // "allow" | "challenge"
 		"clrrv":        clrRevoked,
+	}
+	if pxListed {
+		resp["rule_action"] = ruleActionObserve // a matched traffic rule below replaces it
 	}
 	if b.RuleDecision != nil {
 		// verified_bot rules: reuse the verdict the exemption block already

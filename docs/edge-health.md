@@ -252,6 +252,32 @@ itself); `unknown` when no origin is found on disk. The fix is
 `cfm realip fix`, or for LiteSpeed and NGM the manual step the finding names.
 Per panel and stack: [`origin-real-ip.md`](origin-real-ip.md).
 
+### H. Web traffic reaches the edge, not a DNAT ahead of it (nft + WebShield log)
+
+Added 2026-11-17 after earth. A connection is NAT'd once, by the first nat
+chain that rewrites it. Imunify360 DNATs its sets to WebShield (`:52223` /
+`:52224`) at priority -100, and CFM's web redirect defaults to -99, "Imunify
+first" (`cfm dnat`). On a cPanel node `i360.ipv4.remote_proxy_static` holds
+Cloudflare's ranges, so every Cloudflare visitor went to WebShield: earth sent
+~29% of its web requests there (30 650 in one hour), and its edge saw 235
+Cloudflare requests in that hour. None of it met the WAF, the challenge or the
+edge bans. earth and speedhost had no `NFT_DNAT_PRIORITY` in `cfm.conf`; the
+rest of the fleet runs -101.
+
+`web-dnat-order` reads the nft ruleset (`internal/firewall/netfilterdiag`,
+`WebDNATAhead`: non-CFM DNAT/redirect rules for tcp/80 or tcp/443 at a
+priority no later than `inet cfm_redirect`) and counts WebShield's access log
+over the last 15 min. `warn` when such a rule exists AND WebShield served 100+
+requests in the window (the CFM-first nodes log 2-10, earth logged ~7 500);
+`ok` when CFM's redirect runs first, when web DNAT is off, or when the order is
+Imunify-first but WebShield is quiet (the documented choice); `unknown` when
+the ruleset cannot be read, or an Imunify rule runs ahead and there is no
+WebShield log to measure with. A DNAT ahead from anything else (Docker
+publishing :443, a hand rule) is a `warn` on the order alone, naming its
+owner: WebShield's log cannot measure it. Packet counters are not used: they are cumulative and would
+keep warning after the fix. The fix: `NFT_DNAT_PRIORITY = -101` in
+`/etc/cfm/cfm.conf` and `cfm dnat on --priority -101` (one transaction).
+
 ## Output shape
 
 Structured JSON, most-severe first, so `whats_wrong` and a human read it the same
