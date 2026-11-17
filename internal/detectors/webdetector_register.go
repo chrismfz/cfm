@@ -786,6 +786,7 @@ func init() {
 			UnderAttackConfirmTicks: kvInt(kv, "UNDER_ATTACK_CONFIRM_TICKS", 3),
 			UnderAttackHolddown:     kvDur(kv, "UNDER_ATTACK_HOLDDOWN", 30*time.Minute),
 			UnderAttackRuleTTL:      kvDur(kv, "UNDER_ATTACK_RULE_TTL", 6*time.Hour),
+			UnderAttackOverrideTTL:  kvDur(kv, "UNDER_ATTACK_OVERRIDE_TTL", 6*time.Hour),
 			UnderAttackErrFloor:     kvFlt(kv, "UNDER_ATTACK_ERR_FLOOR", 0.5),
 			UnderAttackBotCeil:      kvFlt(kv, "UNDER_ATTACK_BOT_CEIL", 0.05),
 

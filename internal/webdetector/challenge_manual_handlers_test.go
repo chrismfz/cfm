@@ -311,10 +311,36 @@ func TestAttackOverrideIsAudited(t *testing.T) {
 	}
 }
 
-// ── Slice-D residual resolved: scoped attack override is TTL-bound (24h) ─────
-// Operator decision 2026-09-22: a scoped forced-ON override expires like the
-// panic-button arm; admin overrides stay unbounded. Expiry is honoured by the
-// tick AND the read path, and the response/audit carry the bound.
+// ── Every attack override is TTL-bound ────────────────────────────────────────
+// Operator decisions: 2026-09-22, a scoped forced-ON override expires like the
+// panic-button arm (24h ceiling); 2026-11-17, every override holds for a TTL
+// (the call's ttl, else UNDER_ATTACK_OVERRIDE_TTL, 6h) and arms the vhost's
+// challenge for the same window. Expiry is honoured by the tick AND the read
+// path, and the response/audit carry the bound.
+
+func attackRequest(t *testing.T, e *Engine, query string, scopedHost string) map[string]interface{} {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/attack?"+query, nil)
+	if scopedHost != "" {
+		ctx := context.WithValue(req.Context(), CtxRoleKey{}, CtxRoleScoped)
+		ctx = context.WithValue(ctx, CtxScopeKey{}, map[string]struct{}{scopedHost: {}})
+		req = req.WithContext(ctx)
+	}
+	rr := httptest.NewRecorder()
+	e.handleChallengeVhostAttack(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("attack %s: %d: %s", query, rr.Code, rr.Body.String())
+	}
+	var resp map[string]interface{}
+	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
+	return resp
+}
+
+func overrideExpiry(e *Engine, host string) time.Time {
+	e.attack.mu.Lock()
+	defer e.attack.mu.Unlock()
+	return e.attack.hosts[host].overrideExpires
+}
 
 func TestAttackOverrideScopedTTLBound(t *testing.T) {
 	dir := t.TempDir()
@@ -326,18 +352,10 @@ func TestAttackOverrideScopedTTLBound(t *testing.T) {
 	e := &Engine{history: hs, cfg: Config{UnderAttack: true}, attack: newUnderAttackTracker()}
 	e.manualChal.init("")
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/attack?host=tenant-a.example.com&on=1", nil)
-	ctx := context.WithValue(req.Context(), CtxRoleKey{}, CtxRoleScoped)
-	ctx = context.WithValue(ctx, CtxScopeKey{}, map[string]struct{}{"tenant-a.example.com": {}})
-	rr := httptest.NewRecorder()
-	e.handleChallengeVhostAttack(rr, req.WithContext(ctx))
-	if rr.Code != http.StatusOK {
-		t.Fatalf("scoped attack override failed: %d: %s", rr.Code, rr.Body.String())
-	}
-	var resp map[string]interface{}
-	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
-	if resp["ttl"] != scopedMaxChallengeTTL.String() {
-		t.Fatalf("scoped override response ttl = %#v, want %q", resp["ttl"], scopedMaxChallengeTTL.String())
+	// Asked for more than the ceiling: capped at 24h, and said so.
+	resp := attackRequest(t, e, "host=tenant-a.example.com&on=1&ttl=48h", "tenant-a.example.com")
+	if resp["ttl"] != scopedMaxChallengeTTL.String() || resp["ttl_capped"] != true {
+		t.Fatalf("scoped override: ttl=%#v capped=%#v, want %q capped", resp["ttl"], resp["ttl_capped"], scopedMaxChallengeTTL.String())
 	}
 	if _, ok := resp["expires_at"]; !ok {
 		t.Fatalf("scoped override response missing expires_at")
@@ -346,38 +364,40 @@ func TestAttackOverrideScopedTTLBound(t *testing.T) {
 	if len(evs) != 1 || evs[0].Payload["ttl_sec"] == nil {
 		t.Fatalf("audit must carry ttl_sec for a bounded override: %#v", evs)
 	}
+	if exp := overrideExpiry(e, "tenant-a.example.com"); exp.IsZero() || time.Until(exp) > scopedMaxChallengeTTL+time.Minute {
+		t.Fatalf("override expiry not bounded: %v", exp)
+	}
 
-	// The stored override carries the expiry.
-	e.attack.mu.Lock()
-	st := e.attack.hosts["tenant-a.example.com"]
-	expires := st.overrideExpires
-	e.attack.mu.Unlock()
-	if expires.IsZero() || time.Until(expires) > scopedMaxChallengeTTL+time.Minute {
-		t.Fatalf("override expiry not bounded: %v", expires)
+	// No ttl: the default (6h), under the ceiling, not capped.
+	resp = attackRequest(t, e, "host=tenant-a.example.com&on=1", "tenant-a.example.com")
+	if resp["ttl"] != defaultAttackOverrideTTL.String() || resp["ttl_capped"] != nil {
+		t.Fatalf("scoped default: ttl=%#v capped=%#v", resp["ttl"], resp["ttl_capped"])
 	}
 }
 
-func TestAttackOverrideAdminUnbounded(t *testing.T) {
+func TestAttackOverrideAdminDefaultTTL(t *testing.T) {
 	e := &Engine{cfg: Config{UnderAttack: true}, attack: newUnderAttackTracker()}
 	e.manualChal.init("")
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/attack?host=any.example.com&on=1", nil)
+	resp := attackRequest(t, e, "host=any.example.com&on=1", "")
+	if resp["ttl"] != defaultAttackOverrideTTL.String() {
+		t.Fatalf("admin override with no ttl: %#v, want the %s default", resp["ttl"], defaultAttackOverrideTTL)
+	}
+	exp := overrideExpiry(e, "any.example.com")
+	if d := time.Until(exp); d <= 0 || d > defaultAttackOverrideTTL+time.Minute {
+		t.Fatalf("admin override expiry = %v (in %v)", exp, d)
+	}
+	// An explicit ttl is honoured, uncapped for an admin.
+	resp = attackRequest(t, e, "host=any.example.com&on=1&ttl=48h", "")
+	if resp["ttl"] != (48 * time.Hour).String() || resp["ttl_capped"] != nil {
+		t.Fatalf("admin ttl=48h: %#v", resp)
+	}
+	// A bad ttl is refused.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/attack?host=any.example.com&on=1&ttl=-1h", nil)
 	rr := httptest.NewRecorder()
 	e.handleChallengeVhostAttack(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("admin attack override failed: %d: %s", rr.Code, rr.Body.String())
-	}
-	var resp map[string]interface{}
-	_ = json.Unmarshal(rr.Body.Bytes(), &resp)
-	if _, ok := resp["ttl"]; ok {
-		t.Fatalf("admin override must be unbounded (no ttl in response): %#v", resp)
-	}
-	e.attack.mu.Lock()
-	st := e.attack.hosts["any.example.com"]
-	expires := st.overrideExpires
-	e.attack.mu.Unlock()
-	if !expires.IsZero() {
-		t.Fatalf("admin override must carry no expiry, got %v", expires)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("ttl=-1h: status %d, want 400", rr.Code)
 	}
 }
 

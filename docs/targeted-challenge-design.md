@@ -153,14 +153,19 @@ fallback), triggered by the under-attack state rather than only by a reject.
 >   FCrDNS-verified good bot is never asked (it cannot click): the Rung-1
 >   waiver's verdict and rules (`CHALLENGE_GOODBOT_EXEMPT`; not under a rung
 >   mark, not on a vhost in lockdown).
-> - **The override is in memory:** a cPanel user can set it on their own vhost
->   (24 h max), and a config reload (a `detectors.conf` save, a tailed log's
->   rotation) clears it, so a test must re-arm it after one. Each visitor
->   outside the audience makes two verify POSTs, which count toward the
->   verify rate limit.
-> - **The state challenges nobody by itself,** so a test needs a served
->   challenge: `cfm webtop challenge add <vhost>` + `cfm webtop attack on
->   <vhost>` (or the cfm-admin Under-Attack toggle).
+> - **The override** (`cfm webtop attack on <vhost> [--ttl 6h]`, the cfm-admin
+>   toggle, the `vhost/attack` API; a cPanel user can set it on their own
+>   vhost, 24 h max) holds for `UNDER_ATTACK_OVERRIDE_TTL` (6h) unless the
+>   call names a ttl.
+>   - It arms the vhost's challenge for the same window when no manual
+>     challenge covers it (reason `under_attack`).
+>   - It survives a reload or restart
+>     (`webdetector_attack_overrides.json`, `under_attack_overrides.go`).
+>   - `attack off` removes only the challenge its `attack on` armed.
+>
+>   One command is enough to try it on a vhost. Each visitor outside the
+>   audience makes two verify POSTs, which count toward the verify rate
+>   limit.
 > - **Differences from the text below:** the field names (`v2_confirm`, not
 >   `confirm`, so the scoped strip covers them by prefix), and the kill switch
 >   (`CHALLENGE_V2_CONFIRM = off`; `UNDER_ATTACK_CONFIRM_TICKS` already

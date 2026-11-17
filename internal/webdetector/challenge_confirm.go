@@ -69,10 +69,10 @@ import (
 //                                 see the confirm (default GR,CY); "none" =
 //                                 everyone outside.
 //
-// The confirm is shown only where a challenge is already served: the
-// under-attack state alone challenges nobody. To try it on a vhost, arm a
-// challenge on it (a manual one, or an automatic one already there) and force
-// the state: `cfm webtop challenge add <vhost>` + `cfm webtop attack on <vhost>`.
+// The confirm is shown only where a challenge is served. An operator's
+// `cfm webtop attack on <vhost>` arms one when none covers the vhost, for the
+// override's TTL (under_attack_overrides.go); the detector's automatic entry
+// arms nothing.
 
 const (
 	confirmHeader   = "X-CFM-Confirm"

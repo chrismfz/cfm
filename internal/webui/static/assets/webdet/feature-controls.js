@@ -291,7 +291,7 @@ export const controlsMixin = {
     underAttackButtonTitle(row) {
       if (!row?.under_attack_toggleable) return "Under-Attack Mode is globally off (UNDER_ATTACK=0) — nothing to override.";
       if (row?.under_attack) return "This vhost is UNDER_ATTACK. Click to clear it (auto re-entry suppressed for the holddown).";
-      return "Force this vhost into UNDER_ATTACK (operator override). While it holds, a visitor outside the audience (CHALLENGE_V2_CONFIRM_AUDIENCE, default GR/CY) whose challenge solve had no mouse, touch or key input gets a Continue button before clearance (CHALLENGE_V2_CONFIRM). The vhost needs a challenge served for anyone to see it.";
+      return "Force this vhost into UNDER_ATTACK (operator override). While it holds, a visitor outside the audience (CHALLENGE_V2_CONFIRM_AUDIENCE, default GR/CY) whose challenge solve had no mouse, touch or key input gets a Continue button before clearance (CHALLENGE_V2_CONFIRM). It also arms the vhost's challenge when none is set, and holds for UNDER_ATTACK_OVERRIDE_TTL (default 6h; survives a reload).";
     },
     async toggleUnderAttack(row) {
       const host = String(row?.host || "").trim();

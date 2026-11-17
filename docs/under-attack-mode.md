@@ -23,6 +23,16 @@
 > step to no-input solves outside the vhost's audience while it is
 > UNDER_ATTACK, with a proposed automatic entry from a `solver_farm` finding.
 > I3–I5 stay frozen.
+>
+> **2026-11-17 — the operator's override is self-contained:**
+> - an operator's `attack on` (CLI, cfm-admin, the `vhost/attack` API) now
+>   arms the vhost's challenge when no manual challenge covers it;
+> - it holds for `UNDER_ATTACK_OVERRIDE_TTL` (6h; a cPanel user is capped at
+>   24h; `--ttl` per call) instead of forever;
+> - it survives a reload (`under_attack_overrides.go`).
+>
+> The detector's automatic entry is unchanged: it still challenges no vhost
+> the existing paths left alone.
 
 **Status: I0 shipped; I1 (detector + state + notify, detect-only) and its
 surfacing (I1b) landed — the RT-baseline clause (§3 leg 3) is still open, and

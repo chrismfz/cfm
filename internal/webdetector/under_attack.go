@@ -445,7 +445,8 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 		return
 	}
 	mode := "auto"
-	if st.override != 0 {
+	hadOverride := st.override != 0
+	if hadOverride {
 		mode = "manual"
 	}
 	wasOn := st.on
@@ -459,6 +460,11 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 	st.confirm = 0
 	st.lastEval = now
 	t.mu.Unlock()
+	// The persisted override goes with it, or the next reload would bring it
+	// back. The challenge it armed is the suppression path's to handle.
+	if hadOverride {
+		e.attackOverrides.remove(host)
+	}
 
 	if wasOn {
 		e.emitUnderAttack(now, host, false, SuspiciousRow{Host: host}, 0, reason, mode, out)
