@@ -122,6 +122,30 @@ fires(req("--b\r\nContent-Disposition: form-data; name=\"pad\"\r\n\r\n" .. strin
           "\r\n--b\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\n" .. SHELL .. "\r\n--b--\r\n",
           "/sag.php", "multipart/form-data; boundary=b"), "multipart text field", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
 
+-- Fourth review (2026-11-17).
+-- A short multipart save: 404 never reads multipart, so 417 reads it at any size.
+fires(req("--b\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\n<?php system($_GET['c']); ?>\r\n--b--\r\n",
+          "/sag.php", "multipart/form-data; boundary=b"), "short multipart text field", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+-- The boundary on a second Content-Type line (PHP gets the lines joined).
+do
+  local c = req("--b\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\n" .. SHELL .. "\r\n--b--\r\n", "/sag.php")
+  c.headers["content-type"] = { "multipart/form-data", "boundary=b" }
+  fires(c, "multipart, boundary on a second Content-Type line", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+end
+-- `$%5FPOST`: the underscore encoded, no `<?`.
+fires(req("note=" .. string.rep("x", 2500) .. "&code=eval(base64_decode($%5FPOST[z]));"),
+      "$%5FPOST past 2 KB", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+-- Two global callables score 6 with no `<?` and no `$_`.
+fires(req("note=" .. string.rep("x", 2500) .. "&code=eval(gzinflate(x));system(y);"),
+      "two callables past 2 KB", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+-- 404's head pass does not decode JSON escapes (that is 417's burn-in).
+check(det.detect_php_webshell_body('{"c":"\\u003c?php system(\\u0024_GET[1]);"}',
+      { ["content-type"] = "application/json" }) == nil, "404 head: JSON escapes not decoded")
+check(det.detect_php_webshell_body('{"c":"\\u003c?php system(\\u0024_GET[1]);"}',
+      { ["content-type"] = "application/json" }, 32768) ~= nil, "417: JSON escapes decoded")
+-- A short urlencoded body with no PHP: the gate keeps it out, nothing fires.
+clean(req("name=Maria&email=m%40example.gr&msg=Hello%20there"), "short ordinary form")
+
 -- ── 404 disabled: 417 still runs on its own ───────────────────────────────
 set_only({ rule_php_webshell_body = "disabled", rule_php_webshell_body_deep = "logonly" })
 fires(req(editor_save(PLUGIN_HEAD .. INJECTION .. PLUGIN_TAIL)), "404 disabled, 417 alone", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")

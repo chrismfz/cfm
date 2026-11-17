@@ -2894,10 +2894,11 @@ local function check_impl(ctx, st)
   end
 
   -- ── 404's scorer over the whole body (417, logonly burn-in) ──────────────
-  -- Only when 404's 2 KB head scored nothing and the body goes past it: PHP
-  -- saved through a form field (an editor, a file manager's put) sits wherever
-  -- the file puts it. detect_php_webshell_body's cheap raw gate keeps a body
-  -- with no `<?` / `$_` (or an escape of one) from being decoded. Late, before
+  -- Only when 404's 2 KB head scored nothing: PHP saved through a form field
+  -- (an editor, a file manager's put) sits wherever the file puts it, and 404
+  -- never reads a multipart body or decodes a JSON one's escapes, so a short
+  -- body is read too. detect_php_webshell_body's cheap raw gate keeps a body
+  -- with nothing a score can come from out of the decoder. Late, before
   -- only 612 and 530: cfm.lua pushes the headline hit alone, and at step 15
   -- it took the headline (and the push) from the logonly body rules that run
   -- after it (331 on a wget || curl dropper, 421-425, 430-439, 330).
@@ -2906,7 +2907,7 @@ local function check_impl(ctx, st)
     if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit then
       local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
       local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
-      if #body > head_len and deep_len > head_len then
+      if deep_len > head_len then
         local tag = det.detect_php_webshell_body(body, headers, deep_len)
         if tag then
           local ttl = (dmode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
