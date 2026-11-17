@@ -328,3 +328,58 @@ phpinfo.php
 /php.ini
 /.ftpconfig
 /.remote-sync.json
+
+# ─── THIRD READ: 9 DAYS OF EARTH + MARS + TITAN + VIRGO (added 2026-11-18) ───
+# ~107 M edge requests; each line below had 100-300 distinct IPs on EVERY one
+# of the four nodes and no real 200. Left out again: generic JSON names an app
+# can serve (/admin.json, /database.json, /production.json, /local.json,
+# /default.json, /environment.json, /init.json, /app-config.json, /meta.json,
+# /manifest.json, /swagger.json), Nuxt's real /_payload.json and Angular's
+# /ngsw.json, /values.yaml, /application.yml.
+/firebase-admin.json
+/firebase-config.json
+/firebase-credentials.json
+/firebase-service-account.json
+/google-service-account.json
+/gcp-service.json
+/gc-service.json
+/service_account.json
+/client_secret.json
+/custom-environment-variables.json
+/dockerrun.aws.json
+/buildspec.yml
+/buildspec.yaml
+/railway.json
+/secrets.env
+/ses.env
+/process.env
+/aws_credentials.env
+/.vault-token
+/rclone.conf
+/settings.local.yml
+/compose.yml
+/localhost.key
+/host.key
+/.terraform.rc
+/.terraform.lock.hcl
+# Shell / git dotfiles of a home directory published as a docroot
+/.gitconfig
+/.dockerenv
+/.bashrc
+/.zshrc
+/.profile
+/.bash_profile
+# Monorepo / build-tool trees and manifests
+/nx.json
+/lerna.json
+/rush.json
+/turbo.json
+/pnpm-workspace.yaml
+/.changeset/
+/.turbo/
+/.vercel/
+/.netlify/
+/.output/
+/.huggingface/
+/.cache/
+/.composer/

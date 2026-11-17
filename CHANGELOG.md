@@ -35,7 +35,11 @@ back-filled here — see the git/PR history for that period.
   (`/ai1wm-backups/`, `/wp-content/updraft/`, `wc-logs/`, `installer.php`,
   `/wp-admin/install.php`), whole-site archives (`/backup.zip`, `/www.zip`, …),
   composer manifests, `.NET`/Java probes, `/_ignition/`, `adminer`, shell
-  history and a `/.well-knownold/` webshell stash. 125 new entries in all;
+  history and a `/.well-knownold/` webshell stash. A third read (earth, mars,
+  titan, virgo: ~107 M requests) adds 45 seen on all four at 100-300 IPs each:
+  more service-account / `.env`-style files, CI build specs, shell and git
+  dotfiles, private keys, monorepo manifests and build-tool directories
+  (`/.vercel/`, `/.netlify/`, `/.turbo/`, `/.output/`, …). 170 new entries in all;
   every 200 on them was a site's catch-all page. Generic names a site may
   really serve (`/config.json`, `/settings.json`, `/phpmyadmin`,
   `/server-status`, `/cgi-bin/`) stay out. They feed both
