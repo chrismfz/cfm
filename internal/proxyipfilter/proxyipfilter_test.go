@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -73,17 +74,17 @@ func TestVerdictOrderAndModes(t *testing.T) {
 	setLocal("allow_dyn_v4", true, []string{"5.6.7.8"})
 
 	v := Check("20.43.87.186")
-	if fmt.Sprint(v.Blocks) != "[block_v4 feed:myblock]" || v.Enforce || !v.Listed() {
+	if fmt.Sprint(v.Blocks) != "[block_v4 feed:MYBLOCK]" || v.Enforce || !v.Listed() {
 		t.Fatalf("log mode: %+v", v)
 	}
 	// An allow cancels the block, and is named.
-	if v := Check("45.138.12.99"); fmt.Sprint(v.Allows) != "[feed:myallow]" || v.Enforce {
+	if v := Check("45.138.12.99"); fmt.Sprint(v.Allows) != "[feed:MYALLOW]" || v.Enforce {
 		t.Fatalf("fleet allow: %+v", v)
 	}
 	if v := Check("5.6.7.8"); fmt.Sprint(v.Allows) != "[allow_dyn_v4]" || v.Enforce {
 		t.Fatalf("dyndns allow: %+v", v)
 	}
-	if v := Check("2001:db8::9"); fmt.Sprint(v.Blocks) != "[feed:myblock]" {
+	if v := Check("2001:db8::9"); fmt.Sprint(v.Blocks) != "[feed:MYBLOCK]" {
 		t.Fatalf("v6: %+v", v)
 	}
 	if v := Check("1.1.1.1"); v.Listed() {
@@ -172,8 +173,10 @@ func TestLocalRefreshKeepsASetItCannotRead(t *testing.T) {
 		return nil, errors.New("no such set")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	StartLocalRefresh(ctx, list, 20*time.Millisecond)
+	done := StartLocalRefresh(ctx, list, 20*time.Millisecond)
+	// Before ResetForTest (cleanups run last-in first-out): a refresh still
+	// in flight would write into the next test's state.
+	t.Cleanup(func() { cancel(); <-done })
 	waitFor(t, func() bool { return Check("9.9.9.9").Listed() })
 	fail.Store(true)
 	n := calls.Load()
@@ -271,5 +274,69 @@ func TestFeedHoldsUntilNextApply(t *testing.T) {
 	SetFeed("SHORT", false, nil, nil)
 	if Check("198.51.100.1").Listed() {
 		t.Fatal("the next apply replaces it")
+	}
+}
+
+// A network allow (`cfm allow 203.0.113.0/24`) lifts every address in it at
+// once, like nft's accept.
+func TestForgetNetwork(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	clock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	setClock(func() time.Time { return clock })
+	SetFeed("MYBLOCK", false, []string{"203.0.113.7", "203.0.114.7"}, nil)
+	Forget("203.0.113.9/24")
+	Forget("not/a/cidr")
+	if Check("203.0.113.7").Listed() || !Check("203.0.114.7").Listed() {
+		t.Fatal("network forget")
+	}
+	clock = clock.Add(forgetFor)
+	if !Check("203.0.113.7").Listed() {
+		t.Fatal("after the override")
+	}
+	pruneForgotten()
+	if l := forgottenNets.Load(); l != nil && len(*l) != 0 {
+		t.Fatal("pruned")
+	}
+}
+
+// Two feeds whose names differ only in case are two lists in the log.
+func TestFeedLabelKeepsTheName(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	SetFeed("MyList", false, []string{"192.0.2.1"}, nil)
+	SetFeed("MYLIST", false, []string{"192.0.2.1"}, nil)
+	if v := Check("192.0.2.1"); fmt.Sprint(v.Blocks) != "[feed:MYLIST feed:MyList]" {
+		t.Fatalf("%v", v.Blocks)
+	}
+}
+
+// The log de-dup under concurrent decisions for one listed client: one line,
+// and the next window's line counts every occurrence.
+func TestLogDueConcurrent(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	clock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	setClock(func() time.Time { return clock })
+	var lines atomic.Int32
+	var wg sync.WaitGroup
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				if _, due := logDue("k"); due {
+					lines.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if lines.Load() != 1 {
+		t.Fatalf("lines in one window = %d", lines.Load())
+	}
+	clock = clock.Add(logEvery)
+	if n, due := logDue("k"); !due || n != 4000 {
+		t.Fatalf("next window: n=%d due=%v (3 999 counted + this one)", n, due)
 	}
 }

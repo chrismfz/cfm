@@ -991,6 +991,9 @@ func runDaemon(args []string) {
 						fmt.Fprintln(os.Stderr, "allow apply error:", err)
 						continue
 					}
+					// nft accepts the network now: so does the proxied-client
+					// filter, before its next read of allow_v4_nets.
+					proxyipfilter.Forget(e.CIDR)
 				} else {
 					if err := be.AddAllow(e.IP, dur); err != nil {
 						fmt.Fprintln(os.Stderr, "allow apply error:", err)

@@ -38,7 +38,7 @@ func TestManagerFeedsTheProxiedIPFilter(t *testing.T) {
 	m.mu.Unlock()
 
 	m.fetchOnce(context.Background(), r)
-	if v := proxyipfilter.Check("45.138.12.9"); len(v.Blocks) != 1 || v.Blocks[0] != "feed:myblock" {
+	if v := proxyipfilter.Check("45.138.12.9"); len(v.Blocks) != 1 || v.Blocks[0] != "feed:MYBLOCK" {
 		t.Fatalf("first fetch: %+v", v)
 	}
 	m.fetchOnce(context.Background(), r) // unchanged: skipped, still there

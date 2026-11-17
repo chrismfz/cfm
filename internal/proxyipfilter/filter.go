@@ -53,7 +53,7 @@ const (
 )
 
 type source struct {
-	label string // what the log names: "feed:myblock", "block_v4", "allow_dyn_v4"
+	label string // what the log names: "feed:MYBLOCK", "block_v4", "allow_dyn_v4"
 	group string // GroupFeed / GroupLocal for a block source; "" for an allow
 	allow bool
 	t     table
@@ -75,6 +75,10 @@ var (
 	// nForgotten lets Check skip the map while it is empty.
 	forgotten  sync.Map // netip.Addr -> time.Time
 	nForgotten atomic.Int64
+	// forgottenNets: the same for a network (`cfm allow 203.0.113.0/24`).
+	// Rare, so a copy-on-write slice.
+	forgottenNets atomic.Pointer[[]netForget]
+	netsMu        sync.Mutex
 
 	// clock is time.Now; tests swap it (an atomic: Check and the refresh
 	// goroutine read it while a test may set it).
@@ -141,7 +145,9 @@ type PreparedFeed struct {
 // allow_ext_*), which RebuildExternalUnions rebuilds without a TTL on both
 // engines. A feed holds until its next apply, there as here.
 func PrepareFeed(name string, allow bool, v4, v6 []string) PreparedFeed {
-	s := &source{label: "feed:" + strings.ToLower(name), allow: allow, t: buildTable(v4, v6)}
+	// The name as written: two feeds whose names differ only in case
+	// (MyList, MYLIST) are two lists, and the log must tell them apart.
+	s := &source{label: "feed:" + name, allow: allow, t: buildTable(v4, v6)}
 	if !allow {
 		s.group = GroupFeed
 	}
@@ -191,13 +197,26 @@ func setLocal(set string, allow bool, elems []string) {
 // unblock adds for a feed-listed address).
 const forgetFor = 2 * LocalRefreshEvery
 
-// Forget clears ip from every block source now, for forgetFor. Called from
-// edgeban.Unban, which every unblock and allow path calls (CLAUDE.md): nft
-// stops dropping the address at once, and so must this filter, rather than
-// at the next minute's refresh. A ban the address earns again within
-// forgetFor reaches it after the override ends (nft's own drop is immediate).
+type netForget struct {
+	p   netip.Prefix
+	exp time.Time
+}
+
+// Forget clears ip (an address, or a network as a CIDR) from every block
+// source now, for forgetFor. Called from edgeban.Unban, which every unblock
+// and allow path of an address calls (CLAUDE.md), and for a network allow:
+// nft stops dropping it at once, and so must this filter, rather than at the
+// next minute's refresh. A ban the address earns again within forgetFor
+// reaches it after the override ends (nft's own drop is immediate).
 func Forget(ip string) {
-	a, err := netip.ParseAddr(strings.TrimSpace(ip))
+	ip = strings.TrimSpace(ip)
+	if strings.Contains(ip, "/") {
+		if p, err := netip.ParsePrefix(ip); err == nil {
+			forgetNet(p.Masked())
+		}
+		return
+	}
+	a, err := netip.ParseAddr(ip)
 	if err != nil {
 		return
 	}
@@ -222,9 +241,54 @@ func forgottenNow(a netip.Addr) bool {
 	return false
 }
 
+func forgetNet(p netip.Prefix) {
+	if p.Addr().Is4In6() {
+		p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+	}
+	netsMu.Lock()
+	defer netsMu.Unlock()
+	t := now()
+	var next []netForget
+	if cur := forgottenNets.Load(); cur != nil {
+		for _, f := range *cur {
+			if t.Before(f.exp) && f.p != p {
+				next = append(next, f)
+			}
+		}
+	}
+	next = append(next, netForget{p: p, exp: t.Add(forgetFor)})
+	forgottenNets.Store(&next)
+}
+
+func forgottenNet(a netip.Addr) bool {
+	l := forgottenNets.Load()
+	if l == nil || len(*l) == 0 {
+		return false
+	}
+	t := now()
+	for _, f := range *l {
+		if t.Before(f.exp) && f.p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
 // pruneForgotten drops the expired overrides of addresses no request asked
 // about since (StartLocalRefresh, every minute).
 func pruneForgotten() {
+	netsMu.Lock()
+	if cur := forgottenNets.Load(); cur != nil && len(*cur) > 0 {
+		t := now()
+		var next []netForget
+		for _, f := range *cur {
+			if t.Before(f.exp) {
+				next = append(next, f)
+			}
+		}
+		forgottenNets.Store(&next)
+	}
+	netsMu.Unlock()
 	t := now()
 	forgotten.Range(func(k, v any) bool {
 		if !t.Before(v.(time.Time)) && forgotten.CompareAndDelete(k, v) {
@@ -275,7 +339,7 @@ func Check(ip string) Verdict {
 		return v
 	}
 	a = a.Unmap()
-	if nForgotten.Load() > 0 && forgottenNow(a) {
+	if nForgotten.Load() > 0 && forgottenNow(a) || forgottenNet(a) {
 		return v
 	}
 	snap := cur.Load()
@@ -365,44 +429,64 @@ const (
 	logMaxKeys = 20000
 )
 
+// seen is one log key's state, updated without a lock: a listed scanner's
+// requests all come here, and one mutex for every decision would serialise
+// the bridge on it (CLAUDE.md: a write lock on a hot path stalls everyone).
 type seen struct {
-	last time.Time
-	n    int
+	last atomic.Int64 // UnixNano of the last line
+	n    atomic.Int64 // occurrences since it
 }
 
 var (
-	logMu   sync.Mutex
-	logSeen = map[string]*seen{}
+	logSeen  sync.Map // key -> *seen
+	nLogKeys atomic.Int64
+	logEvict sync.Mutex // only for evicting, never on the hot path
 )
 
 // logDue counts one occurrence of key and reports whether a line is due, with
 // the occurrences since the last line.
 func logDue(key string) (int, bool) {
-	now := now()
-	logMu.Lock()
-	defer logMu.Unlock()
-	s := logSeen[key]
-	if s == nil {
-		if len(logSeen) >= logMaxKeys {
-			for k, e := range logSeen {
-				if now.Sub(e.last) >= logEvery {
-					delete(logSeen, k)
-				}
-			}
-			if len(logSeen) >= logMaxKeys {
-				logSeen = map[string]*seen{}
-			}
+	t := now().UnixNano()
+	v, ok := logSeen.Load(key)
+	if !ok {
+		if nLogKeys.Load() >= logMaxKeys {
+			evictLogKeys(t)
 		}
-		logSeen[key] = &seen{last: now}
-		return 1, true
+		s := &seen{}
+		s.last.Store(t)
+		if v, ok = logSeen.LoadOrStore(key, s); !ok {
+			nLogKeys.Add(1)
+			return 1, true
+		}
 	}
-	s.n++
-	if now.Sub(s.last) < logEvery {
+	s := v.(*seen)
+	s.n.Add(1)
+	last := s.last.Load()
+	if t-last < int64(logEvery) || !s.last.CompareAndSwap(last, t) {
 		return 0, false
 	}
-	n := s.n
-	s.last, s.n = now, 0
-	return n, true
+	return int(s.n.Swap(0)), true
+}
+
+// evictLogKeys drops the keys idle for a window; if every key is fresh (a
+// flood of distinct clients), it starts over.
+func evictLogKeys(t int64) {
+	logEvict.Lock()
+	defer logEvict.Unlock()
+	if nLogKeys.Load() < logMaxKeys {
+		return
+	}
+	logSeen.Range(func(k, v any) bool {
+		if t-v.(*seen).last.Load() >= int64(logEvery) {
+			logSeen.Delete(k)
+			nLogKeys.Add(-1)
+		}
+		return true
+	})
+	if nLogKeys.Load() >= logMaxKeys {
+		logSeen.Range(func(k, _ any) bool { logSeen.Delete(k); return true })
+		nLogKeys.Store(0)
+	}
 }
 
 // Stats is what Decide has counted since the daemon started, and the size of
@@ -435,13 +519,13 @@ func ResetForTest() {
 	feeds, locals = map[string]*source{}, map[string]*source{}
 	publishLocked()
 	mu.Unlock()
-	logMu.Lock()
-	logSeen = map[string]*seen{}
-	logMu.Unlock()
+	logSeen.Range(func(k, _ any) bool { logSeen.Delete(k); return true })
+	nLogKeys.Store(0)
 	modeFeed.Store(ModeLog)
 	modeLocal.Store(ModeLog)
 	forgotten.Range(func(k, _ any) bool { forgotten.Delete(k); return true })
 	nForgotten.Store(0)
+	forgottenNets.Store(nil)
 	nChecks.Store(0)
 	nWould.Store(0)
 	nBlocked.Store(0)

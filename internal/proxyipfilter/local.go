@@ -30,10 +30,13 @@ var localSets = []struct {
 const LocalRefreshEvery = time.Minute
 
 // StartLocalRefresh reads the local sets now and then every interval, until
-// ctx ends. list is the firewall backend's ListSetElementsRaw. A set that
-// cannot be read keeps what it had (a node without IPv6 sets, an nft hiccup),
-// and the error is logged when it changes, not every minute.
-func StartLocalRefresh(ctx context.Context, list func(set string) ([]string, error), every time.Duration) {
+// ctx ends; the returned channel closes when the goroutine has stopped (a
+// test waits for it, or a refresh in flight would write into the next test).
+// list is the firewall backend's ListSetElementsRaw. A set that cannot be
+// read keeps what it had (a node without IPv6 sets, an nft hiccup), and the
+// error is logged when it changes, not every minute.
+func StartLocalRefresh(ctx context.Context, list func(set string) ([]string, error), every time.Duration) <-chan struct{} {
+	done := make(chan struct{})
 	lastErr := map[string]string{}
 	refresh := func() {
 		for _, ls := range localSets {
@@ -54,6 +57,7 @@ func StartLocalRefresh(ctx context.Context, list func(set string) ([]string, err
 		pruneForgotten()
 	}
 	go func() {
+		defer close(done)
 		refresh()
 		t := time.NewTicker(every)
 		defer t.Stop()
@@ -66,4 +70,5 @@ func StartLocalRefresh(ctx context.Context, list func(set string) ([]string, err
 			}
 		}
 	}()
+	return done
 }

@@ -47,7 +47,8 @@ about 4 hours), a job nothing in CFM did.
   path calls, also clears the address from every block source here
   (`Forget`) for two refreshes (2 min), by when the sets read show the
   kernel's own view (the block gone, or the allow an unblock adds for a
-  feed-listed address). A ban the address earns again inside those 2 minutes
+  feed-listed address). A network allow (`cfm allow 203.0.113.0/24`) does the
+  same for the whole range. A ban the address earns again inside those 2 minutes
   reaches the proxied filter when the override ends; nft's own drop of a
   direct client is immediate.
 - **Where:** the nginx bridge's decision (`writeEdgeBan`), for a web-scope
@@ -81,9 +82,9 @@ decisions it stands for (totals and each source's size: `GET
 /api/v1/webdet/edge-ban` → `proxied_ipfilter`, also in `cfm debug`):
 
 ```
-[proxied_ipfilter] would_block ip=20.43.87.186 host=olicatessen.gr block=feed:myblock allow=- mode=feed:log,local:log n=37
+[proxied_ipfilter] would_block ip=20.43.87.186 host=olicatessen.gr block=feed:MYBLOCK allow=- mode=feed:log,local:log n=37
 [proxied_ipfilter] allowed ip=… host=… block=block_v4 allow=allow_dyn_v4 mode=… n=1
-[proxied_ipfilter] block ip=… host=… block=block_v4,feed:myblock allow=- mode=feed:enforce,local:log n=4
+[proxied_ipfilter] block ip=… host=… block=block_v4,feed:MYBLOCK allow=- mode=feed:enforce,local:log n=4
 ```
 
 `block=` names every block source the address is on (overlaps show), `allow=`
