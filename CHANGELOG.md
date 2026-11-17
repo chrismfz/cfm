@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **A WooCommerce sync no longer gets challenged, then banned.** Requests to
+  WooCommerce's authenticated REST API (`/wp-json/wc/v1`–`v3`, legacy
+  `/wc-api/v1`–`v3`, at the site root or one install directory down) no longer
+  count toward the per-IP challenges (`CHALLENGE_UNIQPATHS_IP`,
+  `CHALLENGE_ERR_RATIO`, `CHALLENGE_RPS_4XX/5XX`, `CHALLENGE_POST_RATIO`). A
+  product sync to kiamaia.gr (mars, 2026-11-17) writes a new
+  `/products/<id>/variations/<id>` per request, and some come back 404: it was
+  put under a challenge it cannot solve, the challenge page's 403s fed
+  `403_flood`, and the IP was banned every 30 s while the sync ran. The Store
+  API (`/wp-json/wc/store/…`, cart and checkout, no credentials) and every
+  other route keep every challenge; a marker mid-path, an escape or a
+  credential route never matches. Nothing else changes: no challenge or ban
+  already on the IP is lifted, and the WAF, the 403/404/40x counters and
+  `agent_flood` count these requests as before.
 - **MySQL governor: it now starts when MySQL comes up after the daemon.**
   The governor connected once, at daemon start, and never again. When
   MariaDB started after CFM (orion, 2026-11-17: CFM at 14:53:09, MariaDB at
@@ -151,6 +165,12 @@ back-filled here — see the git/PR history for that period.
   findable.
 
 ### Changed
+- **`[webdetector] AGENT_COUNT` ships as `35` (was `20`).** The 7-day read of
+  the 8 edge nodes (2026-11-17): ~5 800 `agent_flood` bans, 85% Go-http-client
+  scanners and 10% Bytespider and similar crawlers; the few Greek site owners
+  it caught were developers running curl against their own WordPress. Nodes
+  keep their own `detectors.conf` value until it is edited.
+
 - **WAF rule 10029 (Fabrik list-filter eval, CVE-2026-67282) blocks.** A
   14-day read of all 8 nodes found `[eval]=0` only from real users (that
   stays logonly) and a set `[eval]` only from the attacker who defaced
