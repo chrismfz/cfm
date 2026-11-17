@@ -59,15 +59,19 @@ a trust grant.
 
 - **The audience set, per vhost:**
   - Default: GR/CY, the fleet's audience.
-  - **Estimate:** the GR/CY share of the vhost's unchallenged requests over a
-    rolling window (proposed 7 days).
+  - **Estimate:** the GR/CY share of the vhost's solves with real input
+    (`ptr` ≥ 5 and `mv` ≥ 100, the rescue's bar) on a non-farm fingerprint,
+    over a rolling window (proposed 7 days), with a minimum sample (proposed
+    n ≥ 20). Below that it uses the default set or the pin. **Measured
+    2026-11-17, not the access log** (§8): the access log cannot give an
+    audience.
   - **Operator pin:** `audience=<cc,cc>` or `audience=all` per vhost. A
     foreign-audience site (gastronom.hk, mygreecetours.org,
     elitefirstclassmykonos.com, all farm targets in read 7) is pinned `all`,
     or falls back to `all` by itself when its estimate is under a floor
     (proposed: GR/CY < 70 %). `all` keeps today's vhost-wide challenge.
-  - Read 8 measures the estimate and its week-to-week stability before any
-    number above is fixed.
+  - Read 8 measures the estimate's week-to-week stability before any number
+    above is fixed.
 - **In the audience:** the client's country (edge geo / enrich, the same
   resolver as E3's country floor) is in the set, AND
   `DatacenterClass(asn) == ""`.
@@ -189,8 +193,12 @@ fallback), triggered by the under-attack state rather than only by a reject.
   lever.
 - **A Greek visitor abroad** gets the challenge, and under attack the
   confirm, as today.
-- **The estimate needs traffic.** A low-traffic or new vhost keeps the
-  default set (GR/CY) or its pin.
+- **The estimate needs solves.** Most vhosts have fewer than 20 real-input
+  solves a week, and a vhost with no challenge has none. Those keep the
+  default set (GR/CY) or their pin.
+- **The farm posts real input on a few solves.** gastronom.hk had 7 of its 8
+  real-input solves on a farm fingerprint, mygreecetours.org 8 of 9. So the
+  estimate leaves out the convicted farm fingerprints.
 
 ## 7. D5 / D3
 
@@ -213,7 +221,7 @@ fallback), triggered by the under-attack state rather than only by a reject.
 | Step | What | Live effect | Measured by |
 |---|---|---|---|
 | — | Read 8: the audience estimate per vhost and its stability; would-enter from the history DB's `solver_farm` humanity | none | read 8 |
-| S1 | `aud=in\|out\|dc` on automatic-challenge lines | none | the next read |
+| S1 | `aud=in\|out\|dc` on automatic-challenge lines | none | that the in-code classifier agrees with the offline count (the solve lines already carry `cc=` and `asn_name=`, so the sizing itself needs no code) |
 | S2 | the audience floor live (kill switch, pins) | GR/CY audience skips the automatic challenge | spared solves, let-through rejects |
 | S3 | `would_enter_under_attack` from `solver_farm` | none | how often, on which vhosts, never a Greek audience |
 | S4 | the confirm page under manual `attack on` | the confirm is shown, the click passes | shown / clicked / abandoned, the click corpus |
@@ -222,12 +230,40 @@ fallback), triggered by the under-attack state rather than only by a reject.
 Each step is its own small reviewed PR. Every edge-affecting step follows
 `docs/challenge-waf-release-checklist.md`.
 
-**Read 8's method for the audience estimate:**
-- The edge's main access log (`access.log`, log format `cfm`: `client=`,
-  `cf=`, `host=`) carries every request, challenged or not. It is large
-  (titan: 1.2 GB a day).
-- So read 8 samples the distinct client addresses per vhost over a day or
-  two, for the vhosts that had an automatic challenge in the week.
-- It resolves their countries with `mmdblookup` (present on the nodes)
-  against `/var/lib/cfm/maxmind/GeoLite2-City.mmdb`, read-only.
-- The share is then reported per request and per distinct IP.
+**The audience estimate: what was measured (2026-11-17, read-only, no code)**
+
+- **The edge's `access.log` does NOT give an audience.** On qualityweb's 10
+  automatically challenged vhosts (one day), GR/CY is 1–4 % of the distinct
+  addresses. After removing non-browser and bot UAs, the convicted farm's
+  addresses, static files and datacenter ASNs, it is still 0–18 %. The rest
+  is residential addresses from SG, US, CN and BR: scraping that never meets
+  a challenge. On a Greek shop, humans are a small minority of the
+  addresses that reach it.
+- **Real-input solves do.** The solves with `ptr` ≥ 5 and `mv` ≥ 100 in the
+  week's `cfm.challenges.log*`, per vhost, on all 8 nodes:
+  - The Greek shops read 95–100 % GR/CY:
+
+    | vhost (node) | real-input solves | GR/CY |
+    |---|---|---|
+    | mathematica.gr (orion) | 405 | 96 % |
+    | lpr.gr (qualityweb) | 273 | 100 % |
+    | e-vafeiadis.gr (rigel) | 186 | 99 % |
+    | somabed.gr (qualityweb) | 156 | 99 % |
+    | ekalogeropoulos.gr (qualityweb) | 97 | 98 % |
+    | ventus.com.gr (qualityweb) | 85 | 99 % |
+    | gokids.gr (rigel) | 56 | 100 % |
+    | techking.gr (titan) | 34 | 97 % |
+
+  - The vhosts that are not Greek-audience stand out, though their counts are
+    small and mostly farm:
+    - gastronom.hk: 8, 12 % GR/CY, HK ×4;
+    - mygreecetours.org: 9, 0 %;
+    - vitolighting.com: 9, 0 %, SI and IT.
+  - Most other vhosts have fewer than 20 a week, all GR/CY.
+- **Consequence for the design:** the estimate is the real-input share (§3);
+  the access log is dropped. A busy Greek-audience vhost estimates itself;
+  the long tail uses the default or a pin. The would-be sizing (spared
+  solves, let-through rejects) is computable from the solve and reject
+  lines today, with no code.
+- **Read 8 adds the stability:** the same share for this week vs read 7's
+  week, per vhost with n ≥ 20.
