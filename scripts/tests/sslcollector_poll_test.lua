@@ -327,6 +327,26 @@ if poll_stats then
   on_dumpall = nil
 end
 
+-- A /stats body that decodes to a non-table (a number, a string) must not
+-- end the poll chain: indexing it threw before the reschedule, and the worker
+-- never polled again.
+if poll_stats then
+  local json = package.loaded["cjson.safe"]
+  local real_decode = json.decode
+  json.decode = function(body)
+    if type(body) == "string" and body:match("^STATS:") then return 42 end
+    return real_decode(body)
+  end
+  timers = {}
+  dict_data["meta:last_dumpall_attempt_at"] = 1000
+  local ok, err = pcall(poll_stats, false)
+  json.decode = real_decode
+  check(ok, "poll_stats survives a non-table /stats body (" .. tostring(err) .. ")")
+  local again = false
+  for _, t in ipairs(timers) do if t.fn == poll_stats then again = true end end
+  check(again, "poll_stats rescheduled itself after a non-table /stats body")
+end
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

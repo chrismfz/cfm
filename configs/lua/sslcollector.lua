@@ -151,6 +151,53 @@ local HTTP_TIMEOUT_MS = 5000
 -- Guards against truncated/empty responses overwriting a good snapshot.
 local SNAP_MIN_BYTES = 256
 
+-- An ingest REPLACES this worker's store with the payload's names: a name the
+-- daemon dropped (a cPanel self-signed placeholder's www.<dom> once AutoSSL's
+-- *.<dom> + <dom> replaced it) must stop being served. Until 2026-11-17 ingest
+-- only added, so the stale exact entry outranked the new wildcard in every
+-- worker until a reload (spoolbox.gr on rigel: www. served the self-signed
+-- cert for 9 h). A replace strips every name it does not carry, and a store
+-- without a site's cert takes that site down, so it is taken only when:
+--   * the payload says "complete": true. The daemon sets it when every
+--     indexed name made it in (dumpall.go writePayload): a name whose PEM it
+--     could not read (a file mid-rewrite) is left OUT, not sent empty, and
+--     only the flag tells the edge. The snapshot and the per-version build
+--     carry it; the last-resort stream (no room for a temp file) and an older
+--     daemon never do, and merge (the old additive ingest) like any
+--     incomplete payload;
+--   * it is not a sudden shrink: under two thirds of the last payload taken
+--     (the daemon's own snapshot guard, snapshot.go) is merged while the
+--     shrink is younger than SHRINK_HOLD_SECS, so a scan that lost a mount
+--     cannot strip the edge. A shrink that lasts (accounts moved away) is
+--     taken after it: a merged worker next fetches at a version change or
+--     the hourly forced refresh. The baseline is the last payload TAKEN, not
+--     the store (a merge never shrinks the store, so measured against it
+--     every later payload merged again) and not the last payload seen (a
+--     second degraded payload would have stripped the store).
+local SHRINK_GUARD_MIN  = 3     -- below this many names, no shrink guard
+local SHRINK_HOLD_SECS  = 3600  -- a shrink this old is taken
+local _last_payload_n   = 0     -- names in the last payload taken (0: none yet)
+local _shrink_since     = 0     -- when the current held shrink was first seen
+
+-- The hold is timed on the monotonic clock: an NTP step at boot (when a
+-- degraded scan is likeliest) must not end it, nor a step back stretch it.
+-- resty.core.time has it from lua-resty-core 0.1.22; without it the wall
+-- clock is used, and a step back restarts the hold rather than stretching it.
+local _mono_ok, _rtime = pcall(require, "resty.core.time")
+local function hold_clock()
+  if _mono_ok and type(_rtime) == "table" and _rtime.monotonic_msec then
+    -- pcall: a resty.core that loads but cannot resolve the FFI symbol
+    -- would otherwise throw here, after the store was built, on every
+    -- ingest, and the worker would never take a payload again.
+    local ok, ms = pcall(_rtime.monotonic_msec)
+    if ok and type(ms) == "number" then
+      return math.floor(ms / 1000)
+    end
+    _mono_ok = false
+  end
+  return ngx.time()
+end
+
 -- If true, a /dumpall payload without a Version field is a hard reject for
 -- both RAM ingest AND snapshot write. Keep false unless upstream always provides
 -- a version and you want strict enforcement.
@@ -267,7 +314,7 @@ end
 -- Shared dict: cert pair storage
 -- ---------------------------------------------------------------------------
 
-local function store_pair(prefix, name, cert_pem, key_pem)
+local function store_pair(store, prefix, name, cert_pem, key_pem)
   if not name or name == "" then
     return false, "empty name"
   end
@@ -296,7 +343,7 @@ local function store_pair(prefix, name, cert_pem, key_pem)
 
   -- Store only the parsed cdata: nothing after ingest reads the PEM text, so we
   -- don't retain it (no per-cert PEM+DER memory duplication).
-  _store[prefix .. name] = { cert_der = cert_der, key_der = key_der }
+  store[prefix .. name] = { cert_der = cert_der, key_der = key_der }
   return true
 end
 
@@ -409,50 +456,97 @@ local function ingest_dumpall(data, src)
   local reported_wild  = #wild_list
 
   local okN, failN = 0, 0
+  -- Built aside and swapped in whole below: set_cert reads _store, and this
+  -- runs in a timer with no yield, so a handshake sees the old or the new
+  -- store, never a mix.
+  local next_store = {}
+  local nextN = 0
+  -- A name in the payload whose PEM is missing or will not parse keeps this
+  -- worker's current pair for it (what the additive ingest did), rather than
+  -- going to the fallback cert.
+  local function keep_old(key)
+    local old = _store[key]
+    if old and not next_store[key] then
+      next_store[key] = old
+      nextN = nextN + 1
+    end
+  end
+
+  -- One payload entry into next_store. kind is "exact"/"wild" (log words),
+  -- name the normalized host or suffix, raw the payload's own field for the
+  -- skip log line.
+  local function ingest_one(prefix, kind, name, raw, cert_pem, key_pem)
+    local key = prefix .. name
+    if name ~= "" and cert_pem and key_pem then
+      local had = next_store[key] ~= nil
+      local ok, e = store_pair(next_store, prefix, name, cert_pem, key_pem)
+      if ok then
+        okN = okN + 1
+        if not had then nextN = nextN + 1 end
+      else
+        failN = failN + 1
+        keep_old(key)
+        ngx.log(ngx.WARN, "[sslcollector] store ", kind, " fail ",
+          kind == "exact" and "host=" or "suffix=", name, " err=", e)
+      end
+    else
+      failN = failN + 1
+      if name ~= "" then keep_old(key) end
+      ngx.log(ngx.WARN, "[sslcollector] skip ", kind, " ",
+        kind == "exact" and "host=" or "suffix=",
+        tostring(name ~= "" and name or (raw or "?")),
+        kind == "exact" and " reason=missing_host_or_pem" or " reason=missing_suffix_or_pem")
+    end
+  end
 
   for _, it in ipairs(exact_list) do
-    local host     = normalize_name(it.host or it.Host)
-    local cert_pem = it.cert_pem or it.cert or it.CertPEM
-    local key_pem  = it.key_pem  or it.key  or it.KeyPEM
-
-    if host ~= "" and cert_pem and key_pem then
-      local ok, e = store_pair("e:", host, cert_pem, key_pem)
-      if ok then
-        okN = okN + 1
-      else
-        failN = failN + 1
-        ngx.log(ngx.WARN, "[sslcollector] store exact fail host=", host, " err=", e)
-      end
-    else
-      failN = failN + 1
-      ngx.log(ngx.WARN, "[sslcollector] skip exact host=",
-        tostring(host ~= "" and host or (it.host or it.Host or "?")),
-        " reason=missing_host_or_pem")
-    end
+    local raw = it.host or it.Host
+    ingest_one("e:", "exact", normalize_name(raw), raw,
+      it.cert_pem or it.cert or it.CertPEM, it.key_pem or it.key or it.KeyPEM)
   end
-
   for _, it in ipairs(wild_list) do
-    local suf      = normalize_name(it.suffix or it.Suffix)
-    local cert_pem = it.cert_pem or it.cert or it.CertPEM
-    local key_pem  = it.key_pem  or it.key  or it.KeyPEM
-
-    if suf ~= "" and cert_pem and key_pem then
-      local ok, e = store_pair("w:", suf, cert_pem, key_pem)
-      if ok then
-        okN = okN + 1
-      else
-        failN = failN + 1
-        ngx.log(ngx.WARN, "[sslcollector] store wild fail suffix=", suf, " err=", e)
-      end
-    else
-      failN = failN + 1
-      ngx.log(ngx.WARN, "[sslcollector] skip wild suffix=",
-        tostring(suf ~= "" and suf or (it.suffix or it.Suffix or "?")),
-        " reason=missing_suffix_or_pem")
-    end
+    local raw = it.suffix or it.Suffix
+    ingest_one("w:", "wild", normalize_name(raw), raw,
+      it.cert_pem or it.cert or it.CertPEM, it.key_pem or it.key or it.KeyPEM)
   end
 
+  local mode = "none"
   if okN > 0 then
+    -- The baseline is the last payload taken. A worker that has only merged
+    -- so far (booted from an incomplete snapshot, fed by the streamed
+    -- fallback) has none: its store stands in, or the first complete payload
+    -- would replace it however small.
+    local prevN = _last_payload_n
+    if prevN == 0 then
+      for _ in pairs(_store) do prevN = prevN + 1 end
+    end
+    local now = hold_clock()
+    local shrunk = prevN >= SHRINK_GUARD_MIN and nextN * 3 < prevN * 2
+    if not shrunk then _shrink_since = 0 end
+    local hold = false
+    if data.complete ~= true then
+      mode = "merge_incomplete"
+    elseif shrunk then
+      if _shrink_since == 0 or now < _shrink_since then _shrink_since = now end
+      hold = (now - _shrink_since) < SHRINK_HOLD_SECS
+      mode = hold and "merge_shrink" or "replace"
+    else
+      mode = "replace"
+    end
+    if mode == "replace" then
+      _store = next_store
+      _last_payload_n = nextN
+      _shrink_since = 0
+    else
+      -- Keep the additive behaviour for this payload.
+      for k, v in pairs(next_store) do _store[k] = v end
+      if hold then
+        ngx.log(ngx.WARN, "[sslcollector] ingest src=", (src or "?"),
+          " payload holds ", nextN, " names, the last taken ", prevN,
+          ": merged, not replaced (taken if it lasts ", SHRINK_HOLD_SECS, "s)")
+        set_last_error("ingest: payload shrank " .. prevN .. " -> " .. nextN .. ", merged")
+      end
+    end
     dict:set("meta:ready",            "1",         86400)
     dict:set("meta:last_dumpall_at",   ngx.time(), 0)
     dict:set("meta:last_dumpall_src",  src or "?", 86400)
@@ -479,6 +573,7 @@ local function ingest_dumpall(data, src)
     " cached_wild=", cached_wild,
     " ok=", okN,
     " fail=", failN,
+    " mode=", mode,
     " ver=", (ver ~= "" and ver or "-"))
 
   return okN, failN
@@ -518,6 +613,17 @@ local function load_from_snapshot()
   end
 
   ingest_dumpall(data, "snapshot")
+end
+
+-- load_from_snapshot under pcall. Both callers are timers whose later steps
+-- (the fetch, the poll reschedule) must run: an error in the snapshot ingest
+-- ended them, and the worker never fetched or polled again.
+local function safe_load_snapshot()
+  local ok, err = pcall(load_from_snapshot)
+  if not ok then
+    ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(err))
+    set_last_error("snapshot load: " .. tostring(err))
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -693,7 +799,7 @@ local function poll_stats(premature)
   -- without a retry the worker stays empty until /stats first succeeds.
   -- Cheap: io.open + JSON decode of a ~few-hundred-KB file. Idempotent.
   if _worker_last_dumpall == 0 then
-    load_from_snapshot()
+    safe_load_snapshot()
   end
 
   local r, err = sock_get("/stats")
@@ -704,7 +810,9 @@ local function poll_stats(premature)
     dict:set("meta:last_stats_at", ngx.time(), 0)
 
     local st = json.decode(r.body)
-    if st then
+    -- A table only: indexing a number or string decoded from a bad body threw
+    -- here, ending the poll timer before it rescheduled.
+    if type(st) == "table" then
       local newv = st.Version or st.version or ""
       if newv ~= "" then
         -- Compare against _worker_version, not the shared dict. Each worker
@@ -798,8 +906,8 @@ function M.start_background()
   local ok, e = ngx.timer.at(0, function(premature)
     if premature then return end
 
-    -- 1) Warm RAM from disk snapshot
-    load_from_snapshot()
+    -- 1) Warm RAM from disk snapshot.
+    safe_load_snapshot()
 
     -- 2) Attempt live dumpall immediately.
     --    Sets meta:last_dumpall_attempt_at + meta:last_dumpall_at (on success)

@@ -103,6 +103,28 @@ back-filled here — see the git/PR history for that period.
   the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
 ### Fixed
+- **Edge: a cert name the daemon dropped is no longer served until a
+  reload.** The edge's per-worker cert store only ever added names from the
+  sslcollector list. When AutoSSL replaced a new account's cPanel self-signed
+  placeholder (`dom` + `www.dom`) with a wildcard (`*.dom` + `dom`), the
+  stale `www.dom` entry stayed, and an exact name outranks a wildcard:
+  `www.` kept serving the self-signed cert until the edge was reloaded
+  (spoolbox.gr on rigel, 2026-11-17, while `cfm ssl dump` showed the right
+  cert). A list now replaces the store, but only a list the daemon marks
+  complete. A list missing a cert the daemon could not read is merged as
+  before, as is a list under two thirds the size of the last one taken; that
+  shrink is taken only if it lasts an hour. A name whose new PEM is missing or
+  does not parse keeps its old pair. An error loading the snapshot, or a
+  `/stats` answer that is not a JSON object, no longer stops a worker from
+  ever fetching or polling again.
+- **sslcollector: a cert whose key file is missing is no longer indexed, and
+  a cert file with no PEM in it no longer crashes the daemon.** A dangling
+  Virtualmin `ssl.key` symlink was indexed, then left out of every list the
+  edge fetches, so every list was marked incomplete and the edge could never
+  drop a stale name on that node. A non-PEM cert file made the cert scan
+  panic. A cert or key caught mid-rewrite during a scan now keeps its
+  previous entry for up to 10 minutes instead of leaving the list at once,
+  so the edge does not drop that site's cert while it is being renewed.
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
   it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It

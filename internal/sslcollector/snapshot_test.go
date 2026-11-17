@@ -194,10 +194,10 @@ func TestCollectorWriteSnapshot_EndToEnd(t *testing.T) {
 	tmp := t.TempDir()
 	certPath := filepath.Join(tmp, "cert.pem")
 	keyPath := filepath.Join(tmp, "key.pem")
-	if err := os.WriteFile(certPath, []byte(strings.Repeat("CERT", 64)), 0o644); err != nil {
+	if err := os.WriteFile(certPath, fakePEM("CERTIFICATE", 64), 0o644); err != nil {
 		t.Fatalf("seed cert: %v", err)
 	}
-	if err := os.WriteFile(keyPath, []byte(strings.Repeat("KEY", 64)), 0o600); err != nil {
+	if err := os.WriteFile(keyPath, fakePEM("PRIVATE KEY", 64), 0o600); err != nil {
 		t.Fatalf("seed key: %v", err)
 	}
 
