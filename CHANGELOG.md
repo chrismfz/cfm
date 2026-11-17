@@ -17,6 +17,17 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **WAF rule 417 scores PHP source in the whole POST body (logonly).** Rule
+  404 reads only a body's first 2 KB. PHP saved through a form field lands
+  past it: a plugin-editor save with an eval of a request header at line 32
+  (orion, 2026-11-15), and a file manager's put of a shell whose comment
+  header fills the first 2 KB (rigel, 2026-11-17). Both reached the disk.
+  Rule 417 runs 404's scorer over the whole body the edge reads (32 KB), and
+  only when 404 found nothing and the raw body holds a `<?` / `$_` or an
+  escape of one. Logonly through burn-in, since a whole legitimate plugin
+  saved through an editor is scored too. See `docs/waf.md`, "Rule 417".
+
 ### Fixed
 - **MySQL governor: it now starts when MySQL comes up after the daemon.**
   The governor connected once, at daemon start, and never again. When

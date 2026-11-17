@@ -113,6 +113,7 @@ local CFG = {
                                          --  multipart/binary CTs; 0 hits over 6 weeks ×
                                          --  5 servers — no legit traffic produces these bytes)
   rule_php_webshell_body = "challenge_v2",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
+  rule_php_webshell_body_deep = "logonly", -- rule 417: 404's scorer over the whole body the edge read (php_webshell_deep_scan_len, 32 KB), when 404's 2 KB head scored nothing. PHP source saved through a form field lands past 2 KB: a plugin-editor save with an eval of a header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), a file manager's cmd=put / a webshell editor saving a shell whose comment header fills the first 2 KB ("ANTI-BLANK & WAF BYPASS", zerooneoliveoil.gr, rigel, 2026-11-17). Logonly through burn-in: a whole legitimate plugin file saved through an editor is scored too.
   rule_b64_injection     = "challenge_v2",  -- POST-body base64 decode heuristic scanner
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
@@ -514,6 +515,9 @@ local CFG = {
   -- Raw PHP webshell body scanner tuning
   php_webshell_max_scan_len = 2048,
   php_webshell_min_score    = 5,
+  -- Rule 417's window: the whole body the edge reads for the WAF
+  -- (waf_body_max_len, 32 KB by default), not 404's 2 KB head.
+  php_webshell_deep_scan_len = 32768,
 
   -- Obfuscation scorers (script body + upload file content)
   script_obfuscation_max_scan_len = 8192,
@@ -624,6 +628,7 @@ local RULE_IDS = {
   rule_upload_content          = 402,
   rule_upload_content_deep     = 415,
   rule_php_file_body           = 416,
+  rule_php_webshell_body_deep  = 417,
   rule_upload_archive_php      = 414,
   rule_upload_obfuscation      = 403,
   rule_php_webshell_body       = 404,
@@ -1554,11 +1559,29 @@ local function check_impl(ctx, st)
   -- ── 15) Raw PHP webshell body (scored) ───────────────────────────────────
   do
     local mode = rule_mode(CFG.rule_php_webshell_body, "logonly")
+    local head_tag
     if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_php_webshell_body(body, headers)
-      if tag then
+      head_tag = det.detect_php_webshell_body(body, headers)
+      if head_tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WEBSHELL_BODY:" .. tag, ttl, mode, RULE_IDS.rule_php_webshell_body) then goto done end
+        if record("WAF_PHP_WEBSHELL_BODY:" .. head_tag, ttl, mode, RULE_IDS.rule_php_webshell_body) then goto done end
+      end
+    end
+    -- ── 15b) The same scorer over the whole body (417, burn-in) ────────────
+    -- Only when the head scored nothing and the body goes past it: PHP saved
+    -- through a form field (an editor, a file manager's put) sits wherever
+    -- the file puts it. detect_php_webshell_body's cheap raw gate keeps a
+    -- body with no `<?` / `$_` (or an escape of one) from being decoded.
+    local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
+    if dmode ~= "disabled" and body_inspect_ok and not head_tag then
+      local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+      local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
+      if #body > head_len and deep_len > head_len then
+        local tag = det.detect_php_webshell_body(body, headers, deep_len)
+        if tag then
+          local ttl = (dmode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_PHP_WEBSHELL_BODY:DEEP_" .. tag, ttl, dmode, RULE_IDS.rule_php_webshell_body_deep) then goto done end
+        end
       end
     end
   end

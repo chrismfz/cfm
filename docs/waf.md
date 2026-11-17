@@ -1102,6 +1102,8 @@ Current assignments:
                                        416  rule_php_file_body            (logonly, 2026-11-13: a PHP file as the
                                                                          raw POST / PUT / PATCH body; see
                                                                          "Rules 332 and 416")
+                                       417  rule_php_webshell_body_deep   (logonly, 2026-11-17: 404's scorer over
+                                                                         the whole body; see "Rule 417")
                                        421  rule_php_split_string_canary
                                        422  rule_php_dropper_wget_curl
                                        423  rule_php_dropper_markers
@@ -1647,6 +1649,37 @@ not an octet-stream body to a clean URL; a PUT / PATCH under the size and
 type gate. A PUT / PATCH under `/remote.php/` (Nextcloud / ownCloud WebDAV)
 is skipped: a sync client uploads a user's `.php` files there as their raw
 body.
+
+### Rule 417 — `rule_php_webshell_body_deep`
+
+Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, logonly. Rule 404 scores PHP
+source in a textual POST body, but over its first 2 KB only
+(`php_webshell_max_scan_len`). PHP saved through a form field lands wherever
+the file puts it, and two compromises on the fleet passed that way:
+
+- **apolymanseisantoniou.gr (orion, 2026-11-15).** A plugin-editor save
+  (`admin-ajax.php`, `action=edit-theme-plugin-file`). Its `newcontent` held,
+  at line 32 of the plugin, `$a = $_SERVER; … eval\n($a[\n$k]\n);`, an
+  eval of a request header. The later saves had the eval in the head, and
+  404 caught them.
+- **zerooneoliveoil.gr (rigel, 2026-11-17).** A file manager's `cmd=put`,
+  then the shell's own editor, saving "Simple File Manager - ULTIMATE
+  ANTI-BLANK & WAF BYPASS". Its comment header fills the first 2 KB.
+
+**What it does.** Rule 417 runs the same scorer over the whole body the edge
+read (`php_webshell_deep_scan_len`, 32 KB = `waf_body_max_len`):
+- only when 404 scored nothing and the body is longer than the head;
+- only after a cheap raw check finds what a score of 5 needs: `<?` or `$_`,
+  or an escape that may decode to one (`%3C`, `%24`, `%25`).
+
+**Cost.** Nothing on a form with no PHP marker. About +0.4 ms on a 30 KB post
+with HTML. About +5 ms on a 30 KB PHP file saved through an editor, which is
+rare.
+
+**Logonly through burn-in.** A whole legitimate plugin file saved through an
+editor is scored too: a global `exec(` / `system(` call plus a superglobal
+reaches 5. Read its hits fleet-wide before any promotion. Multipart bodies
+stay with 402 / 415 (file parts).
 
 ### Both rules
 

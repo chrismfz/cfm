@@ -1114,7 +1114,12 @@ local function is_textual_body_content_type(content_type)
   return false
 end
 
-function _M.detect_php_webshell_body(body, headers)
+-- cap_len: how much of the raw body to read; 404 reads its 2 KB head
+-- (php_webshell_max_scan_len), rule 417 the whole body the edge read
+-- (php_webshell_deep_scan_len). A deep read first checks the raw body for
+-- what a score of min_score needs (`<?` or `$_`, or an escape that may
+-- decode to one), so an ordinary large form is never decoded.
+function _M.detect_php_webshell_body(body, headers, cap_len)
   if not body or body == "" then return nil end
 
   headers = headers or {}
@@ -1123,7 +1128,17 @@ function _M.detect_php_webshell_body(body, headers)
     return nil
   end
 
-  local s = normalize(cap(body, tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len))
+  local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  cap_len = tonumber(cap_len) or head_len
+  if cap_len > head_len then
+    local raw = cap(body, cap_len)
+    if not (raw:find("<?", 1, true) or raw:find("$_", 1, true)
+            or raw:find("%%3[cC]") or raw:find("%24", 1, true) or raw:find("%25", 1, true)) then
+      return nil
+    end
+  end
+
+  local s = normalize(cap(body, cap_len))
   if s == "" then return nil end
 
   if has(ct, "application/x-www-form-urlencoded") then
