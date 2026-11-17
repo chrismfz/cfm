@@ -250,3 +250,37 @@ func TestUsernameCannotSteerTheVerdict(t *testing.T) {
 		}
 	}
 }
+
+// auth-worker / passwd-file / pam lines carry no user=<: the username sits
+// before the marker. It must neither make the line a user_disabled one nor
+// name the address.
+func TestAuthWorkerLinesUsernameSafe(t *testing.T) {
+	cases := []struct {
+		name, line, want string
+	}{
+		{"plain passwd-file", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(a@b.gr,198.51.100.7,<x1>): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"no session", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(a@b.gr,198.51.100.7): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"(user_disabled) username", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(x(user_disabled),198.51.100.7,<x1>): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"rip= username", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(rip=203.0.113.50,,198.51.100.7,<x1>): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"tuple in the username", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): pam(x,203.0.113.50,<z>),198.51.100.7,<x1>): pam_authenticate() failed: Authentication failure`, "AUTHFAIL|ip=198.51.100.7"},
+		{"pam rhost", `Nov 17 12:00:00 n dovecot[1]: auth: pam_unix(dovecot:auth): authentication failure; logname= uid=0 euid=0 tty=dovecot ruser=a@b.gr rhost=198.51.100.7`, "AUTHFAIL|ip=198.51.100.7"},
+		{"two rhost= is no address", `Nov 17 12:00:00 n dovecot[1]: auth: pam_unix(dovecot:auth): authentication failure; ruser=rhost=203.0.113.50 rhost=198.51.100.7`, ""},
+	}
+	for _, c := range cases {
+		a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, UserDisabledPerIP: 1})
+		a.processLine(time.Now(), c.line)
+		var got []string
+		for _, p := range a.pending {
+			if strings.HasSuffix(p.kindKey, "|ip") {
+				got = append(got, p.kindKey+"="+p.key)
+			}
+		}
+		want := []string{}
+		if c.want != "" {
+			want = []string{c.want}
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: ip buckets %v, want %v", c.name, got, want)
+		}
+	}
+}

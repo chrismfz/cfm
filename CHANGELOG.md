@@ -50,8 +50,9 @@ back-filled here — see the git/PR history for that period.
   username.** Before, a username such as `rip=203.0.113.50,a@b.gr` made it ban
   the address in the username instead of the client's, and report it to the
   fleet. A noise phrase in the username also hid a password failure. It now
-  reads both only from the server's text (the reason before `user=<`, and the
-  last `rip=`).
+  reads both only from the server's text: on a login line, the reason before
+  `user=<` and the last `rip=`; on an auth-worker / passwd-file / pam line,
+  the last `(user,IP,<session>)` tuple.
 
 ### Fixed
 - **The Apache TSV fallback log no longer fills the disk on cPanel.**

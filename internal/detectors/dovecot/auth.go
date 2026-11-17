@@ -268,14 +268,19 @@ func (a *Auth) processLine(now time.Time, line string) {
 	// failure whose username says "(user_disabled)" must stay a password
 	// failure, or a brute force would trade the permanent ban for a capped one.
 	head := ll
+	hasUser := false
 	if i := strings.Index(ll, "user=<"); i >= 0 {
-		head = ll[:i]
+		head, hasUser = ll[:i], true
 	}
-	if a.reDisabled.MatchString(head) {
+	// Only a login service's line (`… (code): user=<…>`) states a verdict in
+	// server text. The auth-worker / passwd-file / pam lines put the username
+	// BEFORE the marker (`passwd-file(USER,IP,<s>): Password mismatch`), so
+	// their head is client text too, and they never say user_disabled.
+	if hasUser && a.reDisabled.MatchString(head) {
 		// Never a password failure: its own bucket only, per IP (the mailbox
 		// is the victim, not the attacker).
 		if a.cfg.UserDisabledPerIP > 0 {
-			if ip := lineIP(a.reRip, ll, head); ip != "" {
+			if ip := a.lineIP(ll, head, hasUser); ip != "" {
 				a.bump(now, kindDisabledIP, ip, line)
 			}
 		}
@@ -292,7 +297,7 @@ func (a *Auth) processLine(now time.Time, line string) {
 	}
 
 	// ip
-	if ip := lineIP(a.reRip, ll, head); ip != "" {
+	if ip := a.lineIP(ll, head, hasUser); ip != "" {
 		a.bump(now, "AUTHFAIL|ip", ip, line)
 	}
 
@@ -311,18 +316,33 @@ func (a *Auth) processLine(now time.Time, line string) {
 
 const kindDisabledIP = "DISABLED|ip"
 
+var (
+	// `…(USER,IP)` or `…(USER,IP,<session>)`, as auth-worker writes it.
+	reAuthTuple = regexp.MustCompile(`,([0-9a-f:.]+)(?:,<[^<>]*>)?\)`)
+	reRhost     = regexp.MustCompile(`\brhost=([0-9a-f:.]+)(?:[\s;,]|$)`)
+)
+
 // lineIP is the source address of a dovecot line, canonical (IPv4 as dotted
-// quad); "" when there is none. It is the LAST rip=: dovecot writes rip after
-// user=<…>, and a username such as "rip=203.0.113.50,a@b.gr" would otherwise
-// name the address to ban (a third party's, reported to the whole fleet).
-// Without a rip=, the first IP in head (the text before user=<) is used, never
-// one from the username.
-func lineIP(reRip *regexp.Regexp, ll, head string) string {
+// quad); "" when there is none. Never from the username, which the client
+// chooses ("rip=203.0.113.50,a@b.gr" would otherwise name a third party's
+// address to ban and report to the whole fleet):
+//   - a login service's line (hasUser): the LAST rip= (dovecot writes it after
+//     user=<…>), else the first IP before user=<;
+//   - an auth-worker / passwd-file / pam line: the IP of the LAST
+//     `(USER,IP[,<session>])` tuple (the server text after it is only the
+//     message), else rhost= when there is exactly one; else none.
+func (a *Auth) lineIP(ll, head string, hasUser bool) string {
 	ipStr := ""
-	if ms := reRip.FindAllStringSubmatch(ll, -1); len(ms) > 0 && ms[len(ms)-1][1] != "" {
+	if hasUser {
+		if ms := a.reRip.FindAllStringSubmatch(ll, -1); len(ms) > 0 {
+			ipStr = ms[len(ms)-1][1]
+		} else {
+			ipStr = firstIPInLine(head)
+		}
+	} else if ms := reAuthTuple.FindAllStringSubmatch(ll, -1); len(ms) > 0 {
 		ipStr = ms[len(ms)-1][1]
-	} else {
-		ipStr = firstIPInLine(head)
+	} else if ms := reRhost.FindAllStringSubmatch(ll, -1); len(ms) == 1 {
+		ipStr = ms[0][1]
 	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {

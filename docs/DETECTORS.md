@@ -341,10 +341,17 @@ So the detector keeps them apart from the password failures:
   so the same address's password failures still get their permanent ban
   right after it.
 - **Client-chosen text:** the verdict and the source address are read only
-  from the server's text. The reason must appear before `user=<`, and the
-  address is the last `rip=`. A username such as `x(user_disabled)@…` or
-  `rip=203.0.113.50,…` therefore cannot turn a password failure into a capped
-  ban, or name another address to ban.
+  from the server's text, so a username such as `x(user_disabled)@…` or
+  `rip=203.0.113.50,…` cannot turn a password failure into a capped ban or
+  name another address to ban.
+  - On a login service's line, the reason must appear before `user=<` and
+    the address is the last `rip=`.
+  - An auth-worker / passwd-file / pam line (only with `auth_verbose`) puts
+    the username before its marker. It never counts as user_disabled, and its
+    address is the IP of the last `(USER,IP[,<session>])` tuple, else a
+    single `rhost=`, else none.
+- **Alert log:** a finding marked `ExtraNotify = no` is recorded as `muted`
+  whatever the section's `BLOCK`, `no` included.
 - **Off switch:** `USER_DISABLED_IP = 0` turns the bucket off.
 
 ### `challenge_solver_farm` — why it exists
