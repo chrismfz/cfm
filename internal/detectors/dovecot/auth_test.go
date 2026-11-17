@@ -1,6 +1,7 @@
 package dovecot
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +108,179 @@ func TestAlertScopes(t *testing.T) {
 	}
 	if !gotUser {
 		t.Fatal("expected a per-user alert at threshold 1")
+	}
+}
+
+// The Imunify RBL lock as dovecot logs it on earth (2026-11-17): a login refused
+// before any password check. It feeds only the user_disabled bucket, never the
+// password-failure ones, and its alert carries a capped ban and no mail.
+const userDisabledLine = `Nov 17 17:15:05 earth dovecot[357175]: imap-login: Login aborted: Connection closed (user disabled, 1 attempts in 2 secs) (user_disabled): user=<info@romylos.gr>, method=PLAIN, rip=103.199.18.15, lip=84.54.49.203, TLS, session=<x>`
+
+func TestUserDisabledBucket(t *testing.T) {
+	a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, AuthFailPerUser: 1, UserDisabledPerIP: 2})
+	now := time.Now()
+	a.processLine(now, userDisabledLine)
+	if len(a.pending) != 1 {
+		t.Fatalf("want only the user_disabled bucket, got %v", a.pending)
+	}
+	for _, p := range a.pending {
+		if p.kindKey != kindDisabledIP || p.key != "103.199.18.15" {
+			t.Fatalf("pending %+v, want %s:103.199.18.15", p, kindDisabledIP)
+		}
+	}
+	ch := make(chan core.Alert, 4)
+	a.flush(now, ch)
+	if len(ch) != 0 {
+		t.Fatalf("one line must stay under USER_DISABLED_IP=2, got %d alert(s)", len(ch))
+	}
+
+	// The same address an hour later (Imunify's locks repeat over hours): the
+	// 24h window still holds the first line.
+	later := now.Add(time.Hour)
+	a.processLine(later, userDisabledLine)
+	a.flush(later, ch)
+	close(ch)
+	var got []core.Alert
+	for al := range ch {
+		got = append(got, al)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want one alert at the second line, got %d", len(got))
+	}
+	al := got[0]
+	if al.Kind != "DOVECOT/USER_DISABLED" || al.Count != 2 {
+		t.Errorf("alert kind=%s count=%d", al.Kind, al.Count)
+	}
+	if al.Extra["ip"] != "103.199.18.15" {
+		t.Errorf("extra ip=%q", al.Extra["ip"])
+	}
+	if al.Extra[core.ExtraMaxBlockTTL] != "24h0m0s" {
+		t.Errorf("max_block_ttl=%q, want the 24h default", al.Extra[core.ExtraMaxBlockTTL])
+	}
+	if al.Extra[core.ExtraNotify] != core.NotifyNo {
+		t.Errorf("notify=%q, want no by default", al.Extra[core.ExtraNotify])
+	}
+	if al.Extra["window"] != "24h0m0s" {
+		t.Errorf("window=%q, want the user_disabled window", al.Extra["window"])
+	}
+}
+
+func TestUserDisabledVariantsAndOff(t *testing.T) {
+	lines := []string{
+		userDisabledLine,
+		`Nov 17 17:15:05 earth dovecot[1]: pop3-login: Login aborted: Connection closed (user disabled, 1 attempts in 2 secs) (user_disabled): user=<a@b.gr>, rip=203.0.113.9`,
+		// an older dovecot without the trailing code
+		`Nov 17 17:15:05 earth dovecot: imap-login: Aborted login (user disabled): user=<a@b.gr>, rip=203.0.113.9`,
+	}
+	for _, ln := range lines {
+		a := NewAuth(Config{Mode: "file", UserDisabledPerIP: 1})
+		a.processLine(time.Now(), ln)
+		if len(a.pending) != 1 {
+			t.Errorf("want one user_disabled bucket, got %v: %q", a.pending, ln)
+			continue
+		}
+		for _, p := range a.pending {
+			if p.kindKey != kindDisabledIP {
+				t.Errorf("bucket %s, want %s: %q", p.kindKey, kindDisabledIP, ln)
+			}
+		}
+	}
+	// USER_DISABLED_IP = 0 turns the bucket off, and the line still never
+	// counts as a password failure.
+	a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, AuthFailPerUser: 1})
+	a.processLine(time.Now(), userDisabledLine)
+	if len(a.pending) != 0 {
+		t.Errorf("bucket off: want nothing pending, got %v", a.pending)
+	}
+	// A password failure is untouched by the new bucket.
+	b := NewAuth(Config{Mode: "file", UserDisabledPerIP: 1})
+	b.processLine(time.Now(), `Sep 10 12:00:00 ngm dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<a@b.com>, method=PLAIN, rip=5.6.7.8`)
+	for _, p := range b.pending {
+		if p.kindKey == kindDisabledIP {
+			t.Errorf("auth_failed counted as user_disabled: %v", b.pending)
+		}
+	}
+
+	// UserDisabledNotify keeps the mail.
+	c := NewAuth(Config{Mode: "file", UserDisabledPerIP: 1, UserDisabledNotify: true})
+	c.processLine(time.Now(), userDisabledLine)
+	ch := make(chan core.Alert, 2)
+	c.flush(time.Now(), ch)
+	close(ch)
+	for al := range ch {
+		if _, ok := al.Extra[core.ExtraNotify]; ok {
+			t.Errorf("USER_DISABLED_NOTIFY=1 must not suppress the mail: %v", al.Extra)
+		}
+	}
+}
+
+// The username is client-chosen text after `user=<`: it must not change the
+// verdict or name the address. A brute force with "(user_disabled)" in the
+// username stays a password failure (permanent ban, not the capped one), a
+// "rip=" in it does not frame another address, and a noise phrase in it does
+// not silence the failure.
+func TestUsernameCannotSteerTheVerdict(t *testing.T) {
+	cases := []struct {
+		name, line, wantKind, wantIP string
+	}{
+		{"user_disabled in the username",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<x(user_disabled)@victim.gr>, method=PLAIN, rip=198.51.100.7, lip=84.54.49.203`,
+			"AUTHFAIL|ip", "198.51.100.7"},
+		{"rip= in the username",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<rip=203.0.113.50,a@b.gr>, method=PLAIN, rip=198.51.100.7, lip=84.54.49.203`,
+			"AUTHFAIL|ip", "198.51.100.7"},
+		{"rip= in the username of a user_disabled line",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Connection closed (user disabled, 1 attempts in 2 secs) (user_disabled): user=<rip=203.0.113.50,a@b.gr>, method=PLAIN, rip=198.51.100.7, lip=84.54.49.203`,
+			kindDisabledIP, "198.51.100.7"},
+		{"noise phrase in the username",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<no auth attempts in 0 secs>, method=PLAIN, rip=198.51.100.7`,
+			"AUTHFAIL|ip", "198.51.100.7"},
+	}
+	for _, c := range cases {
+		a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, AuthFailPerUser: 1, UserDisabledPerIP: 1})
+		a.processLine(time.Now(), c.line)
+		var ipKinds []string
+		for _, p := range a.pending {
+			if strings.HasSuffix(p.kindKey, "|ip") {
+				ipKinds = append(ipKinds, p.kindKey+"="+p.key)
+			}
+		}
+		if len(ipKinds) != 1 || ipKinds[0] != c.wantKind+"="+c.wantIP {
+			t.Errorf("%s: ip buckets %v, want [%s=%s]", c.name, ipKinds, c.wantKind, c.wantIP)
+		}
+	}
+}
+
+// auth-worker / passwd-file / pam lines carry no user=<: the username sits
+// before the marker. It must neither make the line a user_disabled one nor
+// name the address.
+func TestAuthWorkerLinesUsernameSafe(t *testing.T) {
+	cases := []struct {
+		name, line, want string
+	}{
+		{"plain passwd-file", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(a@b.gr,198.51.100.7,<x1>): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"no session", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(a@b.gr,198.51.100.7): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"(user_disabled) username", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(x(user_disabled),198.51.100.7,<x1>): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"rip= username", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): passwd-file(rip=203.0.113.50,,198.51.100.7,<x1>): Password mismatch`, "AUTHFAIL|ip=198.51.100.7"},
+		{"tuple in the username", `Nov 17 12:00:00 n dovecot[1]: auth-worker(42): pam(x,203.0.113.50,<z>),198.51.100.7,<x1>): pam_authenticate() failed: Authentication failure`, "AUTHFAIL|ip=198.51.100.7"},
+		{"pam rhost", `Nov 17 12:00:00 n dovecot[1]: auth: pam_unix(dovecot:auth): authentication failure; logname= uid=0 euid=0 tty=dovecot ruser=a@b.gr rhost=198.51.100.7`, "AUTHFAIL|ip=198.51.100.7"},
+		{"two rhost= is no address", `Nov 17 12:00:00 n dovecot[1]: auth: pam_unix(dovecot:auth): authentication failure; ruser=rhost=203.0.113.50 rhost=198.51.100.7`, ""},
+	}
+	for _, c := range cases {
+		a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, UserDisabledPerIP: 1})
+		a.processLine(time.Now(), c.line)
+		var got []string
+		for _, p := range a.pending {
+			if strings.HasSuffix(p.kindKey, "|ip") {
+				got = append(got, p.kindKey+"="+p.key)
+			}
+		}
+		want := []string{}
+		if c.want != "" {
+			want = []string{c.want}
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: ip buckets %v, want %v", c.name, got, want)
+		}
 	}
 }

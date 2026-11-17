@@ -58,6 +58,20 @@ back-filled here — see the git/PR history for that period.
   found" when the credentials were found and the connect failed: it names the
   credential source and the connect error.
 ### Added
+- **Imunify360 RBL locks now reach the fleet list.** On a cPanel node with
+  Imunify, a mail login from an address on Imunify's global RBL is refused
+  before any password check, and dovecot logs it as `user_disabled`. CFM's
+  dovecot detector only counted password failures, so it never banned these
+  sources or reported them. On earth that was ~1 200 addresses in three days,
+  and none of a 25-address sample was on the fleet list. The detector now counts `user_disabled`
+  logins per IP (`USER_DISABLED_IP = 2` in `USER_DISABLED_WINDOW = 24h`). It
+  bans them for at most `USER_DISABLED_BLOCK_TTL = 24h`, even though the
+  section's `BLOCK` is permanent, and reports them to cfm-web. GR/CY addresses
+  get the section leniency. No mail is sent per ban unless
+  `USER_DISABLED_NOTIFY = 1`; the alert log still records each ban, as
+  muted. A detector can now cap one finding's ban (`core.ExtraMaxBlockTTL`)
+  and skip its mail on the block path (`core.ExtraNotify`).
+  See `docs/DETECTORS.md`, "dovecot_auth — logins refused as user_disabled".
 - **WAF rule 530 measures WooCommerce add-to-cart crawling (logonly).**
   A `GET ?add-to-cart=<id>` makes WooCommerce write a session and a cart, and
   crawlers follow those links on every listing. On 2026-11-17 the fleet served
@@ -70,6 +84,15 @@ back-filled here — see the git/PR history for that period.
   no block rule, so `waf_security` never arms it. Its pushes are kept to one
   per client and tag an hour, so the burn-in adds no flood of history rows.
   See `docs/waf.md`, "Rule 530".
+
+### Security
+- **The dovecot detector no longer takes the address or the verdict from the
+  username.** Before, a username such as `rip=203.0.113.50,a@b.gr` made it ban
+  the address in the username instead of the client's, and report it to the
+  fleet. A noise phrase in the username also hid a password failure. It now
+  reads both only from the server's text: on a login line, the reason before
+  `user=<` and the last `rip=`; on an auth-worker / passwd-file / pam line,
+  the last `(user,IP,<session>)` tuple.
 
 ### Fixed
 - **The Apache TSV fallback log no longer fills the disk on cPanel.**
