@@ -13,25 +13,34 @@
 # time-based directives (daily / rotate N) are not applied twice.
 set -e
 
-CONF=/etc/logrotate.d/logrotate-cfm
+CONF=${CFM_LOGROTATE_CONF:-/etc/logrotate.d/logrotate-cfm}
 
-# The Apache TSV fallback log (httpd-cfm.conf, the web detector's file source
-# when the edge socket is off: `cfm dnat off`). logrotate-cfm leaves
-# /var/log/apache2 to the distro's apache2 block, but cPanel has none: its
-# cpanellogd renames a log past 2 GB to <name>.YYYY_MM_DD[.NN] and never
-# deletes the copies. On 2026-11-17 that held 316 GB on titan, 207 GB on mars
-# and 120 GB on orion; virgo's live file had reached 26 GB unrotated. Its only
-# reader follows the live file, so keep a day of copies and cap the live file
-# by truncating it in place (Apache opens it O_APPEND, so writes go on at the
-# new end; the tailer reopens a file that shrank). Not a logrotate block: on a
-# distro whose apache2 config globs *.log, listing the path again is a
-# "duplicate log entry" error that aborts the whole run.
-TSV_MAX_BYTES=536870912
-for f in /var/log/apache2/access_cfm_tsv.log /usr/local/apache/logs/access_cfm_tsv.log; do
+# The web detector's TSV fallback log (httpd-cfm.conf / nginx-cfm.conf, its
+# file source when the edge socket is off: `cfm dnat off`). logrotate-cfm
+# leaves /var/log/apache2 and /var/log/nginx to the distro, but cPanel has no
+# block there: its cpanellogd renames a log past 2 GB to
+# <name>.YYYY_MM_DD[.NN] and never deletes the copies. On 2026-11-17 that held
+# 316 GB on titan, 207 GB on mars and 175 GB on orion; virgo's live file had
+# reached 26 GB unrotated. So: delete cPanel's dated copies after a day (only
+# that name form: a distro logrotate generation or an operator's own copy is
+# left alone), and past TSV_MAX_BYTES keep ONE compressed copy of the live file
+# (<name>.cfm-prev.gz, overwritten each time) and truncate it in place: the web
+# server opens it O_APPEND, so writes go on at the new end, and the tailer
+# reopens a file that shrank. Not a logrotate block: on a distro whose apache2
+# or nginx config globs *.log, listing the path again is a "duplicate log
+# entry" error that aborts the whole run. CFM_TSV_LOGS overrides the list
+# (tests).
+TSV_MAX_BYTES=${CFM_TSV_MAX_BYTES:-536870912}
+TSV_LOGS=${CFM_TSV_LOGS:-"/var/log/apache2/access_cfm_tsv.log /usr/local/apache/logs/access_cfm_tsv.log /var/log/nginx/access_cfm_tsv.log"}
+for f in $TSV_LOGS; do
     [ -f "$f" ] || continue
-    find "$(dirname "$f")" -maxdepth 1 -type f -name "$(basename "$f")?*" -mmin +1440 -delete 2>/dev/null || true
+    find "$(dirname "$f")" -maxdepth 1 -type f \
+        -name "$(basename "$f").[0-9][0-9][0-9][0-9]_[0-9][0-9]_[0-9][0-9]*" \
+        -mmin +1440 -delete 2>/dev/null || true
     sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
     if [ "$sz" -gt "$TSV_MAX_BYTES" ]; then
+        gzip -c "$f" > "$f.cfm-prev.gz.tmp" 2>/dev/null &&
+            mv -f "$f.cfm-prev.gz.tmp" "$f.cfm-prev.gz" 2>/dev/null || rm -f "$f.cfm-prev.gz.tmp"
         : > "$f" 2>/dev/null || true
     fi
 done

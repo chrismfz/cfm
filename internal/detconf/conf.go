@@ -33,8 +33,12 @@ package detconf
 import (
 	"bufio"
 	"bytes"
+	"log"
 	"os"
 	"strings"
+	"sync"
+
+	"cfm/internal/secretkeys"
 )
 
 type KV = map[string]string
@@ -121,7 +125,9 @@ func ReadSections(path string) (Sections, []byte, error) {
 			}
 			if isConfigKey(candidate) {
 				k := strings.ToUpper(candidate)
-				v := unquoteValue(strings.TrimSpace(line[i+1:]))
+				raw := strings.TrimSpace(line[i+1:])
+				v := unquoteValue(raw)
+				warnSecretReadChanged(k, raw, v)
 				if appendOp {
 					if prev, ok := s.ByName[cur][k]; ok && prev != "" {
 						v = joinAppend(k, prev, v)
@@ -228,4 +234,22 @@ func unquoteValue(raw string) string {
 		}
 	}
 	return strings.Trim(raw, `"`)
+}
+
+// warnedSecretRead: once per key per process (the file is read on every
+// reload and by most CLI commands).
+var warnedSecretRead sync.Map
+
+// warnSecretReadChanged logs, never the value, when a SECRET key written as
+// `KEY = "value" ; comment` now reads differently than it did before
+// unquoteValue (which kept the closing quote and the comment). A token that
+// changes on upgrade changes what is derived from it (the challenge HMAC key,
+// the edge bridge token), so the operator should know why.
+func warnSecretReadChanged(key, raw, v string) {
+	if !secretkeys.IsSecret(key) || v == strings.Trim(raw, `"`) {
+		return
+	}
+	if _, seen := warnedSecretRead.LoadOrStore(key, true); !seen {
+		log.Printf("detconf: warning: %s is written as a quoted value followed by a comment; since 2026-11-17 it reads as the text between the quotes, no longer with the closing quote and comment appended. If that changed the effective secret, move the comment to its own line and check what is derived from it", key)
+	}
 }

@@ -73,9 +73,16 @@ there (or ship a host-specific drop-in), don't duplicate the entry.
   `/var/log/apache2/` has no distro block: cpanellogd renames a log past 2 GB
   to `<name>.YYYY_MM_DD[.NN]` and never deletes the copies (2026-11-17: 316 GB
   on titan, 207 GB on mars, 175 GB on orion, a 26 GB never-rotated live file
-  on virgo). The script deletes those copies after a day and truncates the
-  live file in place past 512 MB; its only reader (the web detector's file
-  source, used when the edge socket is off) follows the live file. A
+  on virgo). The script deletes those copies after a day (that name form only:
+  a distro logrotate generation such as `.1.gz` or an operator's own copy is
+  left alone) and, past 512 MB, gzips the live file to `<name>.cfm-prev.gz`
+  (one generation, overwritten) and truncates it in place; its only reader
+  (the web detector's file source, used when the edge socket is off) follows
+  the live file. The same step covers `/usr/local/apache/logs/` and
+  `/var/log/nginx/access_cfm_tsv.log` (`nginx-cfm.conf`), and runs before the
+  script's exit on a node without `logrotate-cfm`. `check_logrotate_coverage.sh`
+  runs it against a temp tree (`CFM_TSV_LOGS`, `CFM_TSV_MAX_BYTES`,
+  `CFM_LOGROTATE_CONF`). A
   logrotate block for it would be a `duplicate log entry` on a distro whose
   apache2 config globs `*.log`.
 - **`/etc/systemd/system/logrotate.service.d/cfm-openresty.conf`**

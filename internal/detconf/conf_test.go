@@ -1,6 +1,8 @@
 package detconf
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,5 +82,27 @@ func TestUnquoteValue(t *testing.T) {
 		if got := unquoteValue(raw); got != want {
 			t.Errorf("unquoteValue(%q) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+// A secret whose effective value changed with unquoteValue is named once in
+// the log, never with its value; a secret that reads as before is silent.
+func TestWarnSecretReadChanged(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	warnSecretReadChanged("CHALLENGE_TOKEN", `"s3cr3tvalue" ; rotated`, "s3cr3tvalue")
+	warnSecretReadChanged("CHALLENGE_TOKEN", `"s3cr3tvalue" ; rotated`, "s3cr3tvalue") // once per key
+	warnSecretReadChanged("OPENRESTY_TOKEN", `"plain"`, "plain")                       // unchanged: silent
+	warnSecretReadChanged("BLOCK", `"15m" ; note`, "15m")                              // not a secret: silent
+
+	out := buf.String()
+	if strings.Count(out, "CHALLENGE_TOKEN") != 1 {
+		t.Fatalf("want exactly one warning for CHALLENGE_TOKEN, got %q", out)
+	}
+	if strings.Contains(out, "s3cr3tvalue") || strings.Contains(out, "OPENRESTY_TOKEN") || strings.Contains(out, "BLOCK") {
+		t.Fatalf("warning leaked a value or named a key it should not: %q", out)
 	}
 }

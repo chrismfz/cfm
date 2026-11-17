@@ -40,3 +40,24 @@ ALLOW_NETS = "10.0.0.0/8, 192.168.0.0/16"   ; trusted
 		t.Errorf("ALLOW_NETS = %q", got)
 	}
 }
+
+// The `+=` append path (overlay one-liners, where operators comment most)
+// goes through the same reader before joinAppend: the appended item must be
+// the text between the quotes, never `192.168.0.0/16" ; office`.
+func TestQuotedAppendWithInlineCommentReadsAsValue(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "detectors.conf")
+	content := `[global]
+IGNORE_NETS = 10.0.0.0/8
+IGNORE_NETS += "192.168.0.0/16"   ; office
+`
+	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secs, err := ReadSectionsFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := kvStrClean(secs.Global, "IGNORE_NETS", ""), "10.0.0.0/8, 192.168.0.0/16"; got != want {
+		t.Fatalf("IGNORE_NETS = %q, want %q", got, want)
+	}
+}
