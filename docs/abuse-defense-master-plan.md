@@ -509,7 +509,11 @@ already opened.
           24h ceiling as the panic arm — expiry returns the vhost to
           AUTO control via the tick (st.on stays true, so the vhost
           leaves by the normal exit rules, not mid-attack) and the read
-          paths honour it immediately; admin overrides stay unbounded.
+          paths honour it immediately; ~~admin overrides stay unbounded~~
+          (*2026-11-17:* every `attack on` holds for a TTL, the call's or
+          `UNDER_ATTACK_OVERRIDE_TTL` = 6h, arms the vhost's challenge for
+          the same window and survives a reload; a scoped one is capped at
+          24h. `docs/targeted-challenge-design.md` §4.)
           The SAME re-arm residual as the panic arm applies and is
           accepted: a scoped on=1 every <24h keeps the override standing
           (own vhost, audited per re-arm);

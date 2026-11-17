@@ -368,6 +368,11 @@ func TestAttackOverrideScopedTTLBound(t *testing.T) {
 		t.Fatalf("override expiry not bounded: %v", exp)
 	}
 
+	// The arm it made is capped with it.
+	if _, armExp, _ := e.manualChal.active("tenant-a.example.com"); time.Until(armExp) > scopedMaxChallengeTTL+time.Minute {
+		t.Fatalf("scoped arm not capped: expires in %v", time.Until(armExp))
+	}
+
 	// No ttl: the default (6h), under the ceiling, not capped.
 	resp = attackRequest(t, e, "host=tenant-a.example.com&on=1", "tenant-a.example.com")
 	if resp["ttl"] != defaultAttackOverrideTTL.String() || resp["ttl_capped"] != nil {
@@ -389,7 +394,7 @@ func TestAttackOverrideAdminDefaultTTL(t *testing.T) {
 	}
 	// An explicit ttl is honoured, uncapped for an admin.
 	resp = attackRequest(t, e, "host=any.example.com&on=1&ttl=48h", "")
-	if resp["ttl"] != (48 * time.Hour).String() || resp["ttl_capped"] != nil {
+	if resp["ttl"] != (48*time.Hour).String() || resp["ttl_capped"] != nil {
 		t.Fatalf("admin ttl=48h: %#v", resp)
 	}
 	// A bad ttl is refused.

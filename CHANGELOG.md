@@ -53,12 +53,16 @@ back-filled here — see the git/PR history for that period.
     - when no manual challenge covers the vhost, `attack on` arms one for
       the same window (reason `under_attack`, the node's default tier);
     - every override holds for a TTL: the call's `ttl`, else
-      `UNDER_ATTACK_OVERRIDE_TTL` (default 6h; a cPanel user is capped at
-      24h). The challenge it armed expires with it;
+      `UNDER_ATTACK_OVERRIDE_TTL` (default 6h). A cPanel user's override
+      also defaults to 6h now (it was always 24h), and can be set up to 24h.
+      The challenge it armed expires with it;
     - it is saved to `/var/lib/cfm/webdetector_attack_overrides.json` and
       restored after a `detectors.conf` save, a reload or a restart;
-    - `attack off` removes only the challenge its `attack on` armed. A
-      manual challenge you set yourself stays.
+    - `attack off` removes only the challenge its `attack on` armed (so does
+      a `cfm.allow` bypass of the vhost). A manual challenge you set yourself
+      stays. An exclude or ignore no longer ends an `attack on` early: the
+      challenge it armed wins over them, like any manual challenge.
+    - a reload sends no second "under attack" alert.
   - Why: before, `attack on` challenged nobody by itself (a second command
     was needed), an admin override never expired, and any config reload
     dropped it without a word.

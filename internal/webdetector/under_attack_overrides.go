@@ -85,6 +85,9 @@ func (s *attackOverrideStore) load() {
 		}
 		return
 	}
+	if len(b) == 0 {
+		return
+	}
 	var arr []attackOverrideEntry
 	if err := json.Unmarshal(b, &arr); err != nil {
 		logging.Logf("[challenge][vhost] attack override load failed (%s): %v", s.path, err)
@@ -99,6 +102,8 @@ func (s *attackOverrideStore) load() {
 	}
 }
 
+// saveLocked writes the unexpired entries (best effort: a failure is logged
+// and the in-memory state stays authoritative). The caller holds s.mu.
 func (s *attackOverrideStore) saveLocked() {
 	if s.path == "" {
 		return
@@ -115,6 +120,7 @@ func (s *attackOverrideStore) saveLocked() {
 	sort.Slice(arr, func(i, j int) bool { return arr[i].Host < arr[j].Host })
 	b, err := json.MarshalIndent(arr, "", "  ")
 	if err != nil {
+		logging.Logf("[challenge][vhost] attack override persist marshal failed: %v", err)
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o750); err != nil {
@@ -129,7 +135,9 @@ func (s *attackOverrideStore) saveLocked() {
 	if err := os.Rename(tmp, s.path); err != nil {
 		logging.Logf("[challenge][vhost] attack override persist rename failed (%s): %v", s.path, err)
 		_ = os.Remove(tmp)
+		return
 	}
+	_ = os.Chmod(s.path, 0o600)
 }
 
 func (s *attackOverrideStore) set(e attackOverrideEntry) {
@@ -202,11 +210,7 @@ func (e *Engine) ForceVhostAttackAs(host string, on bool, ttl time.Duration, act
 	now := time.Now()
 	if !on {
 		e.SetVhostAttackOverride(host, false, now, 0)
-		if prev, ok := e.attackOverrides.remove(host); ok && prev.ArmedChallenge {
-			if active, _, reason := e.manualChal.active(host); active && reason == attackArmReason {
-				e.ClearManualChallengeVhostAs(host, actor)
-			}
-		}
+		e.dropAttackOverride(host, actor)
 		return false, time.Time{}
 	}
 	if ttl <= 0 {
@@ -233,9 +237,27 @@ func (e *Engine) ForceVhostAttackAs(host string, on bool, ttl time.Duration, act
 	return armed, expires
 }
 
+// dropAttackOverride forgets host's persisted override and removes the
+// challenge its `attack on` armed, while that arm is still the one it made
+// (reason under_attack). With no record (lost, or a store from before the
+// arm), an under_attack arm is taken as the override's own: only an
+// `attack on` writes that reason.
+func (e *Engine) dropAttackOverride(host, actor string) {
+	prev, ok := e.attackOverrides.remove(host)
+	if ok && !prev.ArmedChallenge {
+		return
+	}
+	if active, _, reason := e.manualChal.active(host); active && reason == attackArmReason {
+		e.ClearManualChallengeVhostAs(host, actor)
+	}
+}
+
 // restoreAttackOverrides re-applies the persisted `attack on` overrides with
 // their remaining window, once the new Engine's tracker and bridge exist. The
-// challenges they armed are restored by restoreManualChallenges.
+// challenges they armed are restored by restoreManualChallenges. Like that
+// restore, it writes no history and sends no alert: the state is seeded as
+// already ON, so the first tick sees no transition (the original ON alert and
+// row stand).
 func (e *Engine) restoreAttackOverrides() {
 	now := time.Now()
 	for _, ent := range e.attackOverrides.snapshot() {
@@ -243,7 +265,7 @@ func (e *Engine) restoreAttackOverrides() {
 		if rem <= 0 {
 			continue
 		}
-		e.SetVhostAttackOverride(ent.Host, true, now, rem)
+		e.restoreForcedOn(ent.Host, now, rem)
 		logging.LogfCHALLENGES("[challenge][vhost] action=attack_restore host=%s ttl=%s armed_challenge=%v",
 			ent.Host, rem.Round(time.Second), ent.ArmedChallenge)
 	}

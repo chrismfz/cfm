@@ -1567,8 +1567,8 @@ func runAttackStatus(baseURL string) error {
 		}
 	}
 	fmt.Println("\nUsage:")
-	fmt.Println("  cfm webtop attack on <vhost> [--ttl 6h]   force a vhost into UNDER_ATTACK (arms its challenge too; default 6h)")
-	fmt.Println("  cfm webtop attack off <vhost>  clear it + suppress auto re-entry for the holddown")
+	fmt.Println("  cfm webtop attack on <vhost> [--ttl 6h]  force a vhost into UNDER_ATTACK for a TTL (default 6h); arms its challenge too when none is set")
+	fmt.Println("  cfm webtop attack off <vhost>            clear it (+ the challenge it armed), suppress auto re-entry for the holddown")
 	return nil
 }
 

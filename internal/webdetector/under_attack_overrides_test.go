@@ -1,9 +1,14 @@
 package webdetector
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"cfm/internal/detectors/core"
 )
 
 func newForceAttackEngine(t *testing.T, path string) *Engine {
@@ -122,17 +127,95 @@ func TestAttackOverrideStore_DropsExpired(t *testing.T) {
 	}
 }
 
-// A full suppression (cfm.allow, exclude) drops the persisted override too,
-// or the next reload would bring it back.
-func TestDeescalateDropsThePersistedOverride(t *testing.T) {
+// A cfm.allow bypass drops the persisted override and the challenge its
+// `attack on` armed (the bypass only clears the bridge), so nothing comes back
+// with no override behind it.
+func TestDeescalateDropsThePersistedOverrideAndItsArm(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "o.json")
 	e := newForceAttackEngine(t, path)
 	e.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
-	e.deescalateUnderAttack(time.Now(), "shop.example", "challenge suppressed (excluded)", nil)
+	e.deescalateUnderAttack(time.Now(), "shop.example", "challenge suppressed (bypass)", nil)
 	if _, ok := e.attackOverrides.get("shop.example"); ok {
 		t.Fatal("suppression left the persisted override")
 	}
 	if len(newAttackOverrideStore(path).snapshot()) != 0 {
 		t.Fatal("suppression left it on disk")
+	}
+	if active, _ := manualReason(e, "shop.example"); active {
+		t.Fatal("suppression left the challenge attack on armed")
+	}
+}
+
+// With no record (a lost store), `attack off` still takes an under_attack arm
+// as the override's own: only an `attack on` writes that reason.
+func TestForceVhostAttack_OffWithoutARecord(t *testing.T) {
+	e := newForceAttackEngine(t, "")
+	e.ManualChallengeVhostAs("shop.example", time.Hour, attackArmReason, "", "admin")
+	e.ForceVhostAttackAs("shop.example", false, 0, "admin")
+	if active, _ := manualReason(e, "shop.example"); active {
+		t.Fatal("attack off left an under_attack arm with no record")
+	}
+}
+
+// The arm expires with the override.
+func TestForceVhostAttack_ArmExpiresWithTheOverride(t *testing.T) {
+	e := newForceAttackEngine(t, "")
+	_, exp := e.ForceVhostAttackAs("shop.example", true, 90*time.Minute, "admin")
+	_, armExp, _ := e.manualChal.active("shop.example")
+	if d := armExp.Sub(exp); d < -time.Second || d > time.Second {
+		t.Fatalf("arm expires %v, override %v", armExp, exp)
+	}
+}
+
+// A restored override is seeded as already ON: the first tick sees no
+// transition, so a reload sends no second ON alert or history row.
+func TestRestoreAttackOverrides_NoSecondOnAlert(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "o.json")
+	e1 := newForceAttackEngine(t, path)
+	e1.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+
+	e2 := newForceAttackEngine(t, path)
+	e2.restoreAttackOverrides()
+	out := make(chan core.Alert, 4)
+	e2.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, out)
+	if len(out) != 0 {
+		t.Fatalf("a reload sent %d alert(s): %+v", len(out), <-out)
+	}
+	if on, _, _ := e2.VhostAttackState("shop.example"); !on {
+		t.Fatal("restored vhost not under attack")
+	}
+
+	// Control: a fresh `attack on` does send its ON on the first tick.
+	e3 := newForceAttackEngine(t, "")
+	e3.ForceVhostAttackAs("fresh.example", true, time.Hour, "admin")
+	out3 := make(chan core.Alert, 4)
+	e3.evalUnderAttack(time.Now(), "fresh.example", true, SuspiciousRow{Host: "fresh.example"}, out3)
+	if len(out3) != 1 {
+		t.Fatalf("a fresh attack on sent %d alerts, want 1", len(out3))
+	}
+}
+
+// The CLI's --ttl reaches the API as ttl=, and is refused on `attack off`.
+func TestRunAttackWebTop_TTLFlag(t *testing.T) {
+	var got []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = append(got, r.URL.RawQuery)
+		_, _ = w.Write([]byte(`{"host":"x.gr","attack":true,"ttl":"2h0m0s","expires_at":"2026-11-17T12:00:00Z","challenge_armed":true}`))
+	}))
+	defer ts.Close()
+	for _, args := range [][]string{{"on", "x.gr", "--ttl", "2h"}, {"on", "x.gr", "--ttl=2h"}} {
+		got = nil
+		if err := runAttackWebTop(ts.URL, args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		if len(got) != 1 || !strings.Contains(got[0], "ttl=2h") || !strings.Contains(got[0], "on=1") {
+			t.Fatalf("%v sent %v", args, got)
+		}
+	}
+	if err := runAttackWebTop(ts.URL, []string{"off", "x.gr", "--ttl", "2h"}); err == nil {
+		t.Error("--ttl on attack off must be refused")
+	}
+	if err := runAttackWebTop(ts.URL, []string{"on", "x.gr", "--bogus"}); err == nil {
+		t.Error("an unknown flag must be refused")
 	}
 }

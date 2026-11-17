@@ -104,10 +104,15 @@ UNDER_ATTACK_SOLVES_MIN     = 15    ; distinct solving IPs/min that count as "fa
 UNDER_ATTACK_CONFIRM_TICKS  = 3     ; consecutive ticks before entering
 UNDER_ATTACK_HOLDDOWN       = 30m   ; min time in state; exit needs pressure below floor this long
 UNDER_ATTACK_RULE_TTL       = 6h    ; TTL of any auto/draft traffic rule
+UNDER_ATTACK_OVERRIDE_TTL   = 6h    ; how long an operator's `attack on` holds (since 2026-11-17)
 ```
 
-Manual override, like manual challenge: `cfm webtop attack on|off <vhost>`
-(on = force the state; off = leave + suppress re-entry for the holddown).
+Manual override, like manual challenge: `cfm webtop attack on|off <vhost>`.
+- **on** (`[--ttl 6h]`, since 2026-11-17): force the state for the TTL, and
+  arm the vhost's challenge for the same window when no manual challenge
+  covers it. It survives a reload.
+- **off:** leave, suppress re-entry for the holddown, and remove the
+  challenge that `on` armed.
 
 ## 3. Entry criteria — challenge-efficacy feedback + corroboration
 

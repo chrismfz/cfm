@@ -1245,8 +1245,10 @@ from automatic challenges (host bypass, a Challenge exclude, the ignore
 list) has no automatic tier at all — own or inherited — asked at READ time
 (`hostAutoSuppressed`), so it holds however quiet the host is; a manual arm
 on it keeps its own tier. Notes die with
-their entry, so a forced `attack on` on a host nothing challenges arms
-nothing. The first ARMED noted source wins (strongest first: under_attack,
+their entry, so the under_attack source alone arms nothing on a host nothing
+challenges (since 2026-11-17 an operator's `attack on` also arms a manual
+challenge there, `under_attack_overrides.go`, and the note applies on top of
+it). The first ARMED noted source wins (strongest first: under_attack,
 suspicious_vhost, uniqpaths_short, vhost_config). One bridge RLock at
 verify — no scorer or Under-Attack lock. The UNDER_ATTACK transition line
 carries `tier=` so the log says whether entering the state armed v2.

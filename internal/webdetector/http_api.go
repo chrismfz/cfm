@@ -100,7 +100,7 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/challenge/vhost/lockdown", requirePOST(e.handleChallengeVhostLockdown)}, // lockdown on/off on an armed manual challenge (no client exemption)
 		{"/api/v1/challenge/vhost/tier", e.handleChallengeVhostTier},                      // POST: pin an automatic challenge's tier (v1|v2|auto); GET: list pins (admin)
 		{"/api/v1/challenge/vhost/status", e.handleChallengeVhostStatus},
-		{"/api/v1/challenge/vhost/attack", requirePOST(e.handleChallengeVhostAttack)}, // ?host=&on=1|0 (under-attack override)
+		{"/api/v1/challenge/vhost/attack", requirePOST(e.handleChallengeVhostAttack)}, // ?host=&on=1|0[&ttl=] (under-attack override; on arms the challenge too)
 		{"/api/v1/challenge/exclude/list", e.handleChallengeExcludeList},
 		{"/api/v1/challenge/exclude/add", requirePOST(e.handleChallengeExcludeAdd)},
 		{"/api/v1/challenge/exclude/remove", requirePOST(e.handleChallengeExcludeRemove)},
