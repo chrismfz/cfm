@@ -123,9 +123,10 @@ fallback), triggered by the under-attack state rather than only by a reject.
 >   1. The verify of a qualifying solve answers 403 with `X-CFM-Confirm`, an
 >      HMAC token bound to (ip, host, PoW token), and logs `result=v2_confirm`.
 >   2. The page shows a native Continue button, once the tab is visible.
->   3. A trusted click re-posts the same solve with the token and `clk`
->      (the click; a new log-only `sig` reading). A re-post with the token
->      and still no trusted input (no `clk`, pointer, touch or key) is asked
+>   3. A trusted click re-posts the same solve with the token and
+>      `X-CFM-Click: 1` (a header, so the humanity body and its 1 KB bound
+>      are unchanged). A re-post with the token and still no trusted input
+>      (no click, pointer, touch or key) is asked
 >      again with the same token (a re-post never mints a new one, so one PoW
 >      cannot be kept alive by re-posting). Its PoW is checked as of the token's issue time, so the PoW's
 >      2-minute TTL never sends the visitor back. The token lives 5 minutes,
@@ -143,7 +144,7 @@ fallback), triggered by the under-attack state rather than only by a reject.
 >   feeds the under-attack solve rate, so `auto` is not starved by a farm
 >   that never clicks.
 > - **Honest limits** (the header of `challenge_confirm.go`): a farm that
->   reads the 403 and posts `clk:1` with the token passes, and a CDP click is
+>   reads the 403 and re-posts with the token and `X-CFM-Click` passes, and a CDP click is
 >   trusted; a token is reusable from the same ip and host until it expires
 >   (~7 minutes after the PoW was issued instead of 2).
 > - **Where it applies:** web scope only. A `www.` host with no state of its

@@ -1168,7 +1168,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// never asked (confirmGoodBot).
 		if v2On {
 			switch {
-			case confirmOK && confirmInput(hsSig):
+			case confirmOK && confirmInput(hsSig, r.Header.Get(clickHeader) == "1"):
 				solve.V2Confirm = confirmClicked
 				if ms := verifyAt.Sub(confirmAt).Milliseconds(); ms > 0 {
 					solve.V2ConfirmMS = ms
@@ -2769,9 +2769,10 @@ func challengeHTML() string {
   }
   // END cfmConfirmToken
 
-  function postVerify(sol, ctok) {
+  function postVerify(sol, ctok, clicked) {
     var hdr = { "X-CFM-Token": token, "X-CFM-Pow": powTok, "X-CFM-Sol": sol };
     if (ctok) hdr["X-CFM-Confirm"] = ctok;
+    if (clicked) hdr["X-CFM-Click"] = "1";
     return fetch("/__cfm_verify?next="+encodeURIComponent(next), {
       method: "POST",
       headers: hdr,
@@ -2783,7 +2784,7 @@ func challengeHTML() string {
   // showConfirm replaces the spinner with one native button. It waits for a
   // page someone can see (a background tab shows it when it comes back), and
   // only a trusted click or key press (ev.isTrusted) re-posts the solve with
-  // the token and clk, the click; the server asks again without trusted
+  // the token and X-CFM-Click; the server asks again without trusted
   // input. The page's input listeners keep running, so the re-post carries
   // the approach to the button. No timer, no puzzle.
   function showConfirm(sol, ctok) {
@@ -2808,10 +2809,9 @@ func challengeHTML() string {
         b.textContent = 'Continue';
         b.addEventListener('click', function (ev) {
           if (ev && ev.isTrusted === false) return;
-          HS.clk = (HS.clk || 0) + 1;
           b.disabled = true;
           b.textContent = 'Checking…';
-          send(sol, ctok);
+          send(sol, ctok, true);
         });
         // The give-up message of a later reject writes here (.muted).
         var m = document.createElement('div');
@@ -2831,8 +2831,8 @@ func challengeHTML() string {
     }
   }
 
-  function send(sol, ctok) {
-    postVerify(sol, ctok).then(function(res){
+  function send(sol, ctok, clicked) {
+    postVerify(sol, ctok, clicked).then(function(res){
       if (res.redirected) {
         cfmSession.del('cfm_v2r');
         cfmSession.del('cfm_vf');
@@ -2878,7 +2878,7 @@ func challengeHTML() string {
   (async function(){
     try {
       var sol = await solvePow();
-      send(sol, '');
+      send(sol, '', false);
     } catch(e) {
       setTimeout(function(){ location.reload(); }, 1200);
     }

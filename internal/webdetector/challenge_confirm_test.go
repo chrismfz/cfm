@@ -385,8 +385,7 @@ func TestVerify_ConfirmOutlivesThePowTTL(t *testing.T) {
 	if resp := post(noInput, nil); resp.StatusCode != http.StatusForbidden || resp.Header.Get(confirmHeader) != "" {
 		t.Fatalf("control: the stale PoW alone must fail verify, got status=%d", resp.StatusCode)
 	}
-	clicked := `{"v":1,"wd":false,"ptr":0,"tch":0,"key":0,"mv":0,"clk":1}`
-	if resp := post(clicked, map[string]string{confirmHeader: tok}); resp.StatusCode != http.StatusSeeOther {
+	if resp := post(noInput, map[string]string{confirmHeader: tok, clickHeader: "1"}); resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("confirmed re-post after the PoW TTL: status=%d, want 303", resp.StatusCode)
 	}
 	if solved, _ := capt.counts(); solved != 1 {

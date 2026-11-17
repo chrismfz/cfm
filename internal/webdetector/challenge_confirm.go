@@ -24,8 +24,8 @@ import (
 // a datacenter ASN counts as outside), earns no clearance on its first POST.
 // The verify answers 403 with an X-CFM-Confirm token instead, and the page
 // shows one native "Continue" button. The click re-posts the same solve with
-// the token AND the click itself (clk, a trusted click on the button; the
-// approach to it moves the pointer counts too). A re-post with the token and
+// the token AND the click itself (X-CFM-Click: 1 for a trusted click on the
+// button; the approach to it moves the pointer counts too). A re-post with the token and
 // still no trusted input is asked again. A confirmed re-post passes (absent
 // a certain tell, which Rung 1 already rejected). It is not a reject: D5b
 // holds (absence never convicts), and the button is the recourse D5c promised.
@@ -40,7 +40,7 @@ import (
 //
 // HONEST LIMITS. What it buys is cost and a corpus, not a wall:
 //   - the counts are client-authored, like all of Rung 1: a farm that reads
-//     the 403 and posts clk:1 with the token passes, and a CDP click is a
+//     the 403 and re-posts with the token and X-CFM-Click passes, and a CDP click is a
 //     trusted click. It must now handle a second round trip on every solve
 //     (today's farm stacks post once), and the click's approach is measured
 //     by the page's existing trajectory readings;
@@ -76,6 +76,7 @@ import (
 
 const (
 	confirmHeader   = "X-CFM-Confirm"
+	clickHeader     = "X-CFM-Click"
 	confirmTokenTTL = 5 * time.Minute
 
 	confirmModeOff    = "off"
@@ -186,9 +187,11 @@ func confirmGoodBot(ctx context.Context, s ChallengeSolve) bool {
 }
 
 // confirmInput reports whether a confirm re-post carries trusted input: the
-// click on the button (clk), or pointer, touch or key events.
-func confirmInput(sig *humanitySignals) bool {
-	return sig != nil && intVal(sig.PTR)+intVal(sig.TCH)+intVal(sig.KEY)+intVal(sig.CLK) > 0
+// click on the button (the X-CFM-Click header the page sets on a trusted
+// click; a header, so the humanity body and its 1 KB bound are unchanged),
+// or pointer, touch or key events.
+func confirmInput(sig *humanitySignals, clicked bool) bool {
+	return clicked || (sig != nil && intVal(sig.PTR)+intVal(sig.TCH)+intVal(sig.KEY) > 0)
 }
 
 // confirmRequired reports whether a solve that passed Rung 1 must still
