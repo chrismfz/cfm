@@ -6,8 +6,9 @@
 -- additive ingest kept it in every worker, and an exact entry outranks a
 -- wildcard: www. served the self-signed cert until a reload. Pinned here:
 --   * a name absent from the payload is dropped (the wildcard then serves it);
---   * a payload entry whose PEM fails to parse keeps the worker's old pair;
---   * a payload under half of a store of >= SHRINK_GUARD_MIN names is merged;
+--   * a payload entry whose PEM is missing or fails to parse keeps the old pair;
+--   * a payload under half of the previous one (>= SHRINK_GUARD_MIN names) is
+--     merged once, and the next payload of that size replaces;
 --   * an empty / all-failed payload changes nothing.
 
 -- ── Mocks ────────────────────────────────────────────────────────────────────
@@ -145,14 +146,37 @@ do
   check(serve("spoolbox.gr") == "LE", "v5: an all-failed payload keeps the store")
 end
 
--- ── Shrink guard: under half of a >= 20-name store is merged, not replaced ───
+-- ── A payload entry without a PEM keeps the worker's current pair too ───────
 do
-  local exact = {}
-  for i = 1, 30 do
-    exact[#exact + 1] = { host = "h" .. i .. ".example", cert_pem = "A" .. i, key_pem = "K" }
+  ingest({ version = "v5b",
+    exact = { { host = "spoolbox.gr", key_pem = "K" } },  -- no cert_pem
+    wild  = { { suffix = "spoolbox.gr", cert_pem = "LE2", key_pem = "K" } },
+  }, "dumpall")
+  check(serve("spoolbox.gr") == "LE", "v5b: a PEM-less apex keeps the old pair (got " ..
+        tostring(serve("spoolbox.gr")) .. ")")
+end
+
+local function names(prefix, n, pem)
+  local t = {}
+  for i = 1, n do
+    t[#t + 1] = { host = "h" .. i .. ".example", cert_pem = pem .. i, key_pem = "K" }
   end
-  ingest({ version = "v6", exact = exact, wild = {} }, "dumpall")
+  return t
+end
+
+local function logged(want)
+  for _, l in ipairs(warn_lines) do
+    if l:find(want, 1, true) then return true end
+  end
+  return false
+end
+
+-- ── Shrink guard: under half of the PREVIOUS payload (>= 20) merges once ─────
+do
+  warn_lines = {}
+  ingest({ version = "v6", exact = names("h", 30, "A"), wild = {} }, "dumpall")
   check(counts() == 30, "v6: 30-name store (got " .. counts() .. ")")
+  check(logged("mode=replace"), "v6: the ingest line says mode=replace")
 
   warn_lines = {}
   ingest({ version = "v7", wild = {},
@@ -160,20 +184,22 @@ do
   check(counts() == 30, "v7: a 1-of-30 payload is merged (got " .. counts() .. ")")
   check(serve("h1.example") == "B1", "v7: the merged name is updated")
   check(serve("h2.example") == "A2", "v7: the other names stay")
-  local logged = false
-  for _, l in ipairs(warn_lines) do
-    if l:find("merged, not replaced", 1, true) then logged = true end
-  end
-  check(logged, "v7: the shrink is logged")
+  check(logged("merged, not replaced"), "v7: the shrink is logged")
+  check(logged("mode=merge"), "v7: the ingest line says mode=merge")
 
-  -- 16 of 30 is at least half: replaced, the other 14 dropped.
-  local half = {}
-  for i = 1, 16 do
-    half[#half + 1] = { host = "h" .. i .. ".example", cert_pem = "C" .. i, key_pem = "K" }
-  end
-  ingest({ version = "v8", exact = half, wild = {} }, "dumpall")
-  check(counts() == 16, "v8: a 16-of-30 payload replaces (got " .. counts() .. ")")
-  check(serve("h20.example") == nil, "v8: a dropped name is no longer served")
+  -- The shrink persists: the next payload is measured against v7's, not the
+  -- (still 30-name) store, and replaces. Measured against the store it would
+  -- merge forever.
+  ingest({ version = "v8", wild = {},
+    exact = { { host = "h1.example", cert_pem = "C1", key_pem = "K" } } }, "dumpall")
+  check(counts() == 1, "v8: a second shrunk payload replaces (got " .. counts() .. ")")
+  check(serve("h2.example") == nil, "v8: a dropped name is no longer served")
+
+  -- Back to 30, then 16 of 30 is at least half: replaced at once.
+  ingest({ version = "v9", exact = names("h", 30, "D"), wild = {} }, "dumpall")
+  ingest({ version = "v10", exact = names("h", 16, "E"), wild = {} }, "dumpall")
+  check(counts() == 16, "v10: a 16-of-30 payload replaces (got " .. counts() .. ")")
+  check(serve("h20.example") == nil, "v10: a dropped name is no longer served")
 end
 
 if fails > 0 then

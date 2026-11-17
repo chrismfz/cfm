@@ -75,12 +75,15 @@ stayed in every worker and, since an exact match outranks a wildcard, kept
 serving the self-signed cert until the edge was reloaded (spoolbox.gr on
 rigel, 2026-11-17). Two exceptions keep the old additive behaviour:
 
-- a payload entry whose PEM does not parse keeps the worker's current pair
-  for that name;
-- a payload holding under half of a store of at least 20 names is merged,
-  not swapped (a daemon scan that lost a mount must not strip the edge). It
-  logs `merged, not replaced` and sets `meta:last_error`. A reload takes the
-  payload as it is.
+- a payload entry whose PEM is missing or does not parse keeps the worker's
+  current pair for that name;
+- a payload holding under half of the previous payload (one of at least 20
+  names) is merged, not swapped: one daemon scan that lost a mount must not
+  strip the edge. It logs `merged, not replaced` and sets `meta:last_error`.
+  The next payload is measured against this one, so a real shrink (accounts
+  moved away) is taken one payload later, at the next version change or the
+  hourly forced refresh. Measured against the store, a merge never shrank it
+  and every later payload would merge again.
 
 The `ingest src=…` log line carries `mode=replace|merge|none`.
 

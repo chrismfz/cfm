@@ -156,11 +156,15 @@ local SNAP_MIN_BYTES = 256
 -- *.<dom> + <dom> replaced it) must stop being served. Until 2026-11-17 ingest
 -- only added, so the stale exact entry outranked the new wildcard in every
 -- worker until a reload (spoolbox.gr on rigel: www. served the self-signed
--- cert for 9 h). The guard: a payload holding under half of a store of at
--- least SHRINK_GUARD_MIN names is merged instead (the old additive ingest),
--- so a daemon scan that lost a mount cannot strip the edge of its certs; it
--- logs the shrink, and a reload takes the payload as it is.
+-- cert for 9 h). The guard: a payload holding under half of the PREVIOUS
+-- payload (one of at least SHRINK_GUARD_MIN names) is merged instead (the old
+-- additive ingest), so one daemon scan that lost a mount cannot strip the edge
+-- of its certs; it logs the shrink. The next payload is measured against this
+-- one, so a shrink that is real (accounts moved away) is taken one payload
+-- later. Measured against the store instead, a merge never shrank it and every
+-- later payload merged again: the stale names stayed until a reload.
 local SHRINK_GUARD_MIN = 20
+local _last_payload_n = 0  -- names the last ingested payload held (0: none yet)
 
 -- If true, a /dumpall payload without a Version field is a hard reject for
 -- both RAM ingest AND snapshot write. Keep false unless upstream always provides
@@ -425,9 +429,9 @@ local function ingest_dumpall(data, src)
   -- store, never a mix.
   local next_store = {}
   local nextN = 0
-  -- A name in the payload whose PEM will not parse keeps this worker's
-  -- current pair for it (what the additive ingest did), rather than going
-  -- to the fallback cert.
+  -- A name in the payload whose PEM is missing or will not parse keeps this
+  -- worker's current pair for it (what the additive ingest did), rather than
+  -- going to the fallback cert.
   local function keep_old(key)
     local old = _store[key]
     if old and not next_store[key] then
@@ -454,6 +458,7 @@ local function ingest_dumpall(data, src)
       end
     else
       failN = failN + 1
+      if host ~= "" then keep_old("e:" .. host) end
       ngx.log(ngx.WARN, "[sslcollector] skip exact host=",
         tostring(host ~= "" and host or (it.host or it.Host or "?")),
         " reason=missing_host_or_pem")
@@ -478,6 +483,7 @@ local function ingest_dumpall(data, src)
       end
     else
       failN = failN + 1
+      if suf ~= "" then keep_old("w:" .. suf) end
       ngx.log(ngx.WARN, "[sslcollector] skip wild suffix=",
         tostring(suf ~= "" and suf or (it.suffix or it.Suffix or "?")),
         " reason=missing_suffix_or_pem")
@@ -486,16 +492,16 @@ local function ingest_dumpall(data, src)
 
   local mode = "none"
   if okN > 0 then
-    local curN = 0
-    for _ in pairs(_store) do curN = curN + 1 end
-    if curN >= SHRINK_GUARD_MIN and nextN * 2 < curN then
-      -- Suspicious shrink: keep the additive behaviour for this payload.
+    local prevN = _last_payload_n
+    _last_payload_n = nextN
+    if prevN >= SHRINK_GUARD_MIN and nextN * 2 < prevN then
+      -- Sudden shrink: keep the additive behaviour for this payload only.
       for k, v in pairs(next_store) do _store[k] = v end
       mode = "merge"
       ngx.log(ngx.WARN, "[sslcollector] ingest src=", (src or "?"),
-        " payload holds ", nextN, " of ", curN, " cached names: merged, not",
-        " replaced (stale names stay until a payload of at least half, or a reload)")
-      set_last_error("ingest: payload shrank " .. curN .. " -> " .. nextN .. ", merged")
+        " payload holds ", nextN, " names, the previous ", prevN, ": merged, not",
+        " replaced (the next payload of this size replaces)")
+      set_last_error("ingest: payload shrank " .. prevN .. " -> " .. nextN .. ", merged")
     else
       _store = next_store
       mode = "replace"
