@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **WAF rule 530 measures WooCommerce add-to-cart crawling (logonly).**
+  A `GET ?add-to-cart=<id>` makes WooCommerce write a session and a cart, and
+  crawlers follow those links on every listing. On 2026-11-17 the fleet served
+  ~265 000 of them a day, uncached at 1-3 s each, ~85% to self-declared
+  crawlers (meta-externalagent the largest). The rest came from rotating
+  residential addresses that Imunify360 flags behind the edge. Rule 530
+  (`WAF_CART_CRAWL`) tags each one `CRAWLER`, `NO_REFERER` or `XSITE`. It
+  stands down for a shopper's click (same-site Referer or Fetch Metadata) and
+  for a cart or login cookie. Logonly: nothing is blocked, and the family has
+  no block rule, so `waf_security` never arms it. See `docs/waf.md`, "Rule 530".
+
 ### Fixed
 - **The Apache TSV fallback log no longer fills the disk on cPanel.**
   `access_cfm_tsv.log` (the web detector's file source when the edge socket

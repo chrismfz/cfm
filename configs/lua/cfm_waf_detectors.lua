@@ -9037,4 +9037,75 @@ function _M.detect_php_file_body(body, headers)
   return kind .. "_" .. cls
 end
 
+-- Rule 530 — WooCommerce add-to-cart by GET from a crawler (WAF_CART_CRAWL,
+-- logonly). WooCommerce adds a product to the cart for any request carrying
+-- `add-to-cart=<id>` in $_REQUEST, and its listings print that link on every
+-- product. Crawlers follow it: each request starts a session and writes a
+-- cart to the shop's database, uncached, at 1-3 s of PHP each. Measured
+-- 2026-11-17 on six nodes over one day: ~265 000 such GETs, ~85% from
+-- self-declared crawlers (meta-externalagent alone 47 000 on mars and 65 000 on
+-- titan in five hours; meta-webindexer, SERankingBacklinksBot, ClaudeBot,
+-- Claude-SearchBot), the rest from rotating residential addresses with a plain
+-- browser UA, one or two requests each (Imunify360's "GET add-to-cart flood
+-- pattern", 7 082 addresses in two days on earth).
+--
+-- A shopper's GET add-to-cart is a click on the shop's own link: a same-site
+-- Referer, or Sec-Fetch-Site same-origin / same-site under a no-referrer
+-- policy. A shopper who already has a cart or is logged in carries the
+-- WooCommerce session or login cookie. Any of those stands the rule down.
+-- Everything else is tagged:
+--   CRAWLER     — a self-declared bot UA (named crawler tokens, or a generic
+--                 bot / crawl / spider / indexer / agent word);
+--   NO_REFERER  — a browser UA, no Referer, no same-site Fetch Metadata;
+--   XSITE       — a browser UA whose Referer is another site (a link in an
+--                 ad, a comparison site or an email: possibly a person).
+-- Logonly for measurement: every token above is client-authored, so a tag
+-- may never key enforcement by itself, and the stand-downs can be forged.
+-- That is acceptable for what the rule is for (the cost of crawling), not a
+-- security boundary. Only GET / HEAD and the query string: a product page's
+-- own form POSTs add-to-cart in the body.
+--
+-- The name is read as PHP reads it (php_request_fields), behind a cheap
+-- pre-check on the decoded query. Its tables and helper live inside the
+-- function: the main chunk is at Lua's 200-local limit.
+function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host)
+  if method ~= "get" and method ~= "head" then return nil end
+  if not args or args == "" then return nil end
+  local d = args:find("[%%+]") and _form_unescape(args) or args
+  if not has(lower(d), "add-to-cart") then return nil end
+  -- Past the cheap gate: built only for a request that names the field.
+  local CART_WANT = { ["add-to-cart"] = true }
+  local CART_SESSION_COOKIES = { "wp_woocommerce_session_", "woocommerce_items_in_cart", "wordpress_logged_in_" }
+  local function ua_says_bot(ua)
+    if ua_is_declared_crawler(ua) then return true end
+    return ua:find("bot[%s/;%)%-_]") ~= nil or ua:find("bot$") ~= nil
+        or has(ua, "crawl") or has(ua, "spider") or has(ua, "indexer")
+        or has(ua, "externalagent") or has(ua, "fetcher")
+  end
+  headers = headers or {}
+  local f = _M.php_request_fields(method, args, "", headers, CART_WANT)["add-to-cart"]
+  if not f then return nil end
+  local any = false
+  for i = 1, #f do
+    if f[i]:find("%d") then any = true; break end
+  end
+  if not any then return nil end
+
+  local ck = lower(cookie or header_string(headers["cookie"] or headers["Cookie"]) or "")
+  for i = 1, #CART_SESSION_COOKIES do
+    if has(ck, CART_SESSION_COOKIES[i]) then return nil end
+  end
+
+  local ua = lower(header_string(headers["user-agent"] or headers["User-Agent"]) or "")
+  local site = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
+  local ref = url_host(header_string(headers["referer"] or headers["Referer"]))
+  local host = request_host(headers, req_host)
+  -- A crawler is tagged whatever it sends: a bot may carry a Referer.
+  if ua ~= "" and ua_says_bot(ua) then return "CRAWLER" end
+  if site == "same-origin" or site == "same-site" then return nil end
+  if ref and host ~= "" and same_site(ref, host) then return nil end
+  if ref then return "XSITE" end
+  return "NO_REFERER"
+end
+
 return _M
