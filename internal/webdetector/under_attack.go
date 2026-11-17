@@ -188,6 +188,9 @@ type attackVhost struct {
 	overrideExpires time.Time
 	suppressUntil   time.Time
 	evidence        string // last transition's evidence (kept consistent with `on`)
+	// persisted: the forced-ON override is an `attack on` the override store
+	// holds (syncAttackOverrides releases it when the record goes).
+	persisted bool
 }
 
 // effectiveOverride is the override as of now: a TTL-bounded forced-ON
@@ -574,6 +577,7 @@ func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time, ttl
 		st = &attackVhost{}
 		t.hosts[host] = st
 	}
+	st.persisted = false
 	if on {
 		st.override = +1
 		if ttl > 0 {

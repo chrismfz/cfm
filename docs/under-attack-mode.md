@@ -110,9 +110,11 @@ UNDER_ATTACK_OVERRIDE_TTL   = 6h    ; how long an operator's `attack on` holds (
 Manual override, like manual challenge: `cfm webtop attack on|off <vhost>`.
 - **on** (`[--ttl 6h]`, since 2026-11-17): force the state for the TTL, and
   arm the vhost's challenge for the same window when no manual challenge
-  covers it. It survives a reload.
+  covers it, at the tier of an operator pin on the vhost if one is set. It
+  survives a reload (one shared store; the tracker follows it every tick).
 - **off:** leave, suppress re-entry for the holddown, and remove the
-  challenge that `on` armed.
+  challenge that `on` armed (only while it is still that arm: the record
+  holds its expiry).
 
 ## 3. Entry criteria — challenge-efficacy feedback + corroboration
 

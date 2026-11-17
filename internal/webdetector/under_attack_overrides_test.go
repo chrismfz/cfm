@@ -108,7 +108,7 @@ func TestForceVhostAttack_SurvivesAReload(t *testing.T) {
 	}
 	// `attack off` on the restored engine still removes the challenge its
 	// `attack on` armed (here re-armed, as restoreManualChallenges would).
-	e2.ManualChallengeVhostAs("shop.example", time.Hour, attackArmReason, "", "admin")
+	e2.ManualChallengeVhostAs("shop.example", time.Until(ent.ArmExpiresAt), attackArmReason, "", "admin")
 	e2.ForceVhostAttackAs("shop.example", false, 0, "admin")
 	if active, _ := manualReason(e2, "shop.example"); active {
 		t.Error("attack off after a reload left the arm")
@@ -121,7 +121,7 @@ func TestAttackOverrideStore_DropsExpired(t *testing.T) {
 	s := newAttackOverrideStore(path)
 	s.set(attackOverrideEntry{Host: "old.example", ExpiresAt: time.Now().Add(-time.Minute)})
 	s.set(attackOverrideEntry{Host: "new.example", ExpiresAt: time.Now().Add(time.Hour)})
-	got := newAttackOverrideStore(path).snapshot()
+	got := loadAttackOverrideFileForTest(path).snapshot()
 	if len(got) != 1 || got[0].Host != "new.example" {
 		t.Fatalf("restored %+v, want only new.example", got)
 	}
@@ -138,7 +138,7 @@ func TestDeescalateDropsThePersistedOverrideAndItsArm(t *testing.T) {
 	if _, ok := e.attackOverrides.get("shop.example"); ok {
 		t.Fatal("suppression left the persisted override")
 	}
-	if len(newAttackOverrideStore(path).snapshot()) != 0 {
+	if len(loadAttackOverrideFileForTest(path).snapshot()) != 0 {
 		t.Fatal("suppression left it on disk")
 	}
 	if active, _ := manualReason(e, "shop.example"); active {
@@ -146,14 +146,93 @@ func TestDeescalateDropsThePersistedOverrideAndItsArm(t *testing.T) {
 	}
 }
 
-// With no record (a lost store), `attack off` still takes an under_attack arm
-// as the override's own: only an `attack on` writes that reason.
-func TestForceVhostAttack_OffWithoutARecord(t *testing.T) {
+// The under_attack reason alone does not make an arm the override's: an
+// operator's own arm with that reason is neither refreshed by `attack on`
+// nor removed by `attack off`.
+func TestForceVhostAttack_OperatorsUnderAttackArmIsTheirs(t *testing.T) {
 	e := newForceAttackEngine(t, "")
-	e.ManualChallengeVhostAs("shop.example", time.Hour, attackArmReason, "", "admin")
+	e.ManualChallengeVhostAs("shop.example", 168*time.Hour, attackArmReason, "", "admin")
+	_, before, _ := e.manualChal.active("shop.example")
+	if armed, _ := e.ForceVhostAttackAs("shop.example", true, 0, "tenant"); armed {
+		t.Fatal("attack on took over an operator's under_attack arm")
+	}
+	if _, after, _ := e.manualChal.active("shop.example"); !after.Equal(before) {
+		t.Fatalf("operator's arm re-armed: %v -> %v", before, after)
+	}
+	e.ForceVhostAttackAs("shop.example", false, 0, "tenant")
+	if active, _ := manualReason(e, "shop.example"); !active {
+		t.Fatal("attack off removed an operator's under_attack arm")
+	}
+	// Nor with no record at all.
+	e2 := newForceAttackEngine(t, "")
+	e2.ManualChallengeVhostAs("shop.example", time.Hour, attackArmReason, "", "admin")
+	e2.ForceVhostAttackAs("shop.example", false, 0, "admin")
+	if active, _ := manualReason(e2, "shop.example"); !active {
+		t.Fatal("attack off with no record removed an under_attack arm")
+	}
+}
+
+// A second `attack on` refreshes the arm the first one made.
+func TestForceVhostAttack_RefreshesItsOwnArm(t *testing.T) {
+	e := newForceAttackEngine(t, "")
+	e.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+	armed, exp := e.ForceVhostAttackAs("shop.example", true, 3*time.Hour, "admin")
+	_, armExp, _ := e.manualChal.active("shop.example")
+	if !armed || armExp.Sub(exp) > time.Second || exp.Sub(armExp) > time.Second {
+		t.Fatalf("armed=%v arm %v override %v", armed, armExp, exp)
+	}
 	e.ForceVhostAttackAs("shop.example", false, 0, "admin")
 	if active, _ := manualReason(e, "shop.example"); active {
-		t.Fatal("attack off left an under_attack arm with no record")
+		t.Fatal("attack off left the refreshed arm")
+	}
+}
+
+// An operator's tier pin decides the tier of the arm: a manual v2 arm
+// outranks every pin, so a v1 pin must make it a v1 arm.
+func TestForceVhostAttack_FollowsATierPin(t *testing.T) {
+	def, _ := manualDefaultRungFor("shop.example") // no pin: the node default
+	for _, tc := range []struct{ pin, want string }{{"v1", ""}, {"v2", "v2"}, {"", def}} {
+		e := newForceAttackEngine(t, "")
+		e.tierPins = sharedTierPinStore("")
+		if tc.pin != "" {
+			if _, _, _, refusal, _ := e.tierPins.applyPin("shop.example", tc.pin, time.Hour, "admin", nil, nil); refusal != "" {
+				t.Fatal(refusal)
+			}
+		}
+		e.ForceVhostAttackAs("shop.example", true, 0, "admin")
+		if got := e.manualChal.rung("shop.example"); got != tc.want {
+			t.Errorf("pin %q: arm rung %q, want %q", tc.pin, got, tc.want)
+		}
+	}
+}
+
+// A reload's window: an `attack on|off` through the old Engine after the new
+// one loaded the file reaches the new Engine's tracker on its next tick, and
+// the file keeps both Engines' writes.
+func TestForceVhostAttack_ReloadWindowSync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "webdetector_attack_overrides.json")
+	old := newForceAttackEngine(t, path)
+	old.ForceVhostAttackAs("a.example", true, time.Hour, "admin")
+	nu := newForceAttackEngine(t, path)
+	nu.restoreAttackOverrides()
+	old.ForceVhostAttackAs("b.example", true, 2*time.Hour, "admin")
+	nu.syncAttackOverrides(time.Now())
+	if m, _, _ := nu.vhostAttackKind("b.example", time.Now()); !m {
+		t.Fatal("an attack on through the old Engine never reached the new one")
+	}
+	if got := len(loadAttackOverrideFileForTest(path).snapshot()); got != 2 {
+		t.Fatalf("file holds %d overrides, want 2", got)
+	}
+	old.ForceVhostAttackAs("a.example", false, 0, "admin")
+	nu.syncAttackOverrides(time.Now())
+	if m, _, _ := nu.vhostAttackKind("a.example", time.Now()); m {
+		t.Fatal("an attack off through the old Engine left the new one on")
+	}
+	// A raw override (not in the store) is left alone.
+	nu.SetVhostAttackOverride("raw.example", true, time.Now(), time.Hour)
+	nu.syncAttackOverrides(time.Now())
+	if m, _, _ := nu.vhostAttackKind("raw.example", time.Now()); !m {
+		t.Fatal("sync released an override the store never held")
 	}
 }
 

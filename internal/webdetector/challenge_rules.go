@@ -1339,6 +1339,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         // Keep UNDER_ATTACK vhosts (I1) in the candidate set so they keep being
         // evaluated and can de-escalate even after their traffic drops off.
         if e.attack != nil {
+            e.syncAttackOverrides(now)
             for _, h := range e.attack.activeHosts() { candHosts[h] = struct{}{} }
         }
 

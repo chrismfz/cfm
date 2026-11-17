@@ -750,7 +750,8 @@ func parseAttackOn(q string, body *bool) (bool, error) {
 // accepted. Scoped tokens may only override their own vhosts (vhostAllowed),
 // mirroring vhost/add|remove, and a scoped on=1 is capped at
 // scopedMaxChallengeTTL (24h) like the panic-button arm (ttl_capped=true).
-// The response carries ttl, expires_at and challenge_armed for on=1.
+// The response carries ttl, expires_at and challenge_armed for on=1, and the
+// arm's tier (rung) when it armed one: an operator tier pin decides it.
 func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Request) {
 	host := normalizeHost(r.URL.Query().Get("host"))
 	onStr := r.URL.Query().Get("on")
@@ -857,6 +858,9 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		resp["ttl"] = overrideTTL.String()
 		resp["expires_at"] = expires
 		resp["challenge_armed"] = armed
+		if armed {
+			resp["rung"] = rungOrV1(e.manualChal.rung(host))
+		}
 		if ttlCapped {
 			resp["ttl_capped"] = true
 		}

@@ -1480,7 +1480,7 @@ func runAttackWebTop(baseURL string, args []string) error {
 	if on {
 		fmt.Printf("✓ Under-attack FORCED ON for %v until %v (ttl %v)\n", result["host"], result["expires_at"], result["ttl"])
 		if armed, _ := result["challenge_armed"].(bool); armed {
-			fmt.Println("  a challenge is armed on it for the same window (reason under_attack); `attack off` removes it")
+			fmt.Printf("  a %v challenge is armed on it for the same window (reason under_attack); `attack off` removes it\n", result["rung"])
 		} else {
 			fmt.Println("  an existing manual challenge covers it and stays as it is")
 		}

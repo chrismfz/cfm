@@ -58,9 +58,11 @@ back-filled here — see the git/PR history for that period.
       The challenge it armed expires with it;
     - it is saved to `/var/lib/cfm/webdetector_attack_overrides.json` and
       restored after a `detectors.conf` save, a reload or a restart;
+    - the challenge it arms follows a tier pin you set on the vhost (a v1
+      pin gives a v1 challenge); with no pin it gets the node default;
     - `attack off` removes only the challenge its `attack on` armed (so does
       a `cfm.allow` bypass of the vhost). A manual challenge you set yourself
-      stays. An exclude or ignore no longer ends an `attack on` early: the
+      stays, even one you gave the reason `under_attack`. An exclude or ignore no longer ends an `attack on` early: the
       challenge it armed wins over them, like any manual challenge.
     - a reload sends no second "under attack" alert.
   - Why: before, `attack on` challenged nobody by itself (a second command
