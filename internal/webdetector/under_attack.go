@@ -615,3 +615,33 @@ func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, eviden
 	}
 	return false, time.Time{}, ""
 }
+
+// vhostAttackKind reports whether host is UNDER_ATTACK because an operator
+// holds it there (an unexpired forced-ON override: `cfm webtop attack on`,
+// the cfm-admin toggle) or because the detector's automatic state is on with
+// no override. The same truth VhostAttackState reports, split by cause, for
+// the confirm step (challenge_confirm.go), whose default mode acts on the
+// operator's override only. False/false while the detector is off.
+func (e *Engine) vhostAttackKind(host string, now time.Time) (manual, auto bool) {
+	if e == nil || e.attack == nil || !e.cfg.UnderAttack || host == "" {
+		return false, false
+	}
+	t := e.attack
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.hosts[host]
+	if st == nil {
+		return false, false
+	}
+	override := st.override
+	if override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
+		override = 0
+	}
+	switch override {
+	case +1:
+		return true, false
+	case -1:
+		return false, false
+	}
+	return false, st.on
+}

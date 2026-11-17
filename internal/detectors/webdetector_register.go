@@ -1032,6 +1032,13 @@ func init() {
 		// Kill switch for the real-input rescue of a failing armed solve;
 		// default on.
 		webdet.ConfigureChallengeV2InputRescue(kvBool(kv, "CHALLENGE_V2_INPUT_RESCUE", true))
+		// The under-attack confirm step (docs/targeted-challenge-design.md §4):
+		// off | manual (default: an operator's `attack on` only) | auto, and the
+		// countries that never see it (default GR,CY; "none" = everyone).
+		webdet.ConfigureChallengeV2Confirm(
+			kvStrClean(kv, "CHALLENGE_V2_CONFIRM", "manual"),
+			kvStrClean(kv, "CHALLENGE_V2_CONFIRM_AUDIENCE", "GR,CY"),
+		)
 		// Shadow login signals (login_spray / login_spray_net /
 		// login_dirty_success history rows); default on, nothing enforced.
 		webdet.ConfigureLoginSignals(kvBool(kv, "LOGIN_SIGNALS", true))
