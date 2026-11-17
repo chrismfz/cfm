@@ -236,3 +236,95 @@
 phpinfo.php
 # From orion's retired webdetector_challenge_paths.txt.
 /wso1337.php
+
+# ─── SECOND READ: 9 DAYS OF RIGEL + SPEEDHOST (added 2026-11-18) ──────────────
+# ~35 M edge requests. Counts are distinct IPs per node; no 200 below was a real
+# file (every one a catch-all / 404 page of one size per host). Generic names a
+# site can legitimately serve are left out on purpose: /config.json and
+# /settings.json (SPA runtime config), /env.json, /auth.json, /openapi.json,
+# /package.json, /phpmyadmin (cPanel's own /cpsess<N>/3rdparty/phpMyAdmin/),
+# /server-status (monitoring), /cgi-bin/ (old FormMail sites), /xmlrpc.php.
+# Cloud service-account / API key files (275-420 IPs each)
+/key.json
+/gcp-key.json
+/gcp-sa.json
+/sa.json
+/keyfile.json
+/google-key.json
+/google-credentials.json
+/application_default_credentials.json
+/firebase-key.json
+/serviceaccountkey.json
+/client_secrets.json
+/secrets.json
+/credentials.yml
+/credentials.ini
+/aws.yml
+/aws.json
+/config.env
+/sendgrid.env
+/env.txt
+/env.bak
+/env.old
+/.dev.vars
+/key.pem
+/id_rsa
+/litellm.yaml
+/.amplifyrc
+/.firebaserc
+/firebase.json
+/google-services.json
+/vercel.json
+/compose.yaml
+/.gitmodules
+/.streamlit/
+/.gemini/
+/.cargo/
+/.gem/
+/.dbeaver/
+/.codeium/
+/.llm/
+# A webshell stash next to the real .well-known (82 IPs on rigel). Does not
+# match /.well-known/ itself (the slash after "known").
+/.well-knownold/
+# .NET / Java probes: nothing on a cPanel node runs them (139-188 IPs)
+/appsettings
+/elmah.axd
+/trace.axd
+/web-inf/
+# Composer manifests: an exact version list of the site's packages
+/composer.json
+/composer.lock
+/vendor/composer/installed.json
+# Laravel / Node build trees that should never be web-served
+/_ignition/
+/storage/framework/
+/.next/
+/.vite/
+# cPanel PHP error log, written INTO the docroot (paths, queries, secrets)
+/error_log
+# WordPress backups, logs and (re)install screens
+/wp-content/uploads/wc-logs/
+/wp-content/updraft/
+/ai1wm-backups/
+/installer.php
+/wp-admin/install.php
+/wp-admin/setup-config.php
+/wp-config.txt
+# Whole-site archives
+/backup.zip
+/backup.tar.gz
+/backup.tgz
+/site.zip
+/www.zip
+/public_html.zip
+/wwwroot.zip
+# DB admin tools left in a docroot, shell history, PHP config, sync configs
+/adminer
+/.mysql_history
+/.bash_history
+/.htaccess
+/.user.ini
+/php.ini
+/.ftpconfig
+/.remote-sync.json

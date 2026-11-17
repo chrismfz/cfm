@@ -19,7 +19,7 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - **The malpath list catches the dev-tool and credential probes it missed.**
-  `webdetector_malpaths.txt` gains 51 entries: VCS directories as a whole
+  `webdetector_malpaths.txt` gains 51 entries from a first read: VCS directories as a whole
   (`/.git/`, `/.svn/`, `/.hg/`, `/.bzr/`; only `/.git/config` and `/.git/HEAD`
   were listed), `/.github/`, cloud/dev credential stores (`/.aws/`, `/.ssh/`,
   `/.docker/`, `/.kube/`, `/.azure/`, `/.terraform/`, `/.config/`, `.npmrc`,
@@ -27,8 +27,18 @@ back-filled here — see the git/PR history for that period.
   AI-tool key directories (`/.claude/`, `/.cursor/`, `/.openai/`, …), CI files
   (`.travis.yml`, `.gitlab-ci.yml`, `docker-compose.*`, …), Spring
   `/actuator/`, `laravel.log`, `parameters.yml`, `.DS_Store`, private keys and
-  a few config backups. One day of titan's edge log had 55-145 distinct IPs
-  asking for each, and every 200 was a site's catch-all page. They feed both
+  a few config backups (one day of titan's edge log: 55-145 distinct IPs each).
+  A second read of 9 days on rigel and speedhost (~35 M requests) adds 74
+  more: cloud service-account key files (`/key.json`, `/gcp-key.json`,
+  `/google-credentials.json`, … — 275-420 IPs each), the cPanel `error_log`
+  PHP writes into the docroot, WordPress backups / logs / install screens
+  (`/ai1wm-backups/`, `/wp-content/updraft/`, `wc-logs/`, `installer.php`,
+  `/wp-admin/install.php`), whole-site archives (`/backup.zip`, `/www.zip`, …),
+  composer manifests, `.NET`/Java probes, `/_ignition/`, `adminer`, shell
+  history and a `/.well-knownold/` webshell stash. 125 new entries in all;
+  every 200 on them was a site's catch-all page. Generic names a site may
+  really serve (`/config.json`, `/settings.json`, `/phpmyadmin`,
+  `/server-status`, `/cgi-bin/`) stay out. They feed both
   the per-IP malpath challenge and the MALPATH flood ban. An unmodified list
   is refreshed by the upgrade; a locally edited one is not (rpm writes
   `.rpmnew`).
