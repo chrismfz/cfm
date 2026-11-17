@@ -157,7 +157,7 @@ do
   local src = f:read("*a"); f:close()
   local at = src:find("RULE_IDS.rule_xss_body", 1, true)
   local s60 = src:find("── 60) Generic phpfuck", 1, true)
-  local last = src:find("── LAST) Fetch-metadata missing", 1, true)
+  local last = src:find("── Fetch-metadata missing (headless", 1, true)
   check(at and s60 and last and s60 < at and at < last, "rule 330 sits after step 60 and before 612")
 end
 

@@ -121,6 +121,7 @@ local CFG = {
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
   rule_wp_admin_cross_screen = "logonly", -- rule 503: a logged-in WordPress privileged action (the user screens incl. users.php's GET role change, update.php upload-plugin/upload-theme, plugin activation, the admin-ajax file editor and plugin install/activate, REST writes to /wp/v2/users and /wp/v2/plugins) that did not come from its own form: a same-host Referer from another screen or the front end, Fetch Metadata of a script (fetch/XHR, iframe), cross-site, or a navigation no click started; and a GET of a nonce-bearing screen by fetch/XHR or into an iframe. The stored-XSS kill chain of tophair.gr (2026-10-06): the order screen's script created an administrator and uploaded a backdoor plugin from staff's own browser. Logonly through burn-in; the IP is the victim's, so a block promotion must hold the autoblock (HoldAutoblock).
+  rule_wc_cart_get_crawl  = "logonly", -- rule 530: a GET/HEAD with add-to-cart=<id> (WooCommerce adds to the cart and writes a session for it) from a crawler UA, or from a browser UA with no same-site Referer / Fetch Metadata and no WooCommerce session or login cookie (tags CRAWLER / NO_REFERER / XSITE). ~265k a day on six nodes (2026-11-17), mostly meta-externalagent; every tag is client-authored, so measurement only.
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body. Edge 403 only: autoblock held in code (RULE_511 = 0), WordPress's own pingback client sends it. Recorded late, after the armed families.
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
@@ -657,6 +658,7 @@ local RULE_IDS = {
   rule_xmlrpc_post_burst       = 512,
   -- 520 is intentionally skipped: the SP Page Builder contact-form relay rule
   -- (2026-10-06), removed 2026-10-08 (CHANGELOG "Removed").
+  rule_wc_cart_get_crawl       = 530,
 
   -- 6xx header / protocol anomaly
   rule_ctrl_chars              = 601,
@@ -2869,7 +2871,7 @@ local function check_impl(ctx, st)
 
   -- ── WordPress privileged action from another screen (503, logonly) ──────
   -- A request-context rule: the payload is the admin's own session, so
-  -- nothing earlier sees it (det.detect_wp_admin_cross_screen). Last but 612,
+  -- nothing earlier sees it (det.detect_wp_admin_cross_screen). Last but 612 and 530,
   -- after every armed block-tier rule: its block promotion must hold the
   -- autoblock (the IP is the victim's), and a held block evaluated earlier
   -- would take the headline and end evaluation before an armed rule's ban.
@@ -2884,7 +2886,8 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── LAST) Fetch-metadata missing (headless / automation tell) — logonly ───
+  -- ── Fetch-metadata missing (headless / automation tell) — logonly ───────
+  -- (Last but 530, which is no security finding at all.)
   -- Track-2 Stage 1b, the edge-only "Sec-Fetch tell": a UA that CLAIMS a modern
   -- Sec-Fetch-capable browser (Chrome >= 76 / Firefox >= 90) but sends a text/html
   -- GET|HEAD navigation with NO Sec-Fetch-* AND NO Accept-Language. Stacked weak
@@ -2916,6 +2919,24 @@ local function check_impl(ctx, st)
         local eff_mode = (tag == "NO_FETCH_META_IN_APP") and "logonly" or mode
         local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_FETCH_METADATA:" .. tag, ttl, eff_mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end
+      end
+    end
+  end
+
+  -- ── WooCommerce add-to-cart by GET from a crawler (530, logonly) ─────────
+  -- A cost signal, not an attack, so it runs after every rule, 612 included:
+  -- cfm.lua pushes only the headline, and ahead of 612 it took the headline
+  -- (and the push) of the residential "Chrome" clients that are exactly 612's
+  -- population. When both match, 612 owns the headline and 530 is in
+  -- also_rule_ids, so the burn-in counts 530 from the headline AND
+  -- also_rule_ids.
+  do
+    local mode = rule_mode(CFG.rule_wc_cart_get_crawl, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_wc_cart_get_crawl(m_lower, args, headers, cookie, ctx.host, get_norm_ab)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CART_CRAWL:" .. tag, ttl, mode, RULE_IDS.rule_wc_cart_get_crawl) then goto done end
       end
     end
   end
@@ -2991,6 +3012,21 @@ local PUSH_KEY_KEEPS_TAG = {
   -- logged only the first. Logonly, a fixed set of legs: a flood of one leg
   -- still collapses to one push per window.
   WAF_ADMIN_XSCREEN = true,
+  -- Rule 530's tag is the client class (CRAWLER / NO_REFERER / XSITE), the
+  -- split its burn-in is read by. Logonly, three tags.
+  WAF_CART_CRAWL = true,
+}
+
+-- Families whose push window is longer than push_cooldown_sec. Rule 530's
+-- clients send about one request per IP per minute (Meta's ~350 addresses
+-- spread ~130 a day each; the residential rotation 1-2 per address), so a
+-- 60 s window pushed nearly every hit: ~80 k waf_trigger rows, RPCs and
+-- waf.log lines a day on one node. An hour per (ip, tag) keeps who and which
+-- population, and drops most of the volume. Applied to the logonly tier only:
+-- an operator who promotes the rule gets the normal window, or its ban and
+-- rung mark would lapse while the client kept hitting.
+local PUSH_COOLDOWN_FAMILY = {
+  WAF_CART_CRAWL = 3600,
 }
 
 -- also_rule_ids: the distinct waf_rule_ids in a check()'s `hits` other than
@@ -3069,7 +3105,8 @@ function _M.should_push(shdict, ip, reason, action, rule_id)
     key_reason = key_reason .. "#" .. rid
   end
   local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
-  local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
+  local win = (action == "logonly" and PUSH_COOLDOWN_FAMILY[fam]) or CFG.push_cooldown_sec
+  local ok = shdict:add(k, 1, win)
   return ok == true
 end
 

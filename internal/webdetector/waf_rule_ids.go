@@ -202,6 +202,11 @@ var wafRuleIDs = []WAFRule{
 	{ID: 512, Name: "rule_xmlrpc_post_burst", ReasonFamily: "WAF_AUTH_BURST", DefaultMode: "block"},
 	// 520 intentionally skipped: the SP Page Builder contact-form mail-relay
 	// rule (2026-10-06), removed 2026-10-08 (CHANGELOG "Removed").
+	// 530: a WooCommerce add-to-cart GET from a crawler or from a browser UA
+	// with no same-site Referer and no cart/login cookie (crawl cost, not an
+	// attack). Logonly: every tag is client-authored. No block rule, so the
+	// family is never armed for waf_security.
+	{ID: 530, Name: "rule_wc_cart_get_crawl", ReasonFamily: "WAF_CART_CRAWL", DefaultMode: "logonly"},
 
 	// 6xx header / protocol anomaly
 	{ID: 601, Name: "rule_ctrl_chars", ReasonFamily: "WAF_CTRL_CHARS", DefaultMode: "challenge_v2"},
