@@ -169,6 +169,11 @@ visitors, and a per-IP ban would take a site down for all of them. Imunify's
 "address is a proxy" list that per-IP autoblock never bans, or confirm that
 CFM's existing guards cover them.
 
+Seen in the first proxied-filter read (2026-11-17): a Cloudflare Workers
+egress address (`2a06:98c0:3600::103`, AS132892) on earth's `block_v6` and the
+fleet list, for WEB/MALPATH. Every Worker that fetches through it shares that
+ban. Decide with P4 whether such an address is a client to ban or a proxy.
+
 ### Not proposed
 
 Copying WebShield's reCAPTCHA, its domain whitelist or its country block:
