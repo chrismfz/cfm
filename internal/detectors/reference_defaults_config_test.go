@@ -186,3 +186,40 @@ func mustCIDR(t *testing.T, s string) *net.IPNet {
 	}
 	return n
 }
+
+// TestReferenceConfigWebdetectorLeniency pins the stock [webdetector.leniency]:
+// the 12h [webdetector] ban is reported fleet-wide, so the stock config holds
+// a GR/CY client 15m and keeps it out of cfm-web's blacklist. Country only: a
+// MATCH_ASN would carry Greek-hosted cloud scanners into the soft tier.
+func TestReferenceConfigWebdetectorLeniency(t *testing.T) {
+	path := filepath.Join("..", "..", "configs", "detectors.conf")
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("detectors.conf not found at %s: %v", path, err)
+	}
+	secs, err := ReadSectionsFile(path)
+	if err != nil {
+		t.Fatalf("ReadSectionsFile: %v", err)
+	}
+	if got := kvDur(secs.ByName["webdetector"], "BLOCK", 0); got != 12*time.Hour {
+		t.Errorf("[webdetector] BLOCK = %s, want 12h", got)
+	}
+	soft, ok := secs.ByName["webdetector.leniency"]
+	if !ok {
+		t.Fatal("[webdetector.leniency] missing from the reference config")
+	}
+	for k, want := range map[string]string{
+		"MATCH_COUNTRY": "GR,CY", "BLOCK": "15m", "BLOCK_COOLDOWN": "15m", "SEND_TO_API": "no",
+	} {
+		if got := kvStrClean(soft, k, ""); got != want {
+			t.Errorf("[webdetector.leniency] %s = %q, want %q", k, got, want)
+		}
+	}
+	if got := kvStrClean(soft, "MATCH_ASN", ""); got != "" {
+		t.Errorf("[webdetector.leniency] MATCH_ASN = %q, want none", got)
+	}
+	// The CHALLENGE_* keys of [webdetector] must still read from [webdetector],
+	// not from a section the new one split off.
+	if _, ok := secs.ByName["webdetector"]["CHALLENGE_TOKEN"]; !ok {
+		t.Error("[webdetector] CHALLENGE_TOKEN no longer in [webdetector]")
+	}
+}

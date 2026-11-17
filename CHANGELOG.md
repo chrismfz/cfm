@@ -17,7 +17,43 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The Apache TSV fallback log no longer fills the disk on cPanel.**
+  `access_cfm_tsv.log` (the web detector's file source when the edge socket
+  is off) lives in `/var/log/apache2/`, which CFM left to the distro's
+  logrotate. cPanel has none there: cpanellogd renames the log at 2 GB and
+  never deletes the copies, which had reached 316 GB on titan, 207 GB on mars
+  and 175 GB on orion. The hourly `/etc/cron.hourly/cfm-logrotate` now deletes
+  those copies (`<name>.YYYY_MM_DD[.NN]` only) after a day and, past 512 MB,
+  keeps one compressed copy of the live file (`<name>.cfm-prev.gz`) and
+  truncates it. A distro logrotate generation or an operator's own copy is
+  left alone. It also covers `/var/log/nginx/access_cfm_tsv.log`
+  (`nginx-cfm.conf`), and runs on a node without `logrotate-cfm`.
+- **`detectors.conf`: a quoted value with an inline comment now reads as the
+  value.** `BLOCK = "15m"   ; stage 3 …` was read as the text `15m"   ; stage
+  3 …`, an invalid TTL, so the section's block mode was silently `no`. The
+  stock `[cfm_endpoints]` (and `[api_abuse]` on older configs) shipped exactly
+  that line: its stage 3 never banned on any node. String keys read the same
+  way (`MODE`, paths, lists) were affected too; number, on/off and duration
+  keys were not. The parser now takes the text between the quotes when only a
+  comment follows; every other value reads as before. The stock file no longer
+  quotes those lines, so an older daemon reads it right too. A node whose
+  config carries such a `BLOCK` starts banning with this release.
+  A secret key whose value this changes (`CHALLENGE_TOKEN`, …) is logged once,
+  by name and never by value, so a token that changed under its consumer is
+  findable.
+
+### Changed
+- **`[webdetector] BLOCK` ships as `12h` (was `2h`).** The 2026-11-17 read
+  of the 8 edge nodes found 99% of the web detector's 403 / 404 / 40x bans on
+  cloud scanners, the same Microsoft and Google addresses banned up to 51
+  times a week at the 1h several nodes ran. Every such ban is also reported to
+  the fleet blacklist (MYBLOCK), which a short TTL barely outlives. Existing
+  nodes keep their own `detectors.conf` value (a conffile) until it is edited.
+  The stock file now also ships `[webdetector.leniency]`: a GR/CY client
+  (country only, no ASN) is held 15m and not reported to cfm-web, so a local
+  customer is neither held 12h nor banned on every node. A node keeping its
+  own `detectors.conf` adds that section (or a `detectors.d` overlay) itself.
 
 ## 2026.11.17
 

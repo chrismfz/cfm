@@ -24,7 +24,7 @@ log path CFM configures is covered by something.
 | `/usr/local/openresty/nginx/logs/` | `/etc/logrotate.d/logrotate-cfm` (CFM) |
 | `/var/log/angie/` | vendor `/etc/logrotate.d/angie` |
 | `/var/log/nginx/` | distro `/etc/logrotate.d/nginx` |
-| `/var/log/apache2/`, `/var/log/httpd/` | distro `/etc/logrotate.d/{apache2,httpd}` |
+| `/var/log/apache2/`, `/var/log/httpd/` | distro `/etc/logrotate.d/{apache2,httpd}`; on cPanel, cpanellogd (see below) |
 | `/usr/local/apache/logs/` | cPanel EA4 |
 
 CFM owns exactly the two directories nobody else does. The OpenResty
@@ -68,6 +68,23 @@ there (or ship a host-specific drop-in), don't duplicate the entry.
   day — too coarse for a log growing at tens of GB/day. The hourly pass uses
   logrotate's default state file, the same one the daily run uses, so the
   time-based directives are not applied twice.
+- **The Apache TSV fallback log (`access_cfm_tsv.log`, `httpd-cfm.conf`)** is
+  capped by the same hourly script, not by a logrotate block. On cPanel
+  `/var/log/apache2/` has no distro block: cpanellogd renames a log past 2 GB
+  to `<name>.YYYY_MM_DD[.NN]` and never deletes the copies (2026-11-17: 316 GB
+  on titan, 207 GB on mars, 175 GB on orion, a 26 GB never-rotated live file
+  on virgo). The script deletes those copies after a day (that name form only:
+  a distro logrotate generation such as `.1.gz` or an operator's own copy is
+  left alone) and, past 512 MB, gzips the live file to `<name>.cfm-prev.gz`
+  (one generation, overwritten) and truncates it in place; its only reader
+  (the web detector's file source, used when the edge socket is off) follows
+  the live file. The same step covers `/usr/local/apache/logs/` and
+  `/var/log/nginx/access_cfm_tsv.log` (`nginx-cfm.conf`), and runs before the
+  script's exit on a node without `logrotate-cfm`. `check_logrotate_coverage.sh`
+  runs it against a temp tree (`CFM_TSV_LOGS`, `CFM_TSV_MAX_BYTES`,
+  `CFM_LOGROTATE_CONF`). A
+  logrotate block for it would be a `duplicate log entry` on a distro whose
+  apache2 config globs `*.log`.
 - **`/etc/systemd/system/logrotate.service.d/cfm-openresty.conf`**
   (`configs/cfm-logrotate-systemd.conf`, `ReadWritePaths=-/usr/local/openresty/nginx/logs`).
   EL9 / CloudLinux 9, Debian 11+ and Ubuntu 22.04+ run `logrotate.service`
