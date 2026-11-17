@@ -93,14 +93,22 @@ var wafRuleIDs = []WAFRule{
 	// with something only PHP source carries, in the same parameter (<?php, a superglobal, a
 	// decoder, `$x=`, `;return`, `'.'`, a chr() chain). The eval RCEs of
 	// Fabrik (dmkomotinis.gr), ThinkPHP, SPIP, Magento, Drupal, which 320
-	// (shell / jndi markers) and the body scanners never read. Logonly
-	// through burn-in.
-	{ID: 332, Name: "rule_php_code_args", ReasonFamily: "WAF_RCE", DefaultMode: "logonly"},
-	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "challenge_v2"},
+	// (shell / jndi markers) and the body scanners never read. Block since
+	// 2026-11-17 (7-day burn-in on 8 nodes: 44 hits, every one an exploit),
+	// armed with WAF_RCE.
+	{ID: 332, Name: "rule_php_code_args", ReasonFamily: "WAF_RCE", DefaultMode: "block"},
+	// 303: __proto__ / constructor.prototype. Block since 2026-11-17 (the
+	// React2Shell sweep, ~19 000 hits / ~5 800 IPs a week, no solve); its ban
+	// is held: armed at threshold 1 that is ~830 bans and alerts a day. Held
+	// per rule rather than per family, so cfm_waf.lua runs it late with the
+	// other held rules.
+	{ID: 303, Name: "rule_js_proto", ReasonFamily: "WAF_JS_PROTO", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 304, Name: "rule_b64_injection", ReasonFamily: "WAF_B64_INJECT", DefaultMode: "challenge_v2"},
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "block"},
 	{ID: 306, Name: "rule_serialize", ReasonFamily: "WAF_SERIALIZE", DefaultMode: "challenge_v2"},
-	{ID: 307, Name: "rule_xxe", ReasonFamily: "WAF_XXE", DefaultMode: "challenge_v2"},
+	// 307: XXE DOCTYPE / ENTITY SYSTEM. Block since 2026-11-17 (85 hits a
+	// week, all datacenter scanners), ban held through a burn-in.
+	{ID: 307, Name: "rule_xxe", ReasonFamily: "WAF_XXE", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 308, Name: "rule_shellshock", ReasonFamily: "WAF_SHELLSHOCK", DefaultMode: "challenge_v2"},
 	{ID: 310, Name: "rule_cmd_params", ReasonFamily: "WAF_CMD_PARAM", DefaultMode: "challenge_v2"},
 	{ID: 311, Name: "rule_cmd_payload", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge_v2"},
@@ -146,8 +154,10 @@ var wafRuleIDs = []WAFRule{
 	// <?php / <?=, or a GIF header and one), whatever its Content-Type
 	// says. A php://input dropper's upload (dmkomotinis.gr's up.php took
 	// yavuzshell.php as application/octet-stream), which 402 (multipart)
-	// and 404 (textual types, 2 KB) miss. Logonly through burn-in.
-	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "logonly"},
+	// and 404 (textual types, 2 KB) miss. Block since 2026-11-17 (7-day
+	// burn-in: 289 hits, the PHPUnit eval-stdin.php sweep and a PUT
+	// dropper); its ban is held through a burn-in (~40 bans a day).
+	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
@@ -161,7 +171,11 @@ var wafRuleIDs = []WAFRule{
 	{ID: 435, Name: "rule_php_concat_funcname_eval", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 436, Name: "rule_php_decode_chain", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	{ID: 437, Name: "rule_php_encoded_opener", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "challenge_v2"},
-	{ID: 438, Name: "rule_php_encoded_opener_b64", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "challenge_v2"},
+	// 438: a base64 `<?php` opener in a POST body. Block since 2026-11-17
+	// (14 hits a week, all exploits: Bricks, WP Project Manager), armed with
+	// WAF_BACKDOOR. Still logonly on the pre-auth admin-ajax / admin-post
+	// surface (WPCode saves send it) and off on the rest of /wp-admin/.
+	{ID: 438, Name: "rule_php_encoded_opener_b64", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "block"},
 	{ID: 439, Name: "rule_php_numeric_xor_obfuscation", ReasonFamily: "WAF_BACKDOOR", DefaultMode: "logonly"},
 	// 440: the fake-plugin dropper's download / run command on its own PHP
 	// file (vol2.gr, 2026-11-04). WAF_BACKDOOR's first block rule. Its ban is
@@ -239,12 +253,13 @@ var wafRuleIDs = []WAFRule{
 	// request without a WordPress login (armed); 10020 = the same request WITH
 	// one (a translator in the editor preview, which adds the parameter to
 	// every form); 10019 = unauthenticated trp_get_translations_regular with
-	// string_ids. 10019 and 10020 block at the edge with their autoblock held:
-	// a translator whose login expired with the editor open sends 10019's
-	// request, and one submitting a lost-password form in the preview sends
-	// 10020's; a 6 h ban of the office IP is the wrong answer to either.
+	// string_ids. 10020 blocks at the edge with its autoblock held: a
+	// translator submitting a lost-password form in the preview sends it, and
+	// a 6 h ban of the office IP is the wrong answer. 10019 was held the same
+	// way (a translator whose login expired with the editor open) and is
+	// armed since 2026-11-17: 87 hits in 7 days on 8 nodes, all datacenter.
 	{ID: 10018, Name: "rule_cve_translatepress_reset_preview", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
-	{ID: 10019, Name: "rule_cve_translatepress_id_lookup", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	{ID: 10019, Name: "rule_cve_translatepress_id_lookup", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10020, Name: "rule_cve_translatepress_reset_preview_authed", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 	// 10021 / 10022: CVE-2026-109618 (and the OOM producer of
 	// CVE-2026-109619), PHP core RCE via out-of-memory in the startup
@@ -285,6 +300,10 @@ var wafRuleIDs = []WAFRule{
 	// route that saves no cart, where no file is written.
 	{ID: 10027, Name: "rule_cve_magento_polyshell", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10028, Name: "rule_cve_magento_polyshell_unseen", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	// 10029: CVE-2026-67282, Fabrik (Joomla) list-filter eval RCE: an
+	// `[eval]` index set on a Fabrik request field. Logonly through burn-in
+	// (the file-writing payloads are rule 332's).
+	{ID: 10029, Name: "rule_cve_fabrik_listfilter_eval", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

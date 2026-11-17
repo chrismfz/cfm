@@ -133,8 +133,25 @@ func TestWAFSecurityRuleHolds(t *testing.T) {
 			t.Errorf("held rule %d defaults to %q at the edge, not block — drop the hold", r.ID, r.DefaultMode)
 		}
 	}
-	if got, ok := wafSecurityRuleOverrides(KV{})["10019"]; !ok || got != 0 {
-		t.Errorf("RULE_10019 should default to the code hold 0, got %d (present=%v)", got, ok)
+	// 10019 was held until 2026-11-17 and is armed since (87 hits a week,
+	// all datacenter): it carries no code hold, so the family arms it.
+	if _, ok := wafSecurityRuleOverrides(KV{})["10019"]; ok {
+		t.Errorf("RULE_10019 is armed since 2026-11-17: it must carry no code hold")
+	}
+	// Promoted to block 2026-11-17 with their bans held per rule: 303 (the
+	// React2Shell sweep, ~830 bans a day armed), 307 (XXE) and 416 (a PHP
+	// file as the body) through a burn-in. Each family is armed by its block
+	// rule, so the hold is what keeps them from banning.
+	for _, id := range []string{"303", "307", "416"} {
+		if got, ok := wafSecurityRuleOverrides(KV{})[id]; !ok || got != 0 {
+			t.Errorf("RULE_%s should default to the code hold 0, got %d (present=%v)", id, got, ok)
+		}
+	}
+	// 332 (WAF_RCE) and 438 (WAF_BACKDOOR) are armed with their families.
+	for _, id := range []string{"332", "438"} {
+		if _, ok := wafSecurityRuleOverrides(KV{})[id]; ok {
+			t.Errorf("RULE_%s is armed: it must carry no code hold", id)
+		}
 	}
 	if got := wafSecurityRuleOverrides(KV{})["10020"]; got != 0 {
 		t.Errorf("RULE_10020 should default to the code hold 0, got %d", got)
@@ -158,10 +175,10 @@ func TestWAFSecurityRuleHolds(t *testing.T) {
 			t.Errorf("RULE_%s is armed: it must carry no code hold", id)
 		}
 	}
-	if got := wafSecurityRuleOverrides(KV{"RULE_10019": "1"})["10019"]; got != 1 {
-		t.Errorf("operator RULE_10019 = 1 must win over the code hold, got %d", got)
+	if got := wafSecurityRuleOverrides(KV{"RULE_10020": "1"})["10020"]; got != 1 {
+		t.Errorf("operator RULE_10020 = 1 must win over the code hold, got %d", got)
 	}
-	if got := wafSecurityRuleOverrides(KV{"RULE_10019": "1 ; armed after review"})["10019"]; got != 1 {
+	if got := wafSecurityRuleOverrides(KV{"RULE_10020": "1 ; armed after review"})["10020"]; got != 1 {
 		t.Errorf("an inline comment must not keep the code hold, got %d", got)
 	}
 	if _, ok := wafSecurityRuleOverrides(KV{})["10018"]; ok {
