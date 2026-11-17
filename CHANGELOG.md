@@ -31,12 +31,7 @@ back-filled here — see the git/PR history for that period.
   `USER_DISABLED_NOTIFY = 1`; the alert log still records each ban, as
   muted. A detector can now cap one finding's ban (`core.ExtraMaxBlockTTL`)
   and skip its mail on the block path (`core.ExtraNotify`).
-- **Security:** the dovecot detector reads the verdict and the source address
-  only from the server's text. Before, a username such as
-  `rip=203.0.113.50,a@b.gr` made it ban (and report to the fleet) the address
-  in the username instead of the client's, and a noise phrase in the username
-  hid a password failure. See `docs/DETECTORS.md`, "dovecot_auth — logins refused
-  as user_disabled".
+  See `docs/DETECTORS.md`, "dovecot_auth — logins refused as user_disabled".
 - **WAF rule 530 measures WooCommerce add-to-cart crawling (logonly).**
   A `GET ?add-to-cart=<id>` makes WooCommerce write a session and a cart, and
   crawlers follow those links on every listing. On 2026-11-17 the fleet served
@@ -49,6 +44,14 @@ back-filled here — see the git/PR history for that period.
   no block rule, so `waf_security` never arms it. Its pushes are kept to one
   per client and tag an hour, so the burn-in adds no flood of history rows.
   See `docs/waf.md`, "Rule 530".
+
+### Security
+- **The dovecot detector no longer takes the address or the verdict from the
+  username.** Before, a username such as `rip=203.0.113.50,a@b.gr` made it ban
+  the address in the username instead of the client's, and report it to the
+  fleet. A noise phrase in the username also hid a password failure. It now
+  reads both only from the server's text (the reason before `user=<`, and the
+  last `rip=`).
 
 ### Fixed
 - **The Apache TSV fallback log no longer fills the disk on cPanel.**
