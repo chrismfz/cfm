@@ -113,6 +113,7 @@ local CFG = {
                                          --  multipart/binary CTs; 0 hits over 6 weeks ×
                                          --  5 servers — no legit traffic produces these bytes)
   rule_php_webshell_body = "challenge_v2",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
+  rule_php_webshell_body_deep = "logonly", -- rule 417: 404's scorer over the whole body the edge read (php_webshell_deep_scan_len, 32 KB), when 404's 2 KB head scored nothing. PHP source saved through a form field lands past 2 KB: a plugin-editor save with an eval of a header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), a file manager's cmd=put / a webshell editor saving a shell whose comment header fills the first 2 KB ("ANTI-BLANK & WAF BYPASS", zerooneoliveoil.gr, rigel, 2026-11-17). Logonly through burn-in: a whole legitimate plugin file saved through an editor is scored too.
   rule_b64_injection     = "challenge_v2",  -- POST-body base64 decode heuristic scanner
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
@@ -259,7 +260,7 @@ local CFG = {
   rule_cve_pixelyoursite_session_xss = "block", -- CVE-2026-1844 / -1841 / -109987, the session copies PixelYourSite fills on a session's first request: the raw request path (landing page), the host parse_url takes from the Referer (traffic source) and the utm_* query fields (UTMs), with the same executable-markup / attribute-breakout tests as 10025. These are request parts every site sees, so a scanner or link checker can trip them without the plugin: edge 403 only, autoblock held per rule (HoldAutoblock, RULE_10026 = 0). Runs late with the other held rules.
   rule_cve_magento_polyshell = "block", -- CVE-2026-48356 "PolyShell": Magento Open Source / Adobe Commerce unauth arbitrary file upload through a cart item's custom option `file_info` (base64 file, attacker's name and extension). Blocks a cart-save request (REST cart-items routes for guest / customer / admin carts, the quote save PUT …/carts/<id>, sync / async / async-bulk, route read from $uri and the raw path; SOAP naming a cart or cart-item repository) carrying custom_options, file_info AND base64_encoded_data in its JSON keys, XML element / attribute names (SOAP is XML whatever its type) or query / form-field bracket keys (a multipart POST reaches Magento's input through $_POST), in any spelling Magento reads as them (it drops `_` and ignores case; FILE_INFO). Source: Sansec, Magento's own code, the 2026-10-29 attack on orion. Armed: no legitimate client sends a file this way.
   rule_cve_magento_polyshell_unseen = "block", -- CVE-2026-48356, the inferences, 403 with the autoblock held per rule (HoldAutoblock, RULE_10028 = 0). On a cart-save request 10027 could not read (late with the other held rules; right after 10027 in cfm.lua's burn-in second pass): a body the edge did not hold whole (OVERSIZE: cut past waf_body_max_len or declared but unread, with custom_options in view or on the guest / customer cart-save routes; on SOAP naming a cart service), an XML entity declaration (XML_ENTITY), or a JSON / XML body the scan cannot read as Magento would (UNREADABLE). Late, logonly: the same three names on a web API request that saves no cart (FILE_INFO_ELSEWHERE: an order an integration writes back can carry them, and no file is written there).
-  rule_cve_fabrik_listfilter_eval = "logonly", -- CVE-2026-67282 (Fabrik for Joomla 1.0.0–4.6.7, fixed in 4.7.2 with CVE-2026-66915): unauth RCE through the list filter, which runs `<table>___<element>[value]` as PHP when the element also carries `[eval]` set. Fires on a request field (query, urlencoded or multipart POST) with an `[eval]` index on a Fabrik request (option=com_fabrik, `fabrik` in the path, or the element name's `___`): EVAL_ARG / EVAL_BODY for a set value, EVAL_ZERO (always logonly) for `=0`. Source: the dmkomotinis.gr compromise (earth, 2026-11-12); a 7-day read of all 8 edge nodes' access.log found `[eval]` only from that attacker. Logonly through burn-in; the payloads themselves are rule 332's (block).
+  rule_cve_fabrik_listfilter_eval = "block", -- CVE-2026-67282 (Fabrik for Joomla 1.0.0–4.6.7, fixed in 4.7.2 with CVE-2026-66915): unauth RCE through the list filter, which runs `<table>___<element>[value]` as PHP when the element also carries `[eval]` set. Fires on a request field (query, urlencoded or multipart POST) with an `[eval]` index on a Fabrik request (option=com_fabrik, `fabrik` in the path, or the element name's `___`): EVAL_ARG / EVAL_BODY for a set value, EVAL_ZERO (always logonly) for `=0`. Source: the dmkomotinis.gr compromise (earth, 2026-11-12); a 7-day read of all 8 edge nodes' access.log found `[eval]` only from that attacker. Promoted logonly→block 2026-11-17 (burn-in: a 14-day read of all 8 nodes' cfm.waf.log found EVAL_ZERO only, 10 hits from Greek users on three Fabrik sites, and EVAL_ARG / EVAL_BODY only from the attacker); WAF_CVE armed, so the first probe (`[value]=1;` with `[eval]=1`) bans, before any payload reaches rule 332.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
@@ -514,6 +515,9 @@ local CFG = {
   -- Raw PHP webshell body scanner tuning
   php_webshell_max_scan_len = 2048,
   php_webshell_min_score    = 5,
+  -- Rule 417's window: the whole body the edge reads for the WAF
+  -- (waf_body_max_len, 32 KB by default), not 404's 2 KB head.
+  php_webshell_deep_scan_len = 32768,
 
   -- Obfuscation scorers (script body + upload file content)
   script_obfuscation_max_scan_len = 8192,
@@ -624,6 +628,7 @@ local RULE_IDS = {
   rule_upload_content          = 402,
   rule_upload_content_deep     = 415,
   rule_php_file_body           = 416,
+  rule_php_webshell_body_deep  = 417,
   rule_upload_archive_php      = 414,
   rule_upload_obfuscation      = 403,
   rule_php_webshell_body       = 404,
@@ -1555,10 +1560,14 @@ local function check_impl(ctx, st)
   do
     local mode = rule_mode(CFG.rule_php_webshell_body, "logonly")
     if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_php_webshell_body(body, headers)
-      if tag then
+      local head_tag = det.detect_php_webshell_body(body, headers)
+      -- 417 (late, below) reads the whole body only when the head scored
+      -- nothing, and a short body only where the head could not read it.
+      st.php_body_head_read = true
+      st.php_body_head_hit = head_tag ~= nil
+      if head_tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WEBSHELL_BODY:" .. tag, ttl, mode, RULE_IDS.rule_php_webshell_body) then goto done end
+        if record("WAF_PHP_WEBSHELL_BODY:" .. head_tag, ttl, mode, RULE_IDS.rule_php_webshell_body) then goto done end
       end
     end
   end
@@ -2882,6 +2891,33 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_ADMIN_XSCREEN:" .. tag, ttl, mode, RULE_IDS.rule_wp_admin_cross_screen) then goto done end
+      end
+    end
+  end
+
+  -- ── 404's scorer over the whole body (417, logonly burn-in) ──────────────
+  -- Only when 404's 2 KB head scored nothing: PHP saved through a form field
+  -- (an editor, a file manager's put) sits wherever the file puts it. A body
+  -- no longer than the head is read only where 404 could not read it as PHP
+  -- gets it (a multipart body, a JSON one with escapes: php_body_head_blind)
+  -- or when 404 did not run; otherwise 417 would score what 404 just scored.
+  -- detect_php_webshell_body's cheap raw gate keeps a body with nothing a
+  -- score can come from out of the decoder. Late, before
+  -- only 612 and 530: cfm.lua pushes the headline hit alone, and at step 15
+  -- it took the headline (and the push) from the logonly body rules that run
+  -- after it (331 on a wget || curl dropper, 421-425, 430-439, 330).
+  do
+    local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
+    if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit then
+      local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+      local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
+      if deep_len > head_len
+         and (#body > head_len or not st.php_body_head_read or det.php_body_head_blind(body, headers)) then
+        local tag = det.detect_php_webshell_body(body, headers, deep_len)
+        if tag then
+          local ttl = (dmode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_PHP_WEBSHELL_BODY:DEEP_" .. tag, ttl, dmode, RULE_IDS.rule_php_webshell_body_deep) then goto done end
+        end
       end
     end
   end

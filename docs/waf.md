@@ -1102,6 +1102,8 @@ Current assignments:
                                        416  rule_php_file_body            (logonly, 2026-11-13: a PHP file as the
                                                                          raw POST / PUT / PATCH body; see
                                                                          "Rules 332 and 416")
+                                       417  rule_php_webshell_body_deep   (logonly, 2026-11-17: 404's scorer over
+                                                                         the whole body; see "Rule 417")
                                        421  rule_php_split_string_canary
                                        422  rule_php_dropper_wget_curl
                                        423  rule_php_dropper_markers
@@ -1647,6 +1649,75 @@ not an octet-stream body to a clean URL; a PUT / PATCH under the size and
 type gate. A PUT / PATCH under `/remote.php/` (Nextcloud / ownCloud WebDAV)
 is skipped: a sync client uploads a user's `.php` files there as their raw
 body.
+
+### Rule 417 — `rule_php_webshell_body_deep`
+
+Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, logonly. Rule 404 scores PHP
+source in a textual POST body, but over its first 2 KB only
+(`php_webshell_max_scan_len`). PHP saved through a form field lands wherever
+the file puts it, and two compromises on the fleet passed that way:
+
+- **apolymanseisantoniou.gr (orion, 2026-11-15).** A plugin-editor save
+  (`admin-ajax.php`, `action=edit-theme-plugin-file`). Its `newcontent` held,
+  at line 32 of the plugin, `$a = $_SERVER; … eval\n($a[\n$k]\n);`, an
+  eval of a request header. The later saves had the eval in the head, and
+  404 caught them.
+- **zerooneoliveoil.gr (rigel, 2026-11-17).** A file manager's `cmd=put`,
+  then the shell's own editor, saving "Simple File Manager - ULTIMATE
+  ANTI-BLANK & WAF BYPASS". Its comment header fills the first 2 KB.
+
+**What it does.** Rule 417 runs the same scorer over the whole body the edge
+read (`php_webshell_deep_scan_len`, 32 KB = `waf_body_max_len`):
+- only when 404 scored nothing. A body no longer than 404's 2 KB head is read
+  only where 404 could not read it as PHP gets it (a multipart body, a JSON
+  body with escapes) or when 404 is disabled;
+- only after a cheap raw check finds one of the scorer's markers
+  (`PHP_SCORE_MARKERS`: `<?`, `$_`, the global callables it counts, the
+  webshell names) or an escape that may decode to one (`%3C`, `%3F`, `%24`,
+  `%5F`, `%25`, `\u00`). Not `%20` / `%2F` / `%3D`, which are in nearly every
+  form body. The scorer's own early-out reads the same list. A score of 5
+  with no `<?` / `$_` needs a callable or a webshell name; one spelled with
+  %-encoded letters is not read (residual). With `php_webshell_min_score`
+  below 5 the check is off.
+
+**Also read** (review, 2026-11-17):
+- a multipart body's plain **text** fields, each scored on its own and as PHP
+  hands them to the app: not percent-decoded (a save form posted as
+  multipart; file parts stay 402 / 415's). Multipart is decided by the media
+  type, as PHP does, and the boundary is read from every Content-Type line;
+- a JSON body's `\u00XX` / `\/` escapes, as `json_decode` hands them to the
+  app (`\u003c?php`, `\u0024_POST`). 417 only: 404's head pass ships at
+  challenge_v2 and does not decode them.
+
+**404 changes from the same reviews.** 404 now reads a body's media type the
+way PHP does: an urlencoded body whose Content-Type carried
+`multipart/form-data` in a parameter was read by neither rule. Its early-out
+now admits `assert` / `popen` / `proc_open`, which it scores but used to drop
+before scoring.
+
+**Order.** 417 runs late, after every rule but 612 and 530. cfm.lua pushes
+only the headline hit, and at step 15 (next to 404) 417 took the headline,
+and the push, from the logonly body rules that run after it. A `wget || curl`
+dropper reported 417 instead of 331, whose burn-in then lost it. Those rules
+now keep the headline, and 417 shows in `also_rule_ids`.
+
+**Cost.** On a body past 2 KB with no marker, a lowercased copy and about 20
+plain finds: ~0.17 ms on a 20 KB form. A short body 404 already read costs
+nothing. About +0.4 ms on a 30 KB post with HTML. About +5 ms on a 30 KB PHP
+file saved through an editor, which is rare.
+
+**Logonly through burn-in.** A whole legitimate plugin file saved through an
+editor is scored too: a global `exec(` / `system(` call plus a superglobal
+reaches 5. Read its hits fleet-wide before any promotion. Multipart file
+parts stay with 402 / 415.
+
+### Fleet read of 702, 10029 and 415 (2026-11-17, 14 days, 8 nodes)
+
+| Rule | Hits | What they were | Decision |
+|---|---:|---|---|
+| 10029 Fabrik `[eval]` | 10 | all `EVAL_ZERO` (`[eval]=0`) from Greek users on three Fabrik sites (Fabrik's own form); `EVAL_ARG` only from the dmkomotinis attacker | **block**, armed (WAF_CVE): the first probe bans |
+| 702 C2 tunnel | 355 | 176 `RENTRY` on `zort.me/shorten` (a URL shortener we host: the known FP source of 611); the rest comment spam with tunnel links, a Joomla `component/ajax` poller, `/wp-22.php?sfilecontent=<?php` writers | stays `challenge_v2`; `zort.me` needs a rule-scoped exclude (operator) |
+| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stays logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`), since the log could not say what was uploaded |
 
 ### Both rules
 

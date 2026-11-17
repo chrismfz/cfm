@@ -158,6 +158,12 @@ var wafRuleIDs = []WAFRule{
 	// burn-in: 289 hits, the PHPUnit eval-stdin.php sweep and a PUT
 	// dropper); its ban is held through a burn-in (~40 bans a day).
 	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block", HoldAutoblock: true},
+	// 404's scorer over the whole body the edge read (32 KB), when 404's
+	// 2 KB head scored nothing: PHP saved through a form field (a plugin
+	// editor, a file manager's put, a webshell's own editor) past the head
+	// (orion 2026-11-15, rigel 2026-11-17). Logonly through burn-in: a whole
+	// legitimate plugin file saved through an editor is scored too.
+	{ID: 417, Name: "rule_php_webshell_body_deep", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "logonly"},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
@@ -306,9 +312,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 10027, Name: "rule_cve_magento_polyshell", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10028, Name: "rule_cve_magento_polyshell_unseen", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 	// 10029: CVE-2026-67282, Fabrik (Joomla) list-filter eval RCE: an
-	// `[eval]` index set on a Fabrik request field. Logonly through burn-in
-	// (the file-writing payloads are rule 332's).
-	{ID: 10029, Name: "rule_cve_fabrik_listfilter_eval", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	// `[eval]` index set on a Fabrik request field. Block since 2026-11-17
+	// (14 days on 8 nodes: EVAL_ZERO only from real users, EVAL_ARG only
+	// from the attacker); armed, so the first probe bans before a payload.
+	{ID: 10029, Name: "rule_cve_fabrik_listfilter_eval", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

@@ -58,6 +58,23 @@ back-filled here — see the git/PR history for that period.
   found" when the credentials were found and the connect failed: it names the
   credential source and the connect error.
 ### Added
+- **WAF rule 417 scores PHP source in the whole POST body (logonly).** Rule
+  404 reads only a body's first 2 KB. PHP saved through a form field lands
+  past it: a plugin-editor save with an eval of a request header at line 32
+  (orion, 2026-11-15), and a file manager's put of a shell whose comment
+  header fills the first 2 KB (rigel, 2026-11-17). Both reached the disk.
+  Rule 417 runs 404's scorer over the whole body the edge reads (32 KB), and
+  only when 404 found nothing and the raw body holds something a score can
+  come from (`<?`, `$_`, a callable's or webshell's name, or an escape of
+  one). It also reads a multipart body's text fields at any size (404 reads
+  no multipart body) and a JSON body's `\u00XX` escapes. Logonly through
+  burn-in, since a whole legitimate plugin saved through an editor is scored
+  too. See `docs/waf.md`, "Rule 417".
+  Rule 404 (challenge_v2) changes with it in two narrow ways. It now reads a
+  body by its media type, as PHP does: an urlencoded body whose Content-Type
+  carried `multipart/form-data` in a parameter escaped both rules. And a body
+  scoring on `assert(` / `popen(` / `proc_open(` alone is no longer dropped
+  before scoring.
 - **Imunify360 RBL locks now reach the fleet list.** On a cPanel node with
   Imunify, a mail login from an address on Imunify's global RBL is refused
   before any password check, and dovecot logs it as `user_disabled`. CFM's
@@ -121,6 +138,14 @@ back-filled here — see the git/PR history for that period.
   findable.
 
 ### Changed
+- **WAF rule 10029 (Fabrik list-filter eval, CVE-2026-67282) blocks.** A
+  14-day read of all 8 nodes found `[eval]=0` only from real users (that
+  stays logonly) and a set `[eval]` only from the attacker who defaced
+  dmkomotinis.gr. The rule's family `WAF_CVE` is armed, so the first probe now
+  bans the address before any payload is sent.
+- **WAF rule 415 names the uploaded file's extension in its tag**
+  (`UPLOAD_PHP_TAG_DEEP:<ext>`). Its burn-in had two hits on admin media
+  uploads, and the log could not say what file they were.
 - **`[webdetector] BLOCK` ships as `12h` (was `2h`).** The 2026-11-17 read
   of the 8 edge nodes found 99% of the web detector's 403 / 404 / 40x bans on
   cloud scanners, the same Microsoft and Google addresses banned up to 51

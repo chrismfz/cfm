@@ -1114,19 +1114,102 @@ local function is_textual_body_content_type(content_type)
   return false
 end
 
-function _M.detect_php_webshell_body(body, headers)
+-- What a score can come from, as plain lowercase text: the PHP opener, a
+-- superglobal, the global callables the scorer counts (`exec` also covers
+-- shell_exec) and the webshell names (`wso` covers its version banners).
+-- ONE list for 417's raw gate and the scorer's early-out below, so the two
+-- cannot drift (the early-out once lacked assert / popen / proc_open, and a
+-- body scoring 6 on two of them was dropped unscored).
+_M.PHP_SCORE_MARKERS = { "<?", "$_", "eval", "assert", "system", "exec", "passthru",
+  "popen", "proc_open", "b374k", "c99shell", "r57shell", "indoxploit", "0byt3m1n1",
+  "weevelyshell", "wso" }
+_M.php_score_marker_in = function(t)
+  for _, m in ipairs(_M.PHP_SCORE_MARKERS) do
+    if t:find(m, 1, true) then return true end
+  end
+  return false
+end
+
+-- The body 404's head pass cannot read as PHP gets it: a multipart body (by
+-- its media type, as PHP chooses its reader), or a JSON one carrying a
+-- \u00XX / \/ escape.
+-- Rule 417 reads a short body only then (or when 404 did not run).
+function _M.php_body_head_blind(body, headers)
+  local mt = php_media_type(php_content_type(headers or {}))
+  if mt == "multipart/form-data" then return true end
+  -- Only the escapes json_unescape_ascii decodes change what 404 read
+  -- (`\n`, `\"` are in nearly every JSON body and change nothing).
+  body = body or ""
+  return (body:find("\\u00", 1, true) or body:find("\\/", 1, true)) ~= nil
+     and (has(mt, "json") or body:find("^%s*[%[{]") ~= nil)
+end
+
+-- cap_len: how much of the raw body to read; 404 reads its 2 KB head
+-- (php_webshell_max_scan_len), rule 417 the whole body the edge read
+-- (php_webshell_deep_scan_len). A deep read (417 only):
+--   * first checks the raw body for a PHP_SCORE_MARKERS entry or an escape
+--     that may decode to one (`%3C`, `%3F`, `%24`, `%5F`, `%25`, `\u00`), so a
+--     form with none is never decoded. A score of 5 with no `<?` / `$_` needs
+--     a callable or a webshell name; one spelled with %-encoded letters
+--     passes the gate unread (residual). With min_score below 5 the gate is
+--     off;
+--   * reads a multipart body's plain text fields, each on its own and as PHP
+--     hands them to the app, NOT percent-decoded (a webshell editor's or a
+--     file manager's save form posted as multipart; file parts stay 402 /
+--     415's), with the boundary read from every Content-Type line;
+--   * reads a JSON body's \u00XX / \/ escapes as PHP's json_decode hands
+--     them to the app (`<?php`, `$_POST`). 404's head pass does
+--     not: it ships at challenge_v2, and that decoding is 417's burn-in.
+-- Multipart is decided by the media type, as PHP does: `text/plain;
+-- x=multipart/form-data` is a text body, and an urlencoded body with that
+-- parameter is still read as urlencoded (it hid from 404 and 417 before).
+-- as_field (internal): a multipart field value, read without decoding.
+function _M.detect_php_webshell_body(body, headers, cap_len, as_field)
   if not body or body == "" then return nil end
 
   headers = headers or {}
-  local ct = header_string(headers["content-type"] or headers["Content-Type"])
-  if not is_textual_body_content_type(ct) then
+  local mt = php_media_type(php_content_type(headers))
+  local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  cap_len = tonumber(cap_len) or head_len
+  local deep = cap_len > head_len
+  local multipart = mt == "multipart/form-data"
+  if multipart then
+    if not deep then return nil end
+  elseif not is_textual_body_content_type(mt) then
     return nil
   end
 
-  local s = normalize(cap(body, tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len))
+  local raw = cap(body, cap_len)
+  -- Only escapes that can decode to `<`, `?`, `$`, `_` (or a double
+  -- encoding, %25): `%20`, `%2F`, `%3D` are in nearly every form body and
+  -- would open the gate for all of them.
+  if deep and (tonumber(CFG.php_webshell_min_score) or 5) >= 5 then
+    local lr = lower(raw)
+    if not (_M.php_score_marker_in(lr)
+            or (not as_field and (lr:find("%%3[cf]") or lr:find("%24", 1, true)
+                                  or lr:find("%5f", 1, true) or lr:find("%25", 1, true)))
+            or lr:find("\\u00", 1, true)) then
+      return nil
+    end
+  end
+  if multipart then
+    -- Each text field on its own: a shell sits in one field, and markers
+    -- spread over several ordinary fields must not add up to a score.
+    local hit
+    each_multipart_field(raw, php_content_type(headers), function(_, v)
+      if not hit and v and #v > 0 then
+        hit = _M.detect_php_webshell_body(v, { ["content-type"] = "text/plain" }, cap_len, true)
+      end
+    end)
+    return hit
+  elseif deep and (has(mt, "json") or raw:find("^%s*[%[{]")) then
+    if raw:find("\\", 1, true) then raw = util.json_unescape_ascii(raw) end
+  end
+
+  local s = as_field and lower(raw) or normalize(raw)
   if s == "" then return nil end
 
-  if has(ct, "application/x-www-form-urlencoded") then
+  if mt == "application/x-www-form-urlencoded" then
     s = s:gsub("%+", " ")
   end
 
@@ -1150,12 +1233,7 @@ function _M.detect_php_webshell_body(body, headers)
     return nil
   end
 
-  if not (has(s, "<?") or has(s, "$_") or has(s, "eval") or has(s, "system")
-          or has(s, "passthru") or has(s, "shell_exec") or has(s, "exec")
-          or has(s, "b374k") or has(s, "c99shell") or has(s, "r57shell")
-          or has(s, "indoxploit") or has(s, "0byt3m1n1")
-          or has(s, "weevelyshell") or has(s, "wso 2.")
-          or has(s, "wso 4.") or has(s, "wso 5.")) then
+  if not _M.php_score_marker_in(s) then
     return nil
   end
 
@@ -5575,8 +5653,13 @@ function _M.detect_upload_content_deep(body, headers)
     -- code padded past the edge (`<?=` + blanks) is seen whole, and the `<?`
     -- short open tag, which 402 leaves alone, is read in file bytes here.
     local part = lower(body:sub(s, e))
-    if has(part, "<?php") or has_php_short_echo(part, true) then return "UPLOAD_PHP_TAG_DEEP" end
-    if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP" end
+    -- The tag carries the file's extension (a-z0-9, up to 8; "none"): the
+    -- burn-in's two misses on the fleet were admin media uploads whose file
+    -- the log could not name, so no promotion or carve-out could be decided.
+    local ext = lower(f[1] or ""):match("%.([%w]+)$")
+    ext = ext and ext:sub(1, 8) or "none"
+    if has(part, "<?php") or has_php_short_echo(part, true) then return "UPLOAD_PHP_TAG_DEEP:" .. ext end
+    if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP:" .. ext end
   end
   return nil
 end
