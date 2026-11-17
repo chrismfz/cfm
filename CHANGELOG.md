@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.17
+
 ### Changed
 - **Flood autoblocks are a 72 h ban by default, never permanent unless you
   ask.** A `cfm.conf` with no `THROTTLE_MODE` line (or a blank one) used to
@@ -239,8 +243,6 @@ back-filled here — see the git/PR history for that period.
   (country only, no ASN) is held 15m and not reported to cfm-web, so a local
   customer is neither held 12h nor banned on every node. A node keeping its
   own `detectors.conf` adds that section (or a `detectors.d` overlay) itself.
-
-## 2026.11.17
 
 ### Added
 - **WAF rule 10029: the Fabrik list-filter eval (CVE-2026-67282), logonly.**
