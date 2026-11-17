@@ -1503,8 +1503,8 @@ Tests: `scripts/tests/cfm_waf_shell_write_exec_test.lua`.
 
 ## Rules 332 and 416 — PHP code in the query, a PHP file as the body
 
-Both logonly (burn-in), added 2026-11-13 after the dmkomotinis.gr Joomla
-compromise on earth (2026-11-12). Fabrik 3.10's listfilter evaluates
+Added 2026-11-13 (logonly) after the dmkomotinis.gr Joomla compromise on
+earth (2026-11-12); both **block since 2026-11-17** after the burn-in below. Fabrik 3.10's listfilter evaluates
 `<element>[value]` when `<element>[eval]=1`, so the attacker:
 1. wrote files with `…[value]=$h=fopen('up.php','w');fwrite($h,chr(60).chr(63)…)`;
 2. got `up.php`, a dropper that writes `php://input` to `$_GET['f']`;
@@ -1516,6 +1516,22 @@ but two Fetch Metadata notes. Imunify360 tracked the Fabrik requests
 (`77142206`, `77350942 Dangerous PHP functions in REQUEST_URI`, both
 `AccessDenied:false`). It only refused a request once it recognised the
 uploaded file on disk, and the bot then passed its splash and kept uploading.
+
+**Burn-in (2026-11-10..17, `cfm.waf.log` of the 8 edge nodes).**
+- 332: 44 hits from 34 IPs, every one an exploit — ThinkPHP / ThinkCMF
+  `file_put_contents`, pboot `{pboot:if(…)}`, Drupal `#post_render`,
+  `/cgi-bin/site_active.pl?TEMPLATE=…<?php system('id')…`, Magento
+  `/paypal/transparent/response/?<?=eval(…)`. Block, armed with `WAF_RCE`
+  (6 h ban). The cPanel json-api / execute saves listed as expected noise
+  below never reach it: those paths pass the panel gate before the WAF
+  (`cfm_panel_hosts.is_panel_api_or_sso`).
+- 416: 289 hits from 269 IPs, every one an exploit — the PHPUnit
+  `eval-stdin.php` sweep (275, labelled as a form), a PUT dropper
+  (`/wp-content/upgrade/wpr<N>.php`). Block with its ban held per rule
+  (`RULE_416 = 0`; ~40 bans a day armed), evaluated with the late group.
+
+The Fabrik `[eval]` index itself is rule 10029 (`WAF_CVE`, CVE-2026-67282,
+logonly; `WAF_CVE.md`).
 
 ### Rule 332 — `rule_php_code_args`
 
@@ -1586,8 +1602,8 @@ so the same payload sent as a urlencoded POST body is not read by 332. Rule
 404 reads form bodies but needs a `<?`, `$_`, `eval`, `system` or `exec`
 marker, and `$h=fopen(…);fwrite($h,chr(…))` carries none. Reading form bodies
 here needs editor exclusions first: the cPanel File Manager and theme
-editors post PHP source as a field. That is the next step if the burn-in is
-clean. The rule runs late, beside 331, so a
+editors post PHP source as a field. That is the next step (planned as a
+separate logonly rule: form fields, JSON string values, cookies). The rule runs late, beside 331, so a
 payload that also trips an armed block rule keeps that rule's headline.
 
 ### Rule 416 — `rule_php_file_body`

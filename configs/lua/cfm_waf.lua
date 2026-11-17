@@ -93,7 +93,7 @@ local CFG = {
                                        -- never convicts, D5b).
   rule_xss_body        = "logonly",      -- explicit markup in a POST body (attribute breakout `" onmouseover=`, `<script` tag, a tag carrying an event handler; `javascript:` dropped 2026-10-24, it was 99.8% of the hits and all noise), not with a WordPress login cookie or an Authorization header, or on /wp-admin/ (not admin-ajax / admin-post), /administrator/, LHC's /site_admin/ or a cPanel /cpsess<N>/ path on a cpanel./whm./webmail. host. Visibility only: rule 302 reads the path and query, and a stored-XSS payload in a form field (LHC's chat email field, 2026-10-22) passed unseen. Logonly through burn-in; page builders and editors post markup legitimately.
   rule_shell_write_exec = "logonly",  -- rule 331: a shell command in the args OR body that writes an executable file into the site (wget/curl -O x.php, curl -O of a .php URL, echo|base64 -d|cat … > x.php) or backdates one (touch -d/-t/-r). Rules 310-317 read the query only: the tophair.gr webshell terminal (/?dark&term=1, 2026-10-08) POSTed exactly these and nothing matched. Logonly through burn-in (a tutorial pasted into a comment could carry one); family WAF_RCE.
-  rule_php_code_args   = "logonly",  -- rule 332: PHP source in the query string: a call to a file writer / code runner (file_put_contents, fopen, fwrite, eval, system, shell_exec, assert, include, call_user_func, …, or one named from 'pi'.'eces') with something only PHP source carries (<?php / <?=, a superglobal, a decoder such as base64_decode(, `$x=`, `;return`, `'.'`, a chr() chain). The eval-style RCEs of Fabrik (dmkomotinis.gr, 2026-11-12), ThinkPHP, SPIP, Magento, Drupal: 320 reads only shell / jndi markers, and the body scanners never read the query. Logonly through burn-in; family WAF_RCE.
+  rule_php_code_args   = "block",    -- rule 332: PHP source in the query string: a call to a file writer / code runner (file_put_contents, fopen, fwrite, eval, system, shell_exec, assert, include, call_user_func, …, or one named from 'pi'.'eces') with something only PHP source carries (<?php / <?=, a superglobal, a decoder such as base64_decode(, `$x=`, `;return`, `'.'`, a chr() chain). The eval-style RCEs of Fabrik (dmkomotinis.gr, 2026-11-12), ThinkPHP, SPIP, Magento, Drupal: 320 reads only shell / jndi markers, and the body scanners never read the query. Promoted logonly→block 2026-11-17 (burn-in: 44 hits / 34 IPs in 7 days on 8 nodes, every one an exploit, 0 FP); family WAF_RCE, armed (6h ban).
   rule_sqli            = "block",      -- cheap SQLi signatures + DBMS-unique blind primitives (promoted challenge→block 2026-07 after a clean 6-server FP review: 24/24 TP, 0 FP)
   rule_sqli_blind_lexical = "block", -- word/method-colliding blind tokens (extractvalue(/updatexml(/benchmark(/…); promoted challenge→block 2026-08-23 after expanded fleet burn-in; prior 188/188 TP, 0 FP review (docs/waf.md)
   rule_sqli_union_variant = "challenge_v2",   -- obfuscated UNION (union all/distinct select, union(select, union/**/select) that rule 301's adjacent `union select` misses; promoted logonly→challenge 2026-08-23, challenge→challenge_v2 2026-09-23 (pure sqlmap-style attack traffic; solves get the Rung-1 humanity gate) — docs/waf.md
@@ -203,10 +203,10 @@ local CFG = {
   -- [top-9]  SSRF + JS prototype pollution
   rule_ssrf             = "challenge_v2", -- SSRF protocol schemes (file://, gopher://, …) + IP obfuscation
                                        -- (no legitimate browser/HTTP client sends these schemes)
-  rule_js_proto         = "challenge_v2",  -- JS __proto__ / constructor.prototype pollution
+  rule_js_proto         = "block",  -- JS __proto__ / constructor.prototype pollution. Promoted challenge_v2→block 2026-11-17: 18 916 hits / 5 786 IPs in 7 days on 8 nodes, the React2Shell sweep (POST / with __proto__, Google Cloud / aiohttp), not one IP solved a challenge. Ban held per rule (HoldAutoblock, RULE_303 = 0): at threshold 1 that is ~830 bans and alerts a day. Recorded late, with the held rules.
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
-  rule_xxe              = "challenge_v2",  -- XXE DOCTYPE/ENTITY SYSTEM in request body
+  rule_xxe              = "block",  -- XXE DOCTYPE/ENTITY SYSTEM in request body. Promoted challenge_v2→block 2026-11-17 (85 hits / 55 IPs in 7 days, all datacenter scanners). Ban held per rule (HoldAutoblock, RULE_307 = 0) through a burn-in. Recorded late, with the held rules.
   rule_crlf_injection   = "challenge_v2", -- CRLF / HTTP response-splitting in args or body.
                                         -- content-type/content-length are the FP-prone, low-impact tags:
                                         -- they appear legitimately in request BODIES (multipart part
@@ -249,7 +249,7 @@ local CFG = {
   rule_cve_wp_pagename_traversal = "block", -- CVE-2026-87902 (GHSA-7hp8-65ch-5whp): WordPress core 4.7.0–7.1.1 unauth page-template path traversal. get_page_template() builds page-{$pagename}.php from the url-decoded `pagename` query var without the `..` check, so a readable local .php outside the theme gets included (RCE via pearcmd.php when register_argc_argv=On). Fires on a `pagename` value (query string, urlencoded or multipart POST — WP reads $_POST first) holding a `..` segment; a real pagename is a slug path and never does (near-zero FP). The pretty-permalink route (path -> pagename) is rule 103. Armed like every WAF_CVE block rule: 6h ban + WAF/CVE-2026-87902 alert.
   rule_cve_translatepress_reset_preview = "block", -- CVE-2026-19632 (TranslatePress <= 3.3.1, fixed 3.3.2): `trp-edit-translation` on a password-reset request (wp-login.php lostpassword/retrievepassword, or WooCommerce's lost-password POST) forces translation preview so the reset mail — key included — is stored as a translatable string. Its one legitimate source is the editor preview, which adds it to every form; a hit with a WordPress login cookie is filed under id 10020 (same mode, autoblock held in code), one without under 10018 (armed: 6h ban + WAF/CVE-2026-19632 alert). Fleet sightings 09-15..10-08: the titan attack only.
   rule_cve_translatepress_reset_preview_authed = "block", -- CVE-2026-19632, 10018's request WITH a WordPress login cookie: most likely a translator submitting a lost-password form inside the editor preview (the preview adds the parameter to every form). Edge 403 only; autoblock held in code (RULE_10020 = 0) so the translator is not banned.
-  rule_cve_translatepress_id_lookup = "block", -- CVE-2026-19632 second leg: unauthenticated action=trp_get_translations_regular with string_ids reads stored strings back by id. Only the logged-in editor (trp-editor.js) sends string_ids; gated on no wordpress_logged_in_ cookie (FP filter, a junk cookie bypasses it). Edge block; autoblock held per rule (RULE_10019 = 0): a translator whose login expired mid-session would otherwise be banned.
+  rule_cve_translatepress_id_lookup = "block", -- CVE-2026-19632 second leg: unauthenticated action=trp_get_translations_regular with string_ids reads stored strings back by id. Only the logged-in editor (trp-editor.js) sends string_ids; gated on no wordpress_logged_in_ cookie (FP filter, a junk cookie bypasses it). Edge block; armed since 2026-11-17 (was held per rule, RULE_10019 = 0, against banning a translator whose login expired mid-session): 87 hits in 7 days on 8 nodes, every one from a datacenter (Datacamp, DigitalOcean, Oracle), none from GR or a residential network.
   rule_cve_php_multipart_oom = "block", -- CVE-2026-109618 (GHSA-w8hw-w9fx-j79w; also the OOM producer of CVE-2026-109619, GHSA-6wmf-4rv5-p3rp): PHP < 8.2.35/8.3.36/8.4.27/8.5.12 unauth RCE via out-of-memory during the startup multipart parse (mod_php confirmed). Keyed on the body shapes the advisory names, on a multipart POST: a part with >16 header lines (PART_HEADERS), >=128 empty-filename file controls (EMPTY_FILES), a file part's name nested >16 levels or a plain field's >32 (NESTING). Real forms send none of them (fastest FP lever: a per-host/path WAF exclude for 10021, which also covers the body burn-in). Armed like every WAF_CVE block rule: the exploit needs many attempts (AC:H), and the 6h ban on the first one stops the rest. Not a substitute for the PHP update.
   rule_cve_php_multipart_no_length = "block", -- CVE-2026-109618, the fourth shape: a multipart POST with no Content-Length (NO_CL) that nginx streams to the origin as it is (cfm.lua no_body_length: a body the edge never read — a failed HTTP/3 read, a streaming path off the body allowlist; a body read in full first goes upstream with a real Content-Length). Edge block, autoblock held per rule (RULE_10022 = 0): a non-browser client that streams multipart chunked (Go io.Pipe, curl -F f=@-, Java chunked mode) sends the same shape, and a 6h ban of it (and its NAT) is the wrong answer. Runs late, with 10019/10020, so the held hit cannot take the ban from an armed rule.
   rule_cve_php_upload_progress = "block", -- CVE-2026-109619 (GHSA-6wmf-4rv5-p3rp) as PHP2Shell exploits it: a multipart field (or file part) named PHP_SESSION_UPLOAD_PROGRESS, any case, with neither a same-site Referer nor a same-site Origin (NO_REFERER / XSITE), or with one but no same-site Sec-Fetch-Site (NO_FETCH_METADATA: the scanner forged a same-site Referer here): block; a browser's own upload-progress form sends all three (SAME_SITE) and is logonly. Source: Imunify360 ruleset 8.85 (77866818 / 77236259), which caught the tool on this fleet on 2026-10-21 after it passed the edge; Origin and Fetch Metadata are our additions (a browser sends both on a POST; under Referrer-Policy: no-referrer the Origin is "null", which with Sec-Fetch-Site same-origin is SAME_SITE; Sec-Fetch-Site same-site also accepts a www./sibling host). The name is read from the multipart parse (PHP joins a name split across header lines). Armed: a scanner hitting many sites is what it bans. Runs in step 0 after 10021 and is enforced in the body burn-in (cfm.lua BURNIN_ENFORCE_IDS). Not a substitute for session.upload_progress.enabled = 0 and the PHP update.
@@ -258,12 +258,13 @@ local CFG = {
   rule_cve_pixelyoursite_session_xss = "block", -- CVE-2026-1844 / -1841 / -109987, the session copies PixelYourSite fills on a session's first request: the raw request path (landing page), the host parse_url takes from the Referer (traffic source) and the utm_* query fields (UTMs), with the same executable-markup / attribute-breakout tests as 10025. These are request parts every site sees, so a scanner or link checker can trip them without the plugin: edge 403 only, autoblock held per rule (HoldAutoblock, RULE_10026 = 0). Runs late with the other held rules.
   rule_cve_magento_polyshell = "block", -- CVE-2026-48356 "PolyShell": Magento Open Source / Adobe Commerce unauth arbitrary file upload through a cart item's custom option `file_info` (base64 file, attacker's name and extension). Blocks a cart-save request (REST cart-items routes for guest / customer / admin carts, the quote save PUT …/carts/<id>, sync / async / async-bulk, route read from $uri and the raw path; SOAP naming a cart or cart-item repository) carrying custom_options, file_info AND base64_encoded_data in its JSON keys, XML element / attribute names (SOAP is XML whatever its type) or query / form-field bracket keys (a multipart POST reaches Magento's input through $_POST), in any spelling Magento reads as them (it drops `_` and ignores case; FILE_INFO). Source: Sansec, Magento's own code, the 2026-10-29 attack on orion. Armed: no legitimate client sends a file this way.
   rule_cve_magento_polyshell_unseen = "block", -- CVE-2026-48356, the inferences, 403 with the autoblock held per rule (HoldAutoblock, RULE_10028 = 0). On a cart-save request 10027 could not read (late with the other held rules; right after 10027 in cfm.lua's burn-in second pass): a body the edge did not hold whole (OVERSIZE: cut past waf_body_max_len or declared but unread, with custom_options in view or on the guest / customer cart-save routes; on SOAP naming a cart service), an XML entity declaration (XML_ENTITY), or a JSON / XML body the scan cannot read as Magento would (UNREADABLE). Late, logonly: the same three names on a web API request that saves no cart (FILE_INFO_ELSEWHERE: an order an integration writes back can carry them, and no file is written there).
+  rule_cve_fabrik_listfilter_eval = "logonly", -- CVE-2026-67282 (Fabrik for Joomla 1.0.0–4.6.7, fixed in 4.7.2 with CVE-2026-66915): unauth RCE through the list filter, which runs `<table>___<element>[value]` as PHP when the element also carries `[eval]` set. Fires on a request field (query, urlencoded or multipart POST) with an `[eval]` index on a Fabrik request (option=com_fabrik, `fabrik` in the path, or the element name's `___`): EVAL_ARG / EVAL_BODY for a set value, EVAL_ZERO (always logonly) for `=0`. Source: the dmkomotinis.gr compromise (earth, 2026-11-12); a 7-day read of all 8 edge nodes' access.log found `[eval]` only from that attacker. Logonly through burn-in; the payloads themselves are rule 332's (block).
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
-  rule_php_file_body = "logonly", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Logonly through burn-in; family WAF_PHP_WEBSHELL_BODY.
+  rule_php_file_body = "block", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Promoted logonly→block 2026-11-17 (burn-in: 289 hits / 269 IPs in 7 days, the PHPUnit eval-stdin.php sweep and a PUT dropper, 0 FP); family WAF_PHP_WEBSHELL_BODY, ban held per rule (HoldAutoblock, RULE_416 = 0): ~40 bans a day. Recorded late, with the held rules.
   rule_upload_content_deep = "logonly", -- 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole (added 2026-10-09; burn-in, then promote)
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
@@ -401,7 +402,7 @@ local CFG = {
                                                  --  unwraps it — so 404 never sees a bare hex opener; 437 is its only coverage
                                                  --  for a MARKERLESS hex opener, attack-shaped with ~zero FP. `challenge`
                                                  --  preserves+replays the POST. (logonly→challenge 2026-06-25; narrowed F16.)
-  rule_php_encoded_opener_b64     = "challenge_v2", -- encoded `<?php` opener — base64 form (`PD9waHA` at a base64 value boundary).
+  rule_php_encoded_opener_b64     = "block", -- encoded `<?php` opener — base64 form (`PD9waHA` at a base64 value boundary). Promoted challenge_v2→block 2026-11-17 (14 hits in 7 days, all exploits: Bricks render_element, WP Project Manager pm/v2); family WAF_BACKDOOR, armed (6h ban). Still logonly on the pre-auth admin-ajax / admin-post surface (WPCode saves send it there) and off on the rest of /wp-admin/.
                                                  -- Split out of rule 437 into its own id (438) on 2026-07-02 so its hit
                                                  --  stream is observable separately from the FP-prone URL form above. Unlike
                                                  --  URL-encoding, a browser NEVER base64-encodes a form field, and the match
@@ -706,6 +707,7 @@ local RULE_IDS = {
   rule_cve_pixelyoursite_session_xss = 10026,
   rule_cve_magento_polyshell = 10027,
   rule_cve_magento_polyshell_unseen = 10028,
+  rule_cve_fabrik_listfilter_eval = 10029,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
@@ -1544,17 +1546,8 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 14) JS prototype pollution ────────────────────────────────────────────
-  do
-    local mode = rule_mode(CFG.rule_js_proto, "logonly")
-    if mode ~= "disabled" then
-      local tag = det.detect_js_proto(args, body, get_norm_ab())
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_JS_PROTO:" .. tag, ttl, mode, RULE_IDS.rule_js_proto) then goto done end
-      end
-    end
-  end
+  -- (14, JS prototype pollution, runs late with the held block rules: see
+  -- "JS prototype pollution (303)" before traversal.)
 
   -- ── 15) Raw PHP webshell body (scored) ───────────────────────────────────
   do
@@ -1644,6 +1637,20 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_87902:WORDPRESS:" .. tag, ttl, mode, RULE_IDS.rule_cve_wp_pagename_traversal) then goto done end
+      end
+    end
+  end
+
+  -- Fabrik list-filter eval (CVE-2026-67282), logonly through its burn-in.
+  -- EVAL_ZERO is recorded logonly whatever the mode: `[eval]=0` runs nothing.
+  do
+    local mode = rule_mode(CFG.rule_cve_fabrik_listfilter_eval, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_fabrik_listfilter_eval(uri, m_lower, args, body, headers, get_norm_ab())
+      if tag then
+        if tag == "EVAL_ZERO" then mode = "logonly" end
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_67282:FABRIK:" .. tag, ttl, mode, RULE_IDS.rule_cve_fabrik_listfilter_eval) then goto done end
       end
     end
   end
@@ -1812,17 +1819,8 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 22) XXE ───────────────────────────────────────────────────────────────
-  do
-    local mode = rule_mode(CFG.rule_xxe, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_xxe(body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
-      end
-    end
-  end
+  -- (22, XXE, runs late with the held block rules: see "XXE (307)" before
+  -- traversal.)
 
   -- ── 23) CRLF / HTTP response splitting ───────────────────────────────────
   do
@@ -2477,10 +2475,10 @@ local function check_impl(ctx, st)
     -- admin-post.php surface, keep 437 (url/entity form) fully suppressed
     -- and record the base64 opener (438) at LOGONLY only — visibility into
     -- pre-auth base64 smuggling with ZERO enforcement (no challenge, no
-    -- block; and a logonly hit never reaches the autoblock feed — which
-    -- ingests only action="block" (waf_security_register.go), and no
-    -- WAF_BACKDOOR rule is block-tier — so no ban, even though the
-    -- WAF_BACKDOOR family itself is autoblock-armed). Watch that
+    -- block; and a logonly hit never reaches the autoblock feed, which
+    -- ingests only action="block" (waf_security_register.go) — so no ban,
+    -- although 438 itself is block-tier elsewhere since 2026-11-17 and its
+    -- WAF_BACKDOOR family is autoblock-armed). Watch that
     -- logonly stream (rule 438 on an admin-ajax URI) to separate real
     -- attacks from WPCode noise before any promotion — deliberately logonly
     -- regardless of 438's global tier during this burn-in. The rest of
@@ -2567,7 +2565,7 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 60d) PHP code in the query string (332, logonly) ────────────────────
+  -- ── 60d) PHP code in the query string (332, block, armed) ──────────────
   -- Late, beside 331: an eval payload can also carry a marker an armed
   -- block rule reads (php://, a SQLi breakout), and that rule keeps the
   -- headline. The detector takes the RAW query (to the request-line budget):
@@ -2585,26 +2583,8 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 60e) A PHP file as the raw body (416, logonly) ─────────────────────
-  -- The body a php://input dropper writes to disk, which 402 (multipart)
-  -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
-  -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
-  -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
-  -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
-  -- /remote.php/webdav): a sync client uploads a user's .php files there
-  -- as their raw body.
-  do
-    local mode = rule_mode(CFG.rule_php_file_body, "logonly")
-    local webdav = (m_lower ~= "post") and lower(uri or ""):find("/remote%.php/") ~= nil
-    if mode ~= "disabled" and (body or "") ~= "" and not webdav
-       and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
-      local tag = det.detect_php_file_body(body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WEBSHELL_BODY:BODY_IS_" .. tag, ttl, mode, RULE_IDS.rule_php_file_body) then goto done end
-      end
-    end
-  end
+  -- (60e, a PHP file as the raw body (416), runs late with the held block
+  -- rules: see "A PHP file as the raw body (416)" before traversal.)
 
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
@@ -2751,6 +2731,61 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_BACKDOOR:PLUGIN_CMD:" .. tag, ttl, mode, RULE_IDS.rule_plugin_dropper_cmd) then goto done end
+      end
+    end
+  end
+
+  -- ── JS prototype pollution (303) — block, ban held, so late ─────────────
+  -- Block since 2026-11-17 (the React2Shell sweep) with its ban held per rule
+  -- (HoldAutoblock, RULE_303 = 0); a held block rule shadows armed ones
+  -- (CLAUDE.md §6), so it runs here, after every armed block family. It was
+  -- step 14.
+  do
+    local mode = rule_mode(CFG.rule_js_proto, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_js_proto(args, body, get_norm_ab())
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_JS_PROTO:" .. tag, ttl, mode, RULE_IDS.rule_js_proto) then goto done end
+      end
+    end
+  end
+
+  -- ── XXE (307) — block, ban held, so late ─────────────────────────────────
+  -- Block since 2026-11-17 with its ban held per rule (HoldAutoblock,
+  -- RULE_307 = 0) through a burn-in; late for the same reason as 303. It was
+  -- step 22.
+  do
+    local mode = rule_mode(CFG.rule_xxe, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_xxe(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
+      end
+    end
+  end
+
+  -- ── A PHP file as the raw body (416) — block, ban held, so late ─────────
+  -- Block since 2026-11-17 with its ban held per rule (HoldAutoblock,
+  -- RULE_416 = 0); a held block rule shadows armed ones (CLAUDE.md §6), so it
+  -- runs here, after every armed block family.
+  -- The body a php://input dropper writes to disk, which 402 (multipart)
+  -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
+  -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
+  -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
+  -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
+  -- /remote.php/webdav): a sync client uploads a user's .php files there
+  -- as their raw body.
+  do
+    local mode = rule_mode(CFG.rule_php_file_body, "logonly")
+    local webdav = (m_lower ~= "post") and lower(uri or ""):find("/remote%.php/") ~= nil
+    if mode ~= "disabled" and (body or "") ~= "" and not webdav
+       and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
+      local tag = det.detect_php_file_body(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_PHP_WEBSHELL_BODY:BODY_IS_" .. tag, ttl, mode, RULE_IDS.rule_php_file_body) then goto done end
       end
     end
   end

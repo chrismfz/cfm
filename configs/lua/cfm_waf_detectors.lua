@@ -856,6 +856,55 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   return nil
 end
 
+-- Rule 10029 — CVE-2026-67282, Fabrik (Joomla) 1.0.0–4.6.7 unauth RCE. Source:
+-- the operator's incident report for dmkomotinis.gr (earth, 2026-11-12) and
+-- that site's edge log: the list filter takes `<table>___<element>[value]`
+-- and, when the same element carries `[eval]` set, runs the value as PHP. The
+-- attacker sent `…___aiton[value]=1;&…___aiton[eval]=1` probes, then the
+-- file-writing payloads rule 332 reads. 7 days of edge access.log on all 8
+-- edge nodes (2026-11-17, ~17 800 Fabrik requests): `[eval]` came only from
+-- that attacker, `=0` included, so the legitimate list filter never sends it.
+--
+-- Fires on a request field (query, urlencoded or multipart POST: Fabrik
+-- reads $_REQUEST) whose key has an `[eval]` index, on a Fabrik request: an
+-- `option` field `com_fabrik`, `fabrik` in the path (the SEF
+-- /component/fabrik/ route) or the element name's `___` (a menu-alias route
+-- carries neither of the others). Tags: EVAL_ARG / EVAL_BODY for a set value
+-- (not empty, not "0"), EVAL_ZERO for `=0` (the caller keeps that one
+-- logonly whatever the rule's mode: it runs nothing).
+--
+-- It walks each_request_field (the reader under php_request_fields) itself,
+-- not php_request_fields: that one registers `x[eval]` under `x`
+-- (php_var_name), and the `[eval]` index is the whole signal here.
+function _M.detect_cve_fabrik_listfilter_eval(uri, method, args, body, headers, _nab)
+  -- value_word = true: a multipart field name is not url-encoded, so `eval`
+  -- shows in _nab there too, and a multipart POST is not parsed blind.
+  if not field_gate_open(method, args, body, headers, _nab, "eval", true) then return nil end
+  local route = has(lower(uri or ""), "fabrik")
+  -- Nothing names Fabrik in what the edge saw whole: no parse.
+  if not route and _nab and not (has(_nab, "fabrik") or has(_nab, "___")) then
+    local bn = body_budget(headers)
+    if #(args or "") <= bn and #(body or "") <= bn then return nil end
+  end
+  local set_src, zero, seen_eval_key = nil, false, false
+  each_request_field(method, args, body, headers, function(k, v, src, enc)
+    local lk = lower(k)
+    if enc and v:find("[%%+]") then v = _form_unescape(v) end
+    if not route and lk:match("^%s*option$") and lower(v):match("^%s*com_fabrik") then route = true end
+    if not lk:find("%[%s*eval%s*%]") then return end
+    seen_eval_key = true
+    if not route and lk:find("___", 1, true) then route = true end
+    if v == "" then return end
+    -- Only the exact string "0" is falsy in PHP (" 0", "0 " and "00" are not).
+    if v == "0" then zero = true; return end
+    if not set_src or src == "args" then set_src = src end
+  end)
+  if not seen_eval_key or not route then return nil end
+  if set_src then return set_src == "args" and "EVAL_ARG" or "EVAL_BODY" end
+  if zero then return "EVAL_ZERO" end
+  return nil
+end
+
 -- A data: URI in the request PATH is a client-side artifact, not an attack: a
 -- browser or link-preview crawler (e.g. facebookexternalhit) resolved an inline
 -- `data:...` URI as a RELATIVE url, so the whole data: payload — a base64 image/
@@ -987,8 +1036,33 @@ local function is_known_binaryish_uri(uri)
   return false
 end
 
+-- The WordPress Optimization Detective beacon (the Performance Lab plugin's
+-- url-metrics:store REST route): every visitor's browser posts it, and on
+-- enateam.gr it carried control bytes for Greek visitors on every page
+-- (2026-11-11..17). Exactly that route: the pretty permalink (with at most
+-- one language segment in front, /en/wp-json/…), or ?rest_route= naming it on
+-- the front controller. Anchored, or any request could skip 601 by carrying
+-- the string (`/x.php/wp-json/…` reaches x.php as PATH_INFO, and a
+-- rest_route= on /wp-login.php routes nothing).
+local function is_od_url_metrics(uri, args)
+  local OD_ROUTE = "/optimization-detective/v1/url-metrics:store"
+  local u = lower(uri or "")
+  local pre = u:match("^(.-)/wp%-json" .. OD_ROUTE:gsub("%-", "%%-") .. "/?$")
+  if pre and (pre == "" or pre:match("^/[%w_%-]+$")) then return true end
+  if not (u == "/" or u == "/index.php" or u:match("^/[%w_%-]+/?$") or u:match("^/[%w_%-]+/index%.php$")) then
+    return false
+  end
+  local rr = ("&" .. (args or "")):match("&rest_route=([^&]*)")
+  if not rr then return false end
+  rr = lower(_form_unescape(rr))
+  return rr == OD_ROUTE or rr == OD_ROUTE:sub(2) or rr == OD_ROUTE .. "/"
+end
+
 function _M.detect_ctrl_chars(args, body, headers, uri)
   if is_known_binaryish_uri(uri) then
+    return false
+  end
+  if is_od_url_metrics(uri, args) then
     return false
   end
 
@@ -3702,9 +3776,12 @@ function _M.detect_ssrf_proto(args, body, _ns)
   if s:match("://0x[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]%f[^0-9a-f]") then
     return "SSRF_HEX_IP"
   end
-  -- Decimal longform IP inside a URL: ://2130706433 (= 127.0.0.1)
-  if s:match("://[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]%f[^0-9]") then
-    return "SSRF_DWORD_IP"
+  -- Decimal longform IP inside a URL: ://2130706433 (= 127.0.0.1). Only a
+  -- value an IPv4 address can be (<= 4294967295): a 10-digit number above it
+  -- is no address, and a shop admin searching `https://4932498770` (a phone
+  -- number pasted into the link box) was challenged for it (2026-11-16).
+  for d in s:gmatch("://([0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])%f[^0-9]") do
+    if tonumber(d) <= 4294967295 then return "SSRF_DWORD_IP" end
   end
 
   return nil

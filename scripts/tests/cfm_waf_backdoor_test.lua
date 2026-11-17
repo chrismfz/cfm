@@ -65,7 +65,8 @@ end
 -- into 437 + 438 (base64) on 2026-07-02; audit F16 then NARROWED 437 to the JS
 -- `\x` hex-escape form only (the URL/HTML-entity/JS-unicode forms were removed
 -- as legit-content encodings). BOTH ship at `challenge_v2` since 2026-09-23
--- (whole challenge tier moved; 438 is a candidate for `block` after a burn-in).
+-- (whole challenge tier moved); 438 was promoted to `block` on 2026-11-17 after
+-- a 7-day fleet read (14 hits, every one an exploit).
 -- Assert the built-in CFG defaults before any set_rule() mutation, so a later
 -- promotion is a deliberate edit here rather than silent drift.
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -74,8 +75,8 @@ do
   local snap = waf.get_config()
   check(snap.rule_php_encoded_opener == "challenge_v2",
         "437 shipped default mode is challenge_v2")
-  check(snap.rule_php_encoded_opener_b64 == "challenge_v2",
-        "438 shipped default mode is challenge_v2")
+  check(snap.rule_php_encoded_opener_b64 == "block",
+        "438 shipped default mode is block")
   -- 430 and 432 both stay logonly. 430: hand-written `AddType x-httpd-php` is a
   -- legit shared-hosting directive (needs prose-gating first). 432: WAF_BACKDOOR
   -- is high-risk, so a challenge here converts to block for cleared clients and
