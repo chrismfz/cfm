@@ -686,19 +686,25 @@ request still counts in the IP's total, so it dilutes the 403 share.
 **Origin 403 on wp-admin AJAX, and a traffic rule's 403 (decided
 2026-11-17):** two more 403s left both counters, after a week's read of the
 8 edge nodes found Greek clients banned by them. (a) The ORIGIN's 403 to
-`admin-ajax.php` (root or one install directory down) whose Referer is a
-`/wp-admin/` page of the same host, unless the query's `action` names a
-credential (`isWPAdminAjaxOrigin403`): a shop's own admin on titan, whose open
-order list kept polling Barcode Scanner's AJAX after the session expired, was
-banned at 317 such 403s. The Referer is the client's to forge; what a forger
-gains is admin-ajax refusals that no longer count, while the WAF and
-malicious-path counters still see them. (b) The edge's 403 for a request only
+`admin-ajax.php` (root or one install directory down, not the `index.php`
+PATH_INFO pseudo-directory) with a small non-empty body (1-128 bytes: the
+app's own `-1`/`0` or a plugin's JSON error, never an origin WAF's block page)
+whose Referer is a `/wp-admin/` page of the same host and install, unless any
+`action` key names a credential (`isWPAdminAjaxOrigin403`): a shop's own admin
+on titan, whose open order list kept polling Barcode Scanner's AJAX after the
+session expired, was banned at 317 such 403s. The Referer is the client's to
+forge; what a forger gains is small app-answered admin-ajax refusals that no
+longer count, while the WAF and malicious-path counters still see them, and an
+origin WAF's refusals (ModSecurity, Imunify, Wordfence pages) keep counting. (b) The edge's 403 for a request only
 a traffic rule blocked: cfm.lua logs it as `$cfm_upstream = cfm_block_rule`
 (IP / vhost / WAF / edge-ban refusals stay `cfm_block`), and the counters
 skip it (`isRuleBlock403`): on rigel a rule blocking WhatsApp's fetcher on
 one shop turned a shopper's link-preview retries into an hour's nft ban of
 their home IP. An edge on older Lua still writes `cfm_block` there, so its
-rule blocks keep counting until it is upgraded.
+rule blocks keep counting until it is upgraded. One predicate (`skip403`)
+decides all of this, and the per-IP challenge counters (`CHALLENGE_RPS_4XX`,
+`CHALLENGE_ERR_RATIO`) read it too: the rigel shopper had also been put under
+`CHALLENGE_ERR_RATIO` by the rule's own 403s.
 
 **Gate for `enforce`:** the good-bot fix deployed (above), the
 logged-in-origin-403 case decided, then a fresh read of every node shows no

@@ -70,11 +70,14 @@ back-filled here — see the git/PR history for that period.
 ### Changed
 - **The web detector's 403 counters no longer ban a site's own admin, or a
   visitor a traffic rule already blocks.** `403_flood` (`IP403_COUNT`) and
-  `40x_combo` (`IP40X_COMBO`) skip two more kinds of 403. (1) The 403 that
-  WordPress itself gives to `admin-ajax.php` when the Referer is a `/wp-admin/`
-  page of the same site. This is an open admin tab still polling after its
-  session expired: on titan a shop's admin was nft-banned for an hour, both of
-  their sites with them. A login-type `action` keeps counting. (2) The edge's
+  `40x_combo` (`IP40X_COMBO`), and the per-IP `CHALLENGE_RPS_4XX` /
+  `CHALLENGE_ERR_RATIO` challenges, skip two more kinds of 403. (1) The small
+  403 (up to 128 bytes) that WordPress or a plugin itself gives to
+  `admin-ajax.php` when the Referer is a `/wp-admin/` page of the same site.
+  This is an open admin tab still polling after its session expired: on titan
+  a shop's admin was nft-banned for an hour, both of their sites with them. A
+  login-type `action` and an origin WAF's block page (ModSecurity, Imunify,
+  Wordfence) keep counting. (2) The edge's
   403 for a request that only a traffic rule blocks, now logged as
   `up=cfm_block_rule`; IP, vhost, WAF and edge-ban blocks stay `cfm_block`. On
   rigel a rule blocking WhatsApp's fetcher on one shop turned a shopper's

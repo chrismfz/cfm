@@ -1772,6 +1772,10 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		p = p[:i]
 	}
 
+	// skip: a 403 none of the error counters below count (skip403), worked
+	// out once per record.
+	skip := skip403(rec)
+
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
 		if e.cfg.AbuseShadow && e.cfg.AbuseShadowOrigin403 && isOrigin403POST(rec, p) {
@@ -1791,13 +1795,9 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 			// so counting them let a customer browsing their OWN site cross
 			// IP403_COUNT and self-block (WEB/403). Real 403-floods hit
 			// forbidden non-static paths (wp-login, /.git, config files).
-			// So is WordPress's own 403 to a REST API call: the app's answer
-			// to a client it knows (isWPRestOrigin403), or to an admin-ajax
-			// poll from its own wp-admin (isWPAdminAjaxOrigin403). And so is
-			// the edge's 403 for a traffic rule's block (isRuleBlock403): the
-			// operator's rule already refuses that request.
-			if !isStaticAssetPath(p) && !isWPRestOrigin403(rec) &&
-				!isWPAdminAjaxOrigin403(rec) && !isRuleBlock403(rec) {
+			// So is the app's own 403 to a client it knows and the edge's
+			// 403 for a traffic rule's block (skip403).
+			if !isStaticAssetPath(p) && !skip {
 				if b.ips403 == nil {
 					b.ips403 = make(map[string]int)
 				}
@@ -2016,8 +2016,10 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// Per-IP challenge counters (only allocate maps if a related threshold is enabled)
 	if rec.IP != "" {
-		// status class counters
-		if (e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 4 {
+		// status class counters. A skip403 403 is no client error here either:
+		// on 2026-11-17 a traffic rule's refusals put a shopper's home IP
+		// under CHALLENGE_ERR_RATIO next to the 403_flood ban (rigel).
+		if (e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 4 && !skip {
 			if b.ips4xx == nil {
 				b.ips4xx = make(map[string]int)
 			}
@@ -2114,11 +2116,10 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// 40x combo counters (403+404) per IP, with optional ignore prefixes + unique-path gating.
 	// Static asset paths are excluded to reduce false positives from missing files.
-	// The 403s 403_flood skips are skipped here too (isWPRestOrigin403,
-	// isWPAdminAjaxOrigin403, isRuleBlock403); a 404 there still counts.
+	// The 403s 403_flood skips are skipped here too (skip403); a 404 there
+	// still counts.
 	if rec.IP != "" && e.cfg.IP40xComboCount > 0 && (rec.Status == 403 || rec.Status == 404) {
-		if !isStaticAssetPath(p) && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) &&
-			!isWPRestOrigin403(rec) && !isWPAdminAjaxOrigin403(rec) && !isRuleBlock403(rec) {
+		if !isStaticAssetPath(p) && !hasAnyPrefix(p, e.cfg.Ignore40xPrefixes) && !skip {
 			if b.ips40x == nil {
 				b.ips40x = make(map[string]int)
 			}
