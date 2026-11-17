@@ -18,6 +18,13 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **The Apache TSV fallback log no longer fills the disk on cPanel.**
+  `access_cfm_tsv.log` (the web detector's file source when the edge socket
+  is off) lives in `/var/log/apache2/`, which CFM left to the distro's
+  logrotate. cPanel has none there: cpanellogd renames the log at 2 GB and
+  never deletes the copies, which had reached 316 GB on titan, 207 GB on mars
+  and 175 GB on orion. The hourly `/etc/cron.hourly/cfm-logrotate` now deletes
+  those copies after a day and truncates the live file past 512 MB.
 - **`detectors.conf`: a quoted value with an inline comment now reads as the
   value.** `BLOCK = "15m"   ; stage 3 …` was read as the text `15m"   ; stage
   3 …`, an invalid TTL, so the section's block mode was silently `no`. The

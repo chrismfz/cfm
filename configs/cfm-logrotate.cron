@@ -15,6 +15,27 @@ set -e
 
 CONF=/etc/logrotate.d/logrotate-cfm
 
+# The Apache TSV fallback log (httpd-cfm.conf, the web detector's file source
+# when the edge socket is off: `cfm dnat off`). logrotate-cfm leaves
+# /var/log/apache2 to the distro's apache2 block, but cPanel has none: its
+# cpanellogd renames a log past 2 GB to <name>.YYYY_MM_DD[.NN] and never
+# deletes the copies. On 2026-11-17 that held 316 GB on titan, 207 GB on mars
+# and 120 GB on orion; virgo's live file had reached 26 GB unrotated. Its only
+# reader follows the live file, so keep a day of copies and cap the live file
+# by truncating it in place (Apache opens it O_APPEND, so writes go on at the
+# new end; the tailer reopens a file that shrank). Not a logrotate block: on a
+# distro whose apache2 config globs *.log, listing the path again is a
+# "duplicate log entry" error that aborts the whole run.
+TSV_MAX_BYTES=536870912
+for f in /var/log/apache2/access_cfm_tsv.log /usr/local/apache/logs/access_cfm_tsv.log; do
+    [ -f "$f" ] || continue
+    find "$(dirname "$f")" -maxdepth 1 -type f -name "$(basename "$f")?*" -mmin +1440 -delete 2>/dev/null || true
+    sz=$(stat -c %s "$f" 2>/dev/null || echo 0)
+    if [ "$sz" -gt "$TSV_MAX_BYTES" ]; then
+        : > "$f" 2>/dev/null || true
+    fi
+done
+
 [ -r "$CONF" ] || exit 0
 command -v logrotate >/dev/null 2>&1 || exit 0
 
