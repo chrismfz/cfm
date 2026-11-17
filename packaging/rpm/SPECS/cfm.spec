@@ -118,7 +118,6 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENS
 %attr(0600,root,root) %config(noreplace) /etc/cfm/kernsec.conf
 %attr(0600,root,root) %config(noreplace) /etc/cfm/lsm.conf
 %config(noreplace) /etc/cfm/webdetector_malpaths.txt
-%config(noreplace) /etc/cfm/webdetector_challenge_paths.txt
 %config(noreplace) /etc/cfm/webdetector_challenge_exclude.txt
 %config(noreplace) /etc/cfm/notify.conf
 %config(noreplace) /etc/cfm/cfm.allow

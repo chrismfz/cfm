@@ -680,7 +680,7 @@ func init() {
 
 			// Challenge-only paths (like MALPATH but for CHALLENGE action)
 			ChallengePathsEnabled: kvBool(kv, "CHALLENGE_PATHS", false),
-			ChallengePathsFile:    kvStrClean(kv, "CHALLENGE_PATHS_FILE", "/etc/cfm/webdetector_challenge_paths.txt"),
+			ChallengePathsFile:    kvStrClean(kv, "CHALLENGE_PATHS_FILE", "/etc/cfm/webdetector_malpaths.txt"),
 			ChallengePathsCount:   kvInt(kv, "CHALLENGE_PATHS_COUNT", 1),
 			ChallengePathsTTL:     kvDur(kv, "CHALLENGE_PATHS_TTL", 30*time.Minute),
 

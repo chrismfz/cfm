@@ -175,3 +175,64 @@
 # would trip the malpath flood BAN), .php.example / .php.dist (a WebDAV sync
 # client walking a dev tree cannot solve a challenge). Matching is a substring
 # of the path, so /db.sql also covers /db.sqlite.
+
+# ─── VCS / DEV-TOOL / CI / CLOUD-CREDENTIAL PROBES (added 2026-11-18) ────────
+# One day of titan's edge log: 55-145 distinct IPs each asking for these
+# (~1 870 requests for /.git/ paths besides config/HEAD alone), and every 200
+# was a site's catch-all page (same byte size for every path on the host).
+# None is a URL a browser fetches. Directory entries keep both slashes, so
+# /.git/ does not match /.github/ or /.gitignore.
+/.git/
+/.github/
+/.svn/
+/.hg/
+/.bzr/
+/.ssh/
+/.aws/
+/.azure/
+/.docker/
+/.kube/
+/.terraform/
+/.config/
+/.vscode/
+/.idea/
+# AI-tool key stashes (shell_gpt, llm, aichat ... read their keys from these)
+/.claude/
+/.cursor/
+/.codex/
+/.continue/
+/.anthropic/
+/.openai/
+/.git-credentials
+/.npmrc
+/.pypirc
+/.netrc
+/.pgpass
+/.my.cnf
+/.s3cfg
+/.boto
+/.dockercfg
+/.ds_store
+/sftp-config.json
+/docker-compose.
+/.travis.yml
+/.gitlab-ci.yml
+/.drone.yml
+/bitbucket-pipelines.yml
+/azure-pipelines.yml
+/serverless.yml
+/serverless.yaml
+/parameters.yml
+/actuator/
+/laravel.log
+/wp-config.php.swp
+/config.php.bak
+/configuration.php.bak
+/configuration.php.old
+/server.key
+/master.key
+/privatekey.key
+# No leading slash: also covers /_phpinfo.php and /old_phpinfo.php.
+phpinfo.php
+# From orion's retired webdetector_challenge_paths.txt.
+/wso1337.php

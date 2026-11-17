@@ -47,6 +47,20 @@ chmod 0700 /etc/cfm/detectors.d
 # same lock-down as kernsec.conf.
 [ -f /etc/cfm/lsm.conf ] && chmod go-rwx /etc/cfm/lsm.conf || true
 
+# webdetector_challenge_paths.txt is retired (2026-11-18): CHALLENGE_PATHS has
+# read webdetector_malpaths.txt since 2026-03-12, and the package no longer
+# ships it. dpkg leaves a dropped conffile behind, so clean it up here — unless
+# a live config still points at it. One with entries is kept as .dpkg-old
+# (rpm's .rpmsave equivalent) instead of being deleted.
+retired=/etc/cfm/webdetector_challenge_paths.txt
+if [ -f "$retired" ] && ! grep -qs 'webdetector_challenge_paths' /etc/cfm/detectors.conf /etc/cfm/detectors.d/*.conf; then
+    if grep -qvE '^[[:space:]]*(#|$)' "$retired"; then
+        mv -f "$retired" "$retired.dpkg-old" 2>/dev/null || true
+    else
+        rm -f "$retired" 2>/dev/null || true
+    fi
+fi
+
 # Per-server API/MaxMind secrets overlay. Seed an editable 0600 template on
 # first install only; never overwrite an operator's existing file. It is
 # deliberately NOT a dpkg conffile, so upgrades leave it untouched.

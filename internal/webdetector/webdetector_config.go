@@ -518,7 +518,7 @@ func (c *Config) FillDefaults() {
 	}
 
 	if c.ChallengePathsFile == "" {
-		c.ChallengePathsFile = "/etc/cfm/webdetector_challenge_paths.txt"
+		c.ChallengePathsFile = "/etc/cfm/webdetector_malpaths.txt"
 	}
 	if c.ChallengePathsCount <= 0 {
 		c.ChallengePathsCount = 1 // challenge on first hit by default

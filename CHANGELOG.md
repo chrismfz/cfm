@@ -17,7 +17,31 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **The malpath list catches the dev-tool and credential probes it missed.**
+  `webdetector_malpaths.txt` gains 51 entries: VCS directories as a whole
+  (`/.git/`, `/.svn/`, `/.hg/`, `/.bzr/`; only `/.git/config` and `/.git/HEAD`
+  were listed), `/.github/`, cloud/dev credential stores (`/.aws/`, `/.ssh/`,
+  `/.docker/`, `/.kube/`, `/.azure/`, `/.terraform/`, `/.config/`, `.npmrc`,
+  `.pypirc`, `.netrc`, `.pgpass`, `.my.cnf`, `.s3cfg`, `.git-credentials`, …),
+  AI-tool key directories (`/.claude/`, `/.cursor/`, `/.openai/`, …), CI files
+  (`.travis.yml`, `.gitlab-ci.yml`, `docker-compose.*`, …), Spring
+  `/actuator/`, `laravel.log`, `parameters.yml`, `.DS_Store`, private keys and
+  a few config backups. One day of titan's edge log had 55-145 distinct IPs
+  asking for each, and every 200 was a site's catch-all page. They feed both
+  the per-IP malpath challenge and the MALPATH flood ban. An unmodified list
+  is refreshed by the upgrade; a locally edited one is not (rpm writes
+  `.rpmnew`).
+
+### Removed
+- **`/etc/cfm/webdetector_challenge_paths.txt` is gone.** `CHALLENGE_PATHS`
+  has read `webdetector_malpaths.txt` since 2026-03-12, so the file was read by
+  nothing, yet it still shipped and was still the code default: a
+  `detectors.conf` without `CHALLENGE_PATHS_FILE` armed the check with no
+  rules. The default is now `webdetector_malpaths.txt`. On upgrade rpm removes
+  an unmodified copy and keeps an edited one as `.rpmsave`; the deb postinst
+  does the same (`.dpkg-old`), and leaves it alone if a live config still
+  names it.
 
 ## 2026.11.17
 
