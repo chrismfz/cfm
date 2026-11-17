@@ -24,11 +24,12 @@
 
 ## 2. Current picture (update on every read)
 
-*As of 2026-11-10 (read 6).*
+*As of 2026-11-17 (read 7).*
 
-- **Fleet version:** the 8 web nodes run `2026.11.09` (qualityweb, Angie,
+- **Fleet version:** the 8 web nodes run `2026.11.16` (qualityweb, Angie,
   joined on 2026-10-27). The 5 nodes without an edge serve no challenge:
-  mymail, 3deers, saf and watchdog run `2026.10.21`, avglb `2026.11.03`.
+  mymail, 3deers and saf run `2026.10.21`, avglb `2026.11.03`, watchdog
+  `2026.11.16`.
 - **Live since release 2026.09.29** (deployed 2026-09-29/30):
 
   | PR | What |
@@ -75,6 +76,11 @@
   context on `solver_farm` findings, master plan candidate 3), #1645 (Meta
   crawlers get their own image throttle budget) and #1646 (the
   challenge-exclude file skips google-xrawler from Google's own network).
+
+  Releases 2026.11.10 to 2026.11.16 added, in this area: #1652 (`linux_sw`
+  +20 and the log-only `rf` reading, live from 11-11 ~01:00), a manual
+  vhost challenge armed at v2 unless told v1, and WAF rule 102 at
+  `challenge_v2` (2026.11.14).
 - **What bites today:** operator-armed fingerprint / country-ASN policies
   from cfm-web (still no `v2=geo` line in read 3's week), the WAF challenge
   tier at `challenge_v2`, manual vhost v2 tiers, the automatic vhost
@@ -92,7 +98,12 @@
   qualityweb, rigel, titan and orion, against 23 GR/CY consumer-ISP solves
   with that profile (proposal (a) in read 6). `linux_sw` shipped with the
   change that approved it (operator, 2026-11-10), so the hs-90 Linux
-  profile now scores 110.
+  profile now scores 110. **Read 7: 52 % fleet-wide** (`linux_sw` rejected
+  ~166 000 farm solves). Within a day the farm moved its passes to Windows
+  and Mac UAs with no software renderer, at **hs 0**: 59 795 Windows and
+  79 121 Mac passes on `c28caa00` after 11-11. Each tell buys about a day.
+  Read 7's sizing points at WHO an automatic arm covers instead (proposal
+  (b) in read 7: a per-vhost audience floor).
   The farms' rejects are now device-claim lies (`mobile_hw_lie`,
   `mac_hw_lie`), no longer `outer_zero`. Their passes stay under the fail
   score by design (D5b); stopping the rest is the operator fingerprint
@@ -152,11 +163,12 @@
      2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
      operator cleanup); the shipped `solver_farm` defaults (**decided
      2026-10-27: 180s / 30 / 15**; the fleet moves from 15 to 30).
-- **Next read:** 2026-11-17, after the operator's decisions on read 6's
-  proposals. It watches the farm's hs-90 Linux profile (and whether it
-  flips its UA to Windows), the farm catch rate per node, human rejects
-  under every v2 source, the `solver_farm` humanity lines (GR audiences on
-  fingerprint-blind findings), and the `hid:1` solves on `95070673`.
+- **Next read:** 2026-11-24 (read 8), after the operator's decisions on
+  read 7's proposals. It watches the farm's hs-0 Windows / Mac profile, the
+  catch rate per node, human rejects under every v2 source, the
+  `solver_farm` humanity lines, and, for the audience floor, each vhost's
+  GR/CY share of unchallenged requests and how stable it is. The `hid:1`
+  watch on `95070673` closed in read 7.
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·
@@ -167,14 +179,14 @@
 
 | Node | Edge | Version | `ABUSE_SHADOW` | History kept | ChallengeV2 knobs |
 |---|---|---|---|---|---|
-| earth | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
-| mars | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
-| orion | angie | 2026.11.09 | 1 | 30 d / 1M rows (the 1M cap holds ~6 days) | defaults |
-| qualityweb | angie | 2026.11.09 | 1 (since 2026-11-03) | 30 d / 1M rows | defaults |
-| rigel | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
-| server.speedhost.gr | openresty | 2026.11.09 | 1 (since 2026-09-29) | **7 d** | defaults |
-| titan | openresty | 2026.11.09 | 1 | 30 d / 1M rows | defaults |
-| virgo | angie | 2026.11.09 | 1 | **7 d** | defaults |
+| earth | openresty | 2026.11.16 | 1 | 30 d / 1M rows | defaults |
+| mars | openresty | 2026.11.16 | 1 | 30 d / 1M rows | defaults |
+| orion | angie | 2026.11.16 | 1 | 30 d / 1M rows (the 1M cap holds ~6 days) | defaults |
+| qualityweb | angie | 2026.11.16 | 1 (since 2026-11-03) | 30 d / 1M rows | defaults |
+| rigel | openresty | 2026.11.16 | 1 | 30 d / 1M rows | defaults |
+| server.speedhost.gr | openresty | 2026.11.16 | 1 (since 2026-09-29) | **7 d** | defaults |
+| titan | openresty | 2026.11.16 | 1 | 30 d / 1M rows | defaults |
+| virgo | angie | 2026.11.16 | 1 | **7 d** | defaults |
 
 `[challenge_solver_farm]` on every web node: `WINDOW = 180s`, `MIN_SUBNETS =
 30`, `MIN_SOLVES = 15` (mars in `detectors.d/50-web.conf`), the shipped
@@ -197,8 +209,8 @@ week missed is a week lost on virgo and speedhost.
 | Would-reject sizing | `abuse_shadow` `humanity` (`lines`, `rescued`, `by_src_kind`) | #1525 / #1528 | Sizes any new v2 arm before it is turned on |
 | Payload health | the `hs=-` share of scored solves | — | A jump after a release = the page payload broke (parse / 1 KB cap) |
 | Payload stripping under an arm | `hs=-` solve lines that carry `v2=` (a pass: D5b never fails a missing payload) | read 1 | A rising share on a convicted fp = the farm bypasses the arm by stripping the body → a master-plan decision |
-| Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp means the arm lost that catch → a master-plan decision. Read 4: 793 in 4.9 days, 70 % GR/CY; 4 farm solves passed that a 0x0 size would have failed. (The farms' `outer_zero` rejects had already fallen before #1615.) Read 5: 1 533, 45 % GR/CY; the drop is `95070673` sending `hid:1` from DigitalOcean on orion (702), at hs 0, so a 0x0 size would not have failed them either. |
-| Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %; read 6: 14 % fleet-wide, the farm at hs 90); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
+| Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp means the arm lost that catch → a master-plan decision. Read 4: 793 in 4.9 days, 70 % GR/CY; 4 farm solves passed that a 0x0 size would have failed. (The farms' `outer_zero` rejects had already fallen before #1615.) Read 5: 1 533, 45 % GR/CY; the drop is `95070673` sending `hid:1` from DigitalOcean on orion (702), at hs 0, so a 0x0 size would not have failed them either. Read 7: orion 3, virgo 0 at hs 60–99 under an arm; closed as a watch item. |
+| Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %; read 6: 14 % fleet-wide, the farm at hs 90; read 7: 52 %, the farm's passes now at hs 0); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
 
 ## 5. Entry template
 
@@ -255,6 +267,234 @@ week missed is a week lost on virgo and speedhost.
   `hc` before calling a reject human.
 
 ## 6. Entries
+
+### 2026-11-17 — read 7 (window: 2026-11-10 09:05 to 2026-11-17 09:05 Athens, 7 days)
+
+The first read with `linux_sw` (#1652) and the `rf` reading. Same method as
+read 6: every web node's `cfm.challenges.log*` and `cfm.abuse_shadow.log*`
+parsed over SSH (read-only, python on stdin), and the `solver_farm` findings
+from each node's history database (read-only SQLite). The window is the
+whole week on every node.
+
+- **Fleet:**
+  - The 8 web nodes run `2026.11.16` (binary 11-16 11:13 on all). `linux_sw`
+    shipped in 2026.11.10. Its first line is 11-11 00:52 on orion and
+    00:54 on titan and rigel, and 03:23 on earth, the last node.
+  - In this area since read 6: #1652 (`linux_sw` +20 and `rf`). 2026.11.14
+    also made a manual vhost challenge arm at v2 unless told v1, and moved
+    WAF rule 102 to `challenge_v2`. virgo's manual challenge has 164 v2
+    rejects and 25 passes.
+  - `[challenge_solver_farm]` 180s / 30 / 15 and `ABUSE_SHADOW = 1` on all 8.
+  - **No operator policy bites:** no `v2=fp` and no `v2=geo` line. Every
+    reject is `v2=vhost` (automatic, plus virgo's manual one) or a rung
+    mark.
+  - cfm-web: farm verdicts `95070673`, `c28caa00`, `2879571a` (it moved up
+    from `suspect`), `ba6b4aad` and `19877aeb`. `d9d37bc0` is a `suspect`.
+- **Health:**
+  - 1 052 solves with no payload (`hs=-`) among ~421 000 (read 6: 291).
+    508 of them are farm-fp solves under an arm: qualityweb 267, rigel
+    100, orion 53, titan 48, mars 38.
+  - No `v2_rescued` line, and 0 Windows Chrome/109 rejects.
+- **`linux_sw` worked for about a day; then the farm moved to hs 0.**
+  - **What it caught:** 166 109 farm-fp rejects carry `linux_sw`.
+    - qualityweb 99 655, titan 24 895, rigel 22 325, mars 15 480;
+    - orion 1 814 on `95070673`, which ran the same Linux profile.
+    - 3 657 more on other fingerprints.
+    - Fleet rejects rose to 200 706 (read 6: 22 459).
+  - **GR/CY consumer-ISP rejects it caused: none human.** About 8 lines from
+    6 addresses, all on a farm fingerprint with the farm's Linux SwiftShader
+    profile:
+    - `62.103.124.3` (OTEnet) on three nodes. Its neighbour `.5` is
+      rejected as `headless_ua`.
+    - `85.72.224.25`, `31.217.164.51` (OTEnet, also `outer_zero`) and
+      `37.6.231.158` (Nova).
+
+    No `linux_sw` reject from a GR/CY consumer ISP on a non-farm
+    fingerprint.
+  - **`rf`:** effectively one family. Every software-renderer solve or
+    reject reads `angle-swiftshader` (238 150), apart from 21 `swiftshader`
+    lines on `19877aeb`. No llvmpipe, softpipe or swrast.
+  - **The flip:** `c28caa00` solves after 11-11 00:50, by UA and score:
+
+    | UA | Passed at hs 0 | Passed at hs 60–99 | Rejected |
+    |---|---|---|---|
+    | X11 Linux | 1 344 | 14 221 | **164 037** |
+    | Windows | **59 795** | 3 616 | 182 |
+    | Mac | **79 121** | 1 409 | 14 414 |
+    | Android | 8 462 | 107 | 8 298 |
+
+    In the 16 hours before the flip: Linux at hs 60–99 2 036, Windows at
+    hs 0 2 115, Mac at hs 0 66. The farm still sends the Linux profile,
+    and it is rejected, but most of its passes now claim Windows or Mac and
+    score **0**. No software renderer is reported any more, so `sw_renderer`
+    and the `no_input` amplifier stay silent.
+  - **The waves:**
+    - mars **joinjewels.com**, 42 640 passes on 11-11 and 11-12. Windows
+      and Mac Chrome/118–120, 8 cores, `dpr:1`, no input. 43 518 IPs, all
+      residential: VNPT, Telefónica AR, Jio, Turk Telekom, Starlink, PK,
+      BD.
+    - qualityweb **www.ventus.com.gr** (38 244) and
+      **www.ekalogeropoulos.gr** (28 118), from 11-13. Mac Chrome/146,
+      8 cores, `dpr:1`, no input. 60 672 IPs: GTT, RCN, Comcast, Deutsche
+      Telekom, Free, BT.
+  - **A Mac at `dpr:1` is a measured tell, but it does not help.**
+    Desktop Mac solves on qualityweb and rigel:
+    - farm fp from abroad: **66 829** at `dpr:1`;
+    - GR/CY consumer ISPs: 32 at `dpr:1` and 224 at `dpr:2`, so ~12 % of
+      the Greek Macs (external screens).
+
+    It could only be a device-claim member (D5b), so at hs 0 it would add
+    50, plus 30 for no input = 80, a pass. And the farm can change `dpr` as
+    fast as it changed its UA.
+  - **Windows at hs 0** (4 or 8 cores, `dpr:1`, no input) is a normal
+    Windows PC. Nothing in the score separates it.
+- **Catch rate:** farm fp under an arm, rejected / (passed + rejected). The
+  passes include the bucket's humans (below).
+
+  | Node | Farm fp | Passed / rejected | Caught (read 6) |
+  |---|---|---|---|
+  | titan | `c28caa00` | 10 421 / 38 220 | **79 %** (41 %) |
+  | virgo | `95070673` | 235 / 930 | 80 % (38 %) |
+  | earth | `c28caa00` | 657 / 1 945 | 75 % (37 %) |
+  | rigel | `c28caa00` | 18 388 / 29 480 | **62 %** (2 %) |
+  | qualityweb | `c28caa00` | 89 262 / 102 462 | **53 %** (3 %) |
+  | mars | `c28caa00` | 45 578 / 16 219 | 26 % (17 %) |
+  | orion | `95070673` | 11 583 / 3 781 | 25 % (25 %) |
+  | server.speedhost.gr | `c28caa00` | 62 / 22 | 26 % (33 %) |
+
+  - Fleet-wide: **52 %** (193 059 rejected, 176 186 passed; read 6: 14 %).
+    Over orion, titan and mars: 46 % (read 6: 35 %).
+  - The rejects are mostly the first days' Linux traffic. The passes are
+    now hs 0: mars's 45 578 are joinjewels.com's wave, qualityweb's are
+    ventus and ekalogeropoulos.
+  - orion: www.mathematica.gr is still most of the farm-fp passes (9 087),
+    6 239 of them from abroad at hs 0 and 2 539 GR/CY.
+- **SIZING for targeted challenges.** All solves under an AUTOMATIC vhost
+  challenge (`src=vhost:*`, manual excluded), 192 390 fleet-wide:
+
+  | Who solved | Solves |
+  |---|---|
+  | Abroad (not GR/CY) | 167 094 |
+  | GR/CY consumer ISP, on a farm fingerprint | 15 108 |
+  | GR/CY consumer ISP, other fingerprints | 7 633 |
+  | GR/CY, other networks | 2 555 |
+
+  What a narrower floor would have challenged:
+
+  | Floor | Solves covered | GR/CY consumer on farm fps | GR/CY consumer, other fps |
+  |---|---|---|---|
+  | Convicted farm fp | 179 507 (93 %) | **15 108 (all)** | 0 |
+  | Not GR/CY | 167 094 (87 %) | 0 | **0** |
+  | Datacenter ASN | 21 426 (11 %) | 0 | 0 |
+  | Software renderer | 20 945 (11 %) | 11 | 28 |
+  | Farm fp + software renderer, or datacenter, or not GR/CY | 168 085 (87 %) | 11 | 0 |
+  | No input (ptr, tch and key all 0) | 172 358 (90 %) | 12 975 | **6 506 (85 %)** |
+
+  - **No input is useless as a floor.** The page needs no click, so 85 % of
+    the Greek visitors on other fingerprints solve with none.
+  - **The farm fingerprint is a population.** 15 108 GR/CY consumer
+    solves sit on `c28caa00` / `95070673`, twice the 7 633 on all other
+    fingerprints. Most are hs 0, and 2 128 have pointer input. A
+    farm-fp floor challenges most of a Greek audience.
+  - **Not GR/CY is the one floor that is both large and human-safe on a
+    Greek-audience vhost**: 87 % of the solves, no GR/CY visitor. Two
+    limits:
+    - Some vhosts' audience is foreign. gastronom.hk, mygreecetours.org
+      and elitefirstclassmykonos.com are among the farm's targets, so the
+      audience must be per vhost.
+    - The farm already uses some GR residential exits (the reject lists),
+      and can buy more.
+  - **Datacenter ASN** is human-safe but small (11 %). The farm moved to
+    residential proxies.
+- **Human-labelled rejects (GR/CY consumer ISP, no bot UA): none human.**
+  - qualityweb:
+    - `2.86.220.217` (OTEnet), 100 rejects on www.naturehealth.gr:
+      `headless_ua,webdriver`, Mac UA.
+    - `62.103.72.163` (OTEnet), 42 on www.lpr.gr: `webdriver`.
+    - `194.154.48.114` (the DEI corporate network), 3 on ventus:
+      `headless_ua,webdriver`.
+    - `194.187.255.220` (Medianet), 3 on lpr: `webdriver`.
+  - titan techking.gr, `109.178.9.52` (OTEnet): an Android LG LM-X420
+    with SwiftShader, `touch_lie,mobile_hw_lie`, hs 140. One line, on the
+    non-farm fp `6baa7207`. The closest to a human this week, but its
+    renderer is software.
+  - The `linux_sw` lines above.
+- **`vhost_config`:** 496 rejects, none from a GR/CY address and none on a
+  panel port (read 6: 511). 1 619 GR/CY solves passed on the always-on
+  hosts.
+- **`hid:1` on `95070673`:** farm-fp `hid:1` solves under an arm at hs
+  60–99 (the ones a 0x0 size would have failed): **orion 3, virgo 0**
+  (read 6: 3 and 6). Nearly every farm `hid:1` solve is GR/CY at hs 0.
+  Closed as a watch item: the farm does not use it.
+- **`solver_farm` with humanity:**
+  - **Findings:**
+
+    | Node | Findings | With `subnet_spread` (fingerprint-blind track) |
+    |---|---|---|
+    | titan | 1 827 | 13 |
+    | orion | 1 395 | 2 |
+    | rigel | 311 | 4 |
+    | qualityweb | 168 | 0 |
+    | mars | 149 | 26 |
+    | earth | 3 | 0 |
+    | virgo, server.speedhost.gr | 0 | — |
+
+  - **GR-audience fingerprint-blind findings:**
+    - www.mathematica.gr (orion), 1 at 35 `/24`: GR ×37, 15 at hs 0 and
+      24 at 60–99. That is a mixed window.
+    - gokids.gr and www.gokids.gr (rigel), 2 on 11-11 at 33–35 `/24`:
+      GR/CY ×30–37, hs 0.
+
+    Read on their face, as in read 6. Both are `ACTION = observe`.
+  - **The residential hs-0 wave this week is the farm itself.**
+    joinjewels.com's findings (mars, 11-11 and 11-12) carry
+    `fp_concentration` on `c28caa00`. Their humanity line reads up to
+    1 839 solves at hs 0 from PK, AR, BD, BR and IN in one window. It is
+    not a toolpoint.gr-style fingerprint-blind wave.
+  - The other fingerprint-blind findings are farm-shaped: gastronom.hk
+    (US, hs 60–99, later 100+ once `linux_sw` fired), vagoneto.gr and
+    www.e-vafeiadis.gr (US).
+- **Since last read:** `linux_sw` rejected ~166 000 farm solves and the
+  fleet catch rate went from 14 % to 52 %. Within a day the farm answered:
+  Windows / Mac UAs, no software renderer, hs 0. The score-only path is a
+  loop: each tell buys about a day. The sizing says that WHO is
+  challenged, not how a solve is scored, is where the humans can be spared.
+
+#### Proposals (for the operator; nothing is implemented without a go)
+
+**(a) Stop adding score tells for this farm.** It answered `linux_sw` within
+a day, and a Mac `dpr:1` tell could not reject at hs 0 anyway (D5b). Keep
+`linux_sw` (it still rejects the Linux traffic the farm keeps sending, with
+no measured human cost). Record the Mac `dpr:1` measurement and do not ship
+a tell for it.
+
+**(b) The targeted challenge: an audience floor on the automatic vhost
+challenges (design first, no code).** When an automatic vhost challenge
+fires on a vhost whose audience is Greek, challenge the clients outside
+GR/CY, plus datacenter ASNs and a convicted fp on a software renderer, and
+let GR/CY visitors through unchallenged.
+- This week that covers 87 % of the solves under automatic vhost
+  challenges and challenges no GR/CY visitor.
+- It is the operator's direction: challenge the farm, not the audience.
+- **Per vhost**, learned from the vhost's own unchallenged traffic (its
+  GR/CY share over the last N days), with an operator pin. A foreign-audience
+  site (gastronom.hk, mygreecetours.org) keeps today's vhost-wide challenge.
+- **Honest limits:**
+  - the farm can rent GR residential exits (it already uses a few);
+  - a Greek visitor abroad gets the challenge, as today.
+- **What the next read measures for it:** per vhost, the GR/CY share of
+  unchallenged requests (the audience estimate), and how stable it is week
+  to week.
+- **Where it sits:** it reuses the E3 country floor's machinery (the geo
+  resolver) at vhost grain. It needs a master-plan entry before code: this
+  is a D5 amendment (who an automatic arm covers), not a tell.
+
+**(c) Plan order.** (b) as a design note and one more read (read 8) of the
+audience estimate. Candidate 6 (a faster in-page PoW solver) and candidate 5
+(`CHALLENGE_V2_ENFORCE`) stay behind it. The #1637 open item (the humanity
+line before the UA lines in `alerts.db`) is still open.
+
+- **Actions:** none. Read-only.
 
 ### 2026-11-10 — read 6 (window: 2026-11-03 09:05 to 2026-11-10 09:05 Athens, 7 days)
 
