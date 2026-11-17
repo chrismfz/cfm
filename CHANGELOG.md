@@ -17,7 +17,16 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **`[webdetector] BLOCK` ships as `12h` (was `2h`).** The 2026-11-17 read
+  of the 8 edge nodes found 99% of the web detector's 403 / 404 / 40x bans on
+  cloud scanners, the same Microsoft and Google addresses banned up to 51
+  times a week at the 1h several nodes ran. Every such ban is also reported to
+  the fleet blacklist (MYBLOCK), which a short TTL barely outlives. Existing
+  nodes keep their own `detectors.conf` value (a conffile) until it is edited.
+  Pair it with a `[webdetector.leniency]` for GR/CY (short `BLOCK`,
+  `SEND_TO_API = no`), so a local customer is neither held 12h nor banned on
+  every node.
 
 ## 2026.11.17
 
