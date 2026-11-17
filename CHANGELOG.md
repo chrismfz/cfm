@@ -18,6 +18,22 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Fixed
+- **The L4 flood autoblock no longer bans verified crawlers and Meta's
+  link-preview proxies.** Meta's `fwdproxy-*.fbsv.net` addresses (Facebook
+  link previews, `facebookexternalhit`, the in-app browser) tripped
+  `portflood_443_tcp` and `SYN flood` and were banned permanently into
+  `cfm.deny` on two nodes (59 addresses, May-June 2026; one reached the fleet
+  blacklist), breaking link previews and in-app visits for every site there.
+  The syn / portflood / pps / connlimit / new / icmp autoblock (both engines)
+  now skips an FCrDNS-verified good bot (Googlebot, Bingbot, Applebot,
+  Yandex, Meta), as the web detector's own IP bans already did; the flood
+  meters still drop its excess packets. A PTR that does not forward-confirm
+  (spoofed) is blocked as before; a forward-confirm that does not complete
+  skips only that crossing, so one DNS blip cannot ban a real crawler. It
+  needs PTR enrichment (the PTR comes from the enricher). The skip is logged
+  (`[autoblock][ignored] … FCrDNS-verified good bot meta`), not notified: a
+  crawler re-crosses the threshold every window. Kill switch: `THROTTLE_GOODBOT_EXEMPT = 0` in `cfm.conf`. Existing
+  bans are not lifted: unblock them (`cfm unblock <ip>`).
 - **MySQL governor: it now starts when MySQL comes up after the daemon.**
   The governor connected once, at daemon start, and never again. When
   MariaDB started after CFM (orion, 2026-11-17: CFM at 14:53:09, MariaDB at

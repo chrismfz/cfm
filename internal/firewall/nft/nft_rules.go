@@ -434,6 +434,19 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		}
 	}
 
+	// An FCrDNS-verified good bot (Meta's fwdproxy-*.fbsv.net, Googlebot, …)
+	// is never banned by a flood heuristic; the meters still drop its excess
+	// packets (firewall.AutoblockGoodBot). After the cooldown check: an
+	// address in cooldown was just blocked, so it is no good bot. Logged
+	// only, never notified: a crawler re-crosses the threshold every window.
+	if skip, why := firewall.AutoblockGoodBot(b.enr, ip, tc.GoodBotExemptOff); skip {
+		if time.Since(b.lastIgnoredAt[ip]) >= ignoreNotifyCooldown {
+			logging.Logf("[autoblock][ignored] %s %s%s reason=%s | %s", fam, ip, b.enrichLabel(ip), reason, why)
+			b.lastIgnoredAt[ip] = time.Now()
+		}
+		return nil
+	}
+
 	extraLabel := b.enrichLabel(ip)
 	logIP := ip + extraLabel
 	cleanExtra := strings.TrimSpace(strings.TrimPrefix(extraLabel, "—"))
