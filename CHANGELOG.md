@@ -64,8 +64,9 @@ back-filled here — see the git/PR history for that period.
       cfm-admin Tier picker. The reply and the CLI show the tier visitors
       actually get;
     - when a manual challenge you set yourself already covers the vhost, it
-      stays as it is and the override ends with it (`ttl_clipped`): extend
-      the challenge to hold the override longer;
+      stays as it is and the override is cut to its expiry at that moment
+      (`ttl_clipped`): to hold it longer, extend the challenge and run
+      `attack on` again;
     - refused: a wildcard host, and `attack on` for a vhost in `cfm.allow`
       (it could not be challenged);
     - `attack off` removes only the challenge its `attack on` armed (so does

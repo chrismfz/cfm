@@ -212,6 +212,12 @@ func (s *attackOverrideStore) set(e attackOverrideEntry) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The same (unexpired) override refreshed keeps its announcement: a tick
+	// that sent the ON alert between a refresh's read and this write must not
+	// be undone. An expired record starts a new override.
+	if old, ok := s.m[e.Host]; ok && old.Announced && !e.Announced && old.ExpiresAt.After(time.Now()) {
+		e.Announced, e.Since = true, old.Since
+	}
 	s.m[e.Host] = e
 	s.saveLocked()
 }

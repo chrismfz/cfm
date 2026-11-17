@@ -838,7 +838,7 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 	requested := time.Now().Add(overrideTTL)
 	armed, expires := e.ForceVhostAttackAs(host, on, overrideTTL, actorFromScope(scope))
 	// Cut to an operator's challenge that ends sooner (ForceVhostAttackAs).
-	clipped := on && !armed && expires.Before(requested.Add(-time.Second))
+	clipped := on && !armed && !expires.IsZero() && expires.Before(requested.Add(-time.Second))
 	if clipped {
 		overrideTTL = time.Until(expires).Round(time.Second)
 	}

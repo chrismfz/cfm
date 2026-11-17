@@ -1482,10 +1482,10 @@ func runAttackWebTop(baseURL string, args []string) error {
 		if armed, _ := result["challenge_armed"].(bool); armed {
 			fmt.Println("  a challenge is armed on it for the same window (reason under_attack); `attack off` removes it")
 		} else {
-			fmt.Printf("  your manual challenge on it stays as it is (until %s)\n", cliTime(result["challenge_expires_at"]))
+			fmt.Printf("  the manual challenge already on it stays as it is (until %s)\n", cliTime(result["challenge_expires_at"]))
 		}
 		if clipped, _ := result["ttl_clipped"].(bool); clipped {
-			fmt.Println("  the override ends with that challenge: extend the challenge to hold it longer")
+			fmt.Println("  the override is cut to that challenge's expiry: to hold it longer, extend the challenge, then run `attack on` again")
 		}
 		if tier, ok := result["tier"].(map[string]interface{}); ok {
 			fmt.Printf("  verify tier: %v (%v)\n", tier["rung"], tier["source"])

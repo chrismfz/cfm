@@ -364,3 +364,62 @@ func TestForceVhostAttack_RefreshKeepsTheArmsTier(t *testing.T) {
 		t.Fatalf("refresh re-tiered the arm: %q -> %q", first, got)
 	}
 }
+
+// A vhost already in the automatic ON state gets `attack on`: no ON transition
+// comes for the override, so it is persisted as announced, and a restart (the
+// store read back from its file) sends no ON alert.
+func TestForceVhostAttack_AutoOnThenAttackOnRestartsQuietly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "o.json")
+	e1 := newForceAttackEngine(t, path)
+	since := time.Now().Add(-time.Hour).Truncate(time.Second)
+	e1.attack.mu.Lock()
+	e1.attack.hosts["shop.example"] = &attackVhost{on: true, since: since}
+	e1.attack.mu.Unlock()
+	e1.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+
+	resetAttackOverrideStoresForTest()
+	t.Cleanup(resetAttackOverrideStoresForTest)
+	e2 := newForceAttackEngine(t, path)
+	ent, ok := e2.attackOverrides.get("shop.example")
+	if !ok || !ent.Announced || !ent.Since.Equal(since) {
+		t.Fatalf("persisted announcement: %+v ok=%v", ent, ok)
+	}
+	e2.restoreAttackOverrides()
+	out := make(chan core.Alert, 4)
+	e2.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, out)
+	if len(out) != 0 {
+		t.Fatalf("restart sent %d alert(s)", len(out))
+	}
+	if _, s, _ := e2.VhostAttackState("shop.example"); !s.Equal(since) {
+		t.Fatalf("since reset on restore: %v, want %v", s, since)
+	}
+}
+
+// A refresh keeps the announcement, also when the ON alert was sent between
+// its read and its write (the store keeps it).
+func TestForceVhostAttack_RefreshKeepsTheAnnouncement(t *testing.T) {
+	e := newForceAttackEngine(t, "")
+	e.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+	e.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, make(chan core.Alert, 4))
+	e.ForceVhostAttackAs("shop.example", true, 2*time.Hour, "admin")
+	if ent, _ := e.attackOverrides.get("shop.example"); !ent.Announced {
+		t.Fatal("a refresh lost the announcement")
+	}
+	// The store keeps it even against a write that carries none.
+	ent, _ := e.attackOverrides.get("shop.example")
+	ent.Announced = false
+	e.attackOverrides.set(ent)
+	if got, _ := e.attackOverrides.get("shop.example"); !got.Announced {
+		t.Fatal("set dropped an announcement")
+	}
+}
+
+// An expired record does not lend its announcement to a new override.
+func TestAttackOverrideStore_ExpiredAnnouncementNotInherited(t *testing.T) {
+	s := newAttackOverrideStore("")
+	s.set(attackOverrideEntry{Host: "h.example", ExpiresAt: time.Now().Add(-time.Minute), Announced: true})
+	s.set(attackOverrideEntry{Host: "h.example", ExpiresAt: time.Now().Add(time.Hour)})
+	if got, _ := s.get("h.example"); got.Announced {
+		t.Fatal("a new override inherited an expired announcement")
+	}
+}

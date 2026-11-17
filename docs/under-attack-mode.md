@@ -113,8 +113,8 @@ Manual override, like manual challenge: `cfm webtop attack on|off <vhost>`.
   covers it, at the tier of the vhost's pin if one is set (a pin set later,
   or a second `on`, does not re-tier the arm: the cfm-admin Tier picker or
   the `vhost/rung` API does). When your own manual challenge covers it, that
-  challenge stays and the override is cut to its expiry (`ttl_clipped`):
-  UNDER_ATTACK never outlives the challenge it rides on. A wildcard host is
+  challenge stays and the override is cut to its expiry at that moment
+  (`ttl_clipped`; extend the challenge, then `on` again, to hold it longer). A wildcard host is
   refused, and so is `on` for a `cfm.allow`-bypassed vhost.
   It survives a reload and a restart. An `on`/`off` sent in the second or
   two a reload takes reaches the file but applies only on the next reload,
