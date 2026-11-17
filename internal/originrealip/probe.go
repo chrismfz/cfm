@@ -258,7 +258,7 @@ func (l layout) probeApache(stack string) Probe {
 	if main == nil {
 		return Probe{Stack: stack, Note: "no Apache main config found"}
 	}
-	ds := l.apacheDirectives(main.conf, main.serverRoot, "remoteipinternalproxy", "remoteiptrustedproxy", "remoteipheader")
+	ds, truncated := l.apacheDirectives(main.conf, main.serverRoot, "remoteipinternalproxy", "remoteiptrustedproxy", "remoteipheader")
 	trust, header, scoped := "", "", 0
 	for _, d := range ds {
 		switch {
@@ -284,6 +284,9 @@ func (l layout) probeApache(stack string) Probe {
 	if scoped > 0 {
 		p.Note = joinNote(p.Note, strconv.Itoa(scoped)+" RemoteIP directive(s) inside <VirtualHost> blocks override the server-level ones for those sites")
 	}
+	if truncated {
+		p.Note = joinNote(p.Note, truncatedNote)
+	}
 	return p
 }
 
@@ -302,7 +305,7 @@ func (l layout) probeApache(stack string) Probe {
 // 127.0.0.1 for them, so they are reported, not counted. Read along nginx's
 // include chain. With no server{} block found, the http-level settings decide.
 func (l layout) probeNginx(panel string) Probe {
-	ds, servers := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from", "real_ip_header")
+	ds, servers, truncated := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from", "real_ip_header")
 	trust, header, inLocation, httpList := "", "", 0, false
 	type own struct {
 		list, loopback bool
@@ -342,7 +345,7 @@ func (l layout) probeNginx(panel string) Probe {
 
 	serverIncludes := l.fs(l.cpanelNginxServerIncludes)
 	headers := map[string]bool{}
-	ownOK, proxyUntrusted, inherit, ownNoLoop := 0, 0, 0, 0
+	ownOK, proxyUntrusted, inherit, ownNoLoop, internal := 0, 0, 0, 0, 0
 	badHeaders := map[string]bool{}
 	for i, srv := range servers {
 		o := per[i]
@@ -355,6 +358,12 @@ func (l layout) probeNginx(panel string) Probe {
 			loop = o.loopback
 		}
 		edgeHdr := hdr == "" || edgeHeaders[strings.ToLower(hdr)]
+		if !srv.edgeFacing() {
+			// Listens only where the edge never proxies to (a status page on
+			// 127.0.0.1:8090, a unix socket): no visitor reaches it through the edge.
+			internal++
+			continue
+		}
 		if panel == PanelCPanel && cpanelProxyServer(srv.names) {
 			if !loop || !edgeHdr {
 				proxyUntrusted++
@@ -437,11 +446,21 @@ func (l layout) probeNginx(panel string) Probe {
 		p.Note = joinNote(p.Note, strconv.Itoa(proxyUntrusted)+" cPanel proxy-subdomain server{} block(s) (cpanel./webmail./whm./...) "+
 			"do not trust 127.0.0.1: they proxy to cpsrvd and only ea-nginx's own log reads 127.0.0.1 for them (not counted)")
 	}
+	if internal > 0 {
+		p.Note = joinNote(p.Note, strconv.Itoa(internal)+" server{} block(s) listening only off :80/:443, where the edge never proxies (not counted)")
+	}
 	if inLocation > 0 {
-		p.Note = joinNote(p.Note, strconv.Itoa(inLocation)+" set_real_ip_from line(s) inside location{} blocks (not counted)")
+		p.Note = joinNote(p.Note, strconv.Itoa(inLocation)+" set_real_ip_from line(s) inside location{} blocks: they apply to those locations only, "+
+			"so the verdict reads the server{} level")
+	}
+	if truncated {
+		p.Note = joinNote(p.Note, truncatedNote)
 	}
 	return p
 }
+
+// truncatedNote: a walk limit stopped the read, so the verdict is partial.
+const truncatedNote = "the configuration walk stopped at a limit (include depth, files or inclusions), so the verdict reads part of it only"
 
 // nginxVerdict is what the plan needs from an nginx probe.
 type nginxVerdict struct {
@@ -469,19 +488,52 @@ func cpanelProxyServer(names []string) bool {
 		return false
 	}
 	for _, n := range names {
-		n = strings.ToLower(strings.ReplaceAll(strings.TrimLeft(n, "~^"), `\.`, "."))
-		hit := false
-		for _, pre := range cpanelProxyPrefixes {
-			if strings.HasPrefix(n, pre) {
-				hit = true
-				break
+		for _, c := range nameCandidates(n) {
+			hit := false
+			for _, pre := range cpanelProxyPrefixes {
+				if strings.HasPrefix(c, pre) {
+					hit = true
+					break
+				}
 			}
-		}
-		if !hit {
-			return false
+			if !hit {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// nameCandidates is what a server_name can start with: the name itself, or
+// for a regex (~^...) each option of a leading group, `~^(cpanel|webmail)\.`
+// or `~^(?<sub>cpanel|whm)\.` included.
+func nameCandidates(n string) []string {
+	n = strings.ToLower(n)
+	if !strings.HasPrefix(n, "~") {
+		return []string{n}
+	}
+	n = strings.ReplaceAll(strings.TrimLeft(n, "~^"), `\.`, ".")
+	if !strings.HasPrefix(n, "(") {
+		return []string{n}
+	}
+	j := strings.Index(n, ")")
+	if j < 0 {
+		return []string{n}
+	}
+	inner, rest := n[1:j], n[j+1:]
+	switch {
+	case strings.HasPrefix(inner, "?:"):
+		inner = inner[2:]
+	case strings.HasPrefix(inner, "?<") || strings.HasPrefix(inner, "?p<"):
+		if k := strings.Index(inner, ">"); k >= 0 {
+			inner = inner[k+1:]
+		}
+	}
+	var out []string
+	for _, opt := range strings.Split(inner, "|") {
+		out = append(out, opt+rest)
+	}
+	return out
 }
 
 func siteExamples(us []nginxSite) string {
@@ -509,13 +561,14 @@ func joinSorted(set map[string]bool) string {
 }
 
 // anyLoopback reports whether one of a trust directive's arguments covers the
-// edge's address: 127.0.0.1 or ::1, alone or as a loopback-only network
-// (127.0.0.0/8 .. /32, ::1/128). 127.0.0.1/1 covers half the internet and is
-// not a loopback trust.
+// edge's address: 127.0.0.1, alone or as a loopback-only network (127.0.0.0/8
+// .. /32). The edge proxies from 127.0.0.1 (proxy_bind), so ::1 alone does not
+// trust it: a list holding only ::1 still logs 127.0.0.1. 127.0.0.1/1 covers
+// half the internet and is not a loopback trust.
 func anyLoopback(args []string) bool {
 	for _, a := range args {
 		if ip := net.ParseIP(a); ip != nil {
-			if ip.Equal(net.ParseIP("127.0.0.1")) || ip.Equal(net.IPv6loopback) {
+			if ip.Equal(net.ParseIP("127.0.0.1")) {
 				return true
 			}
 			continue
@@ -524,16 +577,8 @@ func anyLoopback(args []string) bool {
 		if err != nil {
 			continue
 		}
-		ones, bits := n.Mask.Size()
-		switch bits {
-		case 32:
-			if ones >= 8 && n.IP.IsLoopback() && n.Contains(net.ParseIP("127.0.0.1")) {
-				return true
-			}
-		case 128:
-			if ones == 128 && n.IP.Equal(net.IPv6loopback) {
-				return true
-			}
+		if ones, bits := n.Mask.Size(); bits == 32 && ones >= 8 && n.IP.IsLoopback() && n.Contains(net.ParseIP("127.0.0.1")) {
+			return true
 		}
 	}
 	return false

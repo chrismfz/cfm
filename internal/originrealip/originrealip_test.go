@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -505,6 +506,9 @@ func TestCPanelProxyServer(t *testing.T) {
 	cases := map[string]bool{
 		"cpanel.x.gr webmail.x.gr whm.x.gr": true,
 		"cpanel.*":                          true,
+		`~^(cpanel|webmail|whm)\.`:          true,
+		`~^(?<sub>cpanel|whm)\..+$`:         true,
+		`~^(?:www|cpanel)\.`:                false,
 		`~^webmail\.`:                       true,
 		"autodiscover.x.gr x.gr":            false,
 		"webmailer.gr":                      false,
@@ -669,12 +673,13 @@ func TestApplyWritesThroughSymlink(t *testing.T) {
 }
 
 func TestAnyLoopback(t *testing.T) {
-	for _, ok := range [][]string{{"127.0.0.1"}, {"127.0.0.1/32"}, {"127.0.0.0/8"}, {"::1"}, {"::1/128"}, {"10.0.0.1", "127.0.0.1"}} {
+	// The edge proxies from 127.0.0.1: ::1 alone does not trust it.
+	for _, ok := range [][]string{{"127.0.0.1"}, {"127.0.0.1/32"}, {"127.0.0.0/8"}, {"::1", "127.0.0.1"}, {"10.0.0.1", "127.0.0.1"}} {
 		if !anyLoopback(ok) {
 			t.Errorf("%v must be loopback trust", ok)
 		}
 	}
-	for _, bad := range [][]string{{"127.0.0.100"}, {"127.0.0.1/1"}, {"127.0.0.0/1"}, {"0.0.0.0/0"}, {"::/0"}, {"84.54.49.83"}, {"127.0.0.2"}} {
+	for _, bad := range [][]string{{"127.0.0.100"}, {"127.0.0.1/1"}, {"127.0.0.0/1"}, {"0.0.0.0/0"}, {"::/0"}, {"84.54.49.83"}, {"127.0.0.2"}, {"::1"}, {"::1/128"}} {
 		if anyLoopback(bad) {
 			t.Errorf("%v must not be loopback trust", bad)
 		}
@@ -784,7 +789,7 @@ server {
 	if p.Trusted || p.Servers != 2 || p.UntrustedServers != 1 || !strings.Contains(p.Note, "blog.gr") || strings.Contains(p.Note, "shop.gr") {
 		t.Fatalf("probe = %+v", p)
 	}
-	_, servers := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from")
+	_, servers, _ := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from")
 	if len(servers) != 2 || strings.Join(servers[0].names, ",") != "shop.gr" || strings.Join(servers[1].names, ",") != "blog.gr" {
 		t.Fatalf("servers = %+v", servers)
 	}
@@ -802,5 +807,38 @@ func TestCPanelEaNginxHTTPListIsManual(t *testing.T) {
 	pl := l.plan(p)
 	if pl.Action != ActionManual || !strings.Contains(pl.Reason, "http{} has its own set_real_ip_from list") || !strings.Contains(pl.Reason, nginxTrust) {
 		t.Fatalf("plan = %+v", pl)
+	}
+}
+
+// Only server{} blocks the edge proxies to count: a status page on
+// 127.0.0.1:8090 or a unix socket is no visitor's site.
+func TestNginxOnlyEdgeFacingServersCount(t *testing.T) {
+	l, r := testLayout(t)
+	put(t, r, "etc/nginx/nginx.conf", "http {\n    include /etc/nginx/conf.d/*.conf;\n}\n")
+	put(t, r, "etc/nginx/conf.d/a.conf", `server { server_name shop.gr; listen 443 ssl; listen [::]:443 ssl; set_real_ip_from 127.0.0.1; }
+server { listen 127.0.0.1:8090; location /nginx_status { stub_status; } }
+server { listen unix:/run/x.sock; }
+server { server_name plain.gr; set_real_ip_from 127.0.0.1; }
+`)
+	p := l.probe("nginx")
+	if !p.Trusted || p.Servers != 2 || !strings.Contains(p.Note, "2 server{} block(s) listening only off :80/:443") {
+		t.Fatalf("probe = %+v", p)
+	}
+	for l, want := range map[string]string{"80": "80", "*:443": "443", "[::]:80": "80", "127.0.0.1:8090": "8090", "localhost": "80", "[::1]": "80", "10.0.0.1": "80"} {
+		if got := listenPort(l); got != want {
+			t.Errorf("listenPort(%q) = %q, want %q", l, got, want)
+		}
+	}
+}
+
+// A walk limit is said, not silently judged on part of the configuration.
+func TestNginxTruncatedWalkIsNoted(t *testing.T) {
+	l, r := testLayout(t)
+	put(t, r, "etc/nginx/nginx.conf", "http {\n    include /etc/nginx/d0.conf;\n}\n")
+	for i := 0; i <= walkMaxDepth+1; i++ {
+		put(t, r, "etc/nginx/d"+strconv.Itoa(i)+".conf", "include /etc/nginx/d"+strconv.Itoa(i+1)+".conf;\n")
+	}
+	if p := l.probe("nginx"); !strings.Contains(p.Note, "walk stopped at a limit") {
+		t.Fatalf("probe = %+v", p)
 	}
 }

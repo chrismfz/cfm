@@ -25,9 +25,9 @@ because of that.
 | `cfm health` | The `Origin real-IP` line under the edge diagnostics. |
 | `edge_health` (MCP / `/api/v1/system/edge-health`) | Check G, `origin-real-ip`; a `warn` reaches `whats_wrong`. |
 
-The verdict is **trusted** when the origin trusts 127.0.0.1 (or `::1`,
+The verdict is **trusted** when the origin trusts 127.0.0.1 (or
 `127.0.0.1/32`, `127.0.0.0/8`) *and* the client header in effect is one of the
-edge's three. It is **n/a (OK)** when no edge engine runs: then the origin faces
+edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. It is **n/a (OK)** when no edge engine runs: then the origin faces
 the internet itself (avgerinos, a DirectAdmin nginx).
 
 It reads configuration only (`internal/originrealip`), the way the server loads
@@ -64,8 +64,13 @@ What counts, per stack:
   when it has none; its own `real_ip_header` likewise beats the http-level one
   (default `X-Real-IP`). Every site block must end up trusting the loopback
   with one of the edge's headers; `proxy_protocol` or any other header is
-  reported. Lines inside `location{}` and anything under `stream{}` are not
-  counted. With no `server{}` found, the http-level settings decide.
+  reported. Only blocks the edge proxies to count: no `listen` (nginx's
+  default, `*:80`) or one on 80 or 443; a status page on `127.0.0.1:8090` or a
+  unix socket is noted, not counted. Lines inside `location{}` apply to those
+  locations only, so the verdict reads the `server{}` level, and anything
+  under `stream{}` is ignored. With no `server{}` found, the http-level
+  settings decide. A walk that hits a limit (include depth, files,
+  inclusions) says so in the note: the verdict is then partial.
   - **cPanel ea-nginx** includes `conf.d/includes-optional/cloudflare.conf`
     (Cloudflare's ranges, `real_ip_header CF-Connecting-IP`) in every
     `server{}`, so an http-level trust reaches no vhost. The site blocks also

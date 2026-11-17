@@ -271,8 +271,10 @@ over the last 15 min. `warn` when such a rule exists AND WebShield served 100+
 requests in the window (the CFM-first nodes log 2-10, earth logged ~7 500);
 `ok` when CFM's redirect runs first, when web DNAT is off, or when the order is
 Imunify-first but WebShield is quiet (the documented choice); `unknown` when
-the ruleset cannot be read, or a rule runs ahead and there is no WebShield log
-to measure with. Packet counters are not used: they are cumulative and would
+the ruleset cannot be read, or an Imunify rule runs ahead and there is no
+WebShield log to measure with. A DNAT ahead from anything else (Docker
+publishing :443, a hand rule) is a `warn` on the order alone, naming its
+owner: WebShield's log cannot measure it. Packet counters are not used: they are cumulative and would
 keep warning after the fix. The fix: `NFT_DNAT_PRIORITY = -101` in
 `/etc/cfm/cfm.conf` and `cfm dnat on --priority -101` (one transaction).
 

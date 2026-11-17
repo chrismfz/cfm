@@ -184,6 +184,14 @@ func webDNATOrderFinding(ctx context.Context, sev *severityTracker) map[string]a
 		next = "CFM's web redirect cannot run ahead of a nat chain at priority " + itoa(minPrio) +
 			" (nft refuses a nat chain at -200 or below): that chain has to move later"
 	}
+	// WebShield's log measures Imunify's diversion only. Another tool's DNAT
+	// ahead (Docker publishing :443, a hand rule) is a warning on the order
+	// alone: nothing here can say how much it takes, and the edge is bypassed
+	// for whatever it matches.
+	if len(owners) > 1 || !owners["imunify"] {
+		return sev.add(check, "warn", order+" (not Imunify360's WebShield: its log cannot measure this)", ev,
+			"move that DNAT after CFM's web redirect, or set NFT_DNAT_PRIORITY below its priority")
+	}
 	switch {
 	case !ws.read:
 		return sev.add(check, "unknown", order+"; no WebShield access log to measure how much", ev, next)

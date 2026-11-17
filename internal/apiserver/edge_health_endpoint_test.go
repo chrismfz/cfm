@@ -478,6 +478,16 @@ func TestEdgeHealthReport_WebDNATOrder(t *testing.T) {
 	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); strings.Contains(f["next"].(string), "-201") || !strings.Contains(f["next"].(string), "has to move later") {
 		t.Fatalf("-200: %v", f["next"])
 	}
+	// Another tool's DNAT ahead (Docker publishing :443 from iptables-nft's
+	// PREROUTING): warn on the order, naming it, with no WebShield measure.
+	edgeHealthNATReport = func(context.Context) (netfilterdiag.Report, error) {
+		return netfilterdiag.Analyze([]byte(strings.ReplaceAll(nftJSON("-99"), "INPUT_imunify360", "DOCKER")), netfilterdiag.Expected{})
+	}
+	edgeHealthWebShieldLog = filepath.Join(t.TempDir(), "absent.log")
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); f["severity"] != "warn" || !strings.Contains(f["summary"].(string), "iptables-nft") || !strings.Contains(f["summary"].(string), "not Imunify360") {
+		t.Fatalf("docker ahead: %v", f)
+	}
+	edgeHealthWebShieldLog = log
 	// CFM first: ok, whatever WebShield logs.
 	setNFT("-101")
 	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); f["severity"] != "ok" {

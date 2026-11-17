@@ -25,6 +25,41 @@ type directive struct {
 type nginxServer struct {
 	names       []string
 	includeDirs []string // rooted
+	listens     []string // each listen's address argument ("80", "[::]:443", "unix:/x")
+}
+
+// listenPort is a listen address's port: "80", "*:443", "[::]:80",
+// "127.0.0.1:8090"; an address with no port listens on 80, as in nginx.
+func listenPort(l string) string {
+	if strings.HasSuffix(l, "]") { // "[::1]": an IPv6 address alone
+		return "80"
+	}
+	if i := strings.LastIndex(l, ":"); i >= 0 {
+		return l[i+1:]
+	}
+	for _, c := range l {
+		if c < '0' || c > '9' {
+			return "80" // "localhost", "10.0.0.1": an address alone
+		}
+	}
+	return l
+}
+
+// edgeFacing reports whether the edge can reach this server{}: it proxies to
+// the origin's :80 and :443 only. No listen is nginx's default, *:80.
+func (s nginxServer) edgeFacing() bool {
+	if len(s.listens) == 0 {
+		return true
+	}
+	for _, l := range s.listens {
+		if strings.HasPrefix(l, "unix:") {
+			continue
+		}
+		if listenPort(l) == "80" || listenPort(l) == "443" {
+			return true
+		}
+	}
+	return false
 }
 
 // Walk limits: deeper include chains, more files or more inclusions than any
@@ -53,6 +88,9 @@ type walker struct {
 	want     map[string]bool
 	servers  []nginxServer
 	cur      int // nginx: the server{} being walked, -1 outside one
+	// truncated: a walk limit refused a file, so the verdict reads a part
+	// of the configuration only.
+	truncated bool
 	// reinclude: walk a file at every place it is included (nginx, where a
 	// server-level file applies to each server{} that includes it). Apache's
 	// verdict is server-level only, so its walk reads each file once.
@@ -71,7 +109,11 @@ func newWalker(l layout, names ...string) *walker {
 // walk, for one inclusion of it. A file already on the include chain (a loop)
 // is refused. Every successful enter is paired with leave.
 func (w *walker) enter(path string) ([]byte, bool) {
-	if w.active[path] || w.includes >= walkMaxIncludes {
+	if w.active[path] {
+		return nil, false
+	}
+	if w.includes >= walkMaxIncludes {
+		w.truncated = true
 		return nil, false
 	}
 	cf, cached := w.cache[path]
@@ -80,6 +122,7 @@ func (w *walker) enter(path string) ([]byte, bool) {
 	}
 	if !cached {
 		if w.files >= walkMaxFiles {
+			w.truncated = true
 			return nil, false
 		}
 		w.files++
@@ -133,15 +176,16 @@ func (w *walker) expand(pattern, base string) []string {
 // apacheDirectives walks an Apache main config through its Include /
 // IncludeOptional chain, the way Apache loads it. Directives inside a
 // <VirtualHost> are marked scoped.
-func (l layout) apacheDirectives(main, serverRoot string, names ...string) []directive {
+func (l layout) apacheDirectives(main, serverRoot string, names ...string) ([]directive, bool) {
 	w := newWalker(l, names...)
 	root := serverRoot
 	w.apacheFile(l.fs(main), &root, false, 0)
-	return w.out
+	return w.out, w.truncated
 }
 
 func (w *walker) apacheFile(path string, serverRoot *string, inVhost bool, depth int) {
 	if depth > walkMaxDepth {
+		w.truncated = true
 		return
 	}
 	b, ok := w.enter(path)
@@ -190,7 +234,7 @@ func (w *walker) apacheFile(path string, serverRoot *string, inVhost bool, depth
 // marked scoped, with the server{} they belong to; anything under stream{} /
 // mail{} is not the HTTP origin and is dropped. It also returns every http
 // server{} block.
-func (l layout) nginxDirectives(main, prefix string, names ...string) ([]directive, []nginxServer) {
+func (l layout) nginxDirectives(main, prefix string, names ...string) ([]directive, []nginxServer, bool) {
 	w := newWalker(l, append(names, "server_name")...)
 	w.reinclude = true
 	w.nginxFile(l.fs(main), prefix, nil, 0)
@@ -207,7 +251,7 @@ func (l layout) nginxDirectives(main, prefix string, names ...string) ([]directi
 			out = append(out, d)
 		}
 	}
-	return out, w.servers
+	return out, w.servers, w.truncated
 }
 
 func inLocation(stack []string) bool {
@@ -230,6 +274,7 @@ func nonHTTP(stack []string) bool {
 
 func (w *walker) nginxFile(path, prefix string, stack []string, depth int) {
 	if depth > walkMaxDepth {
+		w.truncated = true
 		return
 	}
 	b, ok := w.enter(path)
@@ -315,6 +360,11 @@ func (w *walker) nginxStatement(path, prefix string, stack, f []string, depth in
 		return
 	}
 	name := strings.ToLower(f[0])
+	if name == "listen" && len(f) > 1 && w.cur >= 0 && !inLocation(stack) {
+		s := &w.servers[w.cur]
+		s.listens = append(s.listens, strings.Trim(f[1], `"'`))
+		return
+	}
 	if name == "include" && len(f) > 1 {
 		if w.cur >= 0 && !inLocation(stack) {
 			pat := strings.Trim(f[1], `"'`)
