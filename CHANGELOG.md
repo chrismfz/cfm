@@ -26,7 +26,10 @@ back-filled here — see the git/PR history for that period.
   (~1 MB, never in the edge's Lua), and the edge's per-request decision asks
   them, allows first as in nft. `[webdetector] PROXIED_IPFILTER_FEED` /
   `PROXIED_IPFILTER_LOCAL` = `log` (default: a line per client in `cfm.log`
-  naming the lists it is on), `enforce`, `off`. See `docs/proxied-ipfilter.md`.
+  naming the lists it is on), `enforce`, `off`. An unblock lifts it at once,
+  and a feed with a `TTL=` stops answering when nft's entries expire. On the
+  nftlib engine, reading a set no longer holds the backend's write lock, so a
+  dump never delays a ban. See `docs/proxied-ipfilter.md`.
 - **Under attack, a "Continue" button for the visitors the challenge cannot
   tell apart** (`CHALLENGE_V2_CONFIRM`,
   `docs/targeted-challenge-design.md` §4).

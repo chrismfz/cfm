@@ -29,7 +29,10 @@ about 4 hours), a job nothing in CFM did.
   is a binary search with no allocation; a refresh builds a new snapshot and
   swaps an atomic pointer.
 - **Sources.** Feeds: `blocklists.Manager` hands every successfully applied
-  feed over (`SetFeed`; a feed removed from `cfm.blocklists` is dropped). The
+  feed over (built outside its lock, published under it only while the feed is
+  still configured, so a fetch that finishes after a Reload removed the feed
+  does not bring it back). A feed with a per-element TTL (`|TTL=1h`) stops
+  answering when nft's elements expire, until the next apply. The
   node's own sets of `inet cfm input` are read from the kernel every minute
   (`StartLocalRefresh`, the backend's `ListSetElementsRaw`): `block_v4/v6`,
   `block_v4/v6_nets`, `allow_v4/v6`, `allow_v4/v6_nets`, `allow_dyn_v4/v6`.
@@ -39,13 +42,26 @@ about 4 hours), a job nothing in CFM did.
   block set drops, so an allow only cancels a block. It does not exempt the
   request from the WAF or a challenge, exactly as an nft allow does not for a
   direct client.
+- **Unblocks apply at once.** `edgeban.Unban`, which every unblock and allow
+  path calls, also clears the address from every block source here
+  (`Forget`) for two refreshes (2 min), by when the sets read show the
+  kernel's own view (the block gone, or the allow an unblock adds for a
+  feed-listed address). A ban the address earns again inside those 2 minutes
+  reaches the proxied filter when the override ends; nft's own drop of a
+  direct client is immediate.
 - **Where:** the nginx bridge's decision (`writeEdgeBan`), for a web-scope
   request that came through a trusted proxy (`px=1`), after IGNORE_IPS / the
   static bypass and the edge ban store. No new round trip: the edge asks the
   bridge for every request it has no cached clean allow for, and a `block` is
-  never cached. Not covered: the static location (css/js/images, which checks
-  only the edge copy of `edgeban`) and URLs a client warmed with a clean allow
-  in the 90 s before it was listed.
+  never cached. In log mode the allow for a listed client carries
+  `rule_action=observe`, which the edge does not cache either (cfm.lua acts on
+  block / challenge / throttle only, so it is an allow), so the counts are
+  per request, as enforce would see them. Not covered: the static location
+  (css/js/images, which checks only the edge copy of `edgeban`) and URLs a
+  client warmed with a clean allow in the 90 s before it was listed.
+- **The local sets on nftlib** are dumped without the backend's write lock
+  (the read connection dials its own socket per call), so the minute's reads
+  never hold up a ban or a feed write.
 
 - **After a daemon start** the feed lists are empty until the first fetch
   succeeds (a fetch is never skipped then): with cfm-web unreachable, nft keeps

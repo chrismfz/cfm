@@ -24,9 +24,18 @@ type r32 struct{ lo, hi uint32 }
 type r128 struct{ lo, hi netip.Addr }
 
 // buildTable parses set / feed elements: "1.2.3.4", "1.2.3.0/24", "lo-hi"
-// (nft's rendering of an interval), IPv4 or IPv6.
-func buildTable(elems []string) table {
+// (nft's rendering of an interval), IPv4 or IPv6. It takes several lists so a
+// feed's v4 and v6 halves need no concatenated copy.
+func buildTable(lists ...[]string) table {
 	var t table
+	for _, elems := range lists {
+		t.parse(elems)
+	}
+	t.finish()
+	return t
+}
+
+func (t *table) parse(elems []string) {
 	for _, e := range elems {
 		e = strings.TrimSpace(e)
 		if e == "" {
@@ -69,8 +78,6 @@ func buildTable(elems []string) table {
 		}
 		t.n++
 	}
-	t.finish()
-	return t
 }
 
 func (t *table) addHost(a netip.Addr) {

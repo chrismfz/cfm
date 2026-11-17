@@ -67,13 +67,13 @@ func TestTableLargeAndAllocFree(t *testing.T) {
 func TestVerdictOrderAndModes(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
-	SetFeed("MYBLOCK", false, []string{"20.43.87.186", "45.138.12.0/24"}, []string{"2001:db8::/32"})
-	SetFeed("MYALLOW", true, []string{"45.138.12.99"}, nil)
+	SetFeed("MYBLOCK", false, nil, []string{"20.43.87.186", "45.138.12.0/24"}, []string{"2001:db8::/32"})
+	SetFeed("MYALLOW", true, nil, []string{"45.138.12.99"}, nil)
 	setLocal("block_v4", false, []string{"20.43.87.186", "5.6.7.8"})
 	setLocal("allow_dyn_v4", true, []string{"5.6.7.8"})
 
 	v := Check("20.43.87.186")
-	if fmt.Sprint(v.Blocks) != "[block_v4 feed:myblock]" || v.Enforce || !v.Log {
+	if fmt.Sprint(v.Blocks) != "[block_v4 feed:myblock]" || v.Enforce || !v.Listed() {
 		t.Fatalf("log mode: %+v", v)
 	}
 	// An allow cancels the block, and is named.
@@ -86,10 +86,10 @@ func TestVerdictOrderAndModes(t *testing.T) {
 	if v := Check("2001:db8::9"); fmt.Sprint(v.Blocks) != "[feed:myblock]" {
 		t.Fatalf("v6: %+v", v)
 	}
-	if v := Check("1.1.1.1"); v.Log || len(v.Blocks) != 0 {
+	if v := Check("1.1.1.1"); v.Listed() {
 		t.Fatalf("clean: %+v", v)
 	}
-	if v := Check("not-an-ip"); v.Log {
+	if v := Check("not-an-ip"); v.Listed() {
 		t.Fatal("garbage")
 	}
 
@@ -97,7 +97,7 @@ func TestVerdictOrderAndModes(t *testing.T) {
 	if v := Check("45.138.12.1"); !v.Enforce {
 		t.Fatalf("feed enforce: %+v", v)
 	}
-	if v := Check("5.6.7.9"); v.Log {
+	if v := Check("5.6.7.9"); v.Listed() {
 		t.Fatalf("not listed: %+v", v)
 	}
 	if v := Check("45.138.12.99"); v.Enforce {
@@ -113,7 +113,7 @@ func TestVerdictOrderAndModes(t *testing.T) {
 	}
 
 	DropFeed("MYBLOCK")
-	if v := Check("45.138.12.1"); v.Log {
+	if v := Check("45.138.12.1"); v.Listed() {
 		t.Fatalf("dropped feed still answers: %+v", v)
 	}
 }
@@ -124,10 +124,13 @@ func TestDecideLogsOncePerWindow(t *testing.T) {
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	logNow = func() time.Time { return now }
 	t.Cleanup(func() { logNow = time.Now })
-	SetFeed("MYBLOCK", false, []string{"20.43.87.186"}, nil)
+	SetFeed("MYBLOCK", false, nil, []string{"20.43.87.186"}, nil)
 
-	if Decide("20.43.87.186", "shop.gr") {
-		t.Fatal("log mode answered block")
+	if enf, listed := Decide("20.43.87.186", "shop.gr"); enf || !listed {
+		t.Fatal("log mode: listed, not enforced")
+	}
+	if enf, listed := Decide("1.1.1.1", "shop.gr"); enf || listed {
+		t.Fatal("a clean client is neither")
 	}
 	for i := 0; i < 5; i++ {
 		Decide("20.43.87.186", "shop.gr")
@@ -140,7 +143,7 @@ func TestDecideLogsOncePerWindow(t *testing.T) {
 		t.Fatalf("after the window: n=%d due=%v (5 decides + the probe + this one)", n, due)
 	}
 	SetModes("enforce", "log")
-	if !Decide("20.43.87.186", "shop.gr") {
+	if enf, _ := Decide("20.43.87.186", "shop.gr"); !enf {
 		t.Fatal("enforce mode")
 	}
 	st := Stats()
@@ -167,11 +170,11 @@ func TestLocalRefreshKeepsASetItCannotRead(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	StartLocalRefresh(ctx, list, 20*time.Millisecond)
-	waitFor(t, func() bool { return Check("9.9.9.9").Log })
+	waitFor(t, func() bool { return Check("9.9.9.9").Listed() })
 	fail.Store(true)
 	n := calls.Load()
 	waitFor(t, func() bool { return calls.Load() > n+int32(len(localSets)) })
-	if !Check("9.9.9.9").Log {
+	if !Check("9.9.9.9").Listed() {
 		t.Fatal("an unreadable set lost what it had")
 	}
 }
@@ -193,5 +196,62 @@ func TestOrDashKeepsALineALine(t *testing.T) {
 	}
 	if orDash("") != "-" || len(orDash(strings.Repeat("a", 400))) != 253 {
 		t.Fatal("empty / length")
+	}
+}
+
+// An unblock (edgeban.Unban -> Forget) clears the address at once, from feed
+// and local sources alike, until the sets read next can show it.
+func TestForget(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	clock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return clock }
+	SetFeed("MYBLOCK", false, nil, []string{"20.43.87.186"}, nil)
+	setLocal("block_v4", false, []string{"20.43.87.186", "5.6.7.8"})
+	Forget("20.43.87.186")
+	Forget("garbage")
+	if Check("20.43.87.186").Listed() || !Check("5.6.7.8").Listed() {
+		t.Fatal("forget")
+	}
+	if Check("::ffff:20.43.87.186").Listed() {
+		t.Fatal("a v4-mapped form of a forgotten address")
+	}
+	clock = clock.Add(forgetFor)
+	if !Check("20.43.87.186").Listed() {
+		t.Fatal("still on the lists after the override: listed again")
+	}
+	if Stats()["forgotten"].(int) != 1 {
+		t.Fatal("the expired entry is pruned on the next Forget, not before")
+	}
+	Forget("5.6.7.8")
+	if Stats()["forgotten"].(int) != 1 {
+		t.Fatal("expired entry pruned")
+	}
+}
+
+// A feed with a per-element TTL stops answering when nft's elements expire.
+func TestFeedTTL(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	clock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	now = func() time.Time { return clock }
+	ttl := time.Hour
+	SetFeed("SHORT", false, &ttl, []string{"198.51.100.1"}, nil)
+	SetFeed("ALLOWTTL", true, &ttl, []string{"198.51.100.2"}, nil)
+	SetFeed("LONG", false, nil, []string{"198.51.100.2"}, nil)
+	if !Check("198.51.100.1").Listed() || Check("198.51.100.2").Enforce {
+		t.Fatal("inside the TTL")
+	}
+	SetModes("enforce", "log")
+	clock = clock.Add(ttl)
+	if Check("198.51.100.1").Listed() {
+		t.Fatal("the TTL feed still answers after nft expired it")
+	}
+	if !Check("198.51.100.2").Enforce {
+		t.Fatal("an expired allow feed must stop cancelling")
+	}
+	st := Stats()["sources"].(map[string]any)["feed:short"].(map[string]any)
+	if st["expired"] != true {
+		t.Fatalf("stats %+v", st)
 	}
 }

@@ -1,7 +1,6 @@
 package blocklists
 
 import (
-	"cfm/internal/proxyipfilter"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -13,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/proxyipfilter"
 )
 
 // Applier: ο manager δεν ξέρει nft. Του δίνεις έναν "εφαρμοστή" που ξέρει να
@@ -289,9 +290,15 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	// The same content for the proxied-client filter: nft never sees a
 	// visitor behind Cloudflare, the bridge's decision does (internal/proxyipfilter).
 	// After every successful apply, so the first fetch after a start (never a
-	// skip: there is no hash yet) fills it.
-	proxyipfilter.SetFeed(r.feed.Name, r.feed.Type == TypeAllow, res.V4, res.V6)
+	// skip: there is no hash yet) fills it. Built outside the lock (~100 ms for
+	// the fleet list), published under it only while this runner is still the
+	// feed's: a fetch that finishes after Reload removed the feed (and dropped
+	// it from the filter) must not bring it back.
+	prep := proxyipfilter.PrepareFeed(r.feed.Name, r.feed.Type == TypeAllow, r.feed.TTL, res.V4, res.V6)
 	m.mu.Lock()
+	if cur, ok := m.runs[r.feed.Name]; ok && cur == r && ctx.Err() == nil {
+		prep.Publish()
+	}
 	r.lastAppliedAt = r.lastApply
 	r.lastErr = nil
 	m.mu.Unlock()
