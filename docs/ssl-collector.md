@@ -65,6 +65,25 @@ same OpenResty process via `dict:get_keys()` + `dict:get()`.  A worker-local
 table is only reachable by code that holds a reference to this module, which
 is a significantly smaller blast radius for key material enumeration.
 
+### An ingest replaces the store
+
+Each `/dumpall` (or snapshot) ingest builds a new table and swaps it in
+whole, so a name the daemon dropped stops being served. Ingest used to only
+add: when AutoSSL replaced a cPanel self-signed placeholder (`dom` +
+`www.dom`) with a wildcard (`*.dom` + `dom`), the stale exact `www.dom` entry
+stayed in every worker and, since an exact match outranks a wildcard, kept
+serving the self-signed cert until the edge was reloaded (spoolbox.gr on
+rigel, 2026-11-17). Two exceptions keep the old additive behaviour:
+
+- a payload entry whose PEM does not parse keeps the worker's current pair
+  for that name;
+- a payload holding under half of a store of at least 20 names is merged,
+  not swapped (a daemon scan that lost a mount must not strip the edge). It
+  logs `merged, not replaced` and sets `meta:last_error`. A reload takes the
+  payload as it is.
+
+The `ingest src=…` log line carries `mode=replace|merge|none`.
+
 ---
 
 ## Socket authentication

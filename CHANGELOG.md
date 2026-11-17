@@ -72,6 +72,16 @@ back-filled here — see the git/PR history for that period.
   the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
 ### Fixed
+- **Edge: a cert name the daemon dropped is no longer served until a
+  reload.** The edge's per-worker cert store only ever added names from the
+  sslcollector list. When AutoSSL replaced a new account's cPanel self-signed
+  placeholder (`dom` + `www.dom`) with a wildcard (`*.dom` + `dom`), the
+  stale `www.dom` entry stayed, and an exact name outranks a wildcard:
+  `www.` kept serving the self-signed cert until the edge was reloaded
+  (spoolbox.gr on rigel, 2026-11-17, while `cfm ssl dump` showed the right
+  cert). An update now replaces the store. A name whose new PEM does not
+  parse keeps its old pair, and a list under half the size of the current
+  one (20+ names) is merged as before and logged (`merged, not replaced`).
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
   it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It
