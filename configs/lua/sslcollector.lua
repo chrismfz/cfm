@@ -156,15 +156,28 @@ local SNAP_MIN_BYTES = 256
 -- *.<dom> + <dom> replaced it) must stop being served. Until 2026-11-17 ingest
 -- only added, so the stale exact entry outranked the new wildcard in every
 -- worker until a reload (spoolbox.gr on rigel: www. served the self-signed
--- cert for 9 h). The guard: a payload holding under half of the PREVIOUS
--- payload (one of at least SHRINK_GUARD_MIN names) is merged instead (the old
--- additive ingest), so one daemon scan that lost a mount cannot strip the edge
--- of its certs; it logs the shrink. The next payload is measured against this
--- one, so a shrink that is real (accounts moved away) is taken one payload
--- later. Measured against the store instead, a merge never shrank it and every
--- later payload merged again: the stale names stayed until a reload.
-local SHRINK_GUARD_MIN = 20
-local _last_payload_n = 0  -- names the last ingested payload held (0: none yet)
+-- cert for 9 h). A replace strips every name it does not carry, and a store
+-- without a site's cert takes that site down, so it is taken only when:
+--   * the payload says "complete": true. The daemon sets it when every
+--     indexed name made it in (dumpall.go writePayload): a name whose PEM it
+--     could not read (a file mid-rewrite) is left OUT, not sent empty, and
+--     only the flag tells the edge. The snapshot and the per-version build
+--     carry it; the last-resort stream (no room for a temp file) and an older
+--     daemon never do, and merge (the old additive ingest) like any
+--     incomplete payload;
+--   * it is not a sudden shrink: under two thirds of the last payload taken
+--     (the daemon's own snapshot guard, snapshot.go) is merged while the
+--     shrink is younger than SHRINK_HOLD_SECS, so a scan that lost a mount
+--     cannot strip the edge. A shrink that lasts (accounts moved away) is
+--     taken after it: a merged worker next fetches at a version change or
+--     the hourly forced refresh. The baseline is the last payload TAKEN, not
+--     the store (a merge never shrinks the store, so measured against it
+--     every later payload merged again) and not the last payload seen (a
+--     second degraded payload would have stripped the store).
+local SHRINK_GUARD_MIN  = 3     -- below this many names, no shrink guard
+local SHRINK_HOLD_SECS  = 3600  -- a shrink this old is taken
+local _last_payload_n   = 0     -- names in the last payload taken (0: none yet)
+local _shrink_since     = 0     -- when the current held shrink was first seen
 
 -- If true, a /dumpall payload without a Version field is a hard reject for
 -- both RAM ingest AND snapshot write. Keep false unless upstream always provides
@@ -493,18 +506,32 @@ local function ingest_dumpall(data, src)
   local mode = "none"
   if okN > 0 then
     local prevN = _last_payload_n
-    _last_payload_n = nextN
-    if prevN >= SHRINK_GUARD_MIN and nextN * 2 < prevN then
-      -- Sudden shrink: keep the additive behaviour for this payload only.
-      for k, v in pairs(next_store) do _store[k] = v end
-      mode = "merge"
-      ngx.log(ngx.WARN, "[sslcollector] ingest src=", (src or "?"),
-        " payload holds ", nextN, " names, the previous ", prevN, ": merged, not",
-        " replaced (the next payload of this size replaces)")
-      set_last_error("ingest: payload shrank " .. prevN .. " -> " .. nextN .. ", merged")
+    local now = ngx.time()
+    local shrunk = prevN >= SHRINK_GUARD_MIN and nextN * 3 < prevN * 2
+    if not shrunk then _shrink_since = 0 end
+    local hold = false
+    if data.complete ~= true then
+      mode = "merge_incomplete"
+    elseif shrunk then
+      if _shrink_since == 0 then _shrink_since = now end
+      hold = (now - _shrink_since) < SHRINK_HOLD_SECS
+      mode = hold and "merge_shrink" or "replace"
     else
-      _store = next_store
       mode = "replace"
+    end
+    if mode == "replace" then
+      _store = next_store
+      _last_payload_n = nextN
+      _shrink_since = 0
+    else
+      -- Keep the additive behaviour for this payload.
+      for k, v in pairs(next_store) do _store[k] = v end
+      if hold then
+        ngx.log(ngx.WARN, "[sslcollector] ingest src=", (src or "?"),
+          " payload holds ", nextN, " names, the last taken ", prevN,
+          ": merged, not replaced (taken if it lasts ", SHRINK_HOLD_SECS, "s)")
+        set_last_error("ingest: payload shrank " .. prevN .. " -> " .. nextN .. ", merged")
+      end
     end
     dict:set("meta:ready",            "1",         86400)
     dict:set("meta:last_dumpall_at",   ngx.time(), 0)
@@ -747,7 +774,13 @@ local function poll_stats(premature)
   -- without a retry the worker stays empty until /stats first succeeds.
   -- Cheap: io.open + JSON decode of a ~few-hundred-KB file. Idempotent.
   if _worker_last_dumpall == 0 then
-    load_from_snapshot()
+    -- pcall: an error here would end this timer before it reschedules, and
+    -- the worker would never refresh again.
+    local sok, serr = pcall(load_from_snapshot)
+    if not sok then
+      ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(serr))
+      set_last_error("snapshot load: " .. tostring(serr))
+    end
   end
 
   local r, err = sock_get("/stats")
@@ -852,8 +885,13 @@ function M.start_background()
   local ok, e = ngx.timer.at(0, function(premature)
     if premature then return end
 
-    -- 1) Warm RAM from disk snapshot
-    load_from_snapshot()
+    -- 1) Warm RAM from disk snapshot. pcall: an error must not stop steps
+    --    2 and 3, or the worker never fetches nor polls.
+    local sok, serr = pcall(load_from_snapshot)
+    if not sok then
+      ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(serr))
+      set_last_error("snapshot load: " .. tostring(serr))
+    end
 
     -- 2) Attempt live dumpall immediately.
     --    Sets meta:last_dumpall_attempt_at + meta:last_dumpall_at (on success)

@@ -79,11 +79,12 @@ back-filled here — see the git/PR history for that period.
   stale `www.dom` entry stayed, and an exact name outranks a wildcard:
   `www.` kept serving the self-signed cert until the edge was reloaded
   (spoolbox.gr on rigel, 2026-11-17, while `cfm ssl dump` showed the right
-  cert). An update now replaces the store. A name whose new PEM is missing
-  or does not parse keeps its old pair. A list under half the size of the
-  previous one (20+ names) is merged once and logged (`merged, not
-  replaced`), so one bad scan cannot strip the edge; the next list of that
-  size replaces.
+  cert). A list now replaces the store, but only a list the daemon marks
+  complete. A list missing a cert the daemon could not read is merged as
+  before, as is a list under two thirds the size of the last one taken; that
+  shrink is taken only if it lasts an hour. A name whose new PEM is missing or
+  does not parse keeps its old pair. An error loading the snapshot no longer
+  stops a worker from ever fetching or polling again.
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
   it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It

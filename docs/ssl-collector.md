@@ -67,25 +67,47 @@ is a significantly smaller blast radius for key material enumeration.
 
 ### An ingest replaces the store
 
-Each `/dumpall` (or snapshot) ingest builds a new table and swaps it in
-whole, so a name the daemon dropped stops being served. Ingest used to only
-add: when AutoSSL replaced a cPanel self-signed placeholder (`dom` +
-`www.dom`) with a wildcard (`*.dom` + `dom`), the stale exact `www.dom` entry
-stayed in every worker and, since an exact match outranks a wildcard, kept
-serving the self-signed cert until the edge was reloaded (spoolbox.gr on
-rigel, 2026-11-17). Two exceptions keep the old additive behaviour:
+Each `/dumpall` (or snapshot) ingest builds a new table. When it can, it swaps
+that table in whole, so a name the daemon dropped stops being served.
 
-- a payload entry whose PEM is missing or does not parse keeps the worker's
-  current pair for that name;
-- a payload holding under half of the previous payload (one of at least 20
-  names) is merged, not swapped: one daemon scan that lost a mount must not
-  strip the edge. It logs `merged, not replaced` and sets `meta:last_error`.
-  The next payload is measured against this one, so a real shrink (accounts
-  moved away) is taken one payload later, at the next version change or the
-  hourly forced refresh. Measured against the store, a merge never shrank it
-  and every later payload would merge again.
+Ingest used to only add. When AutoSSL replaced a cPanel self-signed
+placeholder (`dom` + `www.dom`) with a wildcard (`*.dom` + `dom`), the stale
+exact `www.dom` entry stayed in every worker. Because an exact match
+outranks a wildcard, `www.dom` kept serving the self-signed cert until the
+edge was reloaded (spoolbox.gr on rigel, 2026-11-17).
 
-The `ingest src=…` log line carries `mode=replace|merge|none`.
+A replace strips every name the payload does not carry, and a store missing a
+site's cert takes that site down. So a payload replaces only when both of
+these hold:
+
+- **It says `"complete": true`.** If the daemon cannot read a name's PEM (a
+  file mid-rewrite), it leaves the name out of the payload. It does not send
+  the name empty. Only this flag tells the edge that something was left out.
+  - The snapshot and the per-version build carry the flag.
+  - The last-resort stream (used when there is no room for a temp file) and
+    daemons older than the flag never do.
+  - Every incomplete payload is merged, like the old additive ingest.
+- **It is not a sudden shrink.** A payload under two thirds of the last
+  payload taken is merged while the shrink is younger than an hour. Two thirds
+  is the same threshold as the daemon's own snapshot guard. This stops a scan
+  that lost a mount from stripping the edge.
+  - A shrink that lasts (accounts moved away) is taken after the hour, at the
+    next version change or the hourly forced refresh.
+  - The baseline is the last payload taken. It is not the store, which a merge
+    never shrinks. It is not the last payload seen either, because then a
+    second degraded payload would strip the store.
+  - Stores of fewer than 3 names are not guarded.
+
+On top of that:
+
+- A payload entry whose PEM is missing or does not parse keeps the worker's
+  current pair for that name.
+- A held shrink logs `merged, not replaced` and sets `meta:last_error`.
+- The snapshot load is wrapped in `pcall`. Before, an error there ended the
+  boot timer, and the worker never fetched or polled again.
+
+The `ingest src=…` log line carries
+`mode=replace|merge_shrink|merge_incomplete|none`.
 
 ---
 
