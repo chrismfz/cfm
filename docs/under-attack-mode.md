@@ -18,7 +18,8 @@
 > only the unbuilt I3+ ladder.
 >
 > **2026-11-17 — a consumer for the state, still outside the ladder:**
-> `docs/targeted-challenge-design.md` §4 (design, not built) shows a confirm
+> `docs/targeted-challenge-design.md` §4 (built for an operator's `attack on`,
+> `CHALLENGE_V2_CONFIRM`; the automatic entry is not) shows a confirm
 > step to no-input solves outside the vhost's audience while it is
 > UNDER_ATTACK, with a proposed automatic entry from a `solver_farm` finding.
 > I3–I5 stay frozen.

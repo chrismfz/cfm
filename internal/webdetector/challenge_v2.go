@@ -1471,6 +1471,12 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	if s.V2Rescued != "" && s.V2Grain != "" {
 		out += " v2_rescued=" + s.V2Rescued
 	}
+	// The under-attack confirm step (challenge_confirm.go): last within the
+	// humanity suffix (the fields that follow the suffix on a line still
+	// move, as they did for every member added here).
+	if s.V2Confirm != "" {
+		out += fmt.Sprintf(" v2_confirm=%s v2_confirm_ms=%d", s.V2Confirm, s.V2ConfirmMS)
+	}
 	return out
 }
 

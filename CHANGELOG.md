@@ -17,6 +17,37 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **Under attack, a "Continue" button for the visitors the challenge cannot
+  tell apart** (`CHALLENGE_V2_CONFIRM`,
+  `docs/targeted-challenge-design.md` §4).
+  - What: while a vhost is UNDER_ATTACK, a solve that passed the humanity
+    check with no mouse, touch or key input at all, from a visitor outside
+    the audience (`CHALLENGE_V2_CONFIRM_AUDIENCE`, default GR,CY; a
+    datacenter network counts as outside), gets no clearance on its first
+    try. The page shows one Continue button instead, and the click passes;
+    a second try that carries the token but still no click is asked again.
+    Nobody is rejected by it. It waits for a hidden tab to be seen again,
+    works from the keyboard, and lets the visitor click without solving
+    again for up to 5 minutes (bounded by the challenge cookie, 300 s from
+    when it was set; past it the page starts a fresh challenge).
+  - Why: E4 read 7 (2026-11-17). The `c28caa00` farm answered `linux_sw`
+    within a day by passing at score 0 from residential proxies, with no
+    input on 9 solves in 10. No score can reject that. The click costs the
+    farm a second round trip on every solve, and its approach is measured.
+    It is not a wall: a farm that scripts the click (or reports one) passes.
+  - Default `manual`: only while an override holds the vhost UNDER_ATTACK
+    (`cfm webtop attack on <vhost>`, the cfm-admin Under-Attack toggle, or a
+    cPanel user on their own vhost, 24 h max). The override lives in memory:
+    a `detectors.conf` save or reload clears it. A verified search-engine
+    crawler is never asked (it cannot click).
+    The state challenges nobody by itself, so the vhost needs a challenge
+    served: `cfm webtop challenge add <vhost>` to try it. `auto` also covers
+    the detector's automatic entry; `off` turns it off.
+  - Logs: `result=v2_confirm` when the button is shown, and
+    `v2_confirm=clicked v2_confirm_ms=<ms>` on the solve line and history row
+    (withheld from cPanel users with the other `v2_*` keys).
+
 ### Security
 - **cfm-admin logins: goauth updated to its audited release.** The session
   library behind the cfm-admin login was audited and fixed. What changes on a

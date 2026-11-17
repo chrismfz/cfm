@@ -866,8 +866,13 @@ edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
 verify host) are edge-authoritative on current confs; the client-authored
 humanity report remains spoofable by a signal-aware farm — deliberate D5b
 residual, all documented in the HONEST LIMITS block of `challenge_v2.go`; Rung 2 is narrowed to a
-"confirm you're human" fallback for a Rung-1 reject (a candidate, not built, after the real-input rescue above
-and its trajectory corpus) — the visible puzzle was dropped 2026-09-29, and a farm running real browsers
+"confirm you're human" step — since 2026-11-17 BUILT as the under-attack confirm
+(`challenge_confirm.go`, `CHALLENGE_V2_CONFIRM`, default `manual` = an operator's
+`attack on` only): a no-input solve from outside `CHALLENGE_V2_CONFIRM_AUDIENCE`
+(GR,CY; datacenter ASNs count as outside) gets a 403 + `X-CFM-Confirm` token and a
+Continue button, and the click passes (never a reject); the re-post's PoW is checked
+as of the token, so it outlives the PoW TTL — the fallback for a Rung-1 reject is
+not built — the visible puzzle was dropped 2026-09-29, and a farm running real browsers
 (`hs=0`) is the operator fingerprint / geo policy's job, not a harder check (master plan §5, E3's honest
 limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Where we are: `docs/abuse-defense-progress.md`**
 (the measurement journal — read it first). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
@@ -1020,7 +1025,7 @@ because of that. Hard-won points:
 | Alert log (every notifier event + its delivery outcome → `/var/lib/cfm/alerts.db`, `/api/v1/alerts`, cfm-admin Alerts, MCP `alerts`) | `docs/alerts.md` |
 | Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |
 | Vhost lockdown (no client exemption on a manual vhost challenge: crawler storms) | `docs/vhost-lockdown.md` |
-| Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design, not built | `docs/targeted-challenge-design.md` |
+| Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
 `docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·

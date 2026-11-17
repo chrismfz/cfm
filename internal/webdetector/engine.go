@@ -878,6 +878,14 @@ func NewEngine(cfg Config) *Engine {
 	} else {
 		SetChallengeV2Lockdown(nil)
 	}
+	// The under-attack confirm step reads this engine's under-attack state
+	// (challenge_confirm.go); a rebuilt engine re-wires it.
+	// A www. host also follows its apex's state, as its v2 tier does (an
+	// operator forces `attack on example.gr`; visitors arrive on www.).
+	// A confirm-asked solve still counts toward the vhost's under-attack
+	// solve rate (RecordUnderAttackSolve), or a farm that never clicks
+	// would starve the automatic state that asks it.
+	SetUnderAttackConfirmState(e.confirmAttackState, e.RecordUnderAttackSolve)
 
 	return e
 }
@@ -1101,6 +1109,10 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 		if s.V2WaiverMiss != "" {
 			payload["v2_waiver_miss"] = s.V2WaiverMiss
+		}
+		if s.V2Confirm != "" {
+			payload["v2_confirm"] = s.V2Confirm
+			payload["v2_confirm_ms"] = s.V2ConfirmMS
 		}
 		if sig := s.signalMap(); sig != nil {
 			payload["sig"] = sig
