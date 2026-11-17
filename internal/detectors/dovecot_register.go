@@ -67,6 +67,11 @@ func init() {
 			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP", 20),
 			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 10),
 
+			UserDisabledPerIP:    kvInt(kv, "USER_DISABLED_IP", 2),
+			UserDisabledWindow:   kvDur(kv, "USER_DISABLED_WINDOW", 24*time.Hour),
+			UserDisabledBlockTTL: kvDur(kv, "USER_DISABLED_BLOCK_TTL", 24*time.Hour),
+			UserDisabledNotify:   kvBool(kv, "USER_DISABLED_NOTIFY", false),
+
 			UseEnrich:  useEnrich,
 			UsePTR:     usePTR,
 			EnrichDirs: dirs,
@@ -119,24 +124,24 @@ func init() {
 				det.SetState(dovecotState, core.FileStateKey(section, "journal:"+res.Unit))
 			}
 			logging.Logf("[detectors][%s] source=journal unit=%s (%s)", section, res.Unit, res.Reason)
-			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=journal unit=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
-				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Unit, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=journal unit=%s limits: ip=%d user=%d user_disabled=%d/%s enrich=%t ptr=%t dirs=%v)",
+				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Unit, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UserDisabledPerIP, cfg.UserDisabledWindow, cfg.UseEnrich, cfg.UsePTR, dirs)
 		case srcresolve.KindFile:
 			det.SetSource(core.NewFileTailer(res.Path))
 			if dovecotState != nil {
 				det.SetState(dovecotState, core.FileStateKey(section, res.Path))
 			}
 			logging.Logf("[detectors][%s] source=file path=%s (%s)", section, res.Path, res.Reason)
-			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
-				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Path, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=file log=%s limits: ip=%d user=%d user_disabled=%d/%s enrich=%t ptr=%t dirs=%v)",
+				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Path, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UserDisabledPerIP, cfg.UserDisabledWindow, cfg.UseEnrich, cfg.UsePTR, dirs)
 		case srcresolve.KindDocker:
 			det.SetSource(core.NewDockerTailer(res.Container, cfg.DockerArgs...))
 			if dovecotState != nil {
 				det.SetState(dovecotState, core.FileStateKey(section, "docker:"+res.Container))
 			}
 			logging.Logf("[detectors][%s] source=docker container=%s args=%v (%s)", section, res.Container, cfg.DockerArgs, res.Reason)
-			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=docker container=%s limits: ip=%d user=%d enrich=%t ptr=%t dirs=%v)",
-				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Container, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UseEnrich, cfg.UsePTR, dirs)
+			logging.Logf("[detectors] start %s (every=%s window=%s cooldown=%s mode=docker container=%s limits: ip=%d user=%d user_disabled=%d/%s enrich=%t ptr=%t dirs=%v)",
+				section, cfg.Every, cfg.Window, cfg.Cooldown, res.Container, cfg.AuthFailPerIP, cfg.AuthFailPerUser, cfg.UserDisabledPerIP, cfg.UserDisabledWindow, cfg.UseEnrich, cfg.UsePTR, dirs)
 		}
 
 		return det, nil

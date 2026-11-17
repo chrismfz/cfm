@@ -45,6 +45,18 @@ const (
 	NotifyNo    = "no"
 )
 
+// ExtraMaxBlockTTL lets a detector cap how long one finding may ban (a Go
+// duration, e.g. "24h"), whatever the section's BLOCK: a permanent section
+// bans for at most that long, a ttl section for the shorter of the two. Meant
+// for a finding that is weaker than the section's main one. The dovecot
+// section bans permanently on failed passwords, while a login refused as
+// user_disabled (Imunify's RBL lock, or a suspended mailbox) is someone
+// else's verdict and gets a TTL. Absent or unparsable means no cap, so no
+// existing detector changes. The sink honours it on every block path; a
+// dryrun or leniency policy is unaffected, except that a leniency TTL longer
+// than the cap is cut to it.
+const ExtraMaxBlockTTL = "max_block_ttl"
+
 type Sink interface{ Publish(Alert) }
 
 type PeriodicDetector interface {

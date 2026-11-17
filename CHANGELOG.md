@@ -18,6 +18,20 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **Imunify360 RBL locks now reach the fleet list.** On a cPanel node with
+  Imunify, a mail login from an address on Imunify's global RBL is refused
+  before any password check, and dovecot logs it as `user_disabled`. CFM's
+  dovecot detector only counted password failures, so it never banned these
+  sources or reported them. On earth that was ~1 200 addresses in three days,
+  and none of a 25-address sample was on the fleet list. The detector now counts `user_disabled`
+  logins per IP (`USER_DISABLED_IP = 2` in `USER_DISABLED_WINDOW = 24h`). It
+  bans them for at most `USER_DISABLED_BLOCK_TTL = 24h`, even though the
+  section's `BLOCK` is permanent, and reports them to cfm-web. GR/CY addresses
+  get the section leniency. No mail is sent per ban unless
+  `USER_DISABLED_NOTIFY = 1`. A detector can now cap one finding's ban
+  (`core.ExtraMaxBlockTTL`) and skip its mail on the block path
+  (`core.ExtraNotify`). See `docs/DETECTORS.md`, "dovecot_auth — logins refused
+  as user_disabled".
 - **WAF rule 530 measures WooCommerce add-to-cart crawling (logonly).**
   A `GET ?add-to-cart=<id>` makes WooCommerce write a session and a cart, and
   crawlers follow those links on every listing. On 2026-11-17 the fleet served

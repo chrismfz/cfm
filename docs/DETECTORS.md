@@ -282,7 +282,7 @@ Typical defaults below are representative from the shipped template and should b
 |---|---|---|---|
 | `cfm_endpoints` | CFM login/token/API abuse stages; built in and active even without the config file | `STAGE1/2/3_THRESHOLD`, `STAGE2_CHALLENGE_TTL`, `BLOCK`, IP/network allowlists | `EVERY=2s`, `WINDOW=2m`, `BLOCK=15m` |
 | `ssh_auth` | SSH auth failures / brute-force | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `DDOS_IP`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `AUTHFAIL_IP`/`AUTHFAIL_USER`/`DDOS_IP=8`, `BLOCK=permanent`, `BLOCK_COOLDOWN=30m` (also what a section without those keys runs) |
-| `dovecot_auth` | Dovecot auth abuse | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
+| `dovecot_auth` | Dovecot auth abuse, and logins refused as `user_disabled` (Imunify RBL locks) | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK`, `USER_DISABLED_IP`, `USER_DISABLED_WINDOW`, `USER_DISABLED_BLOCK_TTL`, `USER_DISABLED_NOTIFY` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent`; user_disabled: 2 in 24h, a 24h ban, no mail |
 | `ftpd` | FTP auth failures | `MODE`, `AUTHFAIL_IP`, `AUTHFAIL_USER`, `BLOCK` | `MODE=auto`, `WINDOW=15m`, `BLOCK=permanent` |
 | `cpanel` | cPanel auth/root login anomalies | `AUTHFAIL_IP`, `AUTHFAIL_USER`, `ROOT_IP`, `BLOCK` | `WINDOW=10m`, `BLOCK=1h` |
 | `mysql` | MySQL/MariaDB auth failures / scans | `LOG_PATH`, `DENIED_IP`, `DENIED_USER`, `ROOT_IP`, `SCAN_IP`, `BLOCK` | `WINDOW=10m`, `LOG_PATH=auto`, `BLOCK=permanent` |
@@ -300,6 +300,43 @@ Typical defaults below are representative from the shipped template and should b
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
 | `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=4`, `SITES=3`, `BLOCK=3d`, armed (`DRY_RUN=0`); GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
+
+### `dovecot_auth` — logins refused as `user_disabled`
+
+On a cPanel node with Imunify360, `pam_imunify` refuses a mail login from an
+address on Imunify's global RBL before any password is checked. Imunify writes
+`[IM360_RBL] The IP … has been locked` to `/var/log/messages`, and dovecot logs
+the login as `Login aborted: … (user disabled, 1 attempts in 2 secs)
+(user_disabled)`. None of the password-failure markers is in that line. These
+sources never failed a password here, so no detector banned them and none
+reached the fleet list.
+
+Measured on earth (2026-11-17, three days):
+- all 969 addresses with such lines (2 363 lines) were RBL locks;
+- 0 of a 25-address sample were in CFM's own block set or the fleet list
+  (`MYBLOCK`);
+- 1 of the 1 218 RBL addresses was Greek.
+
+The same lock line is on mars, titan, rigel and speedhost (1.7-4.2 k lines
+each). On a node without Imunify, `user_disabled` is also a suspended mailbox
+whose owner's phone retries.
+
+So the detector keeps them apart from the password failures:
+- **Counting:** per IP only (the mailbox is the victim), `USER_DISABLED_IP`
+  (2) in `USER_DISABLED_WINDOW` (24 h). Imunify's locks of one address repeat
+  over hours, not minutes.
+- **Alert:** `DOVECOT/USER_DISABLED`.
+- **Ban:** at most `USER_DISABLED_BLOCK_TTL` (24 h), whatever the section's
+  `BLOCK` says. The alert carries `core.ExtraMaxBlockTTL`, which the sink
+  honours on every block path, so the section's permanent ban becomes a 24 h
+  one. The ban is reported to cfm-web like any other, so the whole fleet gets
+  the address.
+- **GR/CY:** these addresses take the section leniency (a 15 m ban, lenient,
+  not propagated).
+- **Mail:** none per ban (`core.ExtraNotify`), unless
+  `USER_DISABLED_NOTIFY = 1`. There are hundreds a day on an Imunify node. The
+  ban, the report and the detector log still happen.
+- **Off switch:** `USER_DISABLED_IP = 0` turns the bucket off.
 
 ### `challenge_solver_farm` — why it exists
 

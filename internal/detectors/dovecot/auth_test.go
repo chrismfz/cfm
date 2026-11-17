@@ -109,3 +109,106 @@ func TestAlertScopes(t *testing.T) {
 		t.Fatal("expected a per-user alert at threshold 1")
 	}
 }
+
+// The Imunify RBL lock as dovecot logs it on earth (2026-11-17): a login refused
+// before any password check. It feeds only the user_disabled bucket, never the
+// password-failure ones, and its alert carries a capped ban and no mail.
+const userDisabledLine = `Nov 17 17:15:05 earth dovecot[357175]: imap-login: Login aborted: Connection closed (user disabled, 1 attempts in 2 secs) (user_disabled): user=<info@romylos.gr>, method=PLAIN, rip=103.199.18.15, lip=84.54.49.203, TLS, session=<x>`
+
+func TestUserDisabledBucket(t *testing.T) {
+	a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, AuthFailPerUser: 1, UserDisabledPerIP: 2})
+	now := time.Now()
+	a.processLine(now, userDisabledLine)
+	if len(a.pending) != 1 {
+		t.Fatalf("want only the user_disabled bucket, got %v", a.pending)
+	}
+	for _, p := range a.pending {
+		if p.kindKey != kindDisabledIP || p.key != "103.199.18.15" {
+			t.Fatalf("pending %+v, want %s:103.199.18.15", p, kindDisabledIP)
+		}
+	}
+	ch := make(chan core.Alert, 4)
+	a.flush(now, ch)
+	if len(ch) != 0 {
+		t.Fatalf("one line must stay under USER_DISABLED_IP=2, got %d alert(s)", len(ch))
+	}
+
+	// The same address an hour later (Imunify's locks repeat over hours): the
+	// 24h window still holds the first line.
+	later := now.Add(time.Hour)
+	a.processLine(later, userDisabledLine)
+	a.flush(later, ch)
+	close(ch)
+	var got []core.Alert
+	for al := range ch {
+		got = append(got, al)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want one alert at the second line, got %d", len(got))
+	}
+	al := got[0]
+	if al.Kind != "DOVECOT/USER_DISABLED" || al.Count != 2 {
+		t.Errorf("alert kind=%s count=%d", al.Kind, al.Count)
+	}
+	if al.Extra["ip"] != "103.199.18.15" {
+		t.Errorf("extra ip=%q", al.Extra["ip"])
+	}
+	if al.Extra[core.ExtraMaxBlockTTL] != "24h0m0s" {
+		t.Errorf("max_block_ttl=%q, want the 24h default", al.Extra[core.ExtraMaxBlockTTL])
+	}
+	if al.Extra[core.ExtraNotify] != core.NotifyNo {
+		t.Errorf("notify=%q, want no by default", al.Extra[core.ExtraNotify])
+	}
+	if al.Extra["window"] != "24h0m0s" {
+		t.Errorf("window=%q, want the user_disabled window", al.Extra["window"])
+	}
+}
+
+func TestUserDisabledVariantsAndOff(t *testing.T) {
+	lines := []string{
+		userDisabledLine,
+		`Nov 17 17:15:05 earth dovecot[1]: pop3-login: Login aborted: Connection closed (user disabled, 1 attempts in 2 secs) (user_disabled): user=<a@b.gr>, rip=203.0.113.9`,
+		// an older dovecot without the trailing code
+		`Nov 17 17:15:05 earth dovecot: imap-login: Aborted login (user disabled): user=<a@b.gr>, rip=203.0.113.9`,
+	}
+	for _, ln := range lines {
+		a := NewAuth(Config{Mode: "file", UserDisabledPerIP: 1})
+		a.processLine(time.Now(), ln)
+		if len(a.pending) != 1 {
+			t.Errorf("want one user_disabled bucket, got %v: %q", a.pending, ln)
+			continue
+		}
+		for _, p := range a.pending {
+			if p.kindKey != kindDisabledIP {
+				t.Errorf("bucket %s, want %s: %q", p.kindKey, kindDisabledIP, ln)
+			}
+		}
+	}
+	// USER_DISABLED_IP = 0 turns the bucket off, and the line still never
+	// counts as a password failure.
+	a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, AuthFailPerUser: 1})
+	a.processLine(time.Now(), userDisabledLine)
+	if len(a.pending) != 0 {
+		t.Errorf("bucket off: want nothing pending, got %v", a.pending)
+	}
+	// A password failure is untouched by the new bucket.
+	b := NewAuth(Config{Mode: "file", UserDisabledPerIP: 1})
+	b.processLine(time.Now(), `Sep 10 12:00:00 ngm dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<a@b.com>, method=PLAIN, rip=5.6.7.8`)
+	for _, p := range b.pending {
+		if p.kindKey == kindDisabledIP {
+			t.Errorf("auth_failed counted as user_disabled: %v", b.pending)
+		}
+	}
+
+	// UserDisabledNotify keeps the mail.
+	c := NewAuth(Config{Mode: "file", UserDisabledPerIP: 1, UserDisabledNotify: true})
+	c.processLine(time.Now(), userDisabledLine)
+	ch := make(chan core.Alert, 2)
+	c.flush(time.Now(), ch)
+	close(ch)
+	for al := range ch {
+		if _, ok := al.Extra[core.ExtraNotify]; ok {
+			t.Errorf("USER_DISABLED_NOTIFY=1 must not suppress the mail: %v", al.Extra)
+		}
+	}
+}

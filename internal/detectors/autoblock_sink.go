@@ -622,6 +622,20 @@ func (s *sectionSink) Publish(a core.Alert) {
 		effectivePol.Mode = "dryrun"
 	}
 
+	// Per-alert ban cap (core.ExtraMaxBlockTTL): a permanent policy becomes a
+	// TTL of the cap, a longer TTL is cut to it. The ttl case below re-applies
+	// it after the per-alert block_ttl override.
+	if d := maxBlockTTL(out.Extra); d > 0 {
+		switch effectivePol.Mode {
+		case "permanent":
+			effectivePol.Mode, effectivePol.TTL = "ttl", d
+		case "ttl":
+			if effectivePol.TTL <= 0 || effectivePol.TTL > d {
+				effectivePol.TTL = d
+			}
+		}
+	}
+
 	// Cooldown check (do NOT stamp yet; stamp only after a real block)
 	if effectivePol.Cooldown > 0 {
 
@@ -683,6 +697,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 		if ttl <= 0 {
 			ttl = time.Hour
+		}
+		if d := maxBlockTTL(out.Extra); d > 0 && ttl > d {
+			ttl = d
 		}
 		// ExtendBlock, not AddBlock: AddBlock replaces the element, so a
 		// shorter block from another section (webdetector 1h) cut a longer one
@@ -751,7 +768,12 @@ func (s *sectionSink) Publish(a core.Alert) {
 		}
 		copyAlertFields(ev.Extra, out.Extra)
 
-		notify.Enqueue(ev)
+		// A detector may ask for the ban and the report without the mail
+		// (core.ExtraNotify): the block, the API report and the detector log
+		// still happen.
+		if out.Extra[core.ExtraNotify] != core.NotifyNo {
+			notify.Enqueue(ev)
+		}
 
 		// Report to API. SEND_TO_API gates whether we report at all; when we do,
 		// SEND_TO_BLOCKLIST (leniency) selects the destination list: "lenient"
@@ -815,7 +837,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 			ev.Extra["block_mode"] = m
 		}
 		copyAlertFields(ev.Extra, out.Extra)
-		notify.Enqueue(ev)
+		if out.Extra[core.ExtraNotify] != core.NotifyNo {
+			notify.Enqueue(ev)
+		}
 	}
 	// --- end NEW ---
 
@@ -1172,4 +1196,21 @@ func extractUserAgent(samples []string) string {
 		}
 	}
 	return ""
+}
+
+// maxBlockTTL reads core.ExtraMaxBlockTTL: a positive Go duration, else 0
+// (no cap).
+func maxBlockTTL(extra map[string]string) time.Duration {
+	if extra == nil {
+		return 0
+	}
+	v := strings.TrimSpace(extra[core.ExtraMaxBlockTTL])
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }

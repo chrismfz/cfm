@@ -31,6 +31,14 @@ type Config struct {
 	AuthFailPerIP   int
 	AuthFailPerUser int
 
+	// Logins refused as user_disabled (see processLine). Counted apart from
+	// the password failures, per IP, in their own window, and banned for at
+	// most UserDisabledBlockTTL whatever the section's BLOCK.
+	UserDisabledPerIP    int           // 0 disables the bucket
+	UserDisabledWindow   time.Duration // default 24h
+	UserDisabledBlockTTL time.Duration // default 24h
+	UserDisabledNotify   bool          // mail per ban; off by default (hundreds a day)
+
 	// enrichment
 	UseEnrich  bool
 	UsePTR     bool
@@ -51,15 +59,17 @@ type Auth struct {
 	state    *core.State
 	stateKey string
 
-	pending map[string]pend
-	samples *core.SampleRing
-	gate    *core.AlertGate
-	counts  *core.SlidingCounter
+	pending   map[string]pend
+	samples   *core.SampleRing
+	gate      *core.AlertGate
+	counts    *core.SlidingCounter
+	disCounts *core.SlidingCounter // user_disabled, its own window
 
 	// regexes
-	reQuick *regexp.Regexp
-	reRip   *regexp.Regexp
-	reUser  *regexp.Regexp
+	reQuick    *regexp.Regexp
+	reDisabled *regexp.Regexp
+	reRip      *regexp.Regexp
+	reUser     *regexp.Regexp
 
 	enr *enrich.Enricher
 }
@@ -85,6 +95,12 @@ func NewAuth(cfg Config) *Auth {
 	if cfg.SampleLimit <= 0 {
 		cfg.SampleLimit = 10
 	}
+	if cfg.UserDisabledWindow <= 0 {
+		cfg.UserDisabledWindow = 24 * time.Hour
+	}
+	if cfg.UserDisabledBlockTTL <= 0 {
+		cfg.UserDisabledBlockTTL = 24 * time.Hour
+	}
 	if !cfg.UseEnrich && !cfg.UsePTR {
 		cfg.UsePTR = true
 	}
@@ -98,6 +114,7 @@ func NewAuth(cfg Config) *Auth {
 	a.samples = core.NewSampleRing(cfg.SampleLimit)
 	a.gate = core.NewAlertGate(cfg.Cooldown)
 	a.counts = core.NewSlidingCounter(cfg.Window, 0)
+	a.disCounts = core.NewSlidingCounter(cfg.UserDisabledWindow, 0)
 	// Lines we care about (keep this fast pre-filter).
 	// The `dovecot` tag is PID-tolerant (`dovecot[1234]:`), because BOTH sources
 	// we read are syslog-framed WITH the pid: /var/log/maillog (rsyslog) and
@@ -114,6 +131,18 @@ func NewAuth(cfg Config) *Auth {
 	// closed / too many invalid commands, never an actual password try) does NOT
 	// contain any of these markers, so it stays filtered out.
 	a.reQuick = regexp.MustCompile(`dovecot(\[[0-9]+\])?:.*(auth failed|authentication failure|aborted login|password mismatch)`)
+	// A login dovecot refused as user_disabled before any password check:
+	//   imap-login: Login aborted: Connection closed (user disabled, 1 attempts
+	//   in 2 secs) (user_disabled): user=<info@x.gr>, method=PLAIN, rip=…
+	// On a cPanel node with Imunify360 it is pam_imunify locking an address on
+	// Imunify's global RBL ("[IM360_RBL] The IP … has been locked", in
+	// /var/log/messages): on earth all 969 addresses with such lines over three
+	// days (2 363 lines) were RBL locks. None of the markers above is in it, so
+	// these sources never failed a password here, were never banned and never
+	// reached the fleet list. Elsewhere it is also a suspended mailbox, whose
+	// owner's phone retries; hence a separate bucket with its own threshold and
+	// a capped ban.
+	a.reDisabled = regexp.MustCompile(`dovecot(\[[0-9]+\])?:.*\((user_disabled\)|user disabled[,)])`)
 	a.reRip = regexp.MustCompile(`\brip=([0-9a-f:.]+)(?:[,\s]|$)`)
 	// NB: no trailing \b after `>`. A real line is `user=<addr>,` and there is no
 	// word boundary between `>` and `,`, so a `>\b` anchor matched NOTHING — the
@@ -226,6 +255,16 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 func (a *Auth) processLine(now time.Time, line string) {
 	ll := strings.ToLower(line)
+	if a.reDisabled.MatchString(ll) {
+		// Never a password failure: its own bucket only, per IP (the mailbox
+		// is the victim, not the attacker).
+		if a.cfg.UserDisabledPerIP > 0 {
+			if ip := lineIP(a.reRip, ll); ip != "" {
+				a.bump(now, kindDisabledIP, ip, line)
+			}
+		}
+		return
+	}
 	if !a.reQuick.MatchString(ll) {
 		return
 	}
@@ -237,20 +276,8 @@ func (a *Auth) processLine(now time.Time, line string) {
 	}
 
 	// ip
-	ipStr := ""
-	if m := a.reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
-		ipStr = m[1]
-	} else {
-		ipStr = firstIPInLine(ll)
-	}
-	if ipStr != "" {
-		if ip := net.ParseIP(ipStr); ip != nil {
-			if v4 := ip.To4(); v4 != nil {
-				a.bump(now, "AUTHFAIL|ip", v4.String(), line)
-			} else {
-				a.bump(now, "AUTHFAIL|ip", ip.String(), line)
-			}
-		}
+	if ip := lineIP(a.reRip, ll); ip != "" {
+		a.bump(now, "AUTHFAIL|ip", ip, line)
 	}
 
 	// user
@@ -266,12 +293,41 @@ func (a *Auth) processLine(now time.Time, line string) {
 
 }
 
+const kindDisabledIP = "DISABLED|ip"
+
+// lineIP is the source address of a dovecot line: rip=, else the first IP in
+// it, canonical (IPv4 as dotted quad); "" when there is none.
+func lineIP(reRip *regexp.Regexp, ll string) string {
+	ipStr := ""
+	if m := reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
+		ipStr = m[1]
+	} else {
+		ipStr = firstIPInLine(ll)
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return ""
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return ip.String()
+}
+
+// counter is the window a bucket counts in.
+func (a *Auth) counter(kindKey string) *core.SlidingCounter {
+	if kindKey == kindDisabledIP {
+		return a.disCounts
+	}
+	return a.counts
+}
+
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 	sk := kindKey + ":" + key
 	if _, ok := a.pending[sk]; !ok {
 		a.pending[sk] = pend{kindKey: kindKey, key: key}
 	}
-	_ = a.counts.Add(sk, now)
+	_ = a.counter(kindKey).Add(sk, now)
 	a.samples.Add(sk, line)
 }
 
@@ -283,7 +339,7 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 		if limit <= 0 {
 			continue
 		}
-		n := a.counts.Count(sk, now)
+		n := a.counter(p.kindKey).Count(sk, now)
 		if n < limit {
 			continue
 		}
@@ -294,14 +350,27 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 		displayKey := a.enrichDisplay(p.kindKey, baseKey, p.key)
 
 		samples := a.samples.GetAndClear(sk)
+		window := a.cfg.Window
+		if p.kindKey == kindDisabledIP {
+			window = a.cfg.UserDisabledWindow
+		}
 		extra := map[string]string{
-			"window":   a.cfg.Window.String(),
+			"window":   window.String(),
 			"cooldown": a.cfg.Cooldown.String(),
 			"limit":    strconv.Itoa(limit),
 			"mode":     a.cfg.Mode,
 		}
 		if strings.Contains(p.kindKey, "|ip") {
 			extra["ip"] = p.key
+			if p.kindKey == kindDisabledIP {
+				// Someone else's verdict (Imunify's RBL) or a suspended
+				// mailbox: a capped ban, not the section's permanent one.
+				extra[core.ExtraMaxBlockTTL] = a.cfg.UserDisabledBlockTTL.String()
+				extra["reason"] = "user_disabled"
+				if !a.cfg.UserDisabledNotify {
+					extra[core.ExtraNotify] = core.NotifyNo
+				}
+			}
 		} else {
 			// A per-USER finding (one mailbox sprayed) is HOST-scoped: the samples
 			// can span many source IPs, so the sink must NOT ban an arbitrary one —
@@ -336,6 +405,8 @@ func (a *Auth) thresholdAndKey(kindKey, rawKey string) (limit int, alertKind, ba
 		return a.cfg.AuthFailPerIP, "DOVECOT/AUTHFAIL", rawKey
 	case "AUTHFAIL|user":
 		return a.cfg.AuthFailPerUser, "DOVECOT/AUTHFAIL", rawKey
+	case kindDisabledIP:
+		return a.cfg.UserDisabledPerIP, "DOVECOT/USER_DISABLED", rawKey
 	default:
 		return 0, "", rawKey
 	}
