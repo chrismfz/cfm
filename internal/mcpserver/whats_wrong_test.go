@@ -672,16 +672,19 @@ func TestEvalMailTrafficFallbackPutsWarningsFirst(t *testing.T) {
 	}
 }
 
-// The MySQL governor off by design (no database, disabled, held) reads as
-// unavailable; one that cannot connect (MySQL down, wrong password) stays an
-// error, as does any other 503. Neither produces a finding.
+// The MySQL governor off by design (no database, disabled) or still on its
+// first attempt (starting) reads as unavailable; one that cannot connect
+// (MySQL down, wrong password), failed to initialise, or is held by an
+// unreadable detectors.conf stays an error, as does any other 503. Neither
+// produces a finding.
 func TestWhatsWrong_GovernorNotRunningSource(t *testing.T) {
 	for state, want := range map[string]string{
 		"no credentials": "unavailable",
 		"disabled":       "unavailable",
-		"held":           "unavailable",
+		"starting":       "unavailable",
+		"held":           "error: HTTP 503: mysql governor not running: held",
 		"connect failed": "error: HTTP 503: mysql governor not running: connect failed",
-		"starting":       "error: HTTP 503: mysql governor not running: starting",
+		"failed":         "error: HTTP 503: mysql governor not running: failed",
 	} {
 		got := evaluateWhatsWrong(sec("mysql", `{"error":"HTTP 503: mysql governor not running: `+state+`"}`))
 		if got.Sources["mysql"] != want {

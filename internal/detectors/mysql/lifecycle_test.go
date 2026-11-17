@@ -297,6 +297,9 @@ func TestNextRetryDelay(t *testing.T) {
 		}
 	}
 
+	if d := p.next(fmt.Errorf("%w: why", errGovernorHeld), &backoff); d != retryMinDelay {
+		t.Fatalf("held: delay = %v, want %v (a hold must lift within seconds)", d, retryMinDelay)
+	}
 	for _, e := range []error{fmt.Errorf("mysql_governor: cannot connect: %w", errNoCredentials), errGovernorDisabled} {
 		if d := p.next(e, &backoff); d != retryNoCredsDelay {
 			t.Fatalf("%v: delay = %v, want %v", e, d, retryNoCredsDelay)
@@ -377,6 +380,13 @@ func TestGovernorRespError(t *testing.T) {
 		`{"error":"mysql governor not running","reason":"no MySQL credentials found"}`))
 	if err == nil || !strings.Contains(err.Error(), "mysql governor not running: no MySQL credentials found") {
 		t.Fatalf("503: %v", err)
+	}
+
+	// The admin 503 names the state, and the reason restates it: once only.
+	err = governorRespError(mk(503, "application/json; charset=utf-8",
+		`{"error":"mysql governor not running: held","reason":"held: waiting for a readable detectors.conf"}`))
+	if err == nil || !strings.HasPrefix(err.Error(), "mysql governor not running: held: waiting for a readable detectors.conf (") {
+		t.Fatalf("admin 503: %v", err)
 	}
 
 	// An older daemon: the route is not registered, the web UI answers HTML.

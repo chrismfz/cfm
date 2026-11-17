@@ -735,7 +735,13 @@ func governorRespError(resp *http.Response) error {
 	// a JSON body as text/plain.
 	if json.Unmarshal(raw, &e) == nil && e.Error != "" {
 		if e.Reason != "" {
-			return fmt.Errorf("%s: %s (see /var/log/cfm/cfm.mysql.log)", e.Error, e.Reason)
+			// The admin 503's error ends in a one-word state ("…: held") that
+			// the reason restates in full: print the reason only once.
+			msg := e.Error
+			if i := strings.Index(msg, ": "); i > 0 {
+				msg = msg[:i]
+			}
+			return fmt.Errorf("%s: %s (see /var/log/cfm/cfm.mysql.log)", msg, e.Reason)
 		}
 		return fmt.Errorf("%s (HTTP %d)", e.Error, resp.StatusCode)
 	}

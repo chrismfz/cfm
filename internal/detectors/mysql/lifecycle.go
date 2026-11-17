@@ -24,6 +24,9 @@ import (
 //   - [mysql_governor] ENABLED = 0: the operator opted out. No connection is
 //     made; the same slow poll only re-reads the config, because a
 //     detectors.conf edit applies without a restart and may re-enable it.
+//     A hold (detectors.conf unreadable on first load) is re-read every
+//     retryMinDelay instead, so the governor starts seconds after the file
+//     reads.
 //   - credentials found but the connect/ping failed: the database is starting
 //     (cfm.service has no ordering on mariadb/mysqld, on purpose: nodes without
 //     a database must not wait on one), down, or the credentials are wrong.
@@ -48,7 +51,8 @@ var errGovernorDisabled = errors.New("disabled in detectors.conf ([mysql_governo
 
 // errGovernorHeld: not started for a reason other than ENABLED = 0, such as
 // a detectors.conf that could not be read on first load (GovernorConfig
-// HoldReason). Paced like a disabled governor: no connection is made.
+// HoldReason). No connection is made; the config is re-read every
+// retryMinDelay so the hold lifts promptly.
 var errGovernorHeld = errors.New("held")
 
 // retryPacing is the pacing one lifecycle uses (the constants above; a test
@@ -76,7 +80,7 @@ type retryPacing struct {
 type GovernorLifecycle struct {
 	gov       atomic.Pointer[Governor]
 	status    atomic.Pointer[govStatus] // why no governor runs yet; nil once started
-	nextRetry atomic.Int64           // unix nanos of the next attempt; 0 = none scheduled
+	nextRetry atomic.Int64              // unix nanos of the next attempt; 0 = none scheduled
 	started   atomic.Bool
 
 	// newGovernor is NewGovernor; a seam for tests.
@@ -203,11 +207,17 @@ func failureClass(err error) string {
 }
 
 // next returns how long to wait after err, advancing the connect backoff. A
-// failure that made no connection (no credentials, disabled) resets the
+// failure that made no connection (no credentials, disabled, held) resets the
 // backoff: once a connect becomes possible, its first failure should be
-// retried quickly again.
+// retried quickly again. A hold is re-checked every p.min: it only re-reads
+// the in-memory config, and it should lift seconds after detectors.conf
+// becomes readable, not minutes.
 func (p retryPacing) next(err error, backoff *time.Duration) time.Duration {
-	if errors.Is(err, errNoCredentials) || errors.Is(err, errGovernorDisabled) || errors.Is(err, errGovernorHeld) {
+	if errors.Is(err, errGovernorHeld) {
+		*backoff = p.min
+		return p.min
+	}
+	if errors.Is(err, errNoCredentials) || errors.Is(err, errGovernorDisabled) {
 		*backoff = p.min
 		return p.noCreds
 	}
@@ -220,7 +230,7 @@ func (p retryPacing) next(err error, backoff *time.Duration) time.Duration {
 // surface (MCP, whats_wrong), and the full reason (credential sources, driver
 // text) for the admin HTTP API and the log.
 type govStatus struct {
-	state  string // starting | no credentials | disabled | held | connect failed | failed
+	state  string // starting | no credentials | disabled | held | connect failed | failed (connected, init errored)
 	reason string
 }
 

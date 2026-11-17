@@ -79,14 +79,24 @@ func TestMySQLGovernorPendingConfigFollowsDetectorsConf(t *testing.T) {
 	}
 }
 
-// With several instances, any enabled one wins whatever the map order: a
-// disabled instance must not switch off an enabled section's config.
+// With several instances the sync must leave an enabled config alone when any
+// instance is enabled, whatever the map order: it runs before the factories,
+// and on a sweep where the enabled factory sets the same config this would be
+// invisible, so the sync is checked on its own (a first-match sync fails here
+// on about half the map orders).
 func TestMySQLGovernorPendingConfigInstances(t *testing.T) {
 	keepPendingGovernor(t)
-	for i := 0; i < 20; i++ { // map iteration order varies
-		sweepGovernor(t, "[mysql_governor]\nENABLED = 1\nMODE = enforce\n\n[mysql_governor:spare]\nENABLED = 0\n")
-		if cfg, ok := GetPendingGovernorConfig(); !ok || !cfg.Enabled {
-			t.Fatalf("enabled + disabled instance: ok=%v cfg=%+v", ok, cfg)
+	byName := map[string]KV{
+		"global":                {},
+		"mysql_governor":        {"ENABLED": "1", "MODE": "enforce"},
+		"mysql_governor:spare":  {"ENABLED": "0"},
+		"mysql_governor:spare2": {"ENABLED": "0"},
+	}
+	for i := 0; i < 50; i++ { // map iteration order varies
+		setPendingGovernorConfig(mysql.GovernorConfig{Enabled: true, Mode: "enforce"}, true)
+		syncPendingGovernor(byName, nil, false)
+		if cfg, ok := GetPendingGovernorConfig(); !ok || !cfg.Enabled || cfg.Mode != "enforce" {
+			t.Fatalf("enabled + disabled instances: the sync replaced the enabled config: ok=%v cfg=%+v", ok, cfg)
 		}
 	}
 	sweepGovernor(t, "[mysql_governor:a]\nENABLED = 0\n\n[mysql_governor:b]\nENABLED = 0\n")
