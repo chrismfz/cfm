@@ -182,15 +182,12 @@ type attackVhost struct {
 	override int8
 	// overrideExpires bounds a forced-ON override: past it the override
 	// clears back to AUTO control (evalUnderAttack tick; the read path
-	// honours it too). Zero = no bound (admin override). Scoped callers get
-	// a 24h ceiling, mirroring the scoped manual-challenge TTL cap
-	// (slice-D residual, resolved by operator decision 2026-09-22).
+	// honours it too). Every operator `attack on` sets one (ForceVhostAttackAs:
+	// UNDER_ATTACK_OVERRIDE_TTL, a scoped caller capped at 24h); zero = no
+	// bound, only through the raw SetVhostAttackOverride.
 	overrideExpires time.Time
 	suppressUntil   time.Time
 	evidence        string // last transition's evidence (kept consistent with `on`)
-	// persisted: the forced-ON override is an `attack on` the override store
-	// holds (syncAttackOverrides releases it when the record goes).
-	persisted bool
 }
 
 // effectiveOverride is the override as of now: a TTL-bounded forced-ON
@@ -577,7 +574,6 @@ func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time, ttl
 		st = &attackVhost{}
 		t.hosts[host] = st
 	}
-	st.persisted = false
 	if on {
 		st.override = +1
 		if ttl > 0 {

@@ -91,8 +91,10 @@ type attackOverrideStore struct {
 // rebuilds, like tierPinStores: a reload builds the new Engine (loading the
 // file) before the API moves over to it, so an `attack on|off` written through
 // the old Engine in between must land in the store the new one reads, or the
-// new Engine's next save would overwrite it. The new Engine's tracker follows
-// the store on every tick (syncAttackOverrides).
+// new Engine's next save would overwrite it. Residual: the new Engine's
+// tracker and manual challenges (per Engine, loaded at build) do not see such
+// a write until the next reload; the manual challenges carry the same window.
+// The store is read from disk once per process: a hand edit takes a restart.
 var attackOverrideStores = struct {
 	sync.Mutex
 	m map[string]*attackOverrideStore
@@ -282,7 +284,6 @@ func (e *Engine) ForceVhostAttackAs(host string, on bool, ttl time.Duration, act
 		_, armExp, _ = e.manualChal.active(host)
 	}
 	e.SetVhostAttackOverride(host, true, now, ttl)
-	e.markAttackOverridePersisted(host)
 	e.attackOverrides.set(attackOverrideEntry{Host: host, ExpiresAt: expires, ArmedChallenge: armed, ArmExpiresAt: armExp, Actor: actor})
 	return armed, expires
 }
@@ -329,70 +330,8 @@ func (e *Engine) restoreAttackOverrides() {
 			continue
 		}
 		e.restoreForcedOn(ent.Host, now, rem)
-		e.markAttackOverridePersisted(ent.Host)
 		logging.LogfCHALLENGES("[challenge][vhost] action=attack_restore host=%s ttl=%s armed_challenge=%v",
 			ent.Host, rem.Round(time.Second), ent.ArmedChallenge)
 	}
 }
 
-// syncAttackOverrides makes the tracker follow the shared store, once per
-// tick: an `attack on` written through the previous Engine during a reload
-// (after this one loaded the file) is applied with its remaining window, and
-// a persisted override whose record is gone (`attack off` through that
-// Engine) is released. Overrides set without the store (the raw
-// SetVhostAttackOverride) are left alone.
-func (e *Engine) syncAttackOverrides(now time.Time) {
-	if e == nil || e.attack == nil || e.attackOverrides == nil {
-		return
-	}
-	want := map[string]attackOverrideEntry{}
-	for _, ent := range e.attackOverrides.snapshot() {
-		want[ent.Host] = ent
-	}
-	t := e.attack
-	var apply []attackOverrideEntry
-	var release []string
-	t.mu.Lock()
-	for h, ent := range want {
-		st := t.hosts[h]
-		// Every `attack off` removes the record, so a record the tracker
-		// does not reflect is newer than whatever the tracker holds.
-		if st == nil || st.override != +1 || !st.persisted {
-			apply = append(apply, ent)
-			continue
-		}
-		if d := st.overrideExpires.Sub(ent.ExpiresAt); d < -time.Second || d > time.Second {
-			apply = append(apply, ent)
-		}
-	}
-	for h, st := range t.hosts {
-		if st.persisted && st.override == +1 {
-			if _, ok := want[h]; !ok {
-				release = append(release, h)
-			}
-		}
-	}
-	t.mu.Unlock()
-	for _, ent := range apply {
-		if rem := ent.ExpiresAt.Sub(now); rem > 0 {
-			e.restoreForcedOn(ent.Host, now, rem)
-			e.markAttackOverridePersisted(ent.Host)
-			logging.LogfCHALLENGES("[challenge][vhost] action=attack_sync host=%s ttl=%s", ent.Host, rem.Round(time.Second))
-		}
-	}
-	for _, h := range release {
-		e.SetVhostAttackOverride(h, false, now, 0)
-		logging.LogfCHALLENGES("[challenge][vhost] action=attack_sync_off host=%s", h)
-	}
-}
-
-// markAttackOverridePersisted flags host's forced-ON override as one the
-// store holds, so syncAttackOverrides may release it when the record goes.
-func (e *Engine) markAttackOverridePersisted(host string) {
-	t := e.attack
-	t.mu.Lock()
-	if st := t.hosts[host]; st != nil {
-		st.persisted = true
-	}
-	t.mu.Unlock()
-}

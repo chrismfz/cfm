@@ -59,7 +59,8 @@ back-filled here — see the git/PR history for that period.
     - it is saved to `/var/lib/cfm/webdetector_attack_overrides.json` and
       restored after a `detectors.conf` save, a reload or a restart;
     - the challenge it arms follows a tier pin you set on the vhost (a v1
-      pin gives a v1 challenge); with no pin it gets the node default;
+      pin gives a v1 challenge); with no pin it gets the node default. A pin
+      set afterwards does not change it: use the cfm-admin Tier picker;
     - `attack off` removes only the challenge its `attack on` armed (so does
       a `cfm.allow` bypass of the vhost). A manual challenge you set yourself
       stays, even one you gave the reason `under_attack`. An exclude or ignore no longer ends an `attack on` early: the

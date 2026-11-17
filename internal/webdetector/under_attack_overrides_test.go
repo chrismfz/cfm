@@ -206,33 +206,17 @@ func TestForceVhostAttack_FollowsATierPin(t *testing.T) {
 	}
 }
 
-// A reload's window: an `attack on|off` through the old Engine after the new
-// one loaded the file reaches the new Engine's tracker on its next tick, and
-// the file keeps both Engines' writes.
-func TestForceVhostAttack_ReloadWindowSync(t *testing.T) {
+// A reload's window: an `attack on` through the old Engine after the new one
+// loaded the file must not be overwritten by the new Engine's next save (one
+// store per file), so the following reload restores it.
+func TestForceVhostAttack_ReloadWindowKeepsTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "webdetector_attack_overrides.json")
 	old := newForceAttackEngine(t, path)
-	old.ForceVhostAttackAs("a.example", true, time.Hour, "admin")
 	nu := newForceAttackEngine(t, path)
-	nu.restoreAttackOverrides()
-	old.ForceVhostAttackAs("b.example", true, 2*time.Hour, "admin")
-	nu.syncAttackOverrides(time.Now())
-	if m, _, _ := nu.vhostAttackKind("b.example", time.Now()); !m {
-		t.Fatal("an attack on through the old Engine never reached the new one")
-	}
+	old.ForceVhostAttackAs("a.example", true, time.Hour, "admin")
+	nu.ForceVhostAttackAs("b.example", true, time.Hour, "admin")
 	if got := len(loadAttackOverrideFileForTest(path).snapshot()); got != 2 {
 		t.Fatalf("file holds %d overrides, want 2", got)
-	}
-	old.ForceVhostAttackAs("a.example", false, 0, "admin")
-	nu.syncAttackOverrides(time.Now())
-	if m, _, _ := nu.vhostAttackKind("a.example", time.Now()); m {
-		t.Fatal("an attack off through the old Engine left the new one on")
-	}
-	// A raw override (not in the store) is left alone.
-	nu.SetVhostAttackOverride("raw.example", true, time.Now(), time.Hour)
-	nu.syncAttackOverrides(time.Now())
-	if m, _, _ := nu.vhostAttackKind("raw.example", time.Now()); !m {
-		t.Fatal("sync released an override the store never held")
 	}
 }
 
