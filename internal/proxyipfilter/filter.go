@@ -31,6 +31,7 @@ package proxyipfilter
 import (
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -396,11 +397,45 @@ func Decide(ip, host string) (enforce, listed bool) {
 		if len(v.Allows) > 0 {
 			allow = strings.Join(v.Allows, ",")
 		}
-		logging.Logf("[proxied_ipfilter] %s ip=%s host=%s block=%s allow=%s mode=feed:%s,local:%s n=%d",
+		logging.Logf("[proxied_ipfilter] %s ip=%s host=%s block=%s allow=%s mode=feed:%s,local:%s n=%d %s",
 			what, ip, orDash(host), strings.Join(v.Blocks, ","), allow,
-			modeFeed.Load().(string), modeLocal.Load().(string), n)
+			modeFeed.Load().(string), modeLocal.Load().(string), n, geoFields(ip))
 	}
 	return v.Enforce, len(v.Allows) == 0
+}
+
+// GeoFunc answers an address's country (ISO-2) and network (ASN number and
+// name) from the node's local GeoIP database: a memory read, no DNS.
+type GeoFunc func(ip string) (cc string, asn uint, asnName string)
+
+var geo atomic.Pointer[GeoFunc]
+
+// SetGeo gives the log line its cc= / asn= / asn_name= fields (nil: none).
+// The webdetector engine sets it with its enricher. A read for the weekly
+// review: whether a would_block is a Greek visitor, and whether a foreign one
+// is a network that serves real users (Google, Microsoft, Meta, a CDN), not
+// a scanner's host. Called once per logged line (per client and outcome per
+// logEvery), never per request.
+func SetGeo(fn GeoFunc) {
+	if fn == nil {
+		geo.Store(nil)
+		return
+	}
+	geo.Store(&fn)
+}
+
+// geoFields is the log line's tail: `cc=GR asn=6799 asn_name=OTEnet_S.A.`,
+// "-" for what the database does not know.
+func geoFields(ip string) string {
+	cc, asnStr, name := "-", "-", "-"
+	if p := geo.Load(); p != nil {
+		c, a, n := (*p)(ip)
+		cc, name = orDash(strings.ToUpper(c)), orDash(n)
+		if a != 0 {
+			asnStr = strconv.FormatUint(uint64(a), 10)
+		}
+	}
+	return "cc=" + cc + " asn=" + asnStr + " asn_name=" + name
 }
 
 // orDash makes a value the edge passed safe for one log line: no whitespace,

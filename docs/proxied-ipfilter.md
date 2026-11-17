@@ -82,19 +82,27 @@ decisions it stands for (totals and each source's size: `GET
 /api/v1/webdet/edge-ban` → `proxied_ipfilter`, also in `cfm debug`):
 
 ```
-[proxied_ipfilter] would_block ip=20.43.87.186 host=olicatessen.gr block=feed:MYBLOCK allow=- mode=feed:log,local:log n=37
-[proxied_ipfilter] allowed ip=… host=… block=block_v4 allow=allow_dyn_v4 mode=… n=1
-[proxied_ipfilter] block ip=… host=… block=block_v4,feed:MYBLOCK allow=- mode=feed:enforce,local:log n=4
+[proxied_ipfilter] would_block ip=20.43.87.186 host=olicatessen.gr block=feed:MYBLOCK allow=- mode=feed:log,local:log n=37 cc=US asn=8075 asn_name=MICROSOFT-CORP-MSN-AS-BLOCK
+[proxied_ipfilter] allowed ip=… host=… block=block_v4 allow=allow_dyn_v4 mode=… n=1 cc=GR asn=6799 asn_name=OTEnet_S.A.
+[proxied_ipfilter] block ip=… host=… block=block_v4,feed:MYBLOCK allow=- mode=feed:enforce,local:log n=4 cc=- asn=- asn_name=-
 ```
 
 `block=` names every block source the address is on (overlaps show), `allow=`
-every allow that cancelled it.
+every allow that cancelled it. `cc=` / `asn=` / `asn_name=` come from the
+node's GeoIP database (an mmdb read when the line is written, no DNS; `-`
+when it does not know, spaces in the name as `_`). They are what the review
+reads: a `cc=GR` would_block is the likely customer, and a foreign one on a
+network that serves real users (Google, Microsoft, Meta, a CDN) needs a look
+before enforce, unlike a scanner's hosting provider.
 
 ## Next
 
 1. A week of `log` fleet-wide: how many clients and requests per source, and
    whether any `would_block` is a customer (a Greek address on `block_v4` from
-   an SSH or mail ban is the likely false positive).
+   an SSH or mail ban is the likely false positive; `cc=GR`), or a network
+   that serves real users (`asn=`). The first read (2026-11-17) found Meta's
+   forward proxies (`fwdproxy-*.fbsv.net`, AS32934) permanently on mars' and
+   titan's `block_v4` since May, from the SYN / port-flood detectors.
 2. `enforce` per group, feed first.
 3. Promote on hit: a client the bridge blocks from these lists also goes to the
    edge ban store (bounded quota, e.g. 5 k of its 20 k, the feed entry's
