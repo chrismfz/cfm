@@ -194,10 +194,15 @@ func intervalContains(elems []nftables.SetElement, key []byte) bool {
 // For host sets: IP strings. For interval sets: a CIDR per range, or
 // "first-last" for a range that isn't one prefix.
 func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
+	// b.mu guards the set cache only. The dump itself runs on the read
+	// connection, which dials its own socket per call (nlconn.go), so it needs
+	// no lock, and holding b.mu through it made every firewall write (a ban,
+	// a feed apply) wait behind a read: the proxied-client filter
+	// (internal/proxyipfilter) reads ten sets every minute, block_v4 among
+	// them (21 k addresses on titan).
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	set, err := b.lookupSet(setName)
+	b.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("nftlib ListSetElementsRaw %s: %w", setName, err)
 	}

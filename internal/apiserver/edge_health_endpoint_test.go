@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"cfm/internal/firewall/netfilterdiag"
 	"cfm/internal/originrealip"
 	webdet "cfm/internal/webdetector"
 )
@@ -413,6 +414,98 @@ func TestEdgeHealthReport_OriginRealIP(t *testing.T) {
 	}
 }
 
+// Check H, earth before 2026-11-17: Imunify360 DNATs tcp/443 to WebShield at
+// -100, ahead of CFM's web redirect at -99, and WebShield is busy.
+func TestEdgeHealthReport_WebDNATOrder(t *testing.T) {
+	defer stubEdgeHealth(t)()
+	now := time.Date(2026, 11, 17, 10, 30, 0, 0, time.UTC)
+	edgeHealthNow = func() int64 { return now.Unix() }
+	nftJSON := func(cfmPrio string) string {
+		return `{"nftables":[
+ {"chain":{"family":"ip","table":"nat","name":"PREROUTING","type":"nat","hook":"prerouting","prio":-100,"policy":"accept"}},
+ {"chain":{"family":"ip","table":"nat","name":"INPUT_imunify360"}},
+ {"chain":{"family":"inet","table":"cfm_redirect","name":"prerouting","type":"nat","hook":"prerouting","prio":` + cfmPrio + `,"policy":"accept"}},
+ {"rule":{"family":"ip","table":"nat","chain":"PREROUTING","expr":[{"jump":{"target":"INPUT_imunify360"}}]}},
+ {"rule":{"family":"ip","table":"nat","chain":"INPUT_imunify360","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"port":52223}}]}},
+ {"rule":{"family":"inet","table":"cfm_redirect","chain":"prerouting","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"port":9043}}]}}
+]}`
+	}
+	setNFT := func(cfmPrio string) {
+		edgeHealthNATReport = func(context.Context) (netfilterdiag.Report, error) {
+			return netfilterdiag.Analyze([]byte(nftJSON(cfmPrio)), netfilterdiag.Expected{})
+		}
+	}
+	var b strings.Builder
+	old := now.Add(-time.Hour).Format("02/Jan/2006:15:04:05 -0700")
+	b.WriteString(`1.2.3.4 - - [` + old + `] "GET / HTTP/1.1" 200 1 a.gr "-" "ua" WL:"0" "-" XFF:"-" CAPTCHA:"0" PEER:1.2.3.4` + "\n")
+	for i := 0; i < 150; i++ {
+		ts := now.Add(-time.Duration(i) * time.Second).Format("02/Jan/2006:15:04:05 -0700")
+		xff := `XFF:"9.9.9.9"`
+		if i%3 == 0 {
+			xff = `XFF:"-"`
+		}
+		b.WriteString(`172.68.62.86 - - [` + ts + `] "GET / HTTP/2.0" 200 1 a.gr "-" "ua" WL:"0" "-" ` + xff + ` CAPTCHA:"0" PEER:172.68.62.86` + "\n")
+	}
+	log := filepath.Join(t.TempDir(), "access.log")
+	if err := os.WriteFile(log, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edgeHealthWebShieldLog = log
+
+	setNFT("-99")
+	f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order")
+	ev := f["evidence"].(map[string]any)
+	if f["severity"] != "warn" || ev["webshield_requests"] != 150 || ev["webshield_proxied"] != 100 || ev["webshield_count_complete"] != true ||
+		!strings.Contains(f["next"].(string), "NFT_DNAT_PRIORITY = -101") || !strings.Contains(f["summary"].(string), "imunify") {
+		t.Fatalf("imunify first, busy: %v", f)
+	}
+	if strings.Contains(f["next"].(string), "challenge") || !strings.Contains(f["next"].(string), "drops") {
+		t.Fatalf("a graylisted client is dropped by Imunify, not challenged: %q", f["next"])
+	}
+	// A line longer than the read buffer (a scanner's huge URI) is skipped,
+	// not the end of the count.
+	long := `9.9.9.9 - - [` + now.Format("02/Jan/2006:15:04:05 -0700") + `] "GET /` + strings.Repeat("a", 200<<10) + ` HTTP/1.1" 404 1 a.gr "-" "ua" WL:"0" "-" XFF:"-" CAPTCHA:"0" PEER:9.9.9.9` + "\n"
+	if err := os.WriteFile(log, []byte(b.String()[:strings.Index(b.String(), "\n")+1]+long+b.String()[strings.Index(b.String(), "\n")+1:]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ev := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order")["evidence"].(map[string]any); ev["webshield_requests"] != 151 {
+		t.Fatalf("long line: %v", ev)
+	}
+	// A DNAT ahead at -200: CFM cannot go ahead of it (nft refuses -201).
+	edgeHealthNATReport = func(context.Context) (netfilterdiag.Report, error) {
+		return netfilterdiag.Analyze([]byte(strings.Replace(nftJSON("-99"), `"prio":-100`, `"prio":-200`, 1)), netfilterdiag.Expected{})
+	}
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); strings.Contains(f["next"].(string), "-201") || !strings.Contains(f["next"].(string), "has to move later") {
+		t.Fatalf("-200: %v", f["next"])
+	}
+	// Another tool's DNAT ahead (Docker publishing :443 from iptables-nft's
+	// PREROUTING): warn on the order, naming it, with no WebShield measure.
+	edgeHealthNATReport = func(context.Context) (netfilterdiag.Report, error) {
+		return netfilterdiag.Analyze([]byte(strings.ReplaceAll(nftJSON("-99"), "INPUT_imunify360", "DOCKER")), netfilterdiag.Expected{})
+	}
+	edgeHealthWebShieldLog = filepath.Join(t.TempDir(), "absent.log")
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); f["severity"] != "warn" || !strings.Contains(f["summary"].(string), "iptables-nft") || !strings.Contains(f["summary"].(string), "not Imunify360") {
+		t.Fatalf("docker ahead: %v", f)
+	}
+	edgeHealthWebShieldLog = log
+	// CFM first: ok, whatever WebShield logs.
+	setNFT("-101")
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); f["severity"] != "ok" {
+		t.Fatalf("cfm first: %v", f)
+	}
+	// Imunify first but WebShield quiet (speedhost): the documented choice, ok.
+	setNFT("-99")
+	edgeHealthNow = func() int64 { return now.Add(2 * time.Hour).Unix() }
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); f["severity"] != "ok" {
+		t.Fatalf("imunify first, quiet: %v", f)
+	}
+	// No log to measure with: unknown, never ok.
+	edgeHealthWebShieldLog = filepath.Join(t.TempDir(), "absent.log")
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); f["severity"] != "unknown" {
+		t.Fatalf("unmeasured: %v", f)
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func stubEdgeHealth(t *testing.T) func() {
@@ -425,11 +518,15 @@ func stubEdgeHealth(t *testing.T) func() {
 	edgeHealthDirectBounces = func(time.Time) []webdet.CDNCacheSuspect { return nil }
 	edgeHealthDownloadBounces = func(time.Time) []webdet.CDNCacheSuspect { return nil }
 	edgeHealthChallengeServing = func() bool { return true }
+	oNAT, oWSLog := edgeHealthNATReport, edgeHealthWebShieldLog
+	edgeHealthNATReport = func(context.Context) (netfilterdiag.Report, error) { return netfilterdiag.Report{}, nil }
+	edgeHealthWebShieldLog = filepath.Join(t.TempDir(), "absent.log")
 	oRealIP := edgeHealthOriginRealIP
 	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) {
 		return originrealip.Probe{Panel: "cpanel", Stack: "apache", Trusted: true, Directive: "RemoteIP{Internal,Trusted}Proxy 127.0.0.1", Source: "/etc/apache2/conf.d/i360.remoteip.conf", Header: "X-Forwarded-For"}, true
 	}
 	return func() {
+		edgeHealthNATReport, edgeHealthWebShieldLog = oNAT, oWSLog
 		edgeHealthOriginRealIP = oRealIP
 		edgeHealthDirectBounces, edgeHealthDownloadBounces = oDirect, oDownloads
 		edgeHealthDetect, edgeHealthScanAccess, edgeHealthScanError, edgeHealthBridgeConfigPaths, edgeHealthNow, edgeHealthCDNSuspects, edgeHealthChallengeServing = oDet, oAcc, oErr, oBridge, oNow, oCDN, oServ

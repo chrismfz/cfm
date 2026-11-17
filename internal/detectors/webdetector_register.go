@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cfm/internal/edgeban"
+	"cfm/internal/proxyipfilter"
 	"cfm/internal/apiserver"
 	"cfm/internal/clam"
 	core "cfm/internal/detectors/core"
@@ -1011,6 +1012,13 @@ func init() {
 		// the edge's own check, before every exemption (cfm.lua Step 0e,
 		// static files), 403s; "log" only counts and logs.
 		edgeban.SetEdgeMode(cleanScalar(kv["EDGE_BAN_MODE"]))
+		// PROXIED_IPFILTER_FEED / _LOCAL (default log): the verdict CFM's nft
+		// IP filter would give a client behind a trusted proxy, which nft never
+		// sees (internal/proxyipfilter). FEED: the block feeds (cfm-web's
+		// MYBLOCK); LOCAL: the node's own block sets (cfm.deny, TTL bans).
+		// log = a line per client naming the lists, nothing changes; enforce =
+		// the bridge answers block; off. Every allow set cancels a block.
+		proxyipfilter.SetModes(cleanScalar(kv["PROXIED_IPFILTER_FEED"]), cleanScalar(kv["PROXIED_IPFILTER_LOCAL"]))
 
 		webdet.ConfigureFingerprintPolicyEnforcement(
 			kvBool(kv, "FP_POLICY", true),

@@ -27,6 +27,28 @@ back-filled here — see the git/PR history for that period.
   edge nodes' access logs: only the attacker did). Logonly for a burn-in; the
   file-writing payloads are already blocked by rule 332. Update Fabrik to
   4.7.2+, which also fixes CVE-2026-66915.
+- **`edge_health` check H, `web-dnat-order`: is web traffic reaching the
+  edge?** A connection is NAT'd once, by the first nat chain that rewrites it.
+  Imunify360 DNATs its sets to WebShield at priority -100, and CFM's web
+  redirect defaults to -99 ("Imunify first"). On a cPanel node that set holds
+  Cloudflare's ranges, so every Cloudflare visitor bypassed the edge's WAF,
+  challenge and edge bans. earth sent ~29% of its web requests to WebShield
+  for months; the edge saw 235 Cloudflare requests an hour. The check warns
+  when a non-CFM DNAT of tcp/80 or 443 runs before CFM's redirect AND
+  WebShield served 100+ requests in the last 15 min, and names the fix
+  (`NFT_DNAT_PRIORITY = -101`). The warning reaches `whats_wrong`.
+- **The fleet blacklist and the node's own IP lists now reach visitors behind
+  Cloudflare (log mode).** nft sees only the proxy's address, so cfm-web's
+  blacklist (~270k addresses), `cfm.deny` and the TTL bans never applied to a
+  Cloudflare visitor: on earth, addresses other nodes had banned for WAF hits
+  got 200s through Cloudflare. The lists now also live in the daemon's memory
+  (~1 MB, never in the edge's Lua), and the edge's per-request decision asks
+  them, allows first as in nft. `[webdetector] PROXIED_IPFILTER_FEED` /
+  `PROXIED_IPFILTER_LOCAL` = `log` (default: a line per client in `cfm.log`
+  naming the lists it is on), `enforce`, `off`. An unblock lifts it at once.
+  On the
+  nftlib engine, reading a set no longer holds the backend's write lock, so a
+  dump never delays a ban. See `docs/proxied-ipfilter.md`.
 - **Under attack, a "Continue" button for the visitors the challenge cannot
   tell apart** (`CHALLENGE_V2_CONFIRM`,
   `docs/targeted-challenge-design.md` §4).
@@ -177,6 +199,23 @@ back-filled here — see the git/PR history for that period.
     Performance Lab plugin), which visitors' browsers post on every page
     (enateam.gr, Greek visitors, all week). That route is no longer read by
     601; other routes on the same site still are.
+- **`cfm realip` now reads nginx per site, so cPanel ea-nginx nodes are
+  judged correctly.** nginx takes the client from each `server{}`'s own
+  `set_real_ip_from` list when it has one, and cPanel's ea-nginx gives every
+  vhost one (`cloudflare.conf`, Cloudflare's ranges only). The check read only
+  the http-level settings. On earth it warned "logs 127.0.0.1 for every
+  visitor" while the sites logged real IPs, because Imunify360's
+  `server-includes/imunify360-webshield.conf` trusts 127.0.0.1 in every site
+  block. Worse, `cfm realip fix` would have written an http-level file that
+  reaches no vhost and turned the check green. Now each site `server{}` must
+  trust the edge (`servers` / `untrusted_servers` in `edge_health`
+  evidence). On cPanel the fix writes `/etc/nginx/conf.d/server-includes/cfm-realip.conf`,
+  which every site block includes. Elsewhere, when every untrusted block keeps
+  its own list, it names those blocks and leaves the change to the operator
+  instead of writing a file that changes nothing. cPanel's proxy-subdomain
+  blocks (`cpanel.` / `webmail.` / `whm.` ...) proxy to cpsrvd and are
+  reported but not counted. On earth they are where 127.0.0.1 shows, in
+  ea-nginx's own log only.
 - **Edge: a cert name the daemon dropped is no longer served until a
   reload.** The edge's per-worker cert store only ever added names from the
   sslcollector list. When AutoSSL replaced a new account's cPanel self-signed

@@ -19,6 +19,7 @@ loopback, its access logs and PHP's REMOTE_ADDR read 127.0.0.1. fix writes:
   cPanel Apache       /etc/apache2/conf.d/cfm-remoteip.conf
   DirectAdmin Apache  a marked block in /etc/httpd/conf/extra/httpd-includes.conf
   Debian/EL Apache    conf-enabled/ or conf.d/cfm-remoteip.conf
+  cPanel ea-nginx     /etc/nginx/conf.d/server-includes/cfm-realip.conf (every site server{})
   DirectAdmin nginx   a marked block in /etc/nginx/nginx-includes.conf
   nginx               /etc/nginx/conf.d/cfm-realip.conf
 LiteSpeed and NGM are reported with the manual step (CFM does not edit their config).
@@ -125,6 +126,8 @@ func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 		return true, fmt.Sprintf("Origin real-IP: n/a, no CFM edge in front of the %s/%s origin", p.Panel, p.Stack)
 	case p.Stack == StackUnknown:
 		return false, "Origin real-IP: " + p.Note
+	case p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so those sites log 127.0.0.1 instead of the visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	default:
 		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so it logs 127.0.0.1 for every visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	}

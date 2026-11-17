@@ -670,6 +670,12 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	// trust everywhere else). Configuration only (internal/originrealip).
 	rp, edgeUp := edgeHealthOriginRealIP()
 	rEv := map[string]any{"panel": rp.Panel, "stack": rp.Stack, "edge_active": edgeUp, "source": rp.Source, "header": rp.Header}
+	if rp.Servers > 0 {
+		rEv["servers"], rEv["untrusted_servers"] = rp.Servers, rp.UntrustedServers
+	}
+	if rp.Note != "" {
+		rEv["note"] = rp.Note
+	}
 	switch ok, text := originrealip.Verdict(rp, edgeUp); {
 	case !ok && rp.Stack == originrealip.StackUnknown:
 		findings = append(findings, sev.add("origin-real-ip", "unknown", text, rEv, ""))
@@ -682,6 +688,9 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	default:
 		findings = append(findings, sev.add("origin-real-ip", "ok", text, rEv, ""))
 	}
+
+	// ── Check H: web traffic reaches the edge, not a DNAT ahead of it ──────────
+	findings = append(findings, webDNATOrderFinding(ctx, &sev))
 
 	sort.SliceStable(findings, func(i, j int) bool {
 		return sevRank(findings[i]["severity"].(string)) > sevRank(findings[j]["severity"].(string))
