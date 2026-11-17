@@ -134,6 +134,34 @@ in_vendor_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# configs/cfm-logrotate.cron TSV step: run it against a temp tree. It deletes
+# only cPanel's dated copies older than a day, keeps a distro logrotate
+# generation and an operator's own copy, keeps one compressed copy of an
+# oversized live file and truncates it, and runs even when logrotate-cfm is
+# absent (a node without an edge).
+# ---------------------------------------------------------------------------
+cron_tsv_selftest() {
+    local cron="$REPO_ROOT/configs/cfm-logrotate.cron" d f rc=0
+    d=$(mktemp -d)
+    f="$d/access_cfm_tsv.log"
+    head -c 2000 /dev/zero > "$f"
+    : > "$f.2026_11_10";    touch -d '3 days ago' "$f.2026_11_10"
+    : > "$f.2026_11_10.01"; touch -d '3 days ago' "$f.2026_11_10.01"
+    : > "$f.2026_11_17"
+    : > "$f.1.gz";          touch -d '3 days ago' "$f.1.gz"
+    : > "$f.incident";      touch -d '3 days ago' "$f.incident"
+    CFM_TSV_LOGS="$f" CFM_TSV_MAX_BYTES=1000 CFM_LOGROTATE_CONF="$d/none" sh "$cron" || rc=1
+    [ ! -e "$f.2026_11_10" ] && [ ! -e "$f.2026_11_10.01" ] || { red "FAIL: cron kept a cPanel copy older than a day"; rc=1; }
+    [ -e "$f.2026_11_17" ] || { red "FAIL: cron deleted a cPanel copy younger than a day"; rc=1; }
+    [ -e "$f.1.gz" ] && [ -e "$f.incident" ] || { red "FAIL: cron deleted a file that is not a cPanel dated copy"; rc=1; }
+    [ "$(stat -c %s "$f")" -eq 0 ] || { red "FAIL: cron did not truncate the oversized live log"; rc=1; }
+    [ "$(gzip -dc "$f.cfm-prev.gz" 2>/dev/null | wc -c)" -eq 2000 ] || { red "FAIL: cron did not keep the live log as .cfm-prev.gz"; rc=1; }
+    rm -rf "$d"
+    [ "$rc" -eq 0 ] && grn "OK: cfm-logrotate.cron TSV step (temp tree)."
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # Repo / CI mode
 # ---------------------------------------------------------------------------
 repo_mode() {
@@ -189,6 +217,7 @@ repo_mode() {
     fi
 
     grn "OK: every configured CFM log path is rotated."
+    cron_tsv_selftest || return 1
     return 0
 }
 

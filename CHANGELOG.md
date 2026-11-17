@@ -57,6 +57,57 @@ back-filled here — see the git/PR history for that period.
   problem it is. The startup log no longer says "no working credentials
   found" when the credentials were found and the connect failed: it names the
   credential source and the connect error.
+### Added
+- **WAF rule 530 measures WooCommerce add-to-cart crawling (logonly).**
+  A `GET ?add-to-cart=<id>` makes WooCommerce write a session and a cart, and
+  crawlers follow those links on every listing. On 2026-11-17 the fleet served
+  ~265 000 of them a day, uncached at 1-3 s each, ~85% to self-declared
+  crawlers (meta-externalagent the largest). The rest came from rotating
+  residential addresses that Imunify360 flags behind the edge. Rule 530
+  (`WAF_CART_CRAWL`) tags each one `CRAWLER`, `NO_REFERER` or `XSITE`. It
+  stands down for a shopper's click (same-site Referer or Fetch Metadata) and
+  for a cart or login cookie. Logonly: nothing is blocked, and the family has
+  no block rule, so `waf_security` never arms it. Its pushes are kept to one
+  per client and tag an hour, so the burn-in adds no flood of history rows.
+  See `docs/waf.md`, "Rule 530".
+
+### Fixed
+- **The Apache TSV fallback log no longer fills the disk on cPanel.**
+  `access_cfm_tsv.log` (the web detector's file source when the edge socket
+  is off) lives in `/var/log/apache2/`, which CFM left to the distro's
+  logrotate. cPanel has none there: cpanellogd renames the log at 2 GB and
+  never deletes the copies, which had reached 316 GB on titan, 207 GB on mars
+  and 175 GB on orion. The hourly `/etc/cron.hourly/cfm-logrotate` now deletes
+  those copies (`<name>.YYYY_MM_DD[.NN]` only) after a day and, past 512 MB,
+  keeps one compressed copy of the live file (`<name>.cfm-prev.gz`) and
+  truncates it. A distro logrotate generation or an operator's own copy is
+  left alone. It also covers `/var/log/nginx/access_cfm_tsv.log`
+  (`nginx-cfm.conf`), and runs on a node without `logrotate-cfm`.
+- **`detectors.conf`: a quoted value with an inline comment now reads as the
+  value.** `BLOCK = "15m"   ; stage 3 …` was read as the text `15m"   ; stage
+  3 …`, an invalid TTL, so the section's block mode was silently `no`. The
+  stock `[cfm_endpoints]` (and `[api_abuse]` on older configs) shipped exactly
+  that line: its stage 3 never banned on any node. String keys read the same
+  way (`MODE`, paths, lists) were affected too; number, on/off and duration
+  keys were not. The parser now takes the text between the quotes when only a
+  comment follows; every other value reads as before. The stock file no longer
+  quotes those lines, so an older daemon reads it right too. A node whose
+  config carries such a `BLOCK` starts banning with this release.
+  A secret key whose value this changes (`CHALLENGE_TOKEN`, …) is logged once,
+  by name and never by value, so a token that changed under its consumer is
+  findable.
+
+### Changed
+- **`[webdetector] BLOCK` ships as `12h` (was `2h`).** The 2026-11-17 read
+  of the 8 edge nodes found 99% of the web detector's 403 / 404 / 40x bans on
+  cloud scanners, the same Microsoft and Google addresses banned up to 51
+  times a week at the 1h several nodes ran. Every such ban is also reported to
+  the fleet blacklist (MYBLOCK), which a short TTL barely outlives. Existing
+  nodes keep their own `detectors.conf` value (a conffile) until it is edited.
+  The stock file now also ships `[webdetector.leniency]`: a GR/CY client
+  (country only, no ASN) is held 15m and not reported to cfm-web, so a local
+  customer is neither held 12h nor banned on every node. A node keeping its
+  own `detectors.conf` adds that section (or a `detectors.d` overlay) itself.
 
 ## 2026.11.17
 

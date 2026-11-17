@@ -1122,6 +1122,7 @@ Current assignments:
   502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
   503  rule_wp_admin_cross_screen      512  rule_xmlrpc_post_burst
                                        520  (retired 2026-10-08: SP Page Builder contact-form mail relay)
+                                       530  rule_wc_cart_get_crawl (logonly; WooCommerce add-to-cart by GET from a crawler)
 
 6xx — Header / protocol anomaly
   601  rule_ctrl_chars                 605  rule_crlf_injection
@@ -1826,7 +1827,7 @@ it is no signal, like a missing one; on an XHR leg it counts as missing
 (`NO_REFERER`). A `/` with a query (plain permalinks, `/?product=x`) is the
 front end.
 
-The step runs last but 612, after every armed block-tier rule, because a
+The step runs last but 612 and 530, after every armed block-tier rule, because a
 block promotion must hold the autoblock: a held block evaluated earlier takes
 the headline and ends evaluation before an armed rule's ban.
 
@@ -1871,6 +1872,70 @@ edge 403s without an nft ban. A hit means the site already stores a payload
 in something an administrator just opened (an order, a comment, a product
 review, a form entry): find and clean it, as the PixelYourSite clean-up did
 for `pys_enrich_data`.
+
+## Rule 530 — `rule_wc_cart_get_crawl` (WooCommerce add-to-cart crawling)
+
+Reason family **`WAF_CART_CRAWL`**, logonly. WooCommerce adds a product to
+the cart for any request with `add-to-cart=<id>`, and its listings print that
+link on every product. Crawlers follow it, and each request starts a session
+and writes a cart to the shop's database, uncached, at 1-3 s of PHP.
+
+Measured on 2026-11-17 over one day of edge logs on six nodes: about 265 000
+such GETs. Most came from self-declared crawlers:
+- meta-externalagent: 47 000 on mars, and 65 000 on titan in five hours;
+- meta-webindexer, SERankingBacklinksBot, ClaudeBot and Claude-SearchBot.
+
+The rest came from rotating residential addresses with a plain browser UA, one
+or two requests each. That is the pattern Imunify360's ModSecurity rule "GET
+add-to-cart flood pattern" catches behind the edge (7 082 addresses in two
+days on earth), and per-IP counting never sees it. On mars these requests
+cost ~37 hours of backend time a day.
+
+**Fires on** a `GET` / `HEAD` whose query string carries `add-to-cart` (read
+as PHP reads the name, so `add%2Dto%2Dcart` counts) with a value holding a
+digit, and tags the client:
+- `CRAWLER`: a self-declared bot UA;
+- `NO_REFERER`: not a self-declared bot (a browser UA, an in-app browser
+  such as Pinterest's, or no UA at all), no Referer, no same-site Fetch
+  Metadata;
+- `XSITE`: a browser UA with another site's Referer (an ad, a comparison
+  site, an email: possibly a person).
+
+**Stands down** for a shopper's click (a same-site Referer, `www.` or not, or
+`Sec-Fetch-Site` same-origin / same-site under a no-referrer policy) and for a
+client with a WooCommerce session or a WordPress login cookie, whatever the
+UA: an in-app browser can carry a crawler token (the Pinterest app's UA names
+Pinterest), and a person's click must never be tagged a crawler's. A
+same-site Referer is, after a leading `www.` is dropped from both, the host
+itself or a name under it (`m.`), never its parent (a bare `gr` or `com.gr`)
+and never a sibling under a public suffix. The name is matched as PHP reads it,
+case-sensitively (`ADD-TO-CART` adds nothing to a cart). The product page's
+own form POSTs `add-to-cart` in the body and is out of scope.
+
+**Limits.** Every input is client-authored: a crawler that forges a same-site
+Referer, or presents a cookie by that name, is not counted. That is acceptable for a
+cost signal and is why no tag may key enforcement by itself. Crawlers on the
+bypass list (Googlebot, Bingbot, ...) skip the WAF at Step 0 and are not
+measured here.
+
+**Order.** It runs after every other rule, 612 (the fetch-metadata tell)
+included. cfm.lua pushes only the headline hit, and the residential clients
+here are 612's population too: ahead of 612 it took their headline and their
+push. When both match, 612 owns the headline and 530 is in `also_rule_ids`,
+so count 530 from the headline and from `also_rule_ids`.
+
+**Push window.** The tag stays in the push key (`PUSH_KEY_KEEPS_TAG`), so
+the burn-in can compare the three populations per IP, and the window is an
+hour, not 60 s (`PUSH_COOLDOWN_FAMILY`, logonly tier only: a promoted rule
+keeps the normal window). These clients send about one request
+per IP per minute, so a 60 s window pushed nearly every hit (~80 k history
+rows a day on mars). The burn-in counts clients per hour, not requests.
+
+**What next.** After the burn-in (`waf_activity` / `cfm.waf.log`,
+`node="all"`), the likely action for `CRAWLER` is not a block. It is an
+answer that skips the cart write: a 403, or a redirect to the same URL without
+`add-to-cart`. Any change ships per tag. No family block rule is planned, so
+`waf_security` never arms the family.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
@@ -2693,6 +2758,7 @@ The original detector / engine roadmap is shipped end-to-end. Every item is now 
 | **B5** POST + empty UA + Content-Length:0 + `.php` / `.phtml` / `.phar` URI | 411 | cheap, high-confidence webshell-ping fingerprint |
 | Bad UTF-8 encoding (Coraza `validateUtf8Encoding` port) | 611 | overlong / surrogate / truncated multibyte in args+body |
 | Range abuse (Apache Killer / `Request-Range` / multi-Range) | 610 | |
+| WooCommerce `add-to-cart` GET from a crawler / no same-site Referer | 530 | logonly, `WAF_CART_CRAWL`; crawl cost, not an attack |
 | **PHP dropper / canary family** (split-string exec-probes, wget+curl fallback droppers, `!success!`/`!ended!` markers, `<fs>` filesize recon, `@touch()` mtime backdating) | 421-425 | new `WAF_DROPPER` reason family; source workload was a 2026-05-19 shared-hosting compromise |
 | Hit-rate counter + sampled hit log | — | see [Hit-rate measurement](#hit-rate-measurement) |
 | Stable rule IDs + per-vhost rule exclusions (`SecRuleRemoveById`-style) | — | see [Rule IDs](#rule-ids) and [Per-vhost rule exclusions](#per-vhost-rule-exclusions); solves the vitolighting/3xK Tech-style FP cleanly without disabling whole-host WAF |

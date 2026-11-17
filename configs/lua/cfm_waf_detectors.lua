@@ -9037,4 +9037,101 @@ function _M.detect_php_file_body(body, headers)
   return kind .. "_" .. cls
 end
 
+-- Rule 530 — WooCommerce add-to-cart by GET from a crawler (WAF_CART_CRAWL,
+-- logonly). WooCommerce adds a product to the cart for any request carrying
+-- `add-to-cart=<id>` in $_REQUEST, and its listings print that link on every
+-- product. Crawlers follow it: each request starts a session and writes a
+-- cart to the shop's database, uncached, at 1-3 s of PHP each. Measured
+-- 2026-11-17 on six nodes over one day: ~265 000 such GETs, ~85% from
+-- self-declared crawlers (meta-externalagent alone 47 000 on mars and 65 000 on
+-- titan in five hours; meta-webindexer, SERankingBacklinksBot, ClaudeBot,
+-- Claude-SearchBot), the rest from rotating residential addresses with a plain
+-- browser UA, one or two requests each (Imunify360's "GET add-to-cart flood
+-- pattern", 7 082 addresses in two days on earth).
+--
+-- A shopper's GET add-to-cart is a click on the shop's own link: a same-site
+-- Referer, or Sec-Fetch-Site same-origin / same-site under a no-referrer
+-- policy. A shopper who already has a cart or is logged in carries the
+-- WooCommerce session or login cookie. Any of those stands the rule down,
+-- whatever the UA: an in-app browser can carry a crawler token (the Pinterest
+-- app's UA names Pinterest), and a person's click must never be tagged a
+-- crawler's. Everything else is tagged:
+--   CRAWLER     — a self-declared bot UA (named crawler tokens, or a generic
+--                 `...bot/`, crawl, spider, indexer or agent word);
+--   NO_REFERER  — not a self-declared bot (a browser UA, an in-app browser,
+--                 or no UA at all), no Referer, no same-site Fetch Metadata;
+--   XSITE       — a browser UA whose Referer is another site (a link in an
+--                 ad, a comparison site or an email: possibly a person).
+-- Logonly for measurement: every input is client-authored, so a tag may never
+-- key enforcement by itself, and the stand-downs can be forged (a crawler that
+-- sends a same-site Referer or a cart cookie is not counted). That is
+-- acceptable for what the rule is for (the cost of crawling), not a security
+-- boundary. Only GET / HEAD and the query string: a product page's own form
+-- POSTs add-to-cart in the body.
+--
+-- The gate is the memoized normalize(args & body) surface the other field
+-- rules share (`nab`, lowercased); past it the name is read as PHP reads it
+-- (php_request_fields), case-sensitively: WooCommerce reads `add-to-cart`
+-- and PHP keys are case-sensitive, so `ADD-TO-CART` adds nothing to a cart.
+-- The tables and helpers live inside the function: the main chunk is at
+-- Lua's 200-local limit.
+function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host, get_nab)
+  if method ~= "get" and method ~= "head" then return nil end
+  if not args or args == "" then return nil end
+  headers = headers or {}
+  -- get_nab is cfm_waf.check's memoized getter, called only now: a request
+  -- that is no GET with a query never builds the surface for this rule.
+  local nab = get_nab and get_nab() or nil
+  if not field_gate_open(method, args, "", headers, nab, "add-to-cart") then return nil end
+  -- Past the gate: only a request that names the field pays for the parse.
+  local f = _M.php_request_fields(method, args, "", headers)["add-to-cart"]
+  if not f then return nil end
+  local any = false
+  for i = 1, #f do
+    if f[i]:find("%d") then any = true; break end
+  end
+  if not any then return nil end
+
+  -- cfm_waf.check passes ctx.cookie ("" when absent); fall back to the header.
+  local ck = cookie
+  if ck == nil or ck == "" then ck = header_string(headers["cookie"] or headers["Cookie"]) or "" end
+  ck = lower(ck)
+  -- By cookie NAME (the start of the string or after a ';'), not anywhere:
+  -- a value holding one of these words is no cart.
+  for _, name in ipairs({ "wp_woocommerce_session_", "woocommerce_items_in_cart", "wordpress_logged_in_" }) do
+    if ck:find("^%s*" .. name) or ck:find(";%s*" .. name) then return nil end
+  end
+  local site = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
+  if site == "same-origin" or site == "same-site" then return nil end
+  -- Same site for a Referer: after a leading "www." is dropped from both,
+  -- the host itself or a name under it (www.shop.gr / shop.gr, m.shop.gr).
+  -- Never the other way round (a bare "gr" or "com.gr" Referer would be the
+  -- parent of every host under it), and not same_site's sibling rule: two
+  -- tenants under one public suffix (a.com.gr, b.com.gr) are siblings.
+  local ref = url_host(header_string(headers["referer"] or headers["Referer"]))
+  local host = request_host(headers, req_host)
+  if ref and host ~= "" then
+    local r, h = ref:gsub("^www%.", ""), host:gsub("^www%.", "")
+    if r == h or r:sub(-#h - 1) == "." .. h then return nil end
+  end
+
+  local ua = lower(header_string(headers["user-agent"] or headers["User-Agent"]) or "")
+  -- An in-app browser is a person, though its app's name is also a crawler
+  -- token: the Pinterest app appends "[Pinterest/iOS]" / "[Pinterest/Android]"
+  -- (its crawler says Pinterestbot / "Pinterest/0.2"), and a link shared there
+  -- opens with no Referer. ua_is_in_app_browser covers the named in-app
+  -- tokens 612 already measures apart.
+  local in_app = ua_is_in_app_browser(ua) or ua:find("[pinterest/", 1, true) ~= nil
+  -- The generic word needs a version slash or the end after "bot"
+  -- (SERankingBacklinksBot/1.0, ClaudeBot/1.0): a device name such as
+  -- "CUBOT X50" is followed by a space.
+  if ua ~= "" and not in_app and (ua_is_declared_crawler(ua) or ua:find("bot/") or ua:find("bot[;%)]") or ua:find("bot$")
+                   or has(ua, "crawl") or has(ua, "spider") or has(ua, "indexer")
+                   or has(ua, "externalagent") or has(ua, "fetcher")) then
+    return "CRAWLER"
+  end
+  if ref then return "XSITE" end
+  return "NO_REFERER"
+end
+
 return _M
