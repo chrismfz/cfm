@@ -474,7 +474,7 @@ in `sig=`. The automatic v2 arm (`suspicious_vhost` / `uniqpaths_short` /
 `under_attack`) plays §8.4's vhost-level trigger role without §8.3 leg 2, and
 the Rung-1 score is the per-request gate. §8.3 leg 1 shipped for `solver_farm`
 (2026-11-03; `cookie_discard` not done); leg 2 and
-§8.4's visible puzzle are dropped; master plan §5.)* **As first written, nothing here was built or measured**; the numbers to justify each
+§8.4's visible puzzle are dropped; master plan §5. 2026-11-17: §8.4's gate is redesigned with a confirm button instead of the puzzle, in `docs/targeted-challenge-design.md` §4.)* **As first written, nothing here was built or measured**; the numbers to justify each
 threshold do not exist until the evidence signal in §8.2 has run. Treat every
 "human vs farm" claim below as a hypothesis to confirm against real logs, the
 same discipline §5/§6 impose.

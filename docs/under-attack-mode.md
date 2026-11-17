@@ -16,6 +16,12 @@
 > default on, pin v1 per vhost to opt out (`docs/traffic-classifier.md`
 > "Auto-v2"). The I2 freeze is untouched; `UNDER_ATTACK_DRYRUN` still governs
 > only the unbuilt I3+ ladder.
+>
+> **2026-11-17 — a consumer for the state, still outside the ladder:**
+> `docs/targeted-challenge-design.md` §4 (design, not built) shows a confirm
+> step to no-input solves outside the vhost's audience while it is
+> UNDER_ATTACK, with a proposed automatic entry from a `solver_farm` finding.
+> I3–I5 stay frozen.
 
 **Status: I0 shipped; I1 (detector + state + notify, detect-only) and its
 surfacing (I1b) landed — the RT-baseline clause (§3 leg 3) is still open, and
