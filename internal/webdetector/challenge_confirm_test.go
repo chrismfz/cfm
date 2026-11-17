@@ -3,6 +3,7 @@ package webdetector
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -65,7 +66,7 @@ func TestConfirmToken(t *testing.T) {
 		{"other pow", tok, "203.0.113.5", "shop.example.com", "POWTOK2", now},
 		{"expired", tok, "203.0.113.5", "shop.example.com", "POWTOK", now.Add(confirmTokenTTL + time.Second)},
 		{"from the future", tok, "203.0.113.5", "shop.example.com", "POWTOK", now.Add(-time.Minute)},
-		{"tampered", tok[:len(tok)-2] + "AA", "203.0.113.5", "shop.example.com", "POWTOK", now},
+		{"tampered", tamperConfirmToken(t, tok), "203.0.113.5", "shop.example.com", "POWTOK", now},
 		{"garbage", "not-a-token", "203.0.113.5", "shop.example.com", "POWTOK", now},
 		{"empty", "", "203.0.113.5", "shop.example.com", "POWTOK", now},
 	}
@@ -519,4 +520,19 @@ func TestVerify_ConfirmSkipsAVerifiedGoodBot(t *testing.T) {
 	if solved, _ := capt.counts(); solved != 1 {
 		t.Errorf("solved=%d, want 1", solved)
 	}
+}
+
+// tamperConfirmToken flips one bit of the MAC and re-encodes. Replacing the
+// last two characters with "AA" was flaky (about one run in six): base64's
+// last character carries padding bits RawURLEncoding ignores, and the pair
+// could already read "AA", so the "tampered" token sometimes decoded to the
+// genuine bytes.
+func tamperConfirmToken(t *testing.T, tok string) string {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(tok)
+	if err != nil || len(raw) < 9 {
+		t.Fatalf("token does not decode: %v", err)
+	}
+	raw[len(raw)-1] ^= 0x01
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
