@@ -7403,8 +7403,9 @@ function _M.detect_bad_utf8(args, body, headers, uri, _na)
   local tag = utf8_walk(_na or normalize(cap(args or "", CFG.max_scan_len)))
   if tag then return tag end
 
-  -- Walk the body only for TEXTUAL content types (urlencoded / JSON / XML /
-  -- text, or an empty CT). Binary uploads carry raw bytes (JPEG / WebP / PNG /
+  -- Walk the body only for TEXTUAL media types (urlencoded / JSON / XML /
+  -- text, or none), read as PHP reads them (is_textual_body_content_type:
+  -- a Content-Type parameter does not change the answer). Binary uploads carry raw bytes (JPEG / WebP / PNG /
   -- ZIP) that routinely form 0xC0/0xC1 + continuation pairs (JPEG SOF markers
   -- 0xFFC0/0xFFC1 etc.) and E0/F0 leads decoding to overlong / surrogate /
   -- out-of-range codepoints — none of which are encoding-bypass primitives,
