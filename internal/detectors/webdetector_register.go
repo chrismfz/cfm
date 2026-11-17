@@ -786,6 +786,7 @@ func init() {
 			UnderAttackConfirmTicks: kvInt(kv, "UNDER_ATTACK_CONFIRM_TICKS", 3),
 			UnderAttackHolddown:     kvDur(kv, "UNDER_ATTACK_HOLDDOWN", 30*time.Minute),
 			UnderAttackRuleTTL:      kvDur(kv, "UNDER_ATTACK_RULE_TTL", 6*time.Hour),
+			UnderAttackOverrideTTL:  kvDur(kv, "UNDER_ATTACK_OVERRIDE_TTL", 6*time.Hour),
 			UnderAttackErrFloor:     kvFlt(kv, "UNDER_ATTACK_ERR_FLOOR", 0.5),
 			UnderAttackBotCeil:      kvFlt(kv, "UNDER_ATTACK_BOT_CEIL", 0.05),
 
@@ -1032,6 +1033,13 @@ func init() {
 		// Kill switch for the real-input rescue of a failing armed solve;
 		// default on.
 		webdet.ConfigureChallengeV2InputRescue(kvBool(kv, "CHALLENGE_V2_INPUT_RESCUE", true))
+		// The under-attack confirm step (docs/targeted-challenge-design.md §4):
+		// off | manual (default: an operator's `attack on` only) | auto, and the
+		// countries that never see it (default GR,CY; "none" = everyone).
+		webdet.ConfigureChallengeV2Confirm(
+			kvStrClean(kv, "CHALLENGE_V2_CONFIRM", "manual"),
+			kvStrClean(kv, "CHALLENGE_V2_CONFIRM_AUDIENCE", "GR,CY"),
+		)
 		// Shadow login signals (login_spray / login_spray_net /
 		// login_dirty_success history rows); default on, nothing enforced.
 		webdet.ConfigureLoginSignals(kvBool(kv, "LOGIN_SIGNALS", true))

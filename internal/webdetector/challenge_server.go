@@ -636,6 +636,14 @@ type ChallengeSolve struct {
 	// spoofed / timeout / transient (v2Waiver*); "" for everyone else.
 	// Rendered as v2_waiver_miss=<reason>.
 	V2WaiverMiss string
+	// V2Confirm is "clicked" when the solve passed the under-attack confirm
+	// step (challenge_confirm.go): its first POST was answered with a confirm
+	// token and this one carried it. V2ConfirmMS is the time from that answer
+	// to this POST, the click included. Rendered as v2_confirm= and
+	// v2_confirm_ms= on the solve line and history row; the v2_* family is
+	// withheld from scoped callers by prefix.
+	V2Confirm   string
+	V2ConfirmMS int64
 	// Country / CountryISO / ASN / ASNName / PTR are the solving client's
 	// network identity, resolved ONCE at verify (resolveGeo, challenge_geo.go)
 	// so every line and history row about this solve carries the same answer.
@@ -946,7 +954,22 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// One reading of the wall clock for both the freshness check and the
 		// latency, so SolveMS can never exceed the TTL that was just enforced.
 		verifyAt := time.Now().UTC()
-		issuedAt, diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, verifyAt)
+		// A re-post after the under-attack confirm step (challenge_confirm.go)
+		// carries the token its first POST was answered with. Its PoW is
+		// checked as of that answer, when it was fresh, so the time the
+		// visitor took to click never sends them back to solve again; the
+		// token itself lives confirmTokenTTL. An invalid token is ignored:
+		// the solve is then checked like any other.
+		powAt := verifyAt
+		confirmAt, confirmOK := time.Time{}, false
+		// Web scope only, where tokens are issued: a panel verify never
+		// honours one (the token does not bind scope).
+		if ct := r.Header.Get(confirmHeader); ct != "" && scope == "web" {
+			if confirmAt, confirmOK = verifyConfirmToken(ct, ipStr, host, powTok, verifyAt); confirmOK {
+				powAt = confirmAt
+			}
+		}
+		issuedAt, diff, nonce16, ok := verifyPowChallenge(powSecretKey(), powTok, bind, cfg, powAt)
 		if !ok || !verifyPowSolution(nonce16, bind, sol, diff) {
 			logVerifyReject(ipStr, host, "bad_pow", next, r.UserAgent())
 			http.Error(w, "bad pow", http.StatusForbidden)
@@ -990,7 +1013,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			Diff:              diff,
 			UA:                boundStr(ua, solveMaxUA),
 			VerifyMS:          time.Since(verifyStart).Milliseconds(),
-			SolveMS:           powSolveLatencyMS(issuedAt, verifyAt, cfg.TTL),
+			SolveMS:           powSolveLatencyMS(issuedAt, powAt, cfg.TTL),
 			UAImpossible:      uaVerdict.Impossible,
 			UAReason:          uaVerdict.Reason(),
 			UAFamily:          uaVerdict.Family,
@@ -1130,6 +1153,40 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					http.Error(w, "verification failed", http.StatusForbidden)
 					return
 				}
+			}
+		}
+
+		// The under-attack confirm step (challenge_confirm.go,
+		// docs/targeted-challenge-design.md §4): a solve that passed Rung 1
+		// with no trusted input at all, from outside the audience, on a vhost
+		// an operator holds UNDER_ATTACK, gets no clearance yet. The 403
+		// carries the confirm token, and the page shows a Continue button
+		// whose click re-posts this solve with it. Never a reject (D5b): the
+		// click passes absent a certain tell, which Rung 1 rejected above.
+		// A re-post with the token but still no trusted input (no click on
+		// the button, no pointer, touch or key) is asked again with the SAME
+		// token: a new one minted from a re-post would keep one PoW alive
+		// for as long as a client keeps re-posting. A verified good bot is
+		// never asked (confirmGoodBot).
+		if v2On {
+			switch {
+			case confirmOK && confirmInput(hsSig, r.Header.Get(clickHeader) == "1"):
+				solve.V2Confirm = confirmClicked
+				if ms := verifyAt.Sub(confirmAt).Milliseconds(); ms > 0 {
+					solve.V2ConfirmMS = ms
+				}
+			case confirmOK:
+				setNoStore(w.Header())
+				w.Header().Set(confirmHeader, r.Header.Get(confirmHeader))
+				http.Error(w, "confirm", http.StatusForbidden)
+				return
+			case confirmRequired(solve, hsSig) && !confirmGoodBot(r.Context(), solve):
+				logging.LogfCHALLENGES("%s", solve.ConfirmLine())
+				recordConfirmAsked(solve)
+				setNoStore(w.Header())
+				w.Header().Set(confirmHeader, issueConfirmToken(ipStr, host, powTok, verifyAt))
+				http.Error(w, "confirm", http.StatusForbidden)
+				return
 			}
 		}
 
@@ -2431,6 +2488,9 @@ func challengeHTML() string {
     .spinner{width:34px;height:34px;border-radius:999px;border:3px solid rgba(255,255,255,.18);border-top-color:#fff;animation:spin 1s linear infinite;margin:14px 0}
     @keyframes spin{to{transform:rotate(360deg)}}
     code{background:rgba(255,255,255,.08);padding:.15rem .35rem;border-radius:8px}
+    .btn{font:inherit;font-weight:600;font-size:16px;padding:10px 22px;border-radius:10px;border:0;background:#e8eefc;color:#0b1020;cursor:pointer;margin-top:6px}
+    .btn:focus-visible{outline:3px solid #7aa2ff;outline-offset:2px}
+    .btn:disabled{opacity:.6;cursor:default}
   </style>
 </head>
 <body>
@@ -2702,57 +2762,125 @@ func challengeHTML() string {
     }
   }
 
+  // BEGIN cfmConfirmToken (run in node by TestChallengePage_ConfirmToken)
+  // The under-attack confirm step (challenge_confirm.go): a verify answered
+  // 403 WITH an X-CFM-Confirm token asks for one click, nothing else. Any
+  // other 403 (a Rung-1 reject, an expired token) keeps its own path.
+  function cfmConfirmToken(status, header) {
+    return (status === 403 && typeof header === 'string' && header !== '') ? header : '';
+  }
+  // END cfmConfirmToken
+
+  function postVerify(sol, ctok, clicked) {
+    var hdr = { "X-CFM-Token": token, "X-CFM-Pow": powTok, "X-CFM-Sol": sol };
+    if (ctok) hdr["X-CFM-Confirm"] = ctok;
+    if (clicked) hdr["X-CFM-Click"] = "1";
+    return fetch("/__cfm_verify?next="+encodeURIComponent(next), {
+      method: "POST",
+      headers: hdr,
+      body: hsBody(),
+      credentials: "include"
+    });
+  }
+
+  // showConfirm replaces the spinner with one native button. It waits for a
+  // page someone can see (a background tab shows it when it comes back), and
+  // only a trusted click or key press (ev.isTrusted) re-posts the solve with
+  // the token and X-CFM-Click; the server asks again without trusted
+  // input. The page's input listeners keep running, so the re-post carries
+  // the approach to the button. No timer, no puzzle.
+  function showConfirm(sol, ctok) {
+    var shown = false;
+    var show = function () {
+      if (shown) return;
+      try { if (document.visibilityState === 'hidden') return; } catch (e) {}
+      shown = true;
+      try { document.removeEventListener('visibilitychange', show); } catch (e) {}
+      try {
+        var card = document.querySelector('.card');
+        while (card.firstChild) card.removeChild(card.firstChild);
+        var h = document.createElement('div');
+        h.className = 'h';
+        h.textContent = 'One more step';
+        var p = document.createElement('div');
+        p.className = 'p';
+        p.textContent = 'Press Continue to go on to the site.';
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn';
+        b.textContent = 'Continue';
+        b.addEventListener('click', function (ev) {
+          if (ev && ev.isTrusted === false) return;
+          b.disabled = true;
+          b.textContent = 'Checking…';
+          send(sol, ctok, true);
+        });
+        // The give-up message of a later reject writes here (.muted).
+        var m = document.createElement('div');
+        m.className = 'muted';
+        card.appendChild(h);
+        card.appendChild(p);
+        card.appendChild(b);
+        card.appendChild(m);
+        try { b.focus(); } catch (e) {}
+      } catch (e) {
+        setTimeout(function(){ location.reload(); }, 1200);
+      }
+    };
+    show();
+    if (!shown) {
+      try { document.addEventListener('visibilitychange', show); } catch (e) {}
+    }
+  }
+
+  function send(sol, ctok, clicked) {
+    postVerify(sol, ctok, clicked).then(function(res){
+      if (res.redirected) {
+        cfmSession.del('cfm_v2r');
+        cfmSession.del('cfm_vf');
+        window.location = res.url; return;
+      }
+      var confirmTok = '';
+      try { confirmTok = cfmConfirmToken(res.status, res.headers.get('X-CFM-Confirm')); } catch (e) {}
+      if (confirmTok) { showConfirm(sol, confirmTok); return; }
+      // Rung-1 v2_reject ONLY (marked by the X-CFM-V2 header — any other
+      // 403 cause, e.g. blocked cookies or an expired PoW token, keeps the
+      // page's original flat retry and its "enable JavaScript & cookies"
+      // hint). Rejects are retry-able by design (D5c) but with capped
+      // exponential backoff and a give-up, so a misclassified real client
+      // neither loops hot into the verify rate limiter nor burns CPU
+      // forever. The counter EXPIRES after 2 minutes of quiet, so a manual
+      // reload later genuinely starts fresh (sessionStorage outlives the
+      // reload itself).
+      var v2rej = false;
+      try { v2rej = (res.status === 403 && res.headers.get('X-CFM-V2') === 'reject'); } catch (e) {}
+      var v2n = 0;
+      if (v2rej) {
+        var v2s = (cfmSession.get('cfm_v2r') || '').split('|');
+        var v2ts = parseInt(v2s[1] || '0', 10) || 0;
+        if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
+        v2n++;
+        cfmSession.set('cfm_v2r', v2n + '|' + Date.now());
+        if (v2n >= 6) {
+          try {
+            var m = document.querySelector('.muted');
+            if (m) m.textContent = "Verification could not complete. Please wait a minute and reload; if this keeps happening, contact the site owner.";
+          } catch (e) {}
+          return;
+        }
+      }
+      var v2wait = v2rej ? Math.min(1200 * Math.pow(2, v2n), 30000) : 1200;
+      var target = cfmRetryTarget(next, v2rej, cfmSession, Date.now());
+      setTimeout(function(){ window.location = target; }, v2wait);
+    }).catch(function(){
+      setTimeout(function(){ location.reload(); }, 1200);
+    });
+  }
+
   (async function(){
     try {
       var sol = await solvePow();
-
-       fetch("/__cfm_verify?next="+encodeURIComponent(next), {
-        method: "POST",
-        headers: {
-          "X-CFM-Token": token,
-          "X-CFM-Pow": powTok,
-          "X-CFM-Sol": sol,
-        },
-        body: hsBody(),
-        credentials: "include"
-      }).then(function(res){
-        if (res.redirected) {
-          cfmSession.del('cfm_v2r');
-          cfmSession.del('cfm_vf');
-          window.location = res.url; return;
-        }
-        // Rung-1 v2_reject ONLY (marked by the X-CFM-V2 header — any other
-        // 403 cause, e.g. blocked cookies or an expired PoW token, keeps the
-        // page's original flat retry and its "enable JavaScript & cookies"
-        // hint). Rejects are retry-able by design (D5c) but with capped
-        // exponential backoff and a give-up, so a misclassified real client
-        // neither loops hot into the verify rate limiter nor burns CPU
-        // forever. The counter EXPIRES after 2 minutes of quiet, so a manual
-        // reload later genuinely starts fresh (sessionStorage outlives the
-        // reload itself).
-        var v2rej = false;
-        try { v2rej = (res.status === 403 && res.headers.get('X-CFM-V2') === 'reject'); } catch (e) {}
-        var v2n = 0;
-        if (v2rej) {
-          var v2s = (cfmSession.get('cfm_v2r') || '').split('|');
-          var v2ts = parseInt(v2s[1] || '0', 10) || 0;
-          if (Date.now() - v2ts < 120000) v2n = parseInt(v2s[0] || '0', 10) || 0;
-          v2n++;
-          cfmSession.set('cfm_v2r', v2n + '|' + Date.now());
-          if (v2n >= 6) {
-            try {
-              var m = document.querySelector('.muted');
-              if (m) m.textContent = "Verification could not complete. Please wait a minute and reload; if this keeps happening, contact the site owner.";
-            } catch (e) {}
-            return;
-          }
-        }
-        var v2wait = v2rej ? Math.min(1200 * Math.pow(2, v2n), 30000) : 1200;
-        var target = cfmRetryTarget(next, v2rej, cfmSession, Date.now());
-        setTimeout(function(){ window.location = target; }, v2wait);
-      }).catch(function(){
-        setTimeout(function(){ location.reload(); }, 1200);
-      });
+      send(sol, '', false);
     } catch(e) {
       setTimeout(function(){ location.reload(); }, 1200);
     }

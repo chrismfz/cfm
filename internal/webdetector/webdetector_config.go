@@ -303,6 +303,13 @@ type Config struct {
 	UnderAttackConfirmTicks int           // UNDER_ATTACK_CONFIRM_TICKS (consecutive ticks before entering)
 	UnderAttackHolddown     time.Duration // UNDER_ATTACK_HOLDDOWN (pressure below floor this long to exit)
 	UnderAttackRuleTTL      time.Duration // UNDER_ATTACK_RULE_TTL (TTL of auto/draft rules; reserved for I3+)
+	// UnderAttackOverrideTTL is how long an operator's `attack on` holds (and
+	// the challenge it arms with it) when the call names no ttl
+	// (UNDER_ATTACK_OVERRIDE_TTL, default 6h; under_attack_overrides.go).
+	UnderAttackOverrideTTL time.Duration
+	// UnderAttackOverrideStorePath persists the `attack on` overrides across a
+	// reload / restart (default <state dir>/webdetector_attack_overrides.json).
+	UnderAttackOverrideStorePath string
 	UnderAttackErrFloor     float64       // UNDER_ATTACK_ERR_FLOOR (leg 3 error-ratio floor)
 	UnderAttackBotCeil      float64       // UNDER_ATTACK_BOT_CEIL (leg 4 self-declared-bot ceiling)
 
@@ -431,6 +438,9 @@ func (c *Config) FillDefaults() {
 	}
 	if c.WAFExcludeStorePath == "" {
 		c.WAFExcludeStorePath = defaultStatePath("webdetector_waf_excludes.json")
+	}
+	if c.UnderAttackOverrideStorePath == "" {
+		c.UnderAttackOverrideStorePath = defaultStatePath("webdetector_attack_overrides.json")
 	}
 	if c.ChallengeManualStorePath == "" {
 		c.ChallengeManualStorePath = defaultStatePath("webdetector_manual_challenges.json")
@@ -583,6 +593,9 @@ func (c *Config) FillDefaults() {
 		}
 		if c.UnderAttackRuleTTL <= 0 {
 			c.UnderAttackRuleTTL = 6 * time.Hour
+		}
+		if c.UnderAttackOverrideTTL <= 0 {
+			c.UnderAttackOverrideTTL = defaultAttackOverrideTTL
 		}
 		if c.UnderAttackErrFloor <= 0 {
 			c.UnderAttackErrFloor = 0.5

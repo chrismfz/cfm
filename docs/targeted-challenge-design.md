@@ -1,6 +1,6 @@
 # Targeted challenges: the audience floor and the under-attack confirm step (design)
 
-> **Status: design, nothing built.** Written 2026-11-17 after E4 read 7, at the
+> **Status: design; S4 (the confirm step under a manual `attack on`) built 2026-11-17.** Written 2026-11-17 after E4 read 7, at the
 > operator's request ("challenge what we believe is a farm and let the human
 > through"). The plan of record is still `docs/abuse-defense-master-plan.md`.
 > Its §5 holds the decision and the order. This note is the design both
@@ -110,6 +110,67 @@ dropped on 2026-09-29: CAPTCHA farms solve puzzles cheaply, and the cost lands
 on every challenged human. It is master plan candidate 4 (the Rung-2 confirm
 fallback), triggered by the under-attack state rather than only by a reject.
 
+> **As built (S4, 2026-11-17, `internal/webdetector/challenge_confirm.go`):**
+> - **Knobs** (`[webdetector]`):
+>   - `CHALLENGE_V2_CONFIRM` = `manual` (default: only while an operator's
+>     override holds the vhost UNDER_ATTACK), `auto` (the detector's automatic
+>     entry too) or `off`;
+>   - `CHALLENGE_V2_CONFIRM_AUDIENCE` = `GR,CY` (default; `none` = everyone).
+>
+>   A datacenter ASN (`DatacenterClass`) is outside the audience, and an
+>   unresolved country never sees it.
+> - **Flow:**
+>   1. The verify of a qualifying solve answers 403 with `X-CFM-Confirm`, an
+>      HMAC token bound to (ip, host, PoW token), and logs `result=v2_confirm`.
+>   2. The page shows a native Continue button, once the tab is visible.
+>   3. A trusted click re-posts the same solve with the token and
+>      `X-CFM-Click: 1` (a header, so the humanity body and its 1 KB bound
+>      are unchanged). A re-post with the token and still no trusted input
+>      (no click, pointer, touch or key) is asked
+>      again with the same token (a re-post never mints a new one, so one PoW
+>      cannot be kept alive by re-posting). Its PoW is checked as of the token's issue time, so the PoW's
+>      2-minute TTL never sends the visitor back. The token lives 5 minutes,
+>      but the `cfm_chal` cookie the re-post needs expires 300 s after it was
+>      set, so the window is up to 5 minutes and can be shorter (the page then
+>      reloads into a fresh challenge).
+>   4. The solve logs `v2_confirm=clicked v2_confirm_ms=<ms>` (history
+>      payload keys of the same names, withheld from scoped callers as
+>      `v2_*`).
+>
+>   A `v2_confirm` line with no later clicked solve from the same ip and host
+>   is a visitor who did not click. The shown confirm is a log line only, not
+>   a history row (it decides nothing, and under attack it is high volume);
+>   reads count it from `cfm.challenges.log*`. A confirm-asked solve still
+>   feeds the under-attack solve rate, so `auto` is not starved by a farm
+>   that never clicks.
+> - **Honest limits** (the header of `challenge_confirm.go`): a farm that
+>   reads the 403 and re-posts with the token and `X-CFM-Click` passes, and a CDP click is
+>   trusted; a token is reusable from the same ip and host until it expires
+>   (~7 minutes after the PoW was issued instead of 2).
+> - **Where it applies:** web scope only (a panel verify never honours a
+>   token). A `www.` host also follows its apex's state, whatever its own
+>   automatic state (`attack off` on the `www.` host wins). An
+>   FCrDNS-verified good bot is never asked (it cannot click): the Rung-1
+>   waiver's verdict and rules (`CHALLENGE_GOODBOT_EXEMPT`; not under a rung
+>   mark, not on a vhost in lockdown).
+> - **The override** (`cfm webtop attack on <vhost> [--ttl 6h]`, the cfm-admin
+>   toggle, the `vhost/attack` API; a cPanel user can set it on their own
+>   vhost, 24 h max) holds for `UNDER_ATTACK_OVERRIDE_TTL` (6h) unless the
+>   call names a ttl.
+>   - It arms the vhost's challenge for the same window when no manual
+>     challenge covers it (reason `under_attack`).
+>   - It survives a reload or restart
+>     (`webdetector_attack_overrides.json`, `under_attack_overrides.go`).
+>   - `attack off` removes only the challenge its `attack on` armed.
+>
+>   One command is enough to try it on a vhost. Each visitor outside the
+>   audience makes two verify POSTs, which count toward the verify rate
+>   limit.
+> - **Differences from the text below:** the field names (`v2_confirm`, not
+>   `confirm`, so the scoped strip covers them by prefix), and the kill switch
+>   (`CHALLENGE_V2_CONFIRM = off`; `UNDER_ATTACK_CONFIRM_TICKS` already
+>   existed).
+
 - **The state:** UNDER_ATTACK (`internal/webdetector/under_attack.go`, master
   plan §3 row 9) with its hysteresis, holddown and auto-exit. I3–I5 (draft
   block rules, auto-apply, repeat-offender nft) stay frozen (§3 row 10). This
@@ -166,7 +227,7 @@ fallback), triggered by the under-attack state rather than only by a reject.
 
   `abandoned` is the human cost. Read it per country / ASN before the
   automatic entry goes live (S5).
-- **Kill switches:** `[webdetector] UNDER_ATTACK_CONFIRM = 0`, and `attack off`
+- **Kill switches:** `[webdetector] CHALLENGE_V2_CONFIRM = off`, and `attack off`
   per vhost.
 
 ## 5. What this does not do
@@ -224,7 +285,7 @@ fallback), triggered by the under-attack state rather than only by a reject.
 | S1 | `aud=in\|out\|dc` on automatic-challenge lines | none | that the in-code classifier agrees with the offline count (the solve lines already carry `cc=` and `asn_name=`, so the sizing itself needs no code) |
 | S2 | the audience floor live (kill switch, pins) | GR/CY audience skips the automatic challenge | spared solves, let-through rejects |
 | S3 | `would_enter_under_attack` from `solver_farm` | none | how often, on which vhosts, never a Greek audience |
-| S4 | the confirm page under manual `attack on` | the confirm is shown, the click passes | shown / clicked / abandoned, the click corpus |
+| S4 (**built** 2026-11-17) | the confirm page under manual `attack on` | the confirm is shown, the click passes | `v2_confirm` lines vs `v2_confirm=clicked` solves, the click corpus |
 | S5 | the automatic entry | the confirm under automatic UNDER_ATTACK | as S4 |
 
 Each step is its own small reviewed PR. Every edge-affecting step follows

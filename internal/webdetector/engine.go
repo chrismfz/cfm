@@ -586,6 +586,10 @@ type Engine struct {
 	// nil unless UNDER_ATTACK is enabled. Own mutex inside (under_attack.go).
 	// Distinct from vhostUnderAttack above, which is the auto-challenge-armed flag.
 	attack *underAttackTracker
+	// attackOverrides persists the operator's `attack on` (and whether it
+	// armed the vhost's challenge) across a reload; nil when UNDER_ATTACK=0.
+	attackOverrides *attackOverrideStore
+	attackOpMu      sync.Mutex // serializes ForceVhostAttackAs
 
 	// Under-Attack Mode (I2): campaign fingerprinter state (rolling per-vhost
 	// baselines). nil unless UNDER_ATTACK && UNDER_ATTACK_FINGERPRINT. Shadow-only.
@@ -747,6 +751,10 @@ func NewEngine(cfg Config) *Engine {
 	// subscription in the register is likewise gated, so nil == fully inert.
 	if cfg.UnderAttack {
 		e.attack = newUnderAttackTracker()
+		// After restoreManualChallenges above: the challenges an `attack on`
+		// armed are back; now its overrides.
+		e.attackOverrides = newAttackOverrideStore(cfg.UnderAttackOverrideStorePath)
+		e.restoreAttackOverrides()
 		if cfg.UnderAttackFingerprint {
 			e.fp = newFPState()
 		}
@@ -878,6 +886,14 @@ func NewEngine(cfg Config) *Engine {
 	} else {
 		SetChallengeV2Lockdown(nil)
 	}
+	// The under-attack confirm step reads this engine's under-attack state
+	// (challenge_confirm.go); a rebuilt engine re-wires it.
+	// A www. host also follows its apex's state, as its v2 tier does (an
+	// operator forces `attack on example.gr`; visitors arrive on www.).
+	// A confirm-asked solve still counts toward the vhost's under-attack
+	// solve rate (RecordUnderAttackSolve), or a farm that never clicks
+	// would starve the automatic state that asks it.
+	SetUnderAttackConfirmState(e.confirmAttackState, e.RecordUnderAttackSolve)
 
 	return e
 }
@@ -1101,6 +1117,10 @@ func (s ChallengeSolve) historyPayload() map[string]interface{} {
 		}
 		if s.V2WaiverMiss != "" {
 			payload["v2_waiver_miss"] = s.V2WaiverMiss
+		}
+		if s.V2Confirm != "" {
+			payload["v2_confirm"] = s.V2Confirm
+			payload["v2_confirm_ms"] = s.V2ConfirmMS
 		}
 		if sig := s.signalMap(); sig != nil {
 			payload["sig"] = sig

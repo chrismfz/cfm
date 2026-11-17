@@ -291,7 +291,7 @@ export const controlsMixin = {
     underAttackButtonTitle(row) {
       if (!row?.under_attack_toggleable) return "Under-Attack Mode is globally off (UNDER_ATTACK=0) — nothing to override.";
       if (row?.under_attack) return "This vhost is UNDER_ATTACK. Click to clear it (auto re-entry suppressed for the holddown).";
-      return "Force this vhost into UNDER_ATTACK (operator override).";
+      return "Force this vhost into UNDER_ATTACK (operator override). While it holds, a visitor outside the audience (CHALLENGE_V2_CONFIRM_AUDIENCE, default GR/CY) whose challenge solve had no mouse, touch or key input gets a Continue button before clearance (CHALLENGE_V2_CONFIRM). It also arms the vhost's challenge when none is set, and holds for UNDER_ATTACK_OVERRIDE_TTL (default 6h; survives a reload).";
     },
     async toggleUnderAttack(row) {
       const host = String(row?.host || "").trim();
@@ -302,10 +302,17 @@ export const controlsMixin = {
       }
       const on = !row?.under_attack;
       try {
-        await this.postJSON("v1/challenge/vhost/attack", { host, on });
-        this.actionMsg = on
-          ? `Forced UNDER_ATTACK for ${host}`
-          : `Cleared UNDER_ATTACK for ${host} (auto re-entry suppressed for the holddown)`;
+        const res = await this.postJSON("v1/challenge/vhost/attack", { host, on });
+        if (on) {
+          const until = res?.expires_at ? ` until ${new Date(res.expires_at).toLocaleString()}` : "";
+          let msg = `Forced UNDER_ATTACK for ${host}${until}`;
+          if (res?.ttl_clipped) msg += ` (cut to the manual challenge already on it: to hold longer, extend that challenge, then run "cfm webtop attack on ${host}")`;
+          else if (res?.ttl_capped) msg += " (capped to the 24h customer limit)";
+          if (res?.tier?.rung) msg += `; verify tier ${res.tier.rung}`;
+          this.actionMsg = msg;
+        } else {
+          this.actionMsg = `Cleared UNDER_ATTACK for ${host} (auto re-entry suppressed for the holddown)`;
+        }
         await this.refreshVhostControls();
       } catch (err) {
         this.actionMsg = `Under-attack override failed for ${host}: ${err}`;

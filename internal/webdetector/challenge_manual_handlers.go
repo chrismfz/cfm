@@ -720,6 +720,7 @@ func (e *Engine) handleChallengeVhostRemove(w http.ResponseWriter, r *http.Reque
 type chalVhostAttackRequest struct {
 	Host string `json:"host"`
 	On   *bool  `json:"on"`
+	TTL  string `json:"ttl"` // on=1 only, e.g. "6h"; "" = UNDER_ATTACK_OVERRIDE_TTL
 }
 
 // parseAttackOn resolves the desired override state from the query value (or a
@@ -738,19 +739,28 @@ func parseAttackOn(q string, body *bool) (bool, error) {
 	return false, errors.New("missing or invalid 'on' (use on=1 to force under-attack, on=0 to clear)")
 }
 
-// POST /api/v1/challenge/vhost/attack?host=example.gr&on=1
+// POST /api/v1/challenge/vhost/attack?host=example.gr&on=1[&ttl=6h]
 // Operator override for Under-Attack Mode: on=1|true|on forces the vhost INTO
-// UNDER_ATTACK; on=0|false|off leaves it and suppresses auto re-entry for the
-// holddown. Body { "host": "...", "on": true } is also accepted. Scoped tokens
-// may only override their own vhosts (vhostAllowed), mirroring vhost/add|remove,
-// and a scoped on=1 is TTL-bound to scopedMaxChallengeTTL (24h) like the
-// panic-button arm — the response then carries ttl + expires_at; admin
-// overrides stay unbounded.
+// UNDER_ATTACK for ttl (default UNDER_ATTACK_OVERRIDE_TTL, 6h), arms a manual
+// vhost challenge for the same window when no manual challenge covers the
+// host (reason "under_attack"), and persists across a reload
+// (ForceVhostAttackAs, under_attack_overrides.go); on=0|false|off leaves it,
+// suppresses auto re-entry for the holddown and removes the challenge that
+// `attack on` armed. Body { "host": "...", "on": true, "ttl": "6h" } is also
+// accepted. Scoped tokens may only override their own vhosts (vhostAllowed),
+// mirroring vhost/add|remove, and a scoped on=1 is capped at
+// scopedMaxChallengeTTL (24h) like the panic-button arm (ttl_capped=true).
+// The response carries ttl, expires_at, challenge_armed, challenge_expires_at
+// and the effective tier for on=1, the arm's tier (rung) when it armed one (a
+// tier pin decides it), and ttl_clipped when an operator's challenge that ends
+// sooner cut the override. A wildcard host is refused (400), and so is an
+// `on` for a cfm.allow-bypassed vhost (409).
 func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Request) {
 	host := normalizeHost(r.URL.Query().Get("host"))
 	onStr := r.URL.Query().Get("on")
 
 	var onBody *bool
+	ttlStr := r.URL.Query().Get("ttl")
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var body chalVhostAttackRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
@@ -761,8 +771,14 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 			host = normalizeHost(body.Host)
 		}
 		onBody = body.On
+		if body.TTL != "" {
+			ttlStr = body.TTL
+		}
 	}
 
+	// A fully-qualified name ("example.com.") is the same vhost; keyed with the
+	// dot it would pass the bypass check and arm a key nothing matches.
+	host = strings.TrimSuffix(host, ".")
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
@@ -781,20 +797,54 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 	// The override only means anything while the detector is running. Fail loudly
 	// rather than silently no-op (SetVhostAttackOverride is nil-safe when off).
 	if e == nil || !e.cfg.UnderAttack {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "under-attack mode is disabled (UNDER_ATTACK=0)"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "under-attack mode is disabled (UNDER_ATTACK=0); a challenge an earlier `attack on` armed stays until it expires: `cfm webtop challenge remove <vhost>`"})
+		return
+	}
+	// The override's arm and the confirm step match hosts exactly: a wildcard
+	// would challenge every matching vhost and confirm on none.
+	if strings.Contains(host, "*") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wildcard hosts are not supported: name the vhost"})
+		return
+	}
+	// A cfm.allow bypass (CHALLENGE_HOST_BYPASS) drops the override and its
+	// arm on the next tick: refuse rather than answer a success that won't hold.
+	if on && e.hostBypassed(host) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "the vhost is bypassed (cfm.allow / CHALLENGE_HOST_BYPASS): it cannot be challenged"})
 		return
 	}
 
-	// A SCOPED forced-ON override is TTL-bound to the same 24h ceiling as the
-	// panic-button arm (operator decision on the slice-D residual): the
-	// customer shield is temporary, a standing override is the operator's
-	// call. Admin overrides stay unbounded. `attack off` needs no bound (the
-	// holddown already limits the suppression).
+	// Every forced-ON override holds for a TTL: the call's ttl, else
+	// UNDER_ATTACK_OVERRIDE_TTL (6h). A SCOPED one is capped at the same 24h
+	// ceiling as the panic-button arm (operator decision on the slice-D
+	// residual): the customer shield is temporary. `attack off` needs no
+	// bound (the holddown already limits the suppression). An `attack on`
+	// also arms the vhost's challenge for the same window when no manual
+	// challenge covers it, and survives a reload (under_attack_overrides.go).
 	var overrideTTL time.Duration
-	if scope != nil && on {
-		overrideTTL = scopedMaxChallengeTTL
+	ttlCapped := false
+	if on {
+		if strings.TrimSpace(ttlStr) != "" {
+			d, err := time.ParseDuration(strings.TrimSpace(ttlStr))
+			if err != nil || d <= 0 {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ttl: " + ttlStr})
+				return
+			}
+			overrideTTL = d
+		} else {
+			overrideTTL = e.attackOverrideTTL()
+		}
+		if scope != nil && overrideTTL > scopedMaxChallengeTTL {
+			overrideTTL = scopedMaxChallengeTTL
+			ttlCapped = true
+		}
 	}
-	e.SetVhostAttackOverride(host, on, time.Now(), overrideTTL)
+	requested := time.Now().Add(overrideTTL)
+	armed, expires := e.ForceVhostAttackAs(host, on, overrideTTL, actorFromScope(scope))
+	// Cut to an operator's challenge that ends sooner (ForceVhostAttackAs).
+	clipped := on && !armed && !expires.IsZero() && expires.Before(requested.Add(-time.Second))
+	if clipped {
+		overrideTTL = time.Until(expires).Round(time.Second)
+	}
 
 	// Audit (slice-D security review I3): this override used to leave NO
 	// trail beyond the generic api.log request line — a scoped customer
@@ -808,12 +858,13 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		reason = "attack_forced"
 	}
 	logging.LogfCHALLENGES(
-		"[challenge][vhost] action=attack_override host=%s on=%v actor=%s",
-		host, on, actorOrDash(actor),
+		"[challenge][vhost] action=attack_override host=%s on=%v ttl=%s challenge_armed=%v actor=%s",
+		host, on, ttlOrDash(on, overrideTTL), armed, actorOrDash(actor),
 	)
 	payload := map[string]interface{}{"actor": actor, "on": on}
-	if overrideTTL > 0 {
+	if on {
 		payload["ttl_sec"] = int(overrideTTL / time.Second)
+		payload["challenge_armed"] = armed
 	}
 	e.appendHistory(HistoryEvent{
 		TsUnix:  time.Now().Unix(),
@@ -827,9 +878,25 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		"host":   host,
 		"attack": on,
 	}
-	if overrideTTL > 0 {
+	if on {
 		resp["ttl"] = overrideTTL.String()
-		resp["expires_at"] = time.Now().Add(overrideTTL)
+		resp["expires_at"] = expires
+		resp["challenge_armed"] = armed
+		if armed {
+			resp["rung"] = rungOrV1(e.manualChal.rung(host))
+		}
+		if _, chExp, _ := e.manualChallengeCovering(host); !chExp.IsZero() {
+			resp["challenge_expires_at"] = chExp
+		}
+		if clipped {
+			resp["ttl_clipped"] = true
+		}
+		// The tier the verify gate applies: the arm's, or above it the
+		// automatic side's (under_attack is a CHALLENGE_V2_AUTO_VHOST source).
+		resp["tier"] = tierJSON(e.challengeV2VhostTier(host))
+		if ttlCapped {
+			resp["ttl_capped"] = true
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -921,4 +988,12 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"dc_fraction":       DCFracShadowPercent(host),
 		"state":             e.deriveVhostStateForHost(host, time.Now()),
 	})
+}
+
+// ttlOrDash renders an override's TTL for the audit line ("-" for off).
+func ttlOrDash(on bool, d time.Duration) string {
+	if !on {
+		return "-"
+	}
+	return d.String()
 }

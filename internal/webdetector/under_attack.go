@@ -16,8 +16,9 @@ package webdetector
 // rule / nft) lands in later increments. See docs/under-attack-mode.md.
 //
 // Entry (§3), all true for CONFIRM_TICKS consecutive ticks, and only for a vhost
-// the challenge layer already armed (UNDER_ATTACK is reachable ONLY from
-// CHALLENGED — it never challenges a vhost the existing paths left alone):
+// the challenge layer already armed (the automatic entry is reachable ONLY from
+// CHALLENGED — it never challenges a vhost the existing paths left alone; an
+// operator's `attack on` arms the challenge itself, under_attack_overrides.go):
 //
 //  1. challenge armed on the vhost (auto or manual)     — `challenged` arg
 //  2. the challenge is being defeated: distinct solving  — solvesPerMin >= SolvesMin
@@ -44,6 +45,7 @@ package webdetector
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -181,12 +183,23 @@ type attackVhost struct {
 	override int8
 	// overrideExpires bounds a forced-ON override: past it the override
 	// clears back to AUTO control (evalUnderAttack tick; the read path
-	// honours it too). Zero = no bound (admin override). Scoped callers get
-	// a 24h ceiling, mirroring the scoped manual-challenge TTL cap
-	// (slice-D residual, resolved by operator decision 2026-09-22).
+	// honours it too). Every operator `attack on` sets one (ForceVhostAttackAs:
+	// UNDER_ATTACK_OVERRIDE_TTL, a scoped caller capped at 24h); zero = no
+	// bound, only through the raw SetVhostAttackOverride.
 	overrideExpires time.Time
 	suppressUntil   time.Time
 	evidence        string // last transition's evidence (kept consistent with `on`)
+}
+
+// effectiveOverride is the override as of now: a TTL-bounded forced-ON
+// override past its expiry reads as 0 (AUTO). The ONE copy of that rule, for
+// every read path (VhostAttackState, underAttackHosts, vhostAttackKind); the
+// evalUnderAttack tick still owns the actual clearing.
+func (st *attackVhost) effectiveOverride(now time.Time) int8 {
+	if st.override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
+		return 0
+	}
+	return st.override
 }
 
 // underAttackTracker holds the per-vhost state machine and the solve-rate feed.
@@ -262,10 +275,7 @@ func (t *underAttackTracker) underAttackHosts() []string {
 		// Same expiry treatment as VhostAttackState: an expired TTL-bounded
 		// forced-ON override counts only via its auto state (review finding —
 		// the two read paths must report the same truth).
-		override := st.override
-		if override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
-			override = 0
-		}
+		override := st.effectiveOverride(now)
 		if override == +1 || (override == 0 && st.on) {
 			out = append(out, host)
 		}
@@ -343,8 +353,8 @@ func (e *Engine) evalUnderAttack(now time.Time, host string, challenged bool, ro
 	if st.override == -1 && !now.Before(st.suppressUntil) {
 		st.override = 0
 	}
-	// A TTL-bounded forced-ON override (scoped caller) that has served its
-	// window expires back to auto control: st.on stays true, so the vhost
+	// A TTL-bounded forced-ON override (every `attack on` since 2026-11-17,
+	// ForceVhostAttackAs) that has served its window expires back to auto control: st.on stays true, so the vhost
 	// leaves UNDER_ATTACK via the normal exit rules on the following ticks
 	// rather than dropping the shield mid-attack.
 	if st.override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
@@ -411,6 +421,11 @@ func (e *Engine) evalUnderAttack(now time.Time, host string, challenged bool, ro
 
 	if trans != nil {
 		e.emitUnderAttack(now, host, trans.on, row, solves, trans.evidence, trans.mode, out)
+		if trans.on {
+			// A persisted `attack on` is now announced: a reload restores it
+			// as ON without a second alert.
+			e.attackOverrides.markAnnounced(host, now)
+		}
 	}
 }
 
@@ -426,6 +441,14 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 	if t == nil || host == "" {
 		return
 	}
+	// Serialized with ForceVhostAttackAs for the whole tracker+record change
+	// (lock order attackOpMu -> t.mu, as there): an `attack on` either lands
+	// before (its tracker override and record both dropped here) or after
+	// (both dropped on the next tick). The mutex is per Engine: during a
+	// reload the old Engine's API and the new one's tick are not serialized
+	// (the next tick converges).
+	e.attackOpMu.Lock()
+	defer e.attackOpMu.Unlock()
 	t.mu.Lock()
 	st := t.hosts[host]
 	if st == nil || (!st.on && st.override == 0) {
@@ -436,7 +459,8 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 		return
 	}
 	mode := "auto"
-	if st.override != 0 {
+	hadOverride := st.override != 0
+	if hadOverride {
 		mode = "manual"
 	}
 	wasOn := st.on
@@ -450,6 +474,15 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 	st.confirm = 0
 	st.lastEval = now
 	t.mu.Unlock()
+	// The persisted override goes with it, or the next reload would bring it
+	// back, and so does the challenge its `attack on` armed: the cfm.allow
+	// bypass only clears the bridge, so the arm would otherwise come back with
+	// no override behind it once the bypass is lifted. (An exclude or ignore
+	// never reaches here while that arm covers the vhost: a manual challenge
+	// wins over them, keepManualOverSuppression.)
+	if hadOverride {
+		e.dropAttackOverride(host, "")
+	}
 
 	if wasOn {
 		e.emitUnderAttack(now, host, false, SuspiciousRow{Host: host}, 0, reason, mode, out)
@@ -539,9 +572,11 @@ func (e *Engine) emitUnderAttack(now time.Time, host string, on bool, row Suspic
 //
 // ttl bounds a forced-ON override: past now+ttl the override expires back to
 // AUTO control (so an armed vhost leaves UNDER_ATTACK by the normal exit
-// rules). ttl <= 0 means unbounded (admin). A scoped caller's override is
-// TTL-bound like its panic-button arm — the API handler passes the 24h
-// ceiling. ttl is ignored for on=false (the holddown already bounds it).
+// rules). Every operator `attack on` is bounded since 2026-11-17: the API,
+// CLI and cfm-admin go through ForceVhostAttackAs, which passes the call's
+// ttl or UNDER_ATTACK_OVERRIDE_TTL (a scoped caller capped at 24h). ttl <= 0
+// (unbounded) is only this raw method's escape hatch. ttl is ignored for
+// on=false (the holddown already bounds it).
 func (e *Engine) SetVhostAttackOverride(host string, on bool, now time.Time, ttl time.Duration) {
 	if e == nil || e.attack == nil || host == "" {
 		return
@@ -599,14 +634,11 @@ func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, eviden
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if st := t.hosts[host]; st != nil {
-		switch st.override {
+		// An expired TTL-bounded override reads as AUTO immediately — don't
+		// wait for the tick to clear it (the tick still owns the actual state
+		// transition).
+		switch st.effectiveOverride(time.Now()) {
 		case +1:
-			// An expired TTL-bounded override reads as AUTO immediately —
-			// don't wait for the tick to clear it (the tick still owns the
-			// actual state transition).
-			if !st.overrideExpires.IsZero() && !time.Now().Before(st.overrideExpires) {
-				return st.on, st.since, st.evidence
-			}
 			return true, st.since, st.evidence
 		case -1:
 			return false, st.since, st.evidence
@@ -614,4 +646,87 @@ func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, eviden
 		return st.on, st.since, st.evidence
 	}
 	return false, time.Time{}, ""
+}
+
+// vhostAttackKind reports whether host is UNDER_ATTACK because an operator
+// holds it there (an unexpired forced-ON override: `cfm webtop attack on`,
+// the cfm-admin toggle) or because the detector's automatic state is on with
+// no override, for the confirm step (challenge_confirm.go), whose default mode
+// acts on the operator's override only. own says the host has a state of its
+// own (on, or any override, forced-off included), so a caller falling back to
+// a www. host's apex does it only when the www. host says nothing itself.
+// VhostAttackState's truth split by cause, except that this also reads
+// nothing while the detector is off (UNDER_ATTACK=0), where an override
+// cannot be set.
+func (e *Engine) vhostAttackKind(host string, now time.Time) (manual, auto, own bool) {
+	if e == nil || e.attack == nil || !e.cfg.UnderAttack || host == "" {
+		return false, false, false
+	}
+	t := e.attack
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.hosts[host]
+	if st == nil {
+		return false, false, false
+	}
+	switch st.effectiveOverride(now) {
+	case +1:
+		return true, false, true
+	case -1:
+		return false, false, true
+	}
+	return false, st.on, st.on
+}
+
+// confirmAttackState is the confirm step's under-attack read: the host's own
+// state OR, for a www. host, its apex's (an operator forces `attack on
+// example.gr`; visitors arrive on www., which may well be in the automatic
+// state itself — that must not hide the apex's override). Only a www. host the
+// operator forced off ignores its apex.
+func (e *Engine) confirmAttackState(host string) (manual, auto bool) {
+	now := time.Now()
+	manual, auto, own := e.vhostAttackKind(host, now)
+	forcedOff := own && !manual && !auto
+	if strings.HasPrefix(host, "www.") && !forcedOff {
+		am, aa, _ := e.vhostAttackKind(strings.TrimPrefix(host, "www."), now)
+		manual, auto = manual || am, auto || aa
+	}
+	return manual, auto
+}
+
+// restoreForcedOn re-applies a persisted `attack on` after a reload: the
+// override with its remaining window and, when its ON was already alerted,
+// the state seeded as ON since then, so the first tick's "Operator forced ON:
+// enter (once)" sees no transition and sends no second ON alert / history row.
+// Not announced: left to that tick, which sends the ON the reload pre-empted.
+func (e *Engine) restoreForcedOn(host string, now time.Time, rem time.Duration, announced bool, since time.Time) {
+	e.SetVhostAttackOverride(host, true, now, rem)
+	if e == nil || e.attack == nil || !announced {
+		return
+	}
+	if since.IsZero() {
+		since = now
+	}
+	t := e.attack
+	t.mu.Lock()
+	if st := t.hosts[host]; st != nil && !st.on {
+		st.on, st.since, st.belowFloor = true, since, time.Time{}
+		st.evidence = "operator forced (attack on, restored)"
+	}
+	t.mu.Unlock()
+}
+
+// vhostAttackOnSince reports whether host's tracker state is ON, and since
+// when.
+func (e *Engine) vhostAttackOnSince(host string) (bool, time.Time) {
+	if e == nil || e.attack == nil {
+		return false, time.Time{}
+	}
+	t := e.attack
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if st := t.hosts[host]; st != nil && st.on {
+		return true, st.since
+	}
+	return false, time.Time{}
 }

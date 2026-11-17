@@ -17,6 +17,79 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Added
+- **`edge_health` check H, `web-dnat-order`: is web traffic reaching the
+  edge?** A connection is NAT'd once, by the first nat chain that rewrites it.
+  Imunify360 DNATs its sets to WebShield at priority -100, and CFM's web
+  redirect defaults to -99 ("Imunify first"). On a cPanel node that set holds
+  Cloudflare's ranges, so every Cloudflare visitor bypassed the edge's WAF,
+  challenge and edge bans. earth sent ~29% of its web requests to WebShield
+  for months; the edge saw 235 Cloudflare requests an hour. The check warns
+  when a non-CFM DNAT of tcp/80 or 443 runs before CFM's redirect AND
+  WebShield served 100+ requests in the last 15 min, and names the fix
+  (`NFT_DNAT_PRIORITY = -101`). The warning reaches `whats_wrong`.
+- **Under attack, a "Continue" button for the visitors the challenge cannot
+  tell apart** (`CHALLENGE_V2_CONFIRM`,
+  `docs/targeted-challenge-design.md` §4).
+  - What: while a vhost is UNDER_ATTACK, a solve that passed the humanity
+    check with no mouse, touch or key input at all, from a visitor outside
+    the audience (`CHALLENGE_V2_CONFIRM_AUDIENCE`, default GR,CY; a
+    datacenter network counts as outside), gets no clearance on its first
+    try. The page shows one Continue button instead, and the click passes;
+    a second try that carries the token but still no click is asked again.
+    Nobody is rejected by it. It waits for a hidden tab to be seen again,
+    works from the keyboard, and lets the visitor click without solving
+    again for up to 5 minutes (bounded by the challenge cookie, 300 s from
+    when it was set; past it the page starts a fresh challenge).
+  - Why: E4 read 7 (2026-11-17). The `c28caa00` farm answered `linux_sw`
+    within a day by passing at score 0 from residential proxies, with no
+    input on 9 solves in 10. No score can reject that. The click costs the
+    farm a second round trip on every solve, and its approach is measured.
+    It is not a wall: a farm that scripts the click (or reports one) passes.
+  - Default `manual`: only while an override holds the vhost UNDER_ATTACK
+    (`cfm webtop attack on <vhost>`, the cfm-admin Under-Attack toggle, or a
+    cPanel user on their own vhost). A verified search-engine crawler is
+    never asked (it cannot click). `auto` also covers the detector's
+    automatic entry; `off` turns it off.
+  - Logs: `result=v2_confirm` when the button is shown, and
+    `v2_confirm=clicked v2_confirm_ms=<ms>` on the solve line and history row
+    (withheld from cPanel users with the other `v2_*` keys).
+
+### Changed
+- **`attack on` now arms the vhost's challenge, holds for a TTL and survives
+  a reload** (`cfm webtop attack on <vhost> [--ttl 6h]`, the cfm-admin
+  Under-Attack toggle, the `vhost/attack` API).
+  - What:
+    - when no manual challenge covers the vhost, `attack on` arms one for
+      the same window (reason `under_attack`, the node's default tier);
+    - every override holds for a TTL: the call's `ttl`, else
+      `UNDER_ATTACK_OVERRIDE_TTL` (default 6h). A cPanel user's override
+      also defaults to 6h now (it was always 24h), and can be set up to 24h.
+      The challenge it armed expires with it;
+    - it is saved to `/var/lib/cfm/webdetector_attack_overrides.json` and
+      restored after a `detectors.conf` save, a reload or a restart;
+    - the challenge it arms follows the vhost's tier pin (a v1 pin gives a
+      v1 challenge); with no pin it gets the node default. A pin set
+      afterwards does not change it, nor does a second `attack on`: use the
+      cfm-admin Tier picker. The reply and the CLI show the tier visitors
+      actually get;
+    - when a manual challenge you set yourself already covers the vhost, it
+      stays as it is and the override is cut to its expiry at that moment
+      (`ttl_clipped`): to hold it longer, extend the challenge and run
+      `attack on` again;
+    - refused: a wildcard host, and `attack on` for a vhost in `cfm.allow`
+      (it could not be challenged);
+    - `attack off` removes only the challenge its `attack on` armed (so does
+      a `cfm.allow` bypass of the vhost). A manual challenge you set yourself
+      stays, even one you gave the reason `under_attack`. An exclude or ignore no longer ends an `attack on` early: the
+      challenge it armed wins over them, like any manual challenge.
+    - a reload sends no second "under attack" alert, and one right after
+      `attack on` (before its first alert) no longer loses it.
+  - Why: before, `attack on` challenged nobody by itself (a second command
+    was needed), an admin override never expired, and any config reload
+    dropped it without a word.
+  - The detector's automatic entry still arms nothing.
+
 ### Security
 - **cfm-admin logins: goauth updated to its audited release.** The session
   library behind the cfm-admin login was audited and fixed. What changes on a
@@ -71,18 +144,6 @@ back-filled here — see the git/PR history for that period.
   daemon logs a note at start when either is present, and they are gone from
   the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
-### Added
-- **`edge_health` check H, `web-dnat-order`: is web traffic reaching the
-  edge?** A connection is NAT'd once, by the first nat chain that rewrites it.
-  Imunify360 DNATs its sets to WebShield at priority -100, and CFM's web
-  redirect defaults to -99 ("Imunify first"). On a cPanel node that set holds
-  Cloudflare's ranges, so every Cloudflare visitor bypassed the edge's WAF,
-  challenge and edge bans. earth sent ~29% of its web requests to WebShield
-  for months; the edge saw 235 Cloudflare requests an hour. The check warns
-  when a non-CFM DNAT of tcp/80 or 443 runs before CFM's redirect AND
-  WebShield served 100+ requests in the last 15 min, and names the fix
-  (`NFT_DNAT_PRIORITY = -101`). The warning reaches `whats_wrong`.
-
 ### Fixed
 - **`cfm realip` now reads nginx per site, so cPanel ea-nginx nodes are
   judged correctly.** nginx takes the client from each `server{}`'s own
@@ -101,6 +162,28 @@ back-filled here — see the git/PR history for that period.
   blocks (`cpanel.` / `webmail.` / `whm.` ...) proxy to cpsrvd and are
   reported but not counted. On earth they are where 127.0.0.1 shows, in
   ea-nginx's own log only.
+- **Edge: a cert name the daemon dropped is no longer served until a
+  reload.** The edge's per-worker cert store only ever added names from the
+  sslcollector list. When AutoSSL replaced a new account's cPanel self-signed
+  placeholder (`dom` + `www.dom`) with a wildcard (`*.dom` + `dom`), the
+  stale `www.dom` entry stayed, and an exact name outranks a wildcard:
+  `www.` kept serving the self-signed cert until the edge was reloaded
+  (spoolbox.gr on rigel, 2026-11-17, while `cfm ssl dump` showed the right
+  cert). A list now replaces the store, but only a list the daemon marks
+  complete. A list missing a cert the daemon could not read is merged as
+  before, as is a list under two thirds the size of the last one taken; that
+  shrink is taken only if it lasts an hour. A name whose new PEM is missing or
+  does not parse keeps its old pair. An error loading the snapshot, or a
+  `/stats` answer that is not a JSON object, no longer stops a worker from
+  ever fetching or polling again.
+- **sslcollector: a cert whose key file is missing is no longer indexed, and
+  a cert file with no PEM in it no longer crashes the daemon.** A dangling
+  Virtualmin `ssl.key` symlink was indexed, then left out of every list the
+  edge fetches, so every list was marked incomplete and the edge could never
+  drop a stale name on that node. A non-PEM cert file made the cert scan
+  panic. A cert or key caught mid-rewrite during a scan now keeps its
+  previous entry for up to 10 minutes instead of leaving the list at once,
+  so the edge does not drop that site's cert while it is being renewed.
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
   it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It

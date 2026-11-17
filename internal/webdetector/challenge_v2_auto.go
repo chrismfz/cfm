@@ -44,8 +44,10 @@ package webdetector
 // it, operator override included). Each is re-noted on every cycle it is
 // active with a short TTL (autoSourceNoteTTL, 2–10 min) and dropped the cycle it turns
 // off, so the tier ends with the source or the vhost challenge, whichever
-// goes first — no missed transition can leave a stale v2 — and a forced
-// `attack on` on a host no vhost challenge covers arms nothing. The entry's
+// goes first — no missed transition can leave a stale v2 — and the
+// under_attack note alone arms nothing on a host no vhost challenge covers
+// (an operator's `attack on` arms a manual challenge there itself since
+// 2026-11-17: under_attack_overrides.go). The entry's
 // single sticky Reason (which a manual arm or the config list relabels) is
 // never read for arming.
 //

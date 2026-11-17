@@ -30,3 +30,15 @@ func TestChallengeSolvedLine_FieldOrder(t *testing.T) {
 		t.Fatalf("unset scope rendered: %q", got)
 	}
 }
+
+// The hook-written solve line carries the under-attack confirm, inside the
+// humanity suffix.
+func TestChallengeSolvedLine_CarriesConfirm(t *testing.T) {
+	s := webdet.ChallengeSolve{
+		IP: "203.0.113.41", Host: "shop.example.com", URI: "/", UA: "Mozilla/5.0",
+		HumanityScored: true, V2Grain: "vhost", V2Confirm: "clicked", V2ConfirmMS: 2100,
+	}
+	if line := challengeSolvedLine(s, "", 0); !strings.Contains(line, " v2=vhost v2_confirm=clicked v2_confirm_ms=2100") {
+		t.Fatalf("confirm missing from the solve line: %q", line)
+	}
+}

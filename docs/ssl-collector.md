@@ -65,6 +65,75 @@ same OpenResty process via `dict:get_keys()` + `dict:get()`.  A worker-local
 table is only reachable by code that holds a reference to this module, which
 is a significantly smaller blast radius for key material enumeration.
 
+### An ingest replaces the store
+
+Each `/dumpall` (or snapshot) ingest builds a new table. When it can, it swaps
+that table in whole, so a name the daemon dropped stops being served.
+
+Ingest used to only add. When AutoSSL replaced a cPanel self-signed
+placeholder (`dom` + `www.dom`) with a wildcard (`*.dom` + `dom`), the stale
+exact `www.dom` entry stayed in every worker. Because an exact match
+outranks a wildcard, `www.dom` kept serving the self-signed cert until the
+edge was reloaded (spoolbox.gr on rigel, 2026-11-17).
+
+A replace strips every name the payload does not carry, and a store missing a
+site's cert takes that site down. So a payload replaces only when both of
+these hold:
+
+- **It says `"complete": true`.** If the daemon cannot read a name's PEM (a
+  file mid-rewrite), it leaves the name out of the payload. It does not send
+  the name empty. Only this flag tells the edge that something was left out.
+  - The snapshot and the per-version build carry the flag.
+  - The last-resort stream (used when there is no room for a temp file) and
+    daemons older than the flag never do.
+  - Every incomplete payload is merged, like the old additive ingest.
+- **It is not a sudden shrink.** A payload under two thirds of the last
+  payload taken is merged while the shrink is younger than an hour. Two thirds
+  is the same threshold as the daemon's own snapshot guard. This stops a scan
+  that lost a mount from stripping the edge.
+  - A shrink that lasts (accounts moved away) is taken after the hour, at the
+    next version change or the hourly forced refresh.
+  - The baseline is the last payload taken. It is not the store, which a merge
+    never shrinks. It is not the last payload seen either, because then a
+    second degraded payload would strip the store. A worker that has only
+    merged so far (booted from an incomplete snapshot) uses its store size,
+    or its first complete payload would replace it however small.
+  - The hold is timed on the monotonic clock (`resty.core.time`, OpenResty
+    1.19.9+), so an NTP step at boot neither ends nor stretches it. Without
+    that module the wall clock is used, and a step back restarts the hold.
+  - Stores of fewer than 3 names are not guarded.
+
+The daemon refuses to index a pair whose key file is missing, empty or a
+dangling symlink (`buildEntry`). Such an entry used to be indexed (the
+Virtualmin scanners glob for the key and check only the cert) and then left
+out of every payload, so every payload said `complete: false` and the node
+never replaced its stores.
+
+A pair that was indexed and drops out for a moment keeps its entry for 10
+minutes (`buildFailCarry`, `Refresh`). This covers a cert or key caught
+mid-rewrite, and an indexed cert file the scanners skip because it is empty
+for a moment. Without the carry, the payload is still complete without that
+pair, the edge replaces its store, and the site serves the default cert
+until the next Refresh. While carried, the entry's files are read again at
+payload time. When they can be read and hold a PEM block, they are sent.
+When they cannot, or hold none (empty, cut mid-write), the entry is left out,
+the payload is incomplete, and the edge merges it. A cert file that is gone,
+or a cert symlink that dangles (the account or domain was removed), drops the
+entry at once. A pair that stays broken leaves at the first Refresh after the
+10 minutes, which can be the 15-minute discovery tick: up to about 25
+minutes in all.
+
+On top of that:
+
+- A payload entry whose PEM is missing or does not parse keeps the worker's
+  current pair for that name.
+- A held shrink logs `merged, not replaced` and sets `meta:last_error`.
+- The snapshot load is wrapped in `pcall`. Before, an error there ended the
+  boot timer, and the worker never fetched or polled again.
+
+The `ingest src=…` log line carries
+`mode=replace|merge_shrink|merge_incomplete|none`.
+
 ---
 
 ## Socket authentication

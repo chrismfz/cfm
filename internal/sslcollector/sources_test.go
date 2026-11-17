@@ -2,6 +2,7 @@ package sslcollector
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -184,14 +185,14 @@ func genTestCert(t *testing.T, cn string, parentPriv *ecdsa.PrivateKey, parentCe
 		t.Fatal(err)
 	}
 	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
-		IsCA:         parentPriv == nil,
-		DNSNames:     []string{cn},
+		IsCA:                  parentPriv == nil,
+		DNSNames:              []string{cn},
 	}
 	signer, signerCert := priv, tpl
 	if parentPriv != nil {
@@ -503,7 +504,6 @@ func TestGetCertificateLoadsChain(t *testing.T) {
 	}
 }
 
-
 // TestScanMailcowActiveStoreOnly pins the deliberately narrow Mailcow layout:
 // the active root pair and immediate SNI host pairs are discovered, while ACME
 // account material, backups, deeper trees, and incomplete pairs are ignored.
@@ -562,5 +562,290 @@ func TestScanMailcowActiveStoreOnly(t *testing.T) {
 		if _, ok := got[certPath]; !ok {
 			t.Errorf("missing active Mailcow pair %s", certPath)
 		}
+	}
+}
+
+// TestBuildEntryRefusesAnUnusableKey: an entry whose key cannot be read is
+// left out of every /dumpall payload, which then says complete=false, and the
+// edge merges an incomplete payload instead of replacing its store. So a
+// dangling Virtualmin ssl.key symlink (the scanner globs for it and checks
+// only the cert) turned replacement off for the whole node. buildEntry now
+// refuses such a pair, for every source.
+func TestBuildEntryRefusesAnUnusableKey(t *testing.T) {
+	dir := t.TempDir()
+	_, _, certPEM, keyPEM := genTestCert(t, "v.example.gr", nil, nil)
+	cert := filepath.Join(dir, "ssl.cert")
+	if err := os.WriteFile(cert, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "ssl.key")
+	if err := os.Symlink(filepath.Join(dir, "gone.key"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty.key")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	good := filepath.Join(dir, "good.key")
+	if err := os.WriteFile(good, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{dangling, empty, filepath.Join(dir, "missing.key")} {
+		if e, err := buildEntry(Pair{Source: SrcVirtualmin, CertPath: cert, KeyPath: k}, time.Now()); err == nil || e != nil {
+			t.Errorf("buildEntry(key=%s) = %v, %v; want an error", filepath.Base(k), e, err)
+		}
+	}
+	if e, err := buildEntry(Pair{Source: SrcVirtualmin, CertPath: cert, KeyPath: good}, time.Now()); err != nil || e == nil {
+		t.Fatalf("buildEntry(good key) = %v, %v", e, err)
+	}
+
+	// The scanner still finds the dangling pair; Refresh must not index it.
+	vdir := filepath.Join(dir, "home", "u", "domains", "v.example.gr")
+	if err := os.MkdirAll(vdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vdir, "ssl.cert"), certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(vdir, "gone"), filepath.Join(vdir, "ssl.key")); err != nil {
+		t.Fatal(err)
+	}
+	pairs := scanHomeVirtualmin(filepath.Join(dir, "home"))
+	if len(pairs) != 1 {
+		t.Fatalf("scanHomeVirtualmin: %d pairs, want the dangling one", len(pairs))
+	}
+	if _, err := buildEntry(pairs[0], time.Now()); err == nil {
+		t.Fatal("buildEntry indexed a pair whose ssl.key is a dangling symlink")
+	}
+}
+
+// TestBuildEntryNonPEMCertIsAnError: buildEntry returned (nil, nil) for a
+// cert file with no PEM block, and Refresh then read Names off the nil entry
+// and panicked.
+func TestBuildEntryNonPEMCertIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	_, _, _, keyPEM := genTestCert(t, "x.example.gr", nil, nil)
+	cert := filepath.Join(dir, "x.cert")
+	if err := os.WriteFile(cert, []byte("not a certificate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "x.key")
+	if err := os.WriteFile(key, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, err := buildEntry(Pair{Source: SrcGeneric, CertPath: cert, KeyPath: key}, time.Now())
+	if err == nil || e != nil {
+		t.Fatalf("buildEntry(non-PEM cert) = %v, %v; want an error", e, err)
+	}
+}
+
+// TestRefreshCarriesAPairCaughtMidRewrite: the edge replaces its cert store
+// on a complete /dumpall payload, so an indexed pair that drops out of the
+// index for a moment (its cert or key caught mid-rewrite) would take the site
+// to the default cert until the next Refresh. Such a pair keeps its entry for
+// buildFailCarry; a cert that is deleted drops at once.
+func TestRefreshCarriesAPairCaughtMidRewrite(t *testing.T) {
+	dir := t.TempDir()
+	_, _, certPEM, keyPEM := genTestCert(t, "carry.example.gr", nil, nil)
+	_, _, gonePEM, goneKeyPEM := genTestCert(t, "gone.example.gr", nil, nil)
+	cert, key := filepath.Join(dir, "c.cert"), filepath.Join(dir, "c.key")
+	gcert, gkey := filepath.Join(dir, "g.cert"), filepath.Join(dir, "g.key")
+	for p, b := range map[string][]byte{cert: certPEM, key: keyPEM, gcert: gonePEM, gkey: goneKeyPEM} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pairs := []Pair{
+		{Source: SrcGeneric, CertPath: cert, KeyPath: key},
+		{Source: SrcGeneric, CertPath: gcert, KeyPath: gkey},
+	}
+	discoverPairsHook = func() []Pair { return pairs }
+	t.Cleanup(func() { discoverPairsHook = nil })
+
+	c := New(Config{})
+	ctx := context.Background()
+	has := func(h string) bool { return c.EntryForHost(h) != nil }
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") || !has("gone.example.gr") {
+		t.Fatal("setup: both hosts indexed")
+	}
+
+	// The key is truncated mid-rewrite (buildEntry fails), and the other
+	// pair's cert is deleted (the scanner no longer finds it).
+	if err := os.WriteFile(key, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(gcert); err != nil {
+		t.Fatal(err)
+	}
+	pairs = pairs[:1]
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") {
+		t.Fatal("a pair caught mid-rewrite left the index at once")
+	}
+	if has("gone.example.gr") {
+		t.Fatal("a deleted cert was carried")
+	}
+
+	// The cert itself is empty for a moment: scanners skip an empty cert,
+	// so the pair is not discovered at all. Still carried: its file exists.
+	if err := os.WriteFile(cert, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pairs = nil
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") {
+		t.Fatal("an undiscovered pair whose cert file still exists left the index at once")
+	}
+
+	// Past buildFailCarry it goes.
+	c.carryMu.Lock()
+	for k := range c.buildFailSince {
+		c.buildFailSince[k] = time.Now().Add(-buildFailCarry - time.Second)
+	}
+	c.carryMu.Unlock()
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if has("carry.example.gr") {
+		t.Fatal("a pair failing for longer than buildFailCarry was still carried")
+	}
+
+	// Rewritten: indexed again, and the failure clock is forgotten.
+	if err := os.WriteFile(cert, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pairs = []Pair{{Source: SrcGeneric, CertPath: cert, KeyPath: key}}
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") {
+		t.Fatal("the rewritten pair is not indexed")
+	}
+	c.carryMu.Lock()
+	n := len(c.buildFailSince)
+	c.carryMu.Unlock()
+	if n != 0 {
+		t.Fatalf("failure clocks left after recovery: %d", n)
+	}
+}
+
+// TestPayloadSkipsACarriedPairWithNoPEM: a pair carried through a rewrite
+// (buildFailCarry) still has its old names, but its files read empty or cut.
+// writePayload must skip it, making the payload incomplete (the edge merges
+// it), rather than send an empty key in a complete payload: a worker with no
+// older pair for the name (one just started) would replace with that.
+func TestPayloadSkipsACarriedPairWithNoPEM(t *testing.T) {
+	dir := t.TempDir()
+	_, _, aPEM, aKey := genTestCert(t, "a.example.gr", nil, nil)
+	_, _, bPEM, bKey := genTestCert(t, "b.example.gr", nil, nil)
+	acert, akey := filepath.Join(dir, "a.cert"), filepath.Join(dir, "a.key")
+	bcert, bkey := filepath.Join(dir, "b.cert"), filepath.Join(dir, "b.key")
+	for p, b := range map[string][]byte{acert: aPEM, akey: aKey, bcert: bPEM, bkey: bKey} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pairs := []Pair{
+		{Source: SrcGeneric, CertPath: acert, KeyPath: akey},
+		{Source: SrcGeneric, CertPath: bcert, KeyPath: bkey},
+	}
+	discoverPairsHook = func() []Pair { return pairs }
+	t.Cleanup(func() { discoverPairsHook = nil })
+
+	c := New(Config{})
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	payload := func() (payloadResult, string) {
+		var buf strings.Builder
+		res, err := c.writePayload(&buf, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res, buf.String()
+	}
+	if res, body := payload(); !res.Complete || !strings.Contains(body, "a.example.gr") {
+		t.Fatalf("setup: complete=%v, a present=%v", res.Complete, strings.Contains(body, "a.example.gr"))
+	}
+
+	for _, cut := range [][]byte{nil, aKey[:len(aKey)/2]} {
+		// a's key is cut mid-rewrite (carried), and b changes in the same
+		// Refresh, so the version moves.
+		if err := os.WriteFile(akey, cut, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, b2PEM, b2Key := genTestCert(t, "b.example.gr", nil, nil)
+		if err := os.WriteFile(bcert, b2PEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bkey, b2Key, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if c.EntryForHost("a.example.gr") == nil {
+			t.Fatal("setup: a is not carried")
+		}
+		res, body := payload()
+		if res.Complete {
+			t.Errorf("key cut to %d bytes: the payload is complete; want incomplete", len(cut))
+		}
+		if strings.Contains(body, "a.example.gr") {
+			t.Errorf("key cut to %d bytes: the carried pair was sent", len(cut))
+		}
+		if !strings.Contains(body, "b.example.gr") {
+			t.Errorf("key cut to %d bytes: the other pair is missing", len(cut))
+		}
+	}
+}
+
+// TestRefreshDoesNotCarryADanglingCertLink: an indexed pair whose cert is now
+// a dangling symlink (an LE live/ link whose archive was removed) is a removed
+// cert, not one mid-rewrite: it leaves the index at once.
+func TestRefreshDoesNotCarryADanglingCertLink(t *testing.T) {
+	dir := t.TempDir()
+	_, _, certPEM, keyPEM := genTestCert(t, "link.example.gr", nil, nil)
+	real, key := filepath.Join(dir, "archive.pem"), filepath.Join(dir, "k.pem")
+	link := filepath.Join(dir, "live.pem")
+	if err := os.WriteFile(real, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	pairs := []Pair{{Source: SrcLetsEncrypt, CertPath: link, KeyPath: key}}
+	discoverPairsHook = func() []Pair { return pairs }
+	t.Cleanup(func() { discoverPairsHook = nil })
+	c := New(Config{})
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.EntryForHost("link.example.gr") == nil {
+		t.Fatal("setup: not indexed")
+	}
+	if err := os.Remove(real); err != nil {
+		t.Fatal(err)
+	}
+	pairs = nil // the scanner skips the dangling link
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.EntryForHost("link.example.gr") != nil {
+		t.Fatal("a pair whose cert link dangles was carried")
 	}
 }

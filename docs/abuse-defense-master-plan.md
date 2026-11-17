@@ -509,7 +509,11 @@ already opened.
           24h ceiling as the panic arm — expiry returns the vhost to
           AUTO control via the tick (st.on stays true, so the vhost
           leaves by the normal exit rules, not mid-attack) and the read
-          paths honour it immediately; admin overrides stay unbounded.
+          paths honour it immediately; ~~admin overrides stay unbounded~~
+          (*2026-11-17:* every `attack on` holds for a TTL, the call's or
+          `UNDER_ATTACK_OVERRIDE_TTL` = 6h, arms the vhost's challenge for
+          the same window and survives a reload; a scoped one is capped at
+          24h. `docs/targeted-challenge-design.md` §4.)
           The SAME re-arm residual as the panic arm applies and is
           accepted: a scoped on=1 every <24h keeps the override standing
           (own vhost, audited per re-arm);
@@ -900,6 +904,10 @@ already opened.
    to a no-input solve outside the vhost's audience while it is UNDER_ATTACK
    (`docs/targeted-challenge-design.md` §4). It comes after the audience
    floor (§3 there), and both come before candidates 5 and 6.
+   *2026-11-17, operator:* the confirm step was built first, wired to an
+   operator's `attack on` only (`CHALLENGE_V2_CONFIRM = manual`, S4), so it
+   can be tried on a vhost by hand. The audience floor and the automatic
+   entry wait for read 8.
 5. **A `CHALLENGE_V2_ENFORCE` kill switch.** v2 bites fleet-wide by default
    now (the WAF challenge tier, the automatic vhost challenges), and no
    single switch stops the rejects while keeping the telemetry:
@@ -982,7 +990,7 @@ thresholds, 16/20 against the then-shipped 40/40); the orphan
 | Track-2 per-IP score design detail — plan section frozen | `docs/challenge-score.md` |
 | B2 decision record (as-built `cfm_pcw`; retire proposed 2026-09-18, REVERSED 2026-09-22 on fleet evidence — §3 row 8) | `docs/challenge-score-b2.md` |
 | Under-attack state machine design — increments frozen | `docs/under-attack-mode.md` |
-| Targeted challenges (audience floor + under-attack confirm step) — design, not built | `docs/targeted-challenge-design.md` |
+| Targeted challenges (audience floor + under-attack confirm step) — design; the confirm step built (S4, manual `attack on`) | `docs/targeted-challenge-design.md` |
 | Historical context for the abuse_shadow signals | `docs/webdetector-refactor.md` |
 | Archived (superseded, kept for archaeology) | `docs/archive/solver-farm-fingerprint-concentration.md` · `docs/archive/solver-farm-cross-host-phase2.md` · `docs/archive/fleet-fingerprint-reputation.md` |
 

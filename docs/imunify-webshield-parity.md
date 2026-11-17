@@ -1,6 +1,8 @@
 # Imunify360 WebShield vs the CFM edge: what moves when CFM goes first
 
-Status: **analysis + proposal** (2026-11-17). Nothing below P0 is built.
+Status: **analysis + proposal** (2026-11-17). P0 is done. P1 is built in log
+mode as `internal/proxyipfilter` (chrismfz/cfm#1670, `docs/proxied-ipfilter.md`);
+P2-P4 are not built.
 
 ## P0. What happened (done)
 
