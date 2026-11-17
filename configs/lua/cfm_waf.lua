@@ -2871,7 +2871,7 @@ local function check_impl(ctx, st)
 
   -- ── WordPress privileged action from another screen (503, logonly) ──────
   -- A request-context rule: the payload is the admin's own session, so
-  -- nothing earlier sees it (det.detect_wp_admin_cross_screen). Last but 612,
+  -- nothing earlier sees it (det.detect_wp_admin_cross_screen). Last but 612 and 530,
   -- after every armed block-tier rule: its block promotion must hold the
   -- autoblock (the IP is the victim's), and a held block evaluated earlier
   -- would take the headline and end evaluation before an armed rule's ban.
@@ -2886,21 +2886,8 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── WooCommerce add-to-cart by GET from a crawler (530, logonly) ─────────
-  -- A cost signal, not an attack: late, so any real finding on the same
-  -- request keeps the headline; before 612, the weakest.
-  do
-    local mode = rule_mode(CFG.rule_wc_cart_get_crawl, "logonly")
-    if mode ~= "disabled" then
-      local tag = det.detect_wc_cart_get_crawl(m_lower, args, headers, cookie, ctx.host, get_norm_ab)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CART_CRAWL:" .. tag, ttl, mode, RULE_IDS.rule_wc_cart_get_crawl) then goto done end
-      end
-    end
-  end
-
-  -- ── LAST) Fetch-metadata missing (headless / automation tell) — logonly ───
+  -- ── Fetch-metadata missing (headless / automation tell) — logonly ───────
+  -- (Last but 530, which is no security finding at all.)
   -- Track-2 Stage 1b, the edge-only "Sec-Fetch tell": a UA that CLAIMS a modern
   -- Sec-Fetch-capable browser (Chrome >= 76 / Firefox >= 90) but sends a text/html
   -- GET|HEAD navigation with NO Sec-Fetch-* AND NO Accept-Language. Stacked weak
@@ -2932,6 +2919,24 @@ local function check_impl(ctx, st)
         local eff_mode = (tag == "NO_FETCH_META_IN_APP") and "logonly" or mode
         local ttl = (eff_mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_FETCH_METADATA:" .. tag, ttl, eff_mode, RULE_IDS.rule_fetch_metadata_missing) then goto done end
+      end
+    end
+  end
+
+  -- ── WooCommerce add-to-cart by GET from a crawler (530, logonly) ─────────
+  -- A cost signal, not an attack, so it runs after every rule, 612 included:
+  -- cfm.lua pushes only the headline, and ahead of 612 it took the headline
+  -- (and the push) of the residential "Chrome" clients that are exactly 612's
+  -- population. When both match, 612 owns the headline and 530 is in
+  -- also_rule_ids, so the burn-in counts 530 from the headline AND
+  -- also_rule_ids.
+  do
+    local mode = rule_mode(CFG.rule_wc_cart_get_crawl, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_wc_cart_get_crawl(m_lower, args, headers, cookie, ctx.host, get_norm_ab)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CART_CRAWL:" .. tag, ttl, mode, RULE_IDS.rule_wc_cart_get_crawl) then goto done end
       end
     end
   end

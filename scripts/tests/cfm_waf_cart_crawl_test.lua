@@ -185,6 +185,21 @@ do
   check(adds["wafpush|WAF_CART_CRAWL:CRAWLER#530|block|1.2.3.4"] == 60, "530 promoted keeps the 60 s window")
 end
 
+-- ── Order: 612 keeps the headline when both match (its burn-in population) ─
+set_only({ rule_wc_cart_get_crawl = "logonly", rule_fetch_metadata_missing = "logonly" })
+do
+  local c = req({ uri = "/index.php", args = "add-to-cart=3308" })
+  c.headers["accept-language"] = nil
+  local hit, reason, _, action, hits, rid = waf.check(c)
+  check(hit == true and rid == 612, "both match: 612 is the headline (got " .. tostring(reason) .. ")")
+  local also = waf.also_rule_ids(hits, rid) or {}
+  check(also[1] == 530, "both match: 530 in also_rule_ids")
+  -- 530 alone still headlines.
+  hit, reason, _, action, hits, rid = waf.check(req({ uri = "/x/", args = "add-to-cart=1", ua = META }))
+  check(rid == 530, "crawler (612 skips declared crawlers): 530 is the headline")
+end
+set_only({ rule_wc_cart_get_crawl = "logonly" })
+
 -- ── Disabled ───────────────────────────────────────────────────────────────
 set_only({ rule_wc_cart_get_crawl = "disabled" })
 clean(req({ uri = "/", args = "add-to-cart=3801", ua = META }), "rule disabled")

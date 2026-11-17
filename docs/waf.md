@@ -1827,7 +1827,7 @@ it is no signal, like a missing one; on an XHR leg it counts as missing
 (`NO_REFERER`). A `/` with a query (plain permalinks, `/?product=x`) is the
 front end.
 
-The step runs last but 612, after every armed block-tier rule, because a
+The step runs last but 612 and 530, after every armed block-tier rule, because a
 block promotion must hold the autoblock: a held block evaluated earlier takes
 the headline and ends evaluation before an armed rule's ban.
 
@@ -1917,6 +1917,12 @@ Referer, or presents a cookie by that name, is not counted. That is acceptable f
 cost signal and is why no tag may key enforcement by itself. Crawlers on the
 bypass list (Googlebot, Bingbot, ...) skip the WAF at Step 0 and are not
 measured here.
+
+**Order.** It runs after every other rule, 612 (the fetch-metadata tell)
+included. cfm.lua pushes only the headline hit, and the residential clients
+here are 612's population too: ahead of 612 it took their headline and their
+push. When both match, 612 owns the headline and 530 is in `also_rule_ids`,
+so count 530 from the headline and from `also_rule_ids`.
 
 **Push window.** The tag stays in the push key (`PUSH_KEY_KEEPS_TAG`), so
 the burn-in can compare the three populations per IP, and the window is an
