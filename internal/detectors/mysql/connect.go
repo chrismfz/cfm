@@ -2,44 +2,96 @@ package mysql
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func ResolveForAuto() string { return resolveMySQLErrorLog() }
 
-// openDB tries credential sources in priority order.
+// errNoCredentials: no credential source produced a DSN (most likely a node
+// without a database). The lifecycle retries it slowly; see lifecycle.go.
+var errNoCredentials = errors.New("no MySQL credentials found (tried DSN, /root/.my.cnf, /etc/cfm/mysql_governor.cnf, DirectAdmin conf)")
+
+// connectError: a credential source produced a DSN but the connect failed.
+// Its text names the source and the driver error, never the DSN (it holds a
+// password).
+type connectError struct {
+	source string
+	err    error // nil when the DSN itself did not parse
+}
+
+func (e *connectError) Error() string {
+	if e.err == nil {
+		return "invalid DSN from " + e.source
+	}
+	return "connect via " + e.source + " failed: " + e.err.Error()
+}
+
+func (e *connectError) Unwrap() error { return e.err }
+
+// openPingTimeout bounds each connect+ping, so a DSN pointing at a host that
+// never answers cannot stall the connect loop.
+var openPingTimeout = 5 * time.Second
+
+// Credential file locations, in priority order after an explicit DSN. Vars so
+// tests can point them at fixtures.
+var (
+	rootMyCnfPath     = "/root/.my.cnf"
+	governorCnfPath   = "/etc/cfm/mysql_governor.cnf"
+	daMySQLConfigPath = "/usr/local/directadmin/conf/mysql.conf"
+)
+
+// openDB tries credential sources in priority order. It returns
+// errNoCredentials when none produced a DSN, else the last source's
+// *connectError.
 func openDB(cfg GovernorConfig) (*sql.DB, error) {
-	sources := []func() (string, error){
-		func() (string, error) {
+	type source struct {
+		name string
+		dsn  func() (string, error)
+	}
+	sources := []source{
+		{"DSN", func() (string, error) {
 			if cfg.DSN != "" {
 				return cfg.DSN, nil
 			}
 			return "", fmt.Errorf("no explicit DSN")
-		},
-		func() (string, error) { return dsnFromMyCNF("/root/.my.cnf") },
-		func() (string, error) { return dsnFromMyCNF("/etc/cfm/mysql_governor.cnf") },
-		func() (string, error) { return dsnFromDAConf() },
+		}},
+		{rootMyCnfPath, func() (string, error) { return dsnFromMyCNF(rootMyCnfPath) }},
+		{governorCnfPath, func() (string, error) { return dsnFromMyCNF(governorCnfPath) }},
+		{"DirectAdmin conf", dsnFromDAConf},
 	}
 
+	var lastErr error
 	for _, src := range sources {
-		dsn, err := src()
+		dsn, err := src.dsn()
 		if err != nil || dsn == "" {
 			continue
 		}
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
+			// The parse error can quote the DSN: drop it.
+			lastErr = &connectError{source: src.name}
 			continue
 		}
-		if err := db.Ping(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), openPingTimeout)
+		err = db.PingContext(ctx)
+		cancel()
+		if err != nil {
 			db.Close()
+			lastErr = &connectError{source: src.name, err: err}
 			continue
 		}
 		return db, nil
 	}
-	return nil, fmt.Errorf("no working credentials found; tried DSN, /root/.my.cnf, /etc/cfm/mysql_governor.cnf, DirectAdmin conf")
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errNoCredentials
 }
 
 func dsnFromMyCNF(path string) (string, error) {
@@ -101,8 +153,7 @@ func dsnFromMyCNF(path string) (string, error) {
 
 func dsnFromDAConf() (string, error) {
 	// DirectAdmin stores MySQL root credentials here
-	path := "/usr/local/directadmin/conf/mysql.conf"
-	f, err := os.Open(path)
+	f, err := os.Open(daMySQLConfigPath)
 	if err != nil {
 		return "", err
 	}

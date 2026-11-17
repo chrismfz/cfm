@@ -557,7 +557,9 @@ Capabilities at a glance:
   available, but stage-2 challenge requires the webdetector bridge and therefore
   records a failed challenge until the normal config loads. A first-load read
   error retries regular detectors automatically; restart after recovery to
-  reapply start-once config consumers such as the MySQL governor.
+  reapply start-once config consumers. The MySQL governor is not one: it is
+  held (not started) until `detectors.conf` reads, then starts by itself
+  within seconds.
 - The built-in thresholds intentionally treat 10 direct invalid-token events in
   two minutes as observe, 12 as challenge, and 16 as a 15-minute TTL-block
   candidate. A stale automation token can reach those thresholds quickly.
@@ -1144,6 +1146,35 @@ Credentials are auto-detected in this order:
 2. `/root/.my.cnf` (standard cPanel / server root)
 3. `/etc/cfm/mysql_governor.cnf`
 4. `/usr/local/directadmin/conf/mysql.conf` (DirectAdmin)
+
+The governor connects in the background, so a slow or absent database never
+holds up the daemon. If MySQL is not reachable yet (`cfm.service`
+deliberately has no ordering on `mariadb`/`mysqld`, since many nodes run no
+database), it keeps retrying: every 5 s doubling to every 5 min while
+credentials exist but the connect fails, every 5 min (a file check, no
+connection) while no credentials exist at all. `ENABLED = 0` in
+`[mysql_governor]` (on every instance, if there are several) keeps it from
+starting: no connection is made, and the 5-minute check only re-reads the
+config, so re-enabling it there starts it within 5 minutes, without a restart
+(disabling a running governor still needs one). A `detectors.conf` that
+cannot be read on first load holds it the same way, re-checked every 5 s, so
+it starts within seconds of the file reading; removing the file while the
+daemon runs leaves the last setting in place. Until it runs,
+`/api/v1/mysql/*` answers "mysql governor not running: <state>" with the full
+reason and a `Retry-After` of the next attempt; scoped (cPanel user) callers
+get only "mysql governor not running". The states:
+
+| State | Meaning | MCP `whats_wrong` |
+|---|---|---|
+| `starting` | first attempt still under way (just after a daemon start) | unavailable |
+| `no credentials` | no credential source found: a node without a database | unavailable |
+| `disabled` | `ENABLED = 0` | unavailable |
+| `held` | `detectors.conf` unreadable on first load | error |
+| `connect failed` | credentials found, connect failed (MySQL down, wrong password) | error |
+| `failed` | connected, but the governor failed to initialise | error |
+
+`cfm mysqltop` prints the reason. `/var/log/cfm/cfm.mysql.log` logs each change
+of state and the eventual start.
 
 ### Operating Modes
 

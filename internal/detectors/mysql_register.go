@@ -3,8 +3,10 @@ package detectors
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	core "cfm/internal/detectors/core"
@@ -15,15 +17,75 @@ import (
 
 var mysqlState = core.DefaultState()
 
+// The [mysql_governor] section is config-only: its factory stores the parsed
+// config here and main.go's governor lifecycle reads it. The lifecycle's
+// background retry reads it while a detectors.conf reload may be writing it,
+// so both sides go through pendingGovMu.
 var (
+	pendingGovMu    sync.Mutex
 	pendingGovCfg   mysql.GovernorConfig
 	pendingGovReady bool
 )
 
-// GetPendingGovernorConfig returns the parsed GovernorConfig if the
-// [mysql_governor] section was found and ENABLED=1.
+// GetPendingGovernorConfig returns the parsed GovernorConfig once the
+// [mysql_governor] section has been read (ok=true); ok=false means no section
+// (built-in defaults apply). ENABLED = 0 returns ok=true with Enabled=false,
+// which the governor lifecycle reads as "do not start".
 func GetPendingGovernorConfig() (mysql.GovernorConfig, bool) {
+	pendingGovMu.Lock()
+	defer pendingGovMu.Unlock()
 	return pendingGovCfg, pendingGovReady
+}
+
+// syncPendingGovernor runs on every detectors rebuild, right before the
+// factories. The manager never calls a disabled section's factory, and a
+// removed section has none to call, so those states are set here; an enabled
+// section's factory sets the full config in the same sweep.
+//
+//   - config read: no [mysql_governor] section → built-in defaults; every
+//     such section (instances included) disabled → do not start; any enabled
+//     → its factory's config.
+//   - first load unreadable (not missing): hold the governor until a read
+//     succeeds, rather than start it with defaults the file may disable.
+//   - any other failed read (a missing file at first load keeps the
+//     historical "no config = defaults"; a hot reload never gets here on a
+//     read error): unchanged.
+func syncPendingGovernor(byName map[string]KV, readErr error, firstLoad bool) {
+	if readErr != nil {
+		if firstLoad && !os.IsNotExist(readErr) {
+			setPendingGovernorConfig(mysql.GovernorConfig{
+				Enabled:    false,
+				HoldReason: "waiting for a readable detectors.conf",
+			}, true)
+			logMySQLGovf("[detectors] mysql_governor held: detectors.conf unreadable on first load")
+		}
+		return
+	}
+	found, anyEnabled := false, false
+	for name, kv := range byName {
+		if typ, _ := splitTypeInstance(name); typ != "mysql_governor" {
+			continue
+		}
+		found = true
+		if kvBool(kv, "ENABLED", true) {
+			anyEnabled = true
+		}
+	}
+	switch {
+	case !found:
+		setPendingGovernorConfig(mysql.GovernorConfig{}, false)
+	case !anyEnabled:
+		if cfg, ok := GetPendingGovernorConfig(); !ok || cfg.Enabled || cfg.HoldReason != "" {
+			logMySQLGovf("[detectors] mysql_governor disabled in detectors.conf")
+		}
+		setPendingGovernorConfig(mysql.GovernorConfig{Enabled: false}, true)
+	}
+}
+
+func setPendingGovernorConfig(cfg mysql.GovernorConfig, ready bool) {
+	pendingGovMu.Lock()
+	defer pendingGovMu.Unlock()
+	pendingGovCfg, pendingGovReady = cfg, ready
 }
 
 func init() {
@@ -119,11 +181,8 @@ func init() {
 	// [mysql_governor] — processlist monitor + query/conn rules
 	// -------------------------------------------------------------------------
 	Register("mysql_governor", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
-		if !kvBool(kv, "ENABLED", true) {
-			pendingGovReady = false
-			logMySQLGovf("[detectors] %s disabled in detectors.conf", section)
-			return nil, nil
-		}
+		// ENABLED = 0 never gets here (the manager skips a disabled section):
+		// syncPendingGovernor records it.
 
 		// ── SLEEP_REAPER_EXEMPT ──────────────────────────────────────────────
 		exemptRaw := kvStrClean(kv, "SLEEP_REAPER_EXEMPT", "proxysql_monitor,root")
@@ -169,7 +228,7 @@ func init() {
 		}
 
 		// ── Build GovernorConfig ─────────────────────────────────────────────
-		pendingGovCfg = mysql.GovernorConfig{
+		govCfg := mysql.GovernorConfig{
 			DSN:     kvStrClean(kv, "DSN", ""),
 			Enabled: true,
 
@@ -193,18 +252,18 @@ func init() {
 			KillTotalPerWindow: kvInt(kv, "KILL_TOTAL_PER_WINDOW", 20),
 			KillWindow:         kvDur(kv, "KILL_WINDOW", 10*time.Minute),
 		}
-		pendingGovReady = true
+		setPendingGovernorConfig(govCfg, true)
 
 		logMySQLGovf(
 			"[detectors] %s loaded mode=%s poll=%s fanout_kill=%d sleep_reaper=%t query_rules=%d conn_rules=%d exempt=%v",
 			section,
-			pendingGovCfg.Mode,
-			pendingGovCfg.PollEvery,
-			pendingGovCfg.LockFanoutKill,
-			pendingGovCfg.SleepReaper,
+			govCfg.Mode,
+			govCfg.PollEvery,
+			govCfg.LockFanoutKill,
+			govCfg.SleepReaper,
 			len(queryRules),
 			len(connRules),
-			pendingGovCfg.SleepReaperExempt,
+			govCfg.SleepReaperExempt,
 		)
 
 		return nil, nil // config-only; main.go starts the governor

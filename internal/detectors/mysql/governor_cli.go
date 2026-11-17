@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"golang.org/x/term"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -702,7 +703,56 @@ func fetchGovernorJSON(baseURL, path string, out any) error {
 		return fmt.Errorf("mysqltop: cannot reach %s: %w\n(is cfm daemon running?)", url, err)
 	}
 	defer resp.Body.Close()
+	if err := governorRespError(resp); err != nil {
+		return err
+	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// governorRespError turns a non-2xx or non-JSON governor response into a
+// readable error. The daemon answers 503 {"error","reason"} while the governor
+// is not running; an older daemon, which did not register the routes at all
+// then, answers its web UI's HTML page with a 2xx. Only that case is blamed on
+// the governor: the auth guards answer 401/403 through http.Error, which is
+// text/plain, and must read as what they are.
+func governorRespError(resp *http.Response) error {
+	ct := resp.Header.Get("Content-Type")
+	isJSON := strings.Contains(ct, "json")
+	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
+	if ok && isJSON {
+		return nil
+	}
+	if ok {
+		return fmt.Errorf("daemon answered HTTP %d with %q, not JSON: the MySQL governor routes are not served "+
+			"(an older daemon whose governor is not running? see /var/log/cfm/cfm.mysql.log)", resp.StatusCode, ct)
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var e struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	// The body is tried as JSON whatever the Content-Type: http.Error sends
+	// a JSON body as text/plain.
+	if json.Unmarshal(raw, &e) == nil && e.Error != "" {
+		if e.Reason != "" {
+			// The admin 503's error ends in a one-word state ("…: held") that
+			// the reason restates in full: print the reason only once.
+			msg := e.Error
+			if i := strings.Index(msg, ": "); i > 0 {
+				msg = msg[:i]
+			}
+			return fmt.Errorf("%s: %s (see /var/log/cfm/cfm.mysql.log)", msg, e.Reason)
+		}
+		return fmt.Errorf("%s (HTTP %d)", e.Error, resp.StatusCode)
+	}
+	snippet := strings.TrimSpace(string(raw))
+	if len(snippet) > 200 {
+		snippet = snippet[:200] + "…"
+	}
+	if snippet == "" {
+		return fmt.Errorf("daemon answered HTTP %d", resp.StatusCode)
+	}
+	return fmt.Errorf("daemon answered HTTP %d: %s", resp.StatusCode, snippet)
 }
 
 func postGovernorJSON(baseURL, path string, out any) error {
@@ -721,8 +771,8 @@ func postGovernorJSON(baseURL, path string, out any) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("mysqltop: POST %s failed: HTTP %d", u.String(), resp.StatusCode)
+	if err := governorRespError(resp); err != nil {
+		return fmt.Errorf("mysqltop: POST %s failed: %w", u.String(), err)
 	}
 	if out == nil {
 		return nil

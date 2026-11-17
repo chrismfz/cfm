@@ -181,6 +181,14 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 		}
 		if e := sectionError(body); e != "" {
 			sources[key] = "error: " + e
+			// A MySQL governor that is not running by design (no database on
+			// the node, disabled) or not yet (its first attempt still under
+			// way) is unavailable, not a failure. One that cannot connect
+			// (MySQL down, wrong credentials), failed to initialise, or is
+			// held by an unreadable detectors.conf stays an error.
+			if isGovernorOffByDesign(e) {
+				sources[key] = "unavailable"
+			}
 			return false
 		}
 		if !json.Valid(body) {
@@ -939,4 +947,21 @@ func topSignals(sig map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s(%d)", r.k, r.n))
 	}
 	return "top: " + strings.Join(parts, ", ")
+}
+
+// isGovernorOffByDesign reports a section error that is the MySQL governor's
+// 503 for a node with no database credentials, a governor disabled by its
+// config, or one still making its first attempt just after a daemon start
+// ("mysql governor not running: <state>", lifecycle.go). "held" is excluded:
+// it means detectors.conf could not be read, which is a fault.
+func isGovernorOffByDesign(e string) bool {
+	const p = "HTTP 503: mysql governor not running: "
+	if !strings.HasPrefix(e, p) {
+		return false
+	}
+	switch strings.TrimPrefix(e, p) {
+	case "no credentials", "disabled", "starting":
+		return true
+	}
+	return false
 }

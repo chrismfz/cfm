@@ -202,6 +202,7 @@ func (m *manager) maybeReload(parent context.Context) {
 	}
 
 	secs, err, fallback := readSectionsForReload(path, m.running)
+	readErr, firstLoad := err, !m.running // err is reused below; the governor sync needs this one
 	if err != nil {
 		switch {
 		case os.IsNotExist(err):
@@ -474,6 +475,12 @@ func (m *manager) maybeReload(parent context.Context) {
 	// appeared since the last build (srcresolve register path).
 	resetRegistrationProbes()
 	resetBootRacePending()
+
+	// The governor's pending config must follow ENABLED = 0, a removed section
+	// and an unreadable first load, none of which reach its factory (the loop
+	// below skips a disabled section). Here, in the same sweep as the
+	// factories, so the two never disagree between reloads.
+	syncPendingGovernor(secs.ByName, readErr, firstLoad)
 
 	// instantiate + run all enabled sections
 	for secName, kv := range secs.ByName {

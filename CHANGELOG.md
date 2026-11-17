@@ -17,6 +17,46 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **MySQL governor: it now starts when MySQL comes up after the daemon.**
+  The governor connected once, at daemon start, and never again. When
+  MariaDB started after CFM (orion, 2026-11-17: CFM at 14:53:09, MariaDB at
+  14:53:32), the governor stayed off until the next CFM restart: no
+  `mysql_governor` kills in `enforce` mode, and `cfm mysqltop` failed with
+  `invalid character '<'` because its unregistered routes fell through to the
+  web UI's HTML page. The governor now retries in the background (every 5 s
+  doubling to every 5 min while credentials exist but the connect fails;
+  every 5 min, a file check with no connection, on a node with no
+  credentials) and stops once it connects or the daemon shuts down. Each
+  connect is bounded to 5 s, and none of it runs inline at startup: the API
+  comes up whatever the database does. `cfm.service` stays free of any
+  ordering on `mariadb`/`mysqld`, so a node without a database waits on
+  nothing.
+- **`[mysql_governor] ENABLED = 0` is honoured.** The detectors manager
+  never calls a disabled section's factory, so the governor saw "no section"
+  and started anyway with the built-in defaults (monitor mode, polling the
+  processlist every 5 s). A disabled governor (every instance disabled, if
+  there are several) now makes no connection, and re-enabling it in
+  `detectors.conf` starts it within 5 minutes, without a restart. Removing
+  the section falls back to the built-in defaults instead of keeping the last
+  parsed config. A `detectors.conf` that cannot be read on first load holds
+  the governor (it used to start with the defaults) and it starts within
+  seconds of the file reading; removing the file while the daemon runs
+  changes nothing.
+- **`/api/v1/mysql/*` answers a JSON 503 while the governor is not running**
+  instead of the web UI's HTML: `{"error":"mysql governor not running: <state>",
+  "reason":…}` with `<state>` one of `starting`, `no credentials`,
+  `disabled`, `held`, `connect failed`, `failed` (README, MySQL governor),
+  and a `Retry-After` of the next connect attempt. Scoped callers get only
+  `{"error":"mysql governor not running"}`. `cfm mysqltop` shows the reason;
+  the MCP `mysql_pressure` tool shows the state (never the reason);
+  `whats_wrong` lists a governor that is off by design or still starting
+  (`no credentials`, `disabled`, `starting`) as `unavailable`, and one that
+  is held, cannot connect or failed to initialise as an error. The CLI names a non-JSON answer from an older daemon
+  instead of failing in the JSON parser, and a 401/403 reads as the token
+  problem it is. The startup log no longer says "no working credentials
+  found" when the credentials were found and the connect failed: it names the
+  credential source and the connect error.
 ### Added
 - **WAF rule 530 measures WooCommerce add-to-cart crawling (logonly).**
   A `GET ?add-to-cart=<id>` makes WooCommerce write a session and a cart, and

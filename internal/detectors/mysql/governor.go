@@ -21,9 +21,12 @@ type GovernorConfig struct {
 	// Auth — layered fallback (see openDB)
 	DSN string // explicit DSN; empty = auto-detect
 
-	Enabled   bool
-	PollEvery time.Duration // default 5s
-	Mode      string        // "monitor" | "enforce"  (default: monitor)
+	Enabled bool
+	// HoldReason, with Enabled=false, says the governor is held for a reason
+	// other than ENABLED = 0 (e.g. detectors.conf unreadable on first load).
+	HoldReason string
+	PollEvery  time.Duration // default 5s
+	Mode       string        // "monitor" | "enforce"  (default: monitor)
 
 	// Connection pressure
 	ConnWarnPct float64 // notify at N% of max_connections (default 70)
