@@ -38,15 +38,38 @@ back-filled here — see the git/PR history for that period.
     It is not a wall: a farm that scripts the click (or reports one) passes.
   - Default `manual`: only while an override holds the vhost UNDER_ATTACK
     (`cfm webtop attack on <vhost>`, the cfm-admin Under-Attack toggle, or a
-    cPanel user on their own vhost, 24 h max). The override lives in memory:
-    a `detectors.conf` save or reload clears it. A verified search-engine
-    crawler is never asked (it cannot click).
-    The state challenges nobody by itself, so the vhost needs a challenge
-    served: `cfm webtop challenge add <vhost>` to try it. `auto` also covers
-    the detector's automatic entry; `off` turns it off.
+    cPanel user on their own vhost). A verified search-engine crawler is
+    never asked (it cannot click). `auto` also covers the detector's
+    automatic entry; `off` turns it off.
   - Logs: `result=v2_confirm` when the button is shown, and
     `v2_confirm=clicked v2_confirm_ms=<ms>` on the solve line and history row
     (withheld from cPanel users with the other `v2_*` keys).
+
+### Changed
+- **`attack on` now arms the vhost's challenge, holds for a TTL and survives
+  a reload** (`cfm webtop attack on <vhost> [--ttl 6h]`, the cfm-admin
+  Under-Attack toggle, the `vhost/attack` API).
+  - What:
+    - when no manual challenge covers the vhost, `attack on` arms one for
+      the same window (reason `under_attack`, the node's default tier);
+    - every override holds for a TTL: the call's `ttl`, else
+      `UNDER_ATTACK_OVERRIDE_TTL` (default 6h). A cPanel user's override
+      also defaults to 6h now (it was always 24h), and can be set up to 24h.
+      The challenge it armed expires with it;
+    - it is saved to `/var/lib/cfm/webdetector_attack_overrides.json` and
+      restored after a `detectors.conf` save, a reload or a restart;
+    - the challenge it arms follows a tier pin you set on the vhost (a v1
+      pin gives a v1 challenge); with no pin it gets the node default. A pin
+      set afterwards does not change it: use the cfm-admin Tier picker;
+    - `attack off` removes only the challenge its `attack on` armed (so does
+      a `cfm.allow` bypass of the vhost). A manual challenge you set yourself
+      stays, even one you gave the reason `under_attack`. An exclude or ignore no longer ends an `attack on` early: the
+      challenge it armed wins over them, like any manual challenge.
+    - a reload sends no second "under attack" alert.
+  - Why: before, `attack on` challenged nobody by itself (a second command
+    was needed), an admin override never expired, and any config reload
+    dropped it without a word.
+  - The detector's automatic entry still arms nothing.
 
 ### Security
 - **cfm-admin logins: goauth updated to its audited release.** The session

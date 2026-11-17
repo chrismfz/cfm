@@ -106,8 +106,9 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge exclude add <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop challenge exclude remove <host|path> [--type host|path]")
 	fmt.Println("  cfm webtop attack                         # Under-Attack status + vhosts currently under attack")
-	fmt.Println("  cfm webtop attack on <H>                  # force a vhost into UNDER_ATTACK (operator override)")
-	fmt.Println("  cfm webtop attack off <H>                 # clear it + suppress auto re-entry for the holddown")
+	fmt.Println("  cfm webtop attack on <H> [--ttl 6h]       # force a vhost into UNDER_ATTACK for a TTL (default UNDER_ATTACK_OVERRIDE_TTL, 6h);")
+	fmt.Println("                                            #   arms its challenge too when none is set; survives a reload")
+	fmt.Println("  cfm webtop attack off <H>                 # clear it (+ the challenge it armed), suppress auto re-entry for the holddown")
 	fmt.Println("  cfm webtop waf engine [--hours 24 --limit 20 --top 10]")
 	fmt.Println("  cfm webtop waf exclude list")
 	fmt.Println("  cfm webtop waf exclude add <host|path> [--type host|path]")
@@ -1437,12 +1438,30 @@ func runAttackWebTop(baseURL string, args []string) error {
 		return fmt.Errorf("usage: cfm webtop attack %s <vhost>", strings.ToLower(args[0]))
 	}
 	host := args[1]
+	ttl := ""
+	for i := 2; i < len(args); i++ {
+		switch {
+		case args[i] == "--ttl" && i+1 < len(args):
+			ttl = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--ttl="):
+			ttl = strings.TrimPrefix(args[i], "--ttl=")
+		default:
+			return fmt.Errorf("usage: cfm webtop attack on <vhost> [--ttl 6h] | attack off <vhost>")
+		}
+	}
+	if ttl != "" && !on {
+		return fmt.Errorf("--ttl applies to `attack on` only")
+	}
 	onVal := "0"
 	if on {
 		onVal = "1"
 	}
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/attack?host=%s&on=%s",
 		strings.TrimRight(baseURL, "/"), url.QueryEscape(host), onVal)
+	if ttl != "" {
+		u += "&ttl=" + url.QueryEscape(ttl)
+	}
 	resp, err := clihttp.Post(u, "application/json", nil)
 	if err != nil {
 		return err
@@ -1459,7 +1478,15 @@ func runAttackWebTop(baseURL string, args []string) error {
 		return err
 	}
 	if on {
-		fmt.Printf("✓ Under-attack FORCED ON for %v\n", result["host"])
+		fmt.Printf("✓ Under-attack FORCED ON for %v until %v (ttl %v)\n", result["host"], result["expires_at"], result["ttl"])
+		if armed, _ := result["challenge_armed"].(bool); armed {
+			fmt.Printf("  a %v challenge is armed on it for the same window (reason under_attack); `attack off` removes it\n", result["rung"])
+		} else {
+			fmt.Println("  an existing manual challenge covers it and stays as it is")
+		}
+		if capped, _ := result["ttl_capped"].(bool); capped {
+			fmt.Println("  ttl capped at 24h (scoped caller)")
+		}
 	} else {
 		fmt.Printf("✓ Under-attack cleared for %v (auto re-entry suppressed for the holddown)\n", result["host"])
 	}
@@ -1540,8 +1567,8 @@ func runAttackStatus(baseURL string) error {
 		}
 	}
 	fmt.Println("\nUsage:")
-	fmt.Println("  cfm webtop attack on <vhost>   force a vhost into UNDER_ATTACK")
-	fmt.Println("  cfm webtop attack off <vhost>  clear it + suppress auto re-entry for the holddown")
+	fmt.Println("  cfm webtop attack on <vhost> [--ttl 6h]  force a vhost into UNDER_ATTACK for a TTL (default 6h); arms its challenge too when none is set")
+	fmt.Println("  cfm webtop attack off <vhost>            clear it (+ the challenge it armed), suppress auto re-entry for the holddown")
 	return nil
 }
 

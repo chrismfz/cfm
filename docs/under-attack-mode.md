@@ -23,6 +23,16 @@
 > step to no-input solves outside the vhost's audience while it is
 > UNDER_ATTACK, with a proposed automatic entry from a `solver_farm` finding.
 > I3–I5 stay frozen.
+>
+> **2026-11-17 — the operator's override is self-contained:**
+> - an operator's `attack on` (CLI, cfm-admin, the `vhost/attack` API) now
+>   arms the vhost's challenge when no manual challenge covers it;
+> - it holds for `UNDER_ATTACK_OVERRIDE_TTL` (6h; a cPanel user is capped at
+>   24h; `--ttl` per call) instead of forever;
+> - it survives a reload (`under_attack_overrides.go`).
+>
+> The detector's automatic entry is unchanged: it still challenges no vhost
+> the existing paths left alone.
 
 **Status: I0 shipped; I1 (detector + state + notify, detect-only) and its
 surfacing (I1b) landed — the RT-baseline clause (§3 leg 3) is still open, and
@@ -94,10 +104,23 @@ UNDER_ATTACK_SOLVES_MIN     = 15    ; distinct solving IPs/min that count as "fa
 UNDER_ATTACK_CONFIRM_TICKS  = 3     ; consecutive ticks before entering
 UNDER_ATTACK_HOLDDOWN       = 30m   ; min time in state; exit needs pressure below floor this long
 UNDER_ATTACK_RULE_TTL       = 6h    ; TTL of any auto/draft traffic rule
+UNDER_ATTACK_OVERRIDE_TTL   = 6h    ; how long an operator's `attack on` holds (since 2026-11-17)
 ```
 
-Manual override, like manual challenge: `cfm webtop attack on|off <vhost>`
-(on = force the state; off = leave + suppress re-entry for the holddown).
+Manual override, like manual challenge: `cfm webtop attack on|off <vhost>`.
+- **on** (`[--ttl 6h]`, since 2026-11-17): force the state for the TTL, and
+  arm the vhost's challenge for the same window when no manual challenge
+  covers it, at the tier of an operator pin on the vhost if one is set (a
+  pin set later does not re-tier the arm: the cfm-admin Tier picker or the
+  `vhost/rung` API does).
+  It survives a reload and a restart. An `on`/`off` sent in the second or
+  two a reload takes reaches the file but applies only on the next reload,
+  and the file is read once per process (a hand edit takes a restart).
+- **off:** leave, suppress re-entry for the holddown, and remove the
+  challenge that `on` armed (only while it is still that arm: the record
+  holds its expiry; a lockdown or re-tier of it keeps it that arm). The
+  holddown is not persisted: after a reload, automatic re-entry is possible
+  at once.
 
 ## 3. Entry criteria — challenge-efficacy feedback + corroboration
 
