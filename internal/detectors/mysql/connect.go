@@ -2,44 +2,71 @@ package mysql
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 func ResolveForAuto() string { return resolveMySQLErrorLog() }
 
-// openDB tries credential sources in priority order.
+// errNoCredentials: no credential source produced a DSN (most likely a node
+// without a database). The lifecycle retries it slowly; see lifecycle.go.
+var errNoCredentials = errors.New("no MySQL credentials found (tried DSN, /root/.my.cnf, /etc/cfm/mysql_governor.cnf, DirectAdmin conf)")
+
+// openPingTimeout bounds each connect+ping, so a DSN pointing at a host that
+// never answers cannot hold up the caller (the first attempt runs inline at
+// daemon start).
+var openPingTimeout = 5 * time.Second
+
+// openDB tries credential sources in priority order. It returns
+// errNoCredentials when none produced a DSN, else the last connect error,
+// labelled with its source. Errors never carry the DSN (it holds a password).
 func openDB(cfg GovernorConfig) (*sql.DB, error) {
-	sources := []func() (string, error){
-		func() (string, error) {
+	type source struct {
+		name string
+		dsn  func() (string, error)
+	}
+	sources := []source{
+		{"DSN", func() (string, error) {
 			if cfg.DSN != "" {
 				return cfg.DSN, nil
 			}
 			return "", fmt.Errorf("no explicit DSN")
-		},
-		func() (string, error) { return dsnFromMyCNF("/root/.my.cnf") },
-		func() (string, error) { return dsnFromMyCNF("/etc/cfm/mysql_governor.cnf") },
-		func() (string, error) { return dsnFromDAConf() },
+		}},
+		{"/root/.my.cnf", func() (string, error) { return dsnFromMyCNF("/root/.my.cnf") }},
+		{"/etc/cfm/mysql_governor.cnf", func() (string, error) { return dsnFromMyCNF("/etc/cfm/mysql_governor.cnf") }},
+		{"DirectAdmin conf", dsnFromDAConf},
 	}
 
+	var lastErr error
 	for _, src := range sources {
-		dsn, err := src()
+		dsn, err := src.dsn()
 		if err != nil || dsn == "" {
 			continue
 		}
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
+			lastErr = fmt.Errorf("invalid DSN from %s", src.name)
 			continue
 		}
-		if err := db.Ping(); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), openPingTimeout)
+		err = db.PingContext(ctx)
+		cancel()
+		if err != nil {
 			db.Close()
+			lastErr = fmt.Errorf("connect via %s failed: %w", src.name, err)
 			continue
 		}
 		return db, nil
 	}
-	return nil, fmt.Errorf("no working credentials found; tried DSN, /root/.my.cnf, /etc/cfm/mysql_governor.cnf, DirectAdmin conf")
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, errNoCredentials
 }
 
 func dsnFromMyCNF(path string) (string, error) {

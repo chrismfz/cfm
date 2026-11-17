@@ -13,7 +13,7 @@
 //   /api/v1/auth/token              — scoped token issuance (admin token required)
 //   /api/v1/webdet/                 — web detector (registered by webdetector package)
 //   /api/v1/challenge/              — challenge API (registered by webdetector package)
-//   /api/v1/mysql/                  — MySQL governor (registered when gov != nil)
+//   /api/v1/mysql/                  — MySQL governor (503 while it is not running)
 //
 // Handler stack (outermost → innermost — see Start()):
 //   RequestLog → SecurityHeaders → AdminTransportRedirect → APISecurityAnomaly
@@ -133,14 +133,14 @@ func Register(fn func(*http.ServeMux)) {
 //	cfg    — active config (LISTEN_ADDRESS, PORT, TLS_PORT, AUTH_DB_PATH, …)
 //	be     — nft backend; may be nil (/unblock returns 503)
 //	cfgDir — config dir; used by /unblock to edit cfm.deny
-//	gov    — MySQL governor; nil = mysql routes not registered
+//	gov    — MySQL governor lifecycle; nil = mysql routes not registered
 //	ssl    — SSLCollector; nil = TLS port not started even if TLS_PORT > 0
 func Start(
 	ctx context.Context,
 	cfg *cfgpkg.Config,
 	be firewall.Backend,
 	cfgDir string,
-	gov *mysqlpkg.Governor,
+	gov *mysqlpkg.GovernorLifecycle,
 	ssl *sslpkg.Collector,
 ) {
 	if err := validateStartupConfig(cfg); err != nil {
@@ -221,34 +221,7 @@ func Start(
 	RegisterDetectorsEndpoints(m, cfgDir)
 
 	// ── MySQL governor ────────────────────────────────────────────────────────
-	if gov != nil {
-		// Global MySQL governor routes stay strictly admin-only.
-		mysqlAdminMux := http.NewServeMux()
-		gov.RegisterHTTPAdmin(mysqlAdminMux)
-		m.Handle("/api/v1/mysql/state", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/processlist", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/top", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/locks", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/kills", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/history", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/history/events", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/history/summary", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/history/prune", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/history/truncate", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/history/timeline", adminOnlyHandler(mysqlAdminMux))
-		m.Handle("/api/v1/mysql/cpu", adminOnlyHandler(mysqlAdminMux))
-
-		// Filtered MySQL routes may be used by scoped tokens, but must always
-		// carry an effective user filter (explicit or safely derived).
-		mysqlScopedMux := http.NewServeMux()
-		gov.RegisterHTTPScoped(mysqlScopedMux)
-		m.Handle("/api/v1/mysql/user-summary", scopedMySQLFilterHandler(mysqlScopedMux))
-		m.Handle("/api/v1/mysql/user-kills", scopedMySQLFilterHandler(mysqlScopedMux))
-		m.Handle("/api/v1/mysql/user-history", scopedMySQLFilterHandler(mysqlScopedMux))
-		m.Handle("/api/v1/mysql/user-kill", scopedMySQLFilterHandler(mysqlScopedMux))
-
-		logging.LogfAPI("[apiserver] mysql governor routes registered (admin global + scoped filtered)")
-	}
+	registerMySQLGovernorRoutes(m, gov)
 
 	// ── Scoped token issuance ─────────────────────────────────────────────────
 	store := NewTokenStore()
@@ -666,6 +639,54 @@ func parsePprofRequestedSeconds(raw string) int {
 		return pprofRequestedSecondsMaxLimit
 	}
 	return seconds
+}
+
+// registerMySQLGovernorRoutes mounts the MySQL governor routes whenever the
+// lifecycle exists, even before the governor has connected: the lifecycle's
+// handlers answer a JSON 503 until then. An unregistered path fell through to
+// the web UI's "/" and returned HTML, which `cfm mysqltop` reported as
+// "invalid character '<'". The auth guards run first, so an unauthorized
+// caller gets its 403 whether or not the governor runs.
+func registerMySQLGovernorRoutes(m *http.ServeMux, gov *mysqlpkg.GovernorLifecycle) {
+	if gov == nil {
+		return
+	}
+	// Global MySQL governor routes stay strictly admin-only.
+	mysqlAdmin := adminOnlyHandler(gov.AdminHandler())
+	for _, p := range mysqlAdminRoutes {
+		m.Handle(p, mysqlAdmin)
+	}
+
+	// Filtered MySQL routes may be used by scoped tokens, but must always
+	// carry an effective user filter (explicit or safely derived).
+	mysqlScoped := scopedMySQLFilterHandler(gov.ScopedHandler())
+	for _, p := range mysqlScopedRoutes {
+		m.Handle(p, mysqlScoped)
+	}
+
+	logging.LogfAPI("[apiserver] mysql governor routes registered (admin global + scoped filtered)")
+}
+
+var mysqlAdminRoutes = []string{
+	"/api/v1/mysql/state",
+	"/api/v1/mysql/processlist",
+	"/api/v1/mysql/top",
+	"/api/v1/mysql/locks",
+	"/api/v1/mysql/kills",
+	"/api/v1/mysql/history",
+	"/api/v1/mysql/history/events",
+	"/api/v1/mysql/history/summary",
+	"/api/v1/mysql/history/prune",
+	"/api/v1/mysql/history/truncate",
+	"/api/v1/mysql/history/timeline",
+	"/api/v1/mysql/cpu",
+}
+
+var mysqlScopedRoutes = []string{
+	"/api/v1/mysql/user-summary",
+	"/api/v1/mysql/user-kills",
+	"/api/v1/mysql/user-history",
+	"/api/v1/mysql/user-kill",
 }
 
 // adminOnlyHandler wraps h and returns 403 unless middleware explicitly marked

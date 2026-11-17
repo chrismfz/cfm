@@ -17,7 +17,27 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **MySQL governor: it now starts when MySQL comes up after the daemon.**
+  The governor connected once, at daemon start, and never again. When
+  MariaDB started after CFM (orion, 2026-11-17: CFM at 14:53:09, MariaDB at
+  14:53:32), the governor stayed off until the next CFM restart: no
+  `mysql_governor` kills in `enforce` mode, and `cfm mysqltop` failed with
+  `invalid character '<'` because its unregistered routes fell through to the
+  web UI's HTML page. The governor now retries in the background (every 5 s
+  doubling to every 5 min while credentials exist but the connect fails;
+  every 5 min, a file check with no connection, on a node with no
+  credentials) and stops once it connects or the daemon shuts down. Each
+  connect is bounded to 5 s. `cfm.service` stays free of any ordering on
+  `mariadb`/`mysqld`, so a node without a database waits on nothing.
+- **`/api/v1/mysql/*` answers a JSON 503 while the governor is not running**
+  (`{"error":"mysql governor not running","reason":…}`; the reason is
+  withheld from scoped callers) instead of the web UI's HTML. `cfm mysqltop`
+  and the MCP `mysql_pressure` / `whats_wrong` tools show that message,
+  and the CLI names a non-JSON answer from an older daemon instead of
+  failing in the JSON parser. The startup log no longer says "no working
+  credentials found" when the credentials were found and the connect failed:
+  it names the credential source and the connect error.
 
 ## 2026.11.17
 

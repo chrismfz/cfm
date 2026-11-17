@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	core "cfm/internal/detectors/core"
@@ -15,7 +16,12 @@ import (
 
 var mysqlState = core.DefaultState()
 
+// The [mysql_governor] section is config-only: its factory stores the parsed
+// config here and main.go's governor lifecycle reads it. The lifecycle's
+// background retry reads it while a detectors.conf reload may be writing it,
+// so both sides go through pendingGovMu.
 var (
+	pendingGovMu    sync.Mutex
 	pendingGovCfg   mysql.GovernorConfig
 	pendingGovReady bool
 )
@@ -23,7 +29,15 @@ var (
 // GetPendingGovernorConfig returns the parsed GovernorConfig if the
 // [mysql_governor] section was found and ENABLED=1.
 func GetPendingGovernorConfig() (mysql.GovernorConfig, bool) {
+	pendingGovMu.Lock()
+	defer pendingGovMu.Unlock()
 	return pendingGovCfg, pendingGovReady
+}
+
+func setPendingGovernorConfig(cfg mysql.GovernorConfig, ready bool) {
+	pendingGovMu.Lock()
+	defer pendingGovMu.Unlock()
+	pendingGovCfg, pendingGovReady = cfg, ready
 }
 
 func init() {
@@ -120,7 +134,7 @@ func init() {
 	// -------------------------------------------------------------------------
 	Register("mysql_governor", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		if !kvBool(kv, "ENABLED", true) {
-			pendingGovReady = false
+			setPendingGovernorConfig(mysql.GovernorConfig{}, false)
 			logMySQLGovf("[detectors] %s disabled in detectors.conf", section)
 			return nil, nil
 		}
@@ -169,7 +183,7 @@ func init() {
 		}
 
 		// ── Build GovernorConfig ─────────────────────────────────────────────
-		pendingGovCfg = mysql.GovernorConfig{
+		govCfg := mysql.GovernorConfig{
 			DSN:     kvStrClean(kv, "DSN", ""),
 			Enabled: true,
 
@@ -193,18 +207,18 @@ func init() {
 			KillTotalPerWindow: kvInt(kv, "KILL_TOTAL_PER_WINDOW", 20),
 			KillWindow:         kvDur(kv, "KILL_WINDOW", 10*time.Minute),
 		}
-		pendingGovReady = true
+		setPendingGovernorConfig(govCfg, true)
 
 		logMySQLGovf(
 			"[detectors] %s loaded mode=%s poll=%s fanout_kill=%d sleep_reaper=%t query_rules=%d conn_rules=%d exempt=%v",
 			section,
-			pendingGovCfg.Mode,
-			pendingGovCfg.PollEvery,
-			pendingGovCfg.LockFanoutKill,
-			pendingGovCfg.SleepReaper,
+			govCfg.Mode,
+			govCfg.PollEvery,
+			govCfg.LockFanoutKill,
+			govCfg.SleepReaper,
 			len(queryRules),
 			len(connRules),
-			pendingGovCfg.SleepReaperExempt,
+			govCfg.SleepReaperExempt,
 		)
 
 		return nil, nil // config-only; main.go starts the governor

@@ -224,7 +224,20 @@ func section(ctx context.Context, d Deps, path string, q url.Values) json.RawMes
 		return e
 	}
 	if status < 200 || status >= 300 {
-		e, _ := json.Marshal(map[string]any{"error": "HTTP " + strconv.Itoa(status)})
+		msg := "HTTP " + strconv.Itoa(status)
+		// Carry the endpoint's own JSON error (e.g. the MySQL governor's 503
+		// "mysql governor not running" + reason) instead of a bare status.
+		var eb struct {
+			Error  string `json:"error"`
+			Reason string `json:"reason"`
+		}
+		if json.Unmarshal(body, &eb) == nil && eb.Error != "" {
+			msg += ": " + eb.Error
+			if eb.Reason != "" {
+				msg += ": " + eb.Reason
+			}
+		}
+		e, _ := json.Marshal(map[string]any{"error": msg})
 		return e
 	}
 	if !json.Valid(body) {
@@ -574,7 +587,7 @@ func registerMySQLPressure(srv *mcp.Server, d Deps) {
 		}
 		topBody := section(ctx, d, "/api/v1/mysql/top", nil)
 		cpuBody := section(ctx, d, "/api/v1/mysql/cpu", nil)
-		// Surface a section error (e.g. governor not running → HTTP 404) instead
+		// Surface a section error (e.g. governor not running → HTTP 503) instead
 		// of a misleading empty result.
 		if e := sectionError(topBody); e != "" {
 			return nil, nil, fmt.Errorf("mysql/top: %s", e)

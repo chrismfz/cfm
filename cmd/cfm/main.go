@@ -1371,20 +1371,23 @@ func runDaemon(args []string) {
 			return
 		}
 
-		// Start the MySQL governor (unchanged logic — was already here).
-		govCfg, ok := detpkg.GetPendingGovernorConfig()
-		var cfgPtr *mysql.GovernorConfig
-		if ok {
-			cfgPtr = &govCfg
-		}
-		gov := govLc.StartOnce(ctx, cfgPtr)
+		// Start the MySQL governor. If MySQL is not up yet (cfm.service has no
+		// ordering on the database, on purpose: many nodes run none), the
+		// lifecycle keeps retrying in the background; its routes answer 503
+		// until it connects.
+		govLc.Start(ctx, func() *mysql.GovernorConfig {
+			if c, ok := detpkg.GetPendingGovernorConfig(); ok {
+				return &c
+			}
+			return nil
+		})
 
 		// Start the unified internal HTTP server.
 		// Registers pprof, /unblock, and mysql governor routes internally.
 		// ldflags sets main.Version but not runtime/debug BuildInfo, so plumb it
 		// explicitly for the MCP server's initialize result.
 		apiserver.DaemonVersion = Version
-		go apiserver.Start(ctx, cfg, be, cfgDir, gov, sslcol)
+		go apiserver.Start(ctx, cfg, be, cfgDir, govLc, sslcol)
 
 		_ = os.Setenv("CFM_DEBUG_HTTP_STARTED", "1")
 		logging.Logf("[apiserver] http server on %s:%d", apiserver.HTTPBindAddr(cfg.Debug.ListenAddress), cfg.Debug.Port)
