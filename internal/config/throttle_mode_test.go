@@ -47,8 +47,8 @@ func TestThrottleMode_UnknownMeansTTL(t *testing.T) {
 		{`"permanent"`, "permanent"},
 		{`"alert"`, "alert"},
 		{`"dryrun"`, "dryrun"},
-		{`""`, "permanent"},
-		{`" "`, "permanent"}, // blank is unset, not unrecognised
+		{`""`, "ttl"},
+		{`" "`, "ttl"}, // blank is unset (no warning), not unrecognised
 	} {
 		logs.Reset()
 		if got := throttleMode(t, "THROTTLE_MODE = "+tc.in+"\n"); got != tc.want {
@@ -59,8 +59,8 @@ func TestThrottleMode_UnknownMeansTTL(t *testing.T) {
 			t.Errorf("THROTTLE_MODE = %s: warned=%v, want %v (%q)", tc.in, warned, invalid, logs.String())
 		}
 	}
-	if throttleMode(t, "") != "permanent" {
-		t.Error("no THROTTLE_MODE line should mean permanent")
+	if throttleMode(t, "") != "ttl" {
+		t.Error("no THROTTLE_MODE line should mean ttl: a permanent ban is an explicit choice")
 	}
 }
 
@@ -78,7 +78,7 @@ func TestThrottleMode_WarnsOncePerValue(t *testing.T) {
 	if n := strings.Count(logs.String(), `THROTTLE_MODE "bogus"`); n != 1 {
 		t.Errorf("bogus warned %d times, want once:\n%s", n, logs.String())
 	}
-	if !strings.Contains(logs.String(), "THROTTLE_TTL=86400s") {
+	if !strings.Contains(logs.String(), "THROTTLE_TTL=259200s") {
 		t.Errorf("warning should name the TTL used: %q", logs.String())
 	}
 }

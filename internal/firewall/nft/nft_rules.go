@@ -434,6 +434,21 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		}
 	}
 
+	// An FCrDNS-verified good bot (Meta's fwdproxy-*.fbsv.net, Googlebot, …)
+	// is never banned by a flood or portscan autoblock; the meters still drop
+	// its excess packets (firewall.AutoblockGoodBot). It runs after the
+	// cooldown check so an address this path just blocked costs no lookup.
+	// Logged only, never notified: a crawler re-crosses the threshold every
+	// window.
+	if skip, why := firewall.AutoblockGoodBot(b.enr, ip, tc.GoodBotExemptOff); skip {
+		if time.Since(b.lastIgnoredAt[ip]) >= ignoreNotifyCooldown {
+			logging.Logf("[autoblock][ignored] %s %s%s reason=%s | %s", fam, ip, b.enrichLabel(ip), reason, why)
+			firewall.PruneSeen(b.lastIgnoredAt, ignoreNotifyCooldown)
+			b.lastIgnoredAt[ip] = time.Now()
+		}
+		return nil
+	}
+
 	extraLabel := b.enrichLabel(ip)
 	logIP := ip + extraLabel
 	cleanExtra := strings.TrimSpace(strings.TrimPrefix(extraLabel, "—"))
@@ -751,15 +766,7 @@ func (b *Backend) loadPortScannerOnce() {
 	// ετοίμασε ThrottleConfig για reuse του autoBlockEval:
 	//  - Hits=1 (το threshold είναι ήδη PS_LIMIT)
 	//  - WindowSec=PS_INTERVAL
-	tc := cfgpkg.ThrottleConfig{
-		WindowSec:  ps.Interval,
-		Hits:       1,
-		Mode:       "ttl",
-		TTLSeconds: ps.TTLSeconds,
-	}
-	if strings.ToLower(ps.Mode) == "permanent" {
-		tc.Mode = "permanent"
-	}
+	tc := firewall.PortscanThrottleConfig(b.cfg)
 
 	var v4, v6 []string
 	for ip, n := range counts {

@@ -71,9 +71,10 @@ func (c *Config) Summary() []string {
 	}
 
 	lines = append(lines, fmt.Sprintf(
-		"throttle: enabled=%t window=%ds hits=%d mode=%s ttl=%ds set_ttl=%ds cooldown=%ds sources=[%s]",
+		"throttle: enabled=%t window=%ds hits=%d mode=%s ttl=%ds set_ttl=%ds cooldown=%ds sources=[%s] goodbot_exempt=%t",
 		c.Throttle.Enabled, c.Throttle.WindowSec, c.Throttle.Hits, c.Throttle.Mode,
 		c.Throttle.TTLSeconds, c.Throttle.SetTTL, c.Throttle.CooldownSec, src,
+		!c.Throttle.GoodBotExemptOff,
 	))
 
 	// -- tweaks

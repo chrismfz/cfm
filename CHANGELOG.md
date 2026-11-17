@@ -17,7 +17,45 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Flood autoblocks are a 72 h ban by default, never permanent unless you
+  ask.** A `cfm.conf` with no `THROTTLE_MODE` line (or a blank one) used to
+  make every syn / portflood / pps / connlimit / new / icmp autoblock, and
+  the cfm-admin login brute-force autoblock, a PERMANENT ban: written to
+  `cfm.deny` and reported to the fleet API. It is now `ttl`, and
+  `THROTTLE_TTL` defaults to 72 h (was 24 h; the reference `cfm.conf` ships
+  `"259200"`). `THROTTLE_MODE = "permanent"` still means permanent. Existing
+  confs keep their own lines: an upgrade does not rewrite `/etc/cfm/cfm.conf`,
+  so a node that says `permanent` stays permanent until you edit it.
+
 ### Fixed
+- **The L4 flood autoblock no longer bans verified crawlers and Meta's
+  link-preview proxies.** Meta's `fwdproxy-*.fbsv.net` addresses (Facebook
+  link previews, `facebookexternalhit`, the in-app browser) tripped
+  `portflood_443_tcp` and `SYN flood` and were banned permanently into
+  `cfm.deny` on two nodes (59 addresses, May-June 2026; one reached the fleet
+  blacklist), breaking link previews and in-app visits for every site there.
+  The syn / portflood / pps / connlimit / new / icmp autoblock and the
+  port-scan autoblock (both engines) now skip an FCrDNS-verified good bot
+  (Googlebot, Bingbot, Applebot, Yandex, Meta), as the web detector's own IP
+  bans already did; the flood meters still drop its excess packets. A PTR
+  that does not forward-confirm (spoofed) is blocked as before. A
+  forward-confirm that does not complete skips that crossing, so one DNS
+  blip cannot ban a real crawler, but the third such crossing in a row bans:
+  an address's PTR is its owner's to set. The forward-confirms spend a
+  budget of 5 s of resolver time per minute (they run under the autoblock
+  lock, and fake crawler PTRs cost an attacker nothing); past it an address
+  without a cached verdict is blocked as before, and one line is logged
+  (`[autoblock][goodbot] forward-confirm budget … spent`). A crawler's
+  verdict lasts 30 min, and an expired one is still honoured for 24 h when it
+  cannot be re-verified right then, so spending the budget cannot get a
+  known crawler banned; a full verdict cache drops "not a crawler" entries,
+  never verified ones. It needs PTR
+  enrichment (the PTR comes from the enricher). The skip is logged (`[autoblock][ignored] …
+  FCrDNS-verified good bot meta`), not notified: a crawler re-crosses the
+  threshold every window. The startup `[config] throttle:` line now ends in
+  `goodbot_exempt=true|false`. Kill switch: `THROTTLE_GOODBOT_EXEMPT = 0` in `cfm.conf`. Existing
+  bans are not lifted: unblock them (`cfm unblock <ip>`).
 - **MySQL governor: it now starts when MySQL comes up after the daemon.**
   The governor connected once, at daemon start, and never again. When
   MariaDB started after CFM (orion, 2026-11-17: CFM at 14:53:09, MariaDB at

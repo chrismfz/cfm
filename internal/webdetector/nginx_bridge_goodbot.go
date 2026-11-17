@@ -61,6 +61,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/goodbot"
 	"cfm/internal/logging"
 )
 
@@ -145,18 +146,7 @@ func newBridgeGoodBotState() *bridgeGoodBotState {
 // negative TTL. A clean non-match (resolved but wrong IP, or a name that does
 // not exist → spoofed) is a real, cacheable negative.
 func verifyGoodBotIP(ptr, ip string) (name string, cacheable bool) {
-	nm, host, ok := goodBotSuffixName(ptr)
-	if !ok {
-		return "", true // definitively not a good-bot PTR → cacheable negative
-	}
-	matched, err := forwardConfirmsE(host, ip)
-	if err != nil {
-		return "", false // transient resolver failure → do not cache; re-verify later
-	}
-	if matched {
-		return nm, true // FCrDNS-verified → cacheable positive
-	}
-	return "", true // resolved but no match (spoofed) → cacheable negative
+	return goodbot.Verify(ptr, ip)
 }
 
 // looksLikeGoodBotPTR reports whether ptr ends in a known good-bot suffix. This
