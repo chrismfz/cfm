@@ -17,6 +17,18 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Fixed
+- **`detectors.conf`: a quoted value with an inline comment now reads as the
+  value.** `BLOCK = "15m"   ; stage 3 …` was read as the text `15m"   ; stage
+  3 …`, an invalid TTL, so the section's block mode was silently `no`. The
+  stock `[cfm_endpoints]` (and `[api_abuse]` on older configs) shipped exactly
+  that line: its stage 3 never banned on any node. String keys read the same
+  way (`MODE`, paths, lists) were affected too; number, on/off and duration
+  keys were not. The parser now takes the text between the quotes when only a
+  comment follows; every other value reads as before. The stock file no longer
+  quotes those lines, so an older daemon reads it right too. A node whose
+  config carries such a `BLOCK` starts banning with this release.
+
 ### Changed
 - **`[webdetector] BLOCK` ships as `12h` (was `2h`).** The 2026-11-17 read
   of the 8 edge nodes found 99% of the web detector's 403 / 404 / 40x bans on

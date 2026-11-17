@@ -381,8 +381,15 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `DRY_RUN`, the `/tmp` cleanup gate, the suspicious-vhost challenge thresholds).
   Fixing it was itself a behaviour change (those values finally apply), so it
   shipped as its own reviewed PR. Note `cleanScalar` cuts at the first `;`/`#`
-  and does NOT do quote-aware scanning (the section parser leaves an embedded
-  quote on a quoted value with an inline comment). Prefer comments on their own
+  and does NOT do quote-aware scanning. The STRING readers (`kvStrClean` →
+  `detconf.CleanValue`, quote-aware) had the mirror bug until 2026-11-17: the
+  section parser stored `KEY = "15m" ; note` as `15m" ; note`, CleanValue took
+  the stray closing quote as an opening one and kept the comment, and
+  `[cfm_endpoints] BLOCK = "15m" ; …` (stock, and `[api_abuse]` on older
+  confs) read as block mode `no` — that stage 3 never banned anywhere. The
+  parser now reads a quoted value followed only by a comment as the text
+  between the quotes (`detconf.unquoteValue`; any other value as before), and
+  the stock conf no longer quotes those lines. Prefer comments on their own
   line anyway; scalars must never legitimately contain `;`/`#`.
 
 ---

@@ -144,11 +144,14 @@ func kvStrClean(kv KV, key, def string) string {
 // parsing. It drops any inline "; comment" / "# comment" (a scalar value never
 // contains ';' or '#' legitimately) and strips surrounding quotes/space.
 //
-// It deliberately does NOT use detconf.StripInlineComment's quote-aware scan: the
-// section parser leaves an embedded quote when a *quoted* value carries an
-// inline comment (`EVERY = "20s" ; note` is stored as `20s" ; note`), and a
-// quote-aware scan would treat that stray quote as opening a string and never
-// find the ';'. Cutting at the first ';'/'#' then trimming quotes yields `20s`.
+// It deliberately does NOT use detconf.StripInlineComment's quote-aware scan.
+// Before 2026-11-17 the section parser left an embedded quote when a *quoted*
+// value carried an inline comment (`EVERY = "20s" ; note` was stored as
+// `20s" ; note`), and a quote-aware scan treated that stray quote as opening a
+// string and never found the ';' — which is exactly what broke the STRING
+// readers (detconf.CleanValue: `BLOCK = "15m" ; note` read as no block at
+// all). The parser now stores such a value as `20s` (detconf.unquoteValue);
+// cutting at the first ';'/'#' here stays as the scalar readers' own guard.
 //
 // Without this, kvInt/kvBool/kvDur parsed the raw string, failed, and silently
 // fell back to the default — so `SQLI = 1 ; note` (and, historically, the

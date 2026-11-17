@@ -121,7 +121,7 @@ func ReadSections(path string) (Sections, []byte, error) {
 			}
 			if isConfigKey(candidate) {
 				k := strings.ToUpper(candidate)
-				v := strings.Trim(strings.TrimSpace(line[i+1:]), `"`)
+				v := unquoteValue(strings.TrimSpace(line[i+1:]))
 				if appendOp {
 					if prev, ok := s.ByName[cur][k]; ok && prev != "" {
 						v = joinAppend(k, prev, v)
@@ -206,4 +206,26 @@ func splitTypeInstance(section string) (typ, inst string) {
 		inst = strings.Join(parts[1:], " ")
 	}
 	return
+}
+
+// unquoteValue returns a raw value as the readers should see it. A value in
+// double quotes followed only by an inline comment (`KEY = "15m"  ; note`)
+// is the text between the quotes. It used to keep the closing quote and the
+// comment (`15m"  ; note`), and the string readers (detconf.CleanValue, which
+// is quote-aware) took that closing quote as an OPENING one and kept the
+// comment as part of the value: `[cfm_endpoints] BLOCK = "15m" ; …`, shipped
+// in the stock detectors.conf, read as an unparseable TTL, so that detector
+// never banned. Any other value keeps the old reading (surrounding double
+// quotes trimmed), so a quoted value with no comment and an unquoted one are
+// read exactly as before.
+func unquoteValue(raw string) string {
+	if len(raw) >= 2 && raw[0] == '"' {
+		if j := strings.IndexByte(raw[1:], '"'); j >= 0 {
+			rest := strings.TrimSpace(raw[2+j:])
+			if rest == "" || rest[0] == ';' || rest[0] == '#' {
+				return raw[1 : 1+j]
+			}
+		}
+	}
+	return strings.Trim(raw, `"`)
 }
