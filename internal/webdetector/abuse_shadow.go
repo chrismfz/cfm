@@ -242,10 +242,12 @@ func orDash(s string) string {
 	return s
 }
 
-// goodBotPTRSuffixes is the FCrDNS good-bot registry (internal/goodbot, the
-// one list shared with the L4 flood autoblock). Membership alone is NOT trust:
-// the PTR is forward-confirmed (FCrDNS) before a bot is treated as good.
-var goodBotPTRSuffixes = goodbot.PTRSuffixes
+// goodBotPTRSuffixes is a read-only copy of the FCrDNS good-bot registry
+// (internal/goodbot, the one list shared with the L4 flood autoblock), taken
+// at init, for the code that lists it. Matching goes through goodbot itself
+// (goodBotSuffixName). Membership alone is NOT trust: the PTR is
+// forward-confirmed (FCrDNS) before a bot is treated as good.
+var goodBotPTRSuffixes = goodbot.Suffixes()
 
 // verifiedGoodBot returns a good-bot name when ptr is a known good-bot host AND
 // forward-confirms back to ip (FCrDNS); "" otherwise. A PTR that claims a good

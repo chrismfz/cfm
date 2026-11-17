@@ -35,15 +35,18 @@ back-filled here — see the git/PR history for that period.
   `portflood_443_tcp` and `SYN flood` and were banned permanently into
   `cfm.deny` on two nodes (59 addresses, May-June 2026; one reached the fleet
   blacklist), breaking link previews and in-app visits for every site there.
-  The syn / portflood / pps / connlimit / new / icmp autoblock (both engines)
-  now skips an FCrDNS-verified good bot (Googlebot, Bingbot, Applebot,
-  Yandex, Meta), as the web detector's own IP bans already did; the flood
-  meters still drop its excess packets. A PTR that does not forward-confirm
-  (spoofed) is blocked as before; a forward-confirm that does not complete
-  skips only that crossing, so one DNS blip cannot ban a real crawler. It
-  needs PTR enrichment (the PTR comes from the enricher). The skip is logged
-  (`[autoblock][ignored] … FCrDNS-verified good bot meta`), not notified: a
-  crawler re-crosses the threshold every window. Kill switch: `THROTTLE_GOODBOT_EXEMPT = 0` in `cfm.conf`. Existing
+  The syn / portflood / pps / connlimit / new / icmp autoblock and the
+  port-scan autoblock (both engines) now skip an FCrDNS-verified good bot
+  (Googlebot, Bingbot, Applebot, Yandex, Meta), as the web detector's own IP
+  bans already did; the flood meters still drop its excess packets. A PTR
+  that does not forward-confirm (spoofed) is blocked as before. A
+  forward-confirm that does not complete skips that crossing, so one DNS
+  blip cannot ban a real crawler, but the third such crossing in a row bans:
+  an address's PTR is its owner's to set. It needs PTR enrichment (the PTR
+  comes from the enricher). The skip is logged (`[autoblock][ignored] …
+  FCrDNS-verified good bot meta`), not notified: a crawler re-crosses the
+  threshold every window. The startup `[config] throttle:` line now ends in
+  `goodbot_exempt=true|false`. Kill switch: `THROTTLE_GOODBOT_EXEMPT = 0` in `cfm.conf`. Existing
   bans are not lifted: unblock them (`cfm unblock <ip>`).
 - **MySQL governor: it now starts when MySQL comes up after the daemon.**
   The governor connected once, at daemon start, and never again. When

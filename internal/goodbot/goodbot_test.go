@@ -54,3 +54,15 @@ func TestVerifyNoSuffixNoDNS(t *testing.T) {
 		t.Errorf("Verify(non-bot) = %q,%t want \"\",true", name, cacheable)
 	}
 }
+
+// Suffixes is a copy: writing to it changes nothing the matcher trusts.
+func TestSuffixesIsACopy(t *testing.T) {
+	m := Suffixes()
+	if m[".fbsv.net"] != "meta" {
+		t.Fatalf("Suffixes() = %v, want .fbsv.net -> meta", m)
+	}
+	m[".example.net"] = "evil"
+	if _, _, ok := SuffixName("x.example.net"); ok {
+		t.Error("a write to the Suffixes() copy widened the registry")
+	}
+}

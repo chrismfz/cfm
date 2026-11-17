@@ -435,13 +435,15 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 	}
 
 	// An FCrDNS-verified good bot (Meta's fwdproxy-*.fbsv.net, Googlebot, …)
-	// is never banned by a flood heuristic; the meters still drop its excess
-	// packets (firewall.AutoblockGoodBot). After the cooldown check: an
-	// address in cooldown was just blocked, so it is no good bot. Logged
-	// only, never notified: a crawler re-crosses the threshold every window.
+	// is never banned by a flood or portscan autoblock; the meters still drop
+	// its excess packets (firewall.AutoblockGoodBot). It runs after the
+	// cooldown check so an address this path just blocked costs no lookup.
+	// Logged only, never notified: a crawler re-crosses the threshold every
+	// window.
 	if skip, why := firewall.AutoblockGoodBot(b.enr, ip, tc.GoodBotExemptOff); skip {
 		if time.Since(b.lastIgnoredAt[ip]) >= ignoreNotifyCooldown {
 			logging.Logf("[autoblock][ignored] %s %s%s reason=%s | %s", fam, ip, b.enrichLabel(ip), reason, why)
+			firewall.PruneSeen(b.lastIgnoredAt, ignoreNotifyCooldown)
 			b.lastIgnoredAt[ip] = time.Now()
 		}
 		return nil
@@ -769,6 +771,9 @@ func (b *Backend) loadPortScannerOnce() {
 		Hits:       1,
 		Mode:       "ttl",
 		TTLSeconds: ps.TTLSeconds,
+		// The same autoBlockAction runs, so the good-bot exemption applies
+		// to portscan bans too, and its kill switch with it.
+		GoodBotExemptOff: b.cfg.Throttle.GoodBotExemptOff,
 	}
 	if strings.ToLower(ps.Mode) == "permanent" {
 		tc.Mode = "permanent"

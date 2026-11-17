@@ -20,9 +20,10 @@ import (
 	"time"
 )
 
-// PTRSuffixes maps a good bot's canonical PTR domain suffix to its name.
-// Read-only after init.
-var PTRSuffixes = map[string]string{
+// ptrSuffixes maps a good bot's canonical PTR domain suffix to its name.
+// Unexported so nothing can widen trust at runtime: every consumer (the L4
+// ban exemption included) reads it through SuffixName or a Suffixes copy.
+var ptrSuffixes = map[string]string{
 	".googlebot.com":      "googlebot",
 	".google.com":         "google",
 	".search.msn.com":     "bingbot",
@@ -39,6 +40,16 @@ var PTRSuffixes = map[string]string{
 	".fbsv.net": "meta",
 }
 
+// Suffixes returns a copy of the registry (suffix -> bot name), for callers
+// that list it (tests, the traffic-rules name parity check).
+func Suffixes() map[string]string {
+	out := make(map[string]string, len(ptrSuffixes))
+	for k, v := range ptrSuffixes {
+		out[k] = v
+	}
+	return out
+}
+
 // SuffixName reports the good-bot name whose canonical PTR suffix matches ptr,
 // plus the normalised host (trimmed, lowercased, no trailing dot) to
 // forward-confirm. This is the MATCH only: a caller that needs trust must
@@ -48,7 +59,7 @@ func SuffixName(ptr string) (name, host string, ok bool) {
 	if host == "" {
 		return "", "", false
 	}
-	for suf, nm := range PTRSuffixes {
+	for suf, nm := range ptrSuffixes {
 		if strings.HasSuffix(host, suf) {
 			return nm, host, true
 		}
