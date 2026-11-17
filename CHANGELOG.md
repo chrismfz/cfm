@@ -83,8 +83,15 @@ back-filled here — see the git/PR history for that period.
   complete. A list missing a cert the daemon could not read is merged as
   before, as is a list under two thirds the size of the last one taken; that
   shrink is taken only if it lasts an hour. A name whose new PEM is missing or
-  does not parse keeps its old pair. An error loading the snapshot no longer
-  stops a worker from ever fetching or polling again.
+  does not parse keeps its old pair. An error loading the snapshot, or a
+  `/stats` answer that is not a JSON object, no longer stops a worker from
+  ever fetching or polling again.
+- **sslcollector: a cert whose key file is missing is no longer indexed, and
+  a cert file with no PEM in it no longer crashes the daemon.** A dangling
+  Virtualmin `ssl.key` symlink was indexed, then left out of every list the
+  edge fetches, so every list was marked incomplete and the edge could never
+  drop a stale name on that node. A non-PEM cert file made the cert scan
+  panic.
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
   it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It

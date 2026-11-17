@@ -6,10 +6,17 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"os"
 	"strings"
 	"time"
 )
+
+// errKeyUnusable: buildEntry found no readable, non-empty key file.
+var errKeyUnusable = errors.New("key file missing or empty")
+
+// errNoPEMBlock: the cert file holds no PEM block.
+var errNoPEMBlock = errors.New("cert file has no PEM block")
 
 type Pair struct {
 	Source    Source
@@ -96,13 +103,24 @@ func (c *Collector) Refresh(ctx context.Context) error {
 }
 
 func buildEntry(p Pair, now time.Time) (*Entry, error) {
+	// The key must be there too. Not every scanner checks it (the Virtualmin
+	// ones glob for it, so a dangling ssl.key symlink matched), and an entry
+	// whose key cannot be read is left out of every /dumpall payload, which
+	// then says complete=false: the edge merges an incomplete payload instead
+	// of replacing its store, so one such key stopped every worker on the
+	// node from dropping a stale name (sslcollector.lua ingest_dumpall).
+	if !fileOK(p.KeyPath) {
+		return nil, errKeyUnusable
+	}
 	b, err := os.ReadFile(p.CertPath)
 	if err != nil {
 		return nil, err
 	}
 	block, _ := pem.Decode(b)
 	if block == nil {
-		return nil, err
+		// err is nil here (the read succeeded): returning it made Refresh
+		// read Names off a nil entry and panic on any non-PEM cert file.
+		return nil, errNoPEMBlock
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {

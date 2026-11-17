@@ -284,6 +284,75 @@ do
   check(polled, "the boot timer still scheduled the poll loop")
 end
 
+-- ── A worker that has only merged uses its store as the baseline ─────────────
+-- Booted from an incomplete snapshot (or fed by the streamed fallback), it has
+-- taken no payload. Without a baseline the first complete payload replaced
+-- the store however small: a daemon whose scan lost a mount at boot stripped
+-- every worker.
+local function fresh_module()
+  package.loaded["sslcollector"] = nil
+  local lf = loadfile
+  _G.loadfile = function(path)
+    if path == "/var/lib/cfm/lua/cfm_token.lua" then
+      return function() return string.rep("a", 48) end
+    end
+    return lf(path)
+  end
+  local m = require("sslcollector")
+  _G.loadfile = lf
+  return m
+end
+
+do
+  local M2 = fresh_module()
+  local ingest2 = find_upvalue(M2.start_background, "ingest_dumpall")
+  local function n2() local e, w = M2.cert_counts(); return e + w end
+  _G._test_now = 90000
+  ingest2({ version = "m1", complete = false, exact = names("m", 10, "A"), wild = {} }, "snapshot")
+  check(n2() == 10, "m1: the incomplete snapshot is merged into the empty store (got " .. n2() .. ")")
+  ingest2({ version = "m2", complete = true, exact = names("m", 3, "B"), wild = {} }, "dumpall")
+  check(n2() == 10, "m2: a degraded 3-of-10 first complete payload is held (got " .. n2() .. ")")
+
+  -- The wall clock steps back a day: the hold restarts instead of lasting
+  -- a day more.
+  _G._test_now = 90000 - 86400
+  ingest2({ version = "m3", complete = true, exact = names("m", 3, "C"), wild = {} }, "dumpall")
+  check(n2() == 10, "m3: still held after the clock stepped back")
+  _G._test_now = 90000 - 86400 + 3600
+  ingest2({ version = "m4", complete = true, exact = names("m", 3, "D"), wild = {} }, "dumpall")
+  check(n2() == 3, "m4: taken an hour after the step, not a day (got " .. n2() .. ")")
+
+  -- A complete payload of the same size as the merged store replaces.
+  local M3 = fresh_module()
+  local ingest3 = find_upvalue(M3.start_background, "ingest_dumpall")
+  local function n3() local e, w = M3.cert_counts(); return e + w end
+  ingest3({ version = "m5", complete = false, exact = names("m", 10, "A"), wild = {} }, "snapshot")
+  ingest3({ version = "m6", complete = true, exact = names("m", 9, "B"), wild = {} }, "dumpall")
+  check(n3() == 9, "m6: a 9-of-10 complete payload replaces the merged store (got " .. n3() .. ")")
+end
+
+-- ── With resty.core.time the hold runs on the monotonic clock ──────────────
+-- A +2 h NTP step at boot must not end the hold.
+do
+  local mono_ms = 5000000
+  package.loaded["resty.core.time"] = { monotonic_msec = function() return mono_ms end }
+  local M4 = fresh_module()
+  package.loaded["resty.core.time"] = nil
+  local ingest4 = find_upvalue(M4.start_background, "ingest_dumpall")
+  local function n4() local e, w = M4.cert_counts(); return e + w end
+  _G._test_now = 100000
+  ingest4({ version = "t1", complete = true, exact = names("t", 10, "A"), wild = {} }, "dumpall")
+  ingest4({ version = "t2", complete = true, exact = names("t", 3, "B"), wild = {} }, "dumpall")
+  check(n4() == 10, "t2: held")
+  _G._test_now = 100000 + 7200          -- wall clock steps 2 h forward
+  mono_ms = mono_ms + 60 * 1000         -- one real minute
+  ingest4({ version = "t3", complete = true, exact = names("t", 3, "C"), wild = {} }, "dumpall")
+  check(n4() == 10, "t3: a wall-clock step does not end the hold (got " .. n4() .. ")")
+  mono_ms = mono_ms + 3600 * 1000
+  ingest4({ version = "t4", complete = true, exact = names("t", 3, "D"), wild = {} }, "dumpall")
+  check(n4() == 3, "t4: taken after an hour of monotonic time (got " .. n4() .. ")")
+end
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

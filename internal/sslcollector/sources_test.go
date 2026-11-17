@@ -564,3 +564,78 @@ func TestScanMailcowActiveStoreOnly(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildEntryRefusesAnUnusableKey: an entry whose key cannot be read is
+// left out of every /dumpall payload, which then says complete=false, and the
+// edge merges an incomplete payload instead of replacing its store. So a
+// dangling Virtualmin ssl.key symlink (the scanner globs for it and checks
+// only the cert) turned replacement off for the whole node. buildEntry now
+// refuses such a pair, for every source.
+func TestBuildEntryRefusesAnUnusableKey(t *testing.T) {
+	dir := t.TempDir()
+	_, _, certPEM, keyPEM := genTestCert(t, "v.example.gr", nil, nil)
+	cert := filepath.Join(dir, "ssl.cert")
+	if err := os.WriteFile(cert, certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dangling := filepath.Join(dir, "ssl.key")
+	if err := os.Symlink(filepath.Join(dir, "gone.key"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty.key")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	good := filepath.Join(dir, "good.key")
+	if err := os.WriteFile(good, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, k := range []string{dangling, empty, filepath.Join(dir, "missing.key")} {
+		if e, err := buildEntry(Pair{Source: SrcVirtualmin, CertPath: cert, KeyPath: k}, time.Now()); err == nil || e != nil {
+			t.Errorf("buildEntry(key=%s) = %v, %v; want an error", filepath.Base(k), e, err)
+		}
+	}
+	if e, err := buildEntry(Pair{Source: SrcVirtualmin, CertPath: cert, KeyPath: good}, time.Now()); err != nil || e == nil {
+		t.Fatalf("buildEntry(good key) = %v, %v", e, err)
+	}
+
+	// The scanner still finds the dangling pair; Refresh must not index it.
+	vdir := filepath.Join(dir, "home", "u", "domains", "v.example.gr")
+	if err := os.MkdirAll(vdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vdir, "ssl.cert"), certPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(vdir, "gone"), filepath.Join(vdir, "ssl.key")); err != nil {
+		t.Fatal(err)
+	}
+	pairs := scanHomeVirtualmin(filepath.Join(dir, "home"))
+	if len(pairs) != 1 {
+		t.Fatalf("scanHomeVirtualmin: %d pairs, want the dangling one", len(pairs))
+	}
+	if _, err := buildEntry(pairs[0], time.Now()); err == nil {
+		t.Fatal("buildEntry indexed a pair whose ssl.key is a dangling symlink")
+	}
+}
+
+// TestBuildEntryNonPEMCertIsAnError: buildEntry returned (nil, nil) for a
+// cert file with no PEM block, and Refresh then read Names off the nil entry
+// and panicked.
+func TestBuildEntryNonPEMCertIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	_, _, _, keyPEM := genTestCert(t, "x.example.gr", nil, nil)
+	cert := filepath.Join(dir, "x.cert")
+	if err := os.WriteFile(cert, []byte("not a certificate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(dir, "x.key")
+	if err := os.WriteFile(key, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, err := buildEntry(Pair{Source: SrcGeneric, CertPath: cert, KeyPath: key}, time.Now())
+	if err == nil || e != nil {
+		t.Fatalf("buildEntry(non-PEM cert) = %v, %v; want an error", e, err)
+	}
+}

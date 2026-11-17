@@ -179,6 +179,18 @@ local SHRINK_HOLD_SECS  = 3600  -- a shrink this old is taken
 local _last_payload_n   = 0     -- names in the last payload taken (0: none yet)
 local _shrink_since     = 0     -- when the current held shrink was first seen
 
+-- The hold is timed on the monotonic clock: an NTP step at boot (when a
+-- degraded scan is likeliest) must not end it, nor a step back stretch it.
+-- resty.core.time has it from lua-resty-core 0.1.22; without it the wall
+-- clock is used, and a step back restarts the hold rather than stretching it.
+local _mono_ok, _rtime = pcall(require, "resty.core.time")
+local function hold_clock()
+  if _mono_ok and type(_rtime) == "table" and _rtime.monotonic_msec then
+    return math.floor(_rtime.monotonic_msec() / 1000)
+  end
+  return ngx.time()
+end
+
 -- If true, a /dumpall payload without a Version field is a hard reject for
 -- both RAM ingest AND snapshot write. Keep false unless upstream always provides
 -- a version and you want strict enforcement.
@@ -505,15 +517,22 @@ local function ingest_dumpall(data, src)
 
   local mode = "none"
   if okN > 0 then
+    -- The baseline is the last payload taken. A worker that has only merged
+    -- so far (booted from an incomplete snapshot, fed by the streamed
+    -- fallback) has none: its store stands in, or the first complete payload
+    -- would replace it however small.
     local prevN = _last_payload_n
-    local now = ngx.time()
+    if prevN == 0 then
+      for _ in pairs(_store) do prevN = prevN + 1 end
+    end
+    local now = hold_clock()
     local shrunk = prevN >= SHRINK_GUARD_MIN and nextN * 3 < prevN * 2
     if not shrunk then _shrink_since = 0 end
     local hold = false
     if data.complete ~= true then
       mode = "merge_incomplete"
     elseif shrunk then
-      if _shrink_since == 0 then _shrink_since = now end
+      if _shrink_since == 0 or now < _shrink_since then _shrink_since = now end
       hold = (now - _shrink_since) < SHRINK_HOLD_SECS
       mode = hold and "merge_shrink" or "replace"
     else
@@ -791,7 +810,9 @@ local function poll_stats(premature)
     dict:set("meta:last_stats_at", ngx.time(), 0)
 
     local st = json.decode(r.body)
-    if st then
+    -- A table only: indexing a number or string decoded from a bad body threw
+    -- here, ending the poll timer before it rescheduled.
+    if type(st) == "table" then
       local newv = st.Version or st.version or ""
       if newv ~= "" then
         -- Compare against _worker_version, not the shared dict. Each worker

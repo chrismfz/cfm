@@ -95,8 +95,19 @@ these hold:
     next version change or the hourly forced refresh.
   - The baseline is the last payload taken. It is not the store, which a merge
     never shrinks. It is not the last payload seen either, because then a
-    second degraded payload would strip the store.
+    second degraded payload would strip the store. A worker that has only
+    merged so far (booted from an incomplete snapshot) uses its store size,
+    or its first complete payload would replace it however small.
+  - The hold is timed on the monotonic clock (`resty.core.time`, OpenResty
+    1.19.9+), so an NTP step at boot neither ends nor stretches it. Without
+    that module the wall clock is used, and a step back restarts the hold.
   - Stores of fewer than 3 names are not guarded.
+
+The daemon refuses to index a pair whose key file is missing, empty or a
+dangling symlink (`buildEntry`). Such an entry used to be indexed (the
+Virtualmin scanners glob for the key and check only the cert) and then left
+out of every payload, so every payload said `complete: false` and the node
+never replaced its stores.
 
 On top of that:
 
