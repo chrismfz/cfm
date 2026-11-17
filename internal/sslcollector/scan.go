@@ -25,21 +25,27 @@ type Pair struct {
 	ChainPath string
 }
 
+// discoverPairsHook replaces discoverPairs' result in Refresh. Tests only:
+// the scanners read fixed system paths.
+var discoverPairsHook func() []Pair
+
 func (c *Collector) Refresh(ctx context.Context) error {
 	c.refreshCallCount.Add(1)
 	pairs := c.discoverPairs()
+	if discoverPairsHook != nil {
+		pairs = discoverPairsHook()
+	}
 
 	nextExact := map[string]*Entry{}
 	nextWild := map[string]*Entry{}
 	nextFiles := map[string]struct{}{}
 	now := time.Now()
 
-	for _, p := range pairs {
-		e, err := buildEntry(p, now)
-		if err != nil || len(e.Names) == 0 {
-			continue
-		}
+	prev := c.entriesByPair()
+	seen := map[pairKey]bool{}
+	failed := map[pairKey]bool{}
 
+	add := func(e *Entry) {
 		// track known files for stat loop.
 		// ChainPath is included so the 60s statTicker -> anyKnownFileChanged
 		// loop also detects chain-only rotations (eg DA rewriting
@@ -78,10 +84,49 @@ func (c *Collector) Refresh(ctx context.Context) error {
 		}
 	}
 
+	for _, p := range pairs {
+		k := pairKeyOf(p.CertPath, p.KeyPath)
+		seen[k] = true
+		e, err := buildEntry(p, now)
+		if err != nil {
+			// A pair indexed before that fails now keeps its entry for a
+			// while: see buildFailCarry.
+			failed[k] = true
+			old := prev[k]
+			if old == nil || !c.carryOver(k, now) {
+				continue
+			}
+			e = old
+		}
+		if len(e.Names) == 0 {
+			continue
+		}
+		add(e)
+	}
+
+	// An indexed pair the scanners did not find this time, although its cert
+	// file is still there, is carried the same way: most scanners skip an
+	// empty cert file, which is what a truncate-then-write looks like for a
+	// moment. A cert file that is gone (the account or domain removed) drops
+	// the entry at once.
+	for k, old := range prev {
+		if seen[k] {
+			continue
+		}
+		if _, err := os.Lstat(old.CertPath); err != nil {
+			continue
+		}
+		failed[k] = true
+		if c.carryOver(k, now) && len(old.Names) > 0 {
+			add(old)
+		}
+	}
+
 	c.mu.Lock()
 	c.exact = nextExact
 	c.wildSuffix = nextWild
 	c.mu.Unlock()
+	c.forgetBuildFailures(failed)
 
 	c.filesMu.Lock()
 	c.knownFiles = nextFiles
@@ -100,6 +145,66 @@ func (c *Collector) Refresh(ctx context.Context) error {
 	c.refreshedOnce.Store(true)
 
 	return nil
+}
+
+// buildFailCarry: how long an indexed pair that fails to build keeps its
+// previous entry. A cert or key caught mid-rewrite when Refresh runs (a
+// truncate-then-write, an empty key for a moment) used to leave the index at
+// once. The payload is still complete without it, the edge REPLACES its store
+// on a complete payload (sslcollector.lua ingest_dumpall), and the site served
+// the default cert until the next Refresh. Carried, the entry stays in the
+// payload: when its files can be read, they are sent; when they cannot,
+// getPEM skips it and the payload is incomplete, which the edge merges. A pair
+// still failing after this long (a key that became a dangling symlink) leaves
+// the index.
+const buildFailCarry = 10 * time.Minute
+
+// pairKey identifies a cert/key pair across Refreshes.
+type pairKey struct{ cert, key string }
+
+func pairKeyOf(cert, key string) pairKey { return pairKey{absClean(cert), absClean(key)} }
+
+// entriesByPair indexes the current entries by their cert/key pair.
+func (c *Collector) entriesByPair() map[pairKey]*Entry {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[pairKey]*Entry, len(c.exact)+len(c.wildSuffix))
+	for _, m := range []map[string]*Entry{c.exact, c.wildSuffix} {
+		for _, e := range m {
+			if e != nil {
+				out[pairKeyOf(e.CertPath, e.KeyPath)] = e
+			}
+		}
+	}
+	return out
+}
+
+// carryOver reports whether an indexed pair that failed to build at now may
+// keep its previous entry: for buildFailCarry from its first failure.
+func (c *Collector) carryOver(k pairKey, now time.Time) bool {
+	c.carryMu.Lock()
+	defer c.carryMu.Unlock()
+	if c.buildFailSince == nil {
+		c.buildFailSince = map[pairKey]time.Time{}
+	}
+	since, ok := c.buildFailSince[k]
+	if !ok {
+		c.buildFailSince[k] = now
+		return true
+	}
+	return now.Sub(since) < buildFailCarry
+}
+
+// forgetBuildFailures drops the failure clock of every pair that did not fail
+// in this Refresh (it built again, or is no longer discovered).
+func (c *Collector) forgetBuildFailures(failed map[pairKey]bool) {
+	c.carryMu.Lock()
+	defer c.carryMu.Unlock()
+	for k := range c.buildFailSince {
+		if !failed[k] {
+			delete(c.buildFailSince, k)
+		}
+	}
 }
 
 func buildEntry(p Pair, now time.Time) (*Entry, error) {

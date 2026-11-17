@@ -91,7 +91,9 @@ back-filled here — see the git/PR history for that period.
   Virtualmin `ssl.key` symlink was indexed, then left out of every list the
   edge fetches, so every list was marked incomplete and the edge could never
   drop a stale name on that node. A non-PEM cert file made the cert scan
-  panic.
+  panic. A cert or key caught mid-rewrite during a scan now keeps its
+  previous entry for up to 10 minutes instead of leaving the list at once,
+  so the edge does not drop that site's cert while it is being renewed.
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
   it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It

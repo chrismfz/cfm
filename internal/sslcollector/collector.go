@@ -48,6 +48,12 @@ type Collector struct {
 	// tls cache
 	cacheMu   sync.Mutex
 	certCache map[string]cachedCert // normalized host -> cached cert
+
+	// buildFailSince: when an indexed pair first failed to build (a cert or
+	// key caught mid-rewrite), for the carry-over in Refresh. Refresh is not
+	// serialised, hence its own lock.
+	carryMu        sync.Mutex
+	buildFailSince map[pairKey]time.Time
 }
 
 // defaultCacheDir is New's CacheDir when the Config leaves it empty (and the

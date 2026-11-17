@@ -2,6 +2,7 @@ package sslcollector
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -184,14 +185,14 @@ func genTestCert(t *testing.T, cn string, parentPriv *ecdsa.PrivateKey, parentCe
 		t.Fatal(err)
 	}
 	tpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: cn},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		SerialNumber:          big.NewInt(time.Now().UnixNano()),
+		Subject:               pkix.Name{CommonName: cn},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
-		IsCA:         parentPriv == nil,
-		DNSNames:     []string{cn},
+		IsCA:                  parentPriv == nil,
+		DNSNames:              []string{cn},
 	}
 	signer, signerCert := priv, tpl
 	if parentPriv != nil {
@@ -503,7 +504,6 @@ func TestGetCertificateLoadsChain(t *testing.T) {
 	}
 }
 
-
 // TestScanMailcowActiveStoreOnly pins the deliberately narrow Mailcow layout:
 // the active root pair and immediate SNI host pairs are discovered, while ACME
 // account material, backups, deeper trees, and incomplete pairs are ignored.
@@ -637,5 +637,105 @@ func TestBuildEntryNonPEMCertIsAnError(t *testing.T) {
 	e, err := buildEntry(Pair{Source: SrcGeneric, CertPath: cert, KeyPath: key}, time.Now())
 	if err == nil || e != nil {
 		t.Fatalf("buildEntry(non-PEM cert) = %v, %v; want an error", e, err)
+	}
+}
+
+// TestRefreshCarriesAPairCaughtMidRewrite: the edge replaces its cert store
+// on a complete /dumpall payload, so an indexed pair that drops out of the
+// index for a moment (its cert or key caught mid-rewrite) would take the site
+// to the default cert until the next Refresh. Such a pair keeps its entry for
+// buildFailCarry; a cert that is deleted drops at once.
+func TestRefreshCarriesAPairCaughtMidRewrite(t *testing.T) {
+	dir := t.TempDir()
+	_, _, certPEM, keyPEM := genTestCert(t, "carry.example.gr", nil, nil)
+	_, _, gonePEM, goneKeyPEM := genTestCert(t, "gone.example.gr", nil, nil)
+	cert, key := filepath.Join(dir, "c.cert"), filepath.Join(dir, "c.key")
+	gcert, gkey := filepath.Join(dir, "g.cert"), filepath.Join(dir, "g.key")
+	for p, b := range map[string][]byte{cert: certPEM, key: keyPEM, gcert: gonePEM, gkey: goneKeyPEM} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pairs := []Pair{
+		{Source: SrcGeneric, CertPath: cert, KeyPath: key},
+		{Source: SrcGeneric, CertPath: gcert, KeyPath: gkey},
+	}
+	discoverPairsHook = func() []Pair { return pairs }
+	t.Cleanup(func() { discoverPairsHook = nil })
+
+	c := New(Config{})
+	ctx := context.Background()
+	has := func(h string) bool { return c.EntryForHost(h) != nil }
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") || !has("gone.example.gr") {
+		t.Fatal("setup: both hosts indexed")
+	}
+
+	// The key is truncated mid-rewrite (buildEntry fails), and the other
+	// pair's cert is deleted (the scanner no longer finds it).
+	if err := os.WriteFile(key, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(gcert); err != nil {
+		t.Fatal(err)
+	}
+	pairs = pairs[:1]
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") {
+		t.Fatal("a pair caught mid-rewrite left the index at once")
+	}
+	if has("gone.example.gr") {
+		t.Fatal("a deleted cert was carried")
+	}
+
+	// The cert itself is empty for a moment: scanners skip an empty cert,
+	// so the pair is not discovered at all. Still carried: its file exists.
+	if err := os.WriteFile(cert, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pairs = nil
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") {
+		t.Fatal("an undiscovered pair whose cert file still exists left the index at once")
+	}
+
+	// Past buildFailCarry it goes.
+	c.carryMu.Lock()
+	for k := range c.buildFailSince {
+		c.buildFailSince[k] = time.Now().Add(-buildFailCarry - time.Second)
+	}
+	c.carryMu.Unlock()
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if has("carry.example.gr") {
+		t.Fatal("a pair failing for longer than buildFailCarry was still carried")
+	}
+
+	// Rewritten: indexed again, and the failure clock is forgotten.
+	if err := os.WriteFile(cert, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pairs = []Pair{{Source: SrcGeneric, CertPath: cert, KeyPath: key}}
+	if err := c.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !has("carry.example.gr") {
+		t.Fatal("the rewritten pair is not indexed")
+	}
+	c.carryMu.Lock()
+	n := len(c.buildFailSince)
+	c.carryMu.Unlock()
+	if n != 0 {
+		t.Fatalf("failure clocks left after recovery: %d", n)
 	}
 }

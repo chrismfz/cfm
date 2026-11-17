@@ -353,6 +353,21 @@ do
   check(n4() == 3, "t4: taken after an hour of monotonic time (got " .. n4() .. ")")
 end
 
+-- ── A resty.core.time whose monotonic_msec throws falls back, not aborts ────
+-- It is called after the new store is built; an error there would abort every
+-- ingest, and the worker would never take a payload again.
+do
+  package.loaded["resty.core.time"] = { monotonic_msec = function() error("ffi: missing symbol") end }
+  local M5 = fresh_module()
+  package.loaded["resty.core.time"] = nil
+  local ingest5 = find_upvalue(M5.start_background, "ingest_dumpall")
+  local function n5() local e, w = M5.cert_counts(); return e + w end
+  local ok, err = pcall(ingest5, { version = "x1", complete = true,
+    exact = names("x", 5, "A"), wild = {} }, "dumpall")
+  check(ok, "an ingest survives a throwing monotonic_msec (" .. tostring(err) .. ")")
+  check(n5() == 5, "x1: the payload was taken (got " .. n5() .. ")")
+end
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

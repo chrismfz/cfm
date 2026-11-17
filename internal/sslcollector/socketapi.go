@@ -225,8 +225,9 @@ func (s *sockServer) handleDumpAll(w http.ResponseWriter, r *http.Request) {
 		return // the worker is gone
 	}
 	// No room for a temp file (a full /var): stream it to the worker as it
-	// is written, one at a time. Its counts stay 0 — the edge does not read
-	// them.
+	// is written, one at a time. Its counts stay 0 and `complete` false: the
+	// edge reads no counts, and merges an incomplete payload into its store
+	// rather than replacing it, so this path never drops a stale name.
 	logging.Logf("[sslcollector] /dumpall: temp build failed (%v); streaming the payload", err)
 	s.col.built.stream.Lock()
 	defer s.col.built.stream.Unlock()

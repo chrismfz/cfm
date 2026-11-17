@@ -186,7 +186,14 @@ local _shrink_since     = 0     -- when the current held shrink was first seen
 local _mono_ok, _rtime = pcall(require, "resty.core.time")
 local function hold_clock()
   if _mono_ok and type(_rtime) == "table" and _rtime.monotonic_msec then
-    return math.floor(_rtime.monotonic_msec() / 1000)
+    -- pcall: a resty.core that loads but cannot resolve the FFI symbol
+    -- would otherwise throw here, after the store was built, on every
+    -- ingest, and the worker would never take a payload again.
+    local ok, ms = pcall(_rtime.monotonic_msec)
+    if ok and type(ms) == "number" then
+      return math.floor(ms / 1000)
+    end
+    _mono_ok = false
   end
   return ngx.time()
 end
@@ -465,54 +472,42 @@ local function ingest_dumpall(data, src)
     end
   end
 
-  for _, it in ipairs(exact_list) do
-    local host     = normalize_name(it.host or it.Host)
-    local cert_pem = it.cert_pem or it.cert or it.CertPEM
-    local key_pem  = it.key_pem  or it.key  or it.KeyPEM
-
-    if host ~= "" and cert_pem and key_pem then
-      local had = next_store["e:" .. host] ~= nil
-      local ok, e = store_pair(next_store, "e:", host, cert_pem, key_pem)
+  -- One payload entry into next_store. kind is "exact"/"wild" (log words),
+  -- name the normalized host or suffix, raw the payload's own field for the
+  -- skip log line.
+  local function ingest_one(prefix, kind, name, raw, cert_pem, key_pem)
+    local key = prefix .. name
+    if name ~= "" and cert_pem and key_pem then
+      local had = next_store[key] ~= nil
+      local ok, e = store_pair(next_store, prefix, name, cert_pem, key_pem)
       if ok then
         okN = okN + 1
         if not had then nextN = nextN + 1 end
       else
         failN = failN + 1
-        keep_old("e:" .. host)
-        ngx.log(ngx.WARN, "[sslcollector] store exact fail host=", host, " err=", e)
+        keep_old(key)
+        ngx.log(ngx.WARN, "[sslcollector] store ", kind, " fail ",
+          kind == "exact" and "host=" or "suffix=", name, " err=", e)
       end
     else
       failN = failN + 1
-      if host ~= "" then keep_old("e:" .. host) end
-      ngx.log(ngx.WARN, "[sslcollector] skip exact host=",
-        tostring(host ~= "" and host or (it.host or it.Host or "?")),
-        " reason=missing_host_or_pem")
+      if name ~= "" then keep_old(key) end
+      ngx.log(ngx.WARN, "[sslcollector] skip ", kind, " ",
+        kind == "exact" and "host=" or "suffix=",
+        tostring(name ~= "" and name or (raw or "?")),
+        kind == "exact" and " reason=missing_host_or_pem" or " reason=missing_suffix_or_pem")
     end
   end
 
+  for _, it in ipairs(exact_list) do
+    local raw = it.host or it.Host
+    ingest_one("e:", "exact", normalize_name(raw), raw,
+      it.cert_pem or it.cert or it.CertPEM, it.key_pem or it.key or it.KeyPEM)
+  end
   for _, it in ipairs(wild_list) do
-    local suf      = normalize_name(it.suffix or it.Suffix)
-    local cert_pem = it.cert_pem or it.cert or it.CertPEM
-    local key_pem  = it.key_pem  or it.key  or it.KeyPEM
-
-    if suf ~= "" and cert_pem and key_pem then
-      local had = next_store["w:" .. suf] ~= nil
-      local ok, e = store_pair(next_store, "w:", suf, cert_pem, key_pem)
-      if ok then
-        okN = okN + 1
-        if not had then nextN = nextN + 1 end
-      else
-        failN = failN + 1
-        keep_old("w:" .. suf)
-        ngx.log(ngx.WARN, "[sslcollector] store wild fail suffix=", suf, " err=", e)
-      end
-    else
-      failN = failN + 1
-      if suf ~= "" then keep_old("w:" .. suf) end
-      ngx.log(ngx.WARN, "[sslcollector] skip wild suffix=",
-        tostring(suf ~= "" and suf or (it.suffix or it.Suffix or "?")),
-        " reason=missing_suffix_or_pem")
-    end
+    local raw = it.suffix or it.Suffix
+    ingest_one("w:", "wild", normalize_name(raw), raw,
+      it.cert_pem or it.cert or it.CertPEM, it.key_pem or it.key or it.KeyPEM)
   end
 
   local mode = "none"
@@ -618,6 +613,17 @@ local function load_from_snapshot()
   end
 
   ingest_dumpall(data, "snapshot")
+end
+
+-- load_from_snapshot under pcall. Both callers are timers whose later steps
+-- (the fetch, the poll reschedule) must run: an error in the snapshot ingest
+-- ended them, and the worker never fetched or polled again.
+local function safe_load_snapshot()
+  local ok, err = pcall(load_from_snapshot)
+  if not ok then
+    ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(err))
+    set_last_error("snapshot load: " .. tostring(err))
+  end
 end
 
 -- ---------------------------------------------------------------------------
@@ -793,13 +799,7 @@ local function poll_stats(premature)
   -- without a retry the worker stays empty until /stats first succeeds.
   -- Cheap: io.open + JSON decode of a ~few-hundred-KB file. Idempotent.
   if _worker_last_dumpall == 0 then
-    -- pcall: an error here would end this timer before it reschedules, and
-    -- the worker would never refresh again.
-    local sok, serr = pcall(load_from_snapshot)
-    if not sok then
-      ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(serr))
-      set_last_error("snapshot load: " .. tostring(serr))
-    end
+    safe_load_snapshot()
   end
 
   local r, err = sock_get("/stats")
@@ -906,13 +906,8 @@ function M.start_background()
   local ok, e = ngx.timer.at(0, function(premature)
     if premature then return end
 
-    -- 1) Warm RAM from disk snapshot. pcall: an error must not stop steps
-    --    2 and 3, or the worker never fetches nor polls.
-    local sok, serr = pcall(load_from_snapshot)
-    if not sok then
-      ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(serr))
-      set_last_error("snapshot load: " .. tostring(serr))
-    end
+    -- 1) Warm RAM from disk snapshot.
+    safe_load_snapshot()
 
     -- 2) Attempt live dumpall immediately.
     --    Sets meta:last_dumpall_attempt_at + meta:last_dumpall_at (on success)

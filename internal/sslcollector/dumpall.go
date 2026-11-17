@@ -101,7 +101,10 @@ const payloadCountWidth = 10
 // entries, so readSnapshotHeader can take them off the front of a ~110 MB
 // file; they are written as padded placeholders and filled in through at
 // once the entries are out. With at nil they stay 0 / false (a payload
-// streamed to a worker, which reads neither).
+// streamed to a worker). The edge reads no counts, but it does read
+// `complete`: only a complete payload replaces a worker's cert store; any
+// other is merged into it (configs/lua/sslcollector.lua ingest_dumpall), so a
+// streamed payload never drops a stale name.
 //
 // The payload used to be built whole in memory (a map per entry, a buffer
 // for the JSON and the encoder's own copy of it): about four times its size
@@ -274,7 +277,7 @@ func (c *Collector) writePayload(w io.Writer, at io.WriterAt) (payloadResult, er
 		}{completeAt, "true "})
 	}
 	if at == nil {
-		return res, nil // streamed to a client: the edge reads no counts
+		return res, nil // streamed: complete stays false, and the edge merges it
 	}
 	for _, p := range patches {
 		if _, err := at.WriteAt([]byte(p.b), int64(p.off)); err != nil {
@@ -415,8 +418,9 @@ func (c *Collector) dumpAllBuilt(ctx context.Context) (*builtPayload, func(), er
 	// Reused only when complete and under the version it was built for. A
 	// payload built across an index swap carries the older label and is not
 	// complete; one that lost an entry to a transient PEM read error is not
-	// complete either — shared with every worker, the gap would stay until
-	// the next version change (the edge does not read `complete`).
+	// complete either. Not reused: shared with every worker, it would keep
+	// them merging (the edge replaces its store only on a complete payload)
+	// until the next version change.
 	if res.Complete && res.Version == ver {
 		b.retire(b.cur)
 		b.cur = bp

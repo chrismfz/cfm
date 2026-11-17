@@ -109,6 +109,16 @@ Virtualmin scanners glob for the key and check only the cert) and then left
 out of every payload, so every payload said `complete: false` and the node
 never replaced its stores.
 
+A pair that was indexed and drops out for a moment keeps its entry for 10
+minutes (`buildFailCarry`, `Refresh`). This covers a cert or key caught
+mid-rewrite, and an indexed cert file the scanners skip because it is empty
+for a moment. Without the carry, the payload is still complete without that
+pair, the edge replaces its store, and the site serves the default cert
+until the next Refresh. While carried, the entry's files are read again at
+payload time. When they can be read, they are sent. When they cannot, the
+payload is incomplete and the edge merges it. A cert file that is gone (the
+account or domain was removed) drops the entry at once.
+
 On top of that:
 
 - A payload entry whose PEM is missing or does not parse keeps the worker's
