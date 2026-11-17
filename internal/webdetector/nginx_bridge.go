@@ -273,7 +273,17 @@ type NginxBridge struct {
 	edgeBanJournal edgeBanJournal
 }
 
-func (b *NginxBridge) SetEnricher(e *enrich.Enricher) { b.enr = e }
+func (b *NginxBridge) SetEnricher(e *enrich.Enricher) {
+	b.enr = e
+	// The proxied IP filter's log line names the client's country and ASN
+	// (the bridge is where its verdict is asked).
+	if e != nil {
+		proxyipfilter.SetGeo(func(ip string) (string, uint, string) {
+			r := e.LookupGeoFast(ip)
+			return r.CountryISO, r.ASN, r.ASNName
+		})
+	}
+}
 
 // refreshSkew is the minimum remaining time before we bother to re-push
 // an already-active decision (to avoid log spam / needless socket traffic).
