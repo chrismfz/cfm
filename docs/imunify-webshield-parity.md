@@ -106,16 +106,30 @@ So a scanner another node caught is stopped on every node for direct traffic
 and on none for Cloudflare traffic. The same holds on titan, rigel and orion,
 which have run CFM first all along.
 
-- **Source:** the feed content the daemon already fetches and applies (the
-  same parse that fills `block_ext_v4_hosts`), kept in memory as a lookup for
-  the bridge. Not copied into `edgeban` and not streamed to the edge's
-  `cfm_edgeban.lua` copy: 268 k entries would bloat the 5 s change feed, and
-  `edgeban`'s narrowing reconcile assumes it holds web bans only.
-- **Where:** `writeEdgeBan` (bridge decision, `px=1`, web scope): blocked when
-  the real client is in the edge ban store **or** in the fleet blacklist.
-  The bridge answer is what cfm.lua enforces; requests the edge answers from
-  its decision cache or its static locations without asking the bridge are
-  covered once the first decision for the client is `block`.
+- **No list in Lua.** 268 k addresses in a shared dict or in the workers is
+  the regression already ruled out; the edge copy of `edgeban` is capped at
+  20 k (`lua_shared_dict cfm_edgeban 16m`, two copies of the daemon's cap).
+- **Lookup in the bridge (Go):** the daemon keeps the feed it already fetches
+  for `block_ext_v4_hosts` as an in-memory lookup (sorted `[]uint32` for v4:
+  ~1 MB, a binary search per query; v6 apart). `writeEdgeBan` (bridge
+  decision, `px=1`, web scope) answers `block` when the real client is in the
+  edge ban store **or** in the fleet list. No new RPC: the edge asks the bridge
+  for every request it has no cached clean allow for, and a `block` is never
+  cached, so a listed client meets the lookup on every page and `.php`
+  request (the `.php` / `wp-admin` location runs cfm.lua).
+- **What the bridge does not see:** the static location (css/js/images, which
+  checks only the edge copy) and URLs a client warmed with a clean allow in the
+  last 90 s before it was listed.
+- **Promote on hit, bounded:** on a `block` answered from the fleet list, the
+  address also goes to `edgeban` (source `fleet`, TTL = the feed entry's
+  expiry, at most a few hours), so within ~5 s the edge copy covers the static
+  location and the cached URLs too. Only addresses that actually show up are
+  promoted, not the list; a quota (e.g. 5 k of the 20 k) keeps them from ever
+  pushing the node's own web bans out, and past it the bridge alone enforces.
+  The fleet unblock path (`pending-unblocks`) must `edgeban.Unban` them.
+  Size check from earth: the 62 Imunify-blacklisted IPs that hit through
+  Cloudflare drove 14 690 requests in ~4 h, so a day's promotions are in the
+  hundreds, not thousands; the `log` phase measures it fleet-wide first.
 - **Precedence:** IGNORE_IPS, the static bypass and every allow (the fleet
   whitelist `MYALLOW` included) win, as they do in nft.
 - **Rollout:** a `[webdetector]` mode `log | enforce | off` (log first:
