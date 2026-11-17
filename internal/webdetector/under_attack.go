@@ -441,6 +441,14 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 	if t == nil || host == "" {
 		return
 	}
+	// Serialized with ForceVhostAttackAs for the whole tracker+record change
+	// (lock order attackOpMu -> t.mu, as there): an `attack on` either lands
+	// before (its tracker override and record both dropped here) or after
+	// (both dropped on the next tick). The mutex is per Engine: during a
+	// reload the old Engine's API and the new one's tick are not serialized
+	// (the next tick converges).
+	e.attackOpMu.Lock()
+	defer e.attackOpMu.Unlock()
 	t.mu.Lock()
 	st := t.hosts[host]
 	if st == nil || (!st.on && st.override == 0) {
@@ -473,14 +481,7 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 	// never reaches here while that arm covers the vhost: a manual challenge
 	// wins over them, keepManualOverSuppression.)
 	if hadOverride {
-		// Serialized with ForceVhostAttackAs, which persists the record
-		// before setting the tracker: an `attack on` racing this tick either
-		// finishes first (dropped here) or lands after (dropped next tick).
-		// The mutex is per Engine: during a reload the old Engine's API and
-		// the new one's tick are not serialized (the next tick converges).
-		e.attackOpMu.Lock()
 		e.dropAttackOverride(host, "")
-		e.attackOpMu.Unlock()
 	}
 
 	if wasOn {

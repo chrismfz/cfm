@@ -306,7 +306,7 @@ export const controlsMixin = {
         if (on) {
           const until = res?.expires_at ? ` until ${new Date(res.expires_at).toLocaleString()}` : "";
           let msg = `Forced UNDER_ATTACK for ${host}${until}`;
-          if (res?.ttl_clipped) msg += " (cut to the manual challenge already on it: extend that challenge, then force it again, to hold longer)";
+          if (res?.ttl_clipped) msg += ` (cut to the manual challenge already on it: to hold longer, extend that challenge, then run "cfm webtop attack on ${host}")`;
           else if (res?.ttl_capped) msg += " (capped to the 24h customer limit)";
           if (res?.tier?.rung) msg += `; verify tier ${res.tier.rung}`;
           this.actionMsg = msg;

@@ -801,9 +801,8 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// The override's arm and the confirm step match hosts exactly: a wildcard
-	// would challenge every matching vhost and confirm on none. (`off` stays
-	// allowed, to clear one an earlier build accepted.)
-	if on && strings.Contains(host, "*") {
+	// would challenge every matching vhost and confirm on none.
+	if strings.Contains(host, "*") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wildcard hosts are not supported: name the vhost"})
 		return
 	}

@@ -337,15 +337,12 @@ func (e *Engine) ForceVhostAttackAs(host string, on bool, ttl time.Duration, act
 	if hadPrev {
 		ent.Announced, ent.Since = prev.Announced, prev.Since
 	}
-	if on, since := e.vhostAttackOnSince(host); on && !ent.Announced {
-		// Already UNDER_ATTACK (automatic entry, alerted): no ON transition
-		// will come for this override, so it is announced as of then.
-		ent.Announced, ent.Since = true, since
-	}
 	e.attackOverrides.set(ent)
 	e.SetVhostAttackOverride(host, true, now, ttl)
-	// An automatic entry that landed between the check above and the
-	// override sends no forced ON either: announced as of then.
+	// Already UNDER_ATTACK (an automatic entry, alerted, before or during
+	// this call): no forced ON transition will come for this override, so it
+	// is announced as of then. Checked after the override, so an automatic
+	// entry racing it is seen too.
 	if on, since := e.vhostAttackOnSince(host); on {
 		e.attackOverrides.markAnnounced(host, since)
 	}

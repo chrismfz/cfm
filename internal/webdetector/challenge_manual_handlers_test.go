@@ -437,6 +437,7 @@ func TestAttackOverrideRefusesWildcardAndBypassed(t *testing.T) {
 		code int
 	}{
 		{"host=*.example.com&on=1", http.StatusBadRequest},
+		{"host=*.example.com&on=0", http.StatusBadRequest},
 		{"host=allowed.example.com&on=1", http.StatusConflict},
 		{"host=allowed.example.com.&on=1", http.StatusConflict},
 	} {
