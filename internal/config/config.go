@@ -409,19 +409,21 @@ func (c *Config) SetDefaults() {
 	}
 	// Editions: no hard default; user may choose ASN or City or both
 
-	// THROTTLE_MODE: unset means "permanent"; an unrecognised value means a
-	// bounded block (THROTTLE_TTL), with a warning. It used to fall back to
+	// THROTTLE_MODE: unset, or an unrecognised value (with a warning), means
+	// a bounded block of THROTTLE_TTL (default 72h). Both used to mean
 	// "permanent", and the reference cfm.conf shipped THROTTLE_MODE = "tlt"
 	// (for "ttl"), so every throttle autoblock (syn, portflood, connlimit, …)
-	// was a permanent ban, written to cfm.deny and reported to the API. The
-	// cfm-admin login brute-force autoblock follows this mode too.
+	// was a permanent ban, written to cfm.deny and reported to the API: Meta's
+	// link-preview proxies sat in cfm.deny for months (2026). A permanent ban
+	// is the operator's explicit THROTTLE_MODE = "permanent". The cfm-admin
+	// login brute-force autoblock follows this mode too.
 	if c.Throttle.TTLSeconds == 0 {
-		c.Throttle.TTLSeconds = 24 * 3600
+		c.Throttle.TTLSeconds = 72 * 3600
 	}
 	c.Throttle.Mode = strings.ToLower(strings.TrimSpace(c.Throttle.Mode))
 	switch c.Throttle.Mode {
 	case "":
-		c.Throttle.Mode = "permanent"
+		c.Throttle.Mode = "ttl"
 	case "permanent", "ttl", "dryrun", "alert":
 	default:
 		if _, seen := throttleModeWarned.LoadOrStore(c.Throttle.Mode, true); !seen {

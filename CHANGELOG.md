@@ -17,6 +17,17 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Changed
+- **Flood autoblocks are a 72 h ban by default, never permanent unless you
+  ask.** A `cfm.conf` with no `THROTTLE_MODE` line (or a blank one) used to
+  make every syn / portflood / pps / connlimit / new / icmp autoblock, and
+  the cfm-admin login brute-force autoblock, a PERMANENT ban: written to
+  `cfm.deny` and reported to the fleet API. It is now `ttl`, and
+  `THROTTLE_TTL` defaults to 72 h (was 24 h; the reference `cfm.conf` ships
+  `"259200"`). `THROTTLE_MODE = "permanent"` still means permanent. Existing
+  confs keep their own lines: an upgrade does not rewrite `/etc/cfm/cfm.conf`,
+  so a node that says `permanent` stays permanent until you edit it.
+
 ### Fixed
 - **The L4 flood autoblock no longer bans verified crawlers and Meta's
   link-preview proxies.** Meta's `fwdproxy-*.fbsv.net` addresses (Facebook
