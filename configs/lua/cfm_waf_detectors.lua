@@ -1049,7 +1049,11 @@ local function is_od_url_metrics(uri, args)
   local u = lower(uri or "")
   local pre = u:match("^(.-)/wp%-json" .. OD_ROUTE:gsub("%-", "%%-") .. "/?$")
   if pre and (pre == "" or pre:match("^/[%w_%-]+$")) then return true end
-  if not (u == "/" or u == "/index.php" or u:match("^/[%w_%-]+/?$") or u:match("^/[%w_%-]+/index%.php$")) then
+  -- ?rest_route= only on the front controller (a WordPress language prefix
+  -- such as /en/ or /pt-br/ allowed): on another app's /login it routes nothing.
+  local lang = u:match("^/(%a%a)/") or u:match("^/(%a%a%-%a%a)/")
+  local rest = lang and u:sub(#lang + 2) or u
+  if not (rest == "/" or rest == "/index.php" or (lang and rest == "")) then
     return false
   end
   local rr = ("&" .. (args or "")):match("&rest_route=([^&]*)")
@@ -3811,6 +3815,23 @@ end
 -- Source: uusec xxe-attack.lua.
 -- Only scans XML / form-encoded / text bodies.  Checks for SYSTEM or PUBLIC
 -- entity declarations which are the canonical XXE primitives.
+-- An external entity declaration in the body (lowercased, capped): the
+-- `<!ENTITY name SYSTEM "…">` / `<!ENTITY name PUBLIC "…" "…">` (or a
+-- parameter entity `<!ENTITY % name SYSTEM …>`) an XXE needs. Rule 307 blocks
+-- only on this; its looser matches stay at challenge_v2.
+function _M.xxe_external_entity(body)
+  if not body or body == "" then return false end
+  local bl = lower(cap(body, CFG.max_scan_len))
+  local init = 1
+  while true do
+    local s, e = bl:find("<!entity", init, true)
+    if not s then return false end
+    local decl = bl:sub(e + 1, e + 400):match("^[^>]*")
+    if decl:find("%s+system%s*[\"']") or decl:find("%s+public%s*[\"']") then return true end
+    init = e + 1
+  end
+end
+
 function _M.detect_xxe(body, headers)
   if not body or body == "" then return nil end
 

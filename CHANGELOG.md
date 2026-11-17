@@ -72,6 +72,13 @@ back-filled here — see the git/PR history for that period.
     WP Project Manager). 438 is armed with `WAF_BACKDOOR`. 303 and 307 keep
     their bans held (`RULE_303 = 0`: ~830 bans and alerts a day armed;
     `RULE_307 = 0` through a burn-in).
+  - What stays below block: 303's `constructor` + `.prototype` leg (plain
+    JavaScript source carries it; all the measured hits were `__proto__`)
+    and a 307 match without an external entity declaration
+    (`<!ENTITY x SYSTEM|PUBLIC "…">`; an Illustrator SVG's internal
+    entities matched the old test) stay challenge_v2. 416 skips a PUT /
+    PATCH on a cPanel Web Disk host (`webdisk.<domain>`), the customer's
+    own WebDAV upload, as it skips Nextcloud's `/remote.php/`.
   - The held block rules (303, 307, 416) now run after every armed block
     rule, so a request that also carries an armed payload keeps that rule's
     ban and alert.

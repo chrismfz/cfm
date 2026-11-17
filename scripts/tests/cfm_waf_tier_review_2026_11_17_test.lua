@@ -87,6 +87,17 @@ do
   check(r.rule_id == 301 and r.action == "block", "416 + 301: the armed 301 keeps the headline (" .. show(r) .. ")")
 end
 
+-- 416 vs the armed CVE rules that run between its old (60e) and new place:
+-- a `<?php`-prefixed lost-password POST carrying TranslatePress's
+-- trp-edit-translation is 10018's (armed), not 416's (held).
+do
+  local r = run{ method = "POST", uri = "/wp-login.php", args = "action=lostpassword",
+                 ct = "application/x-www-form-urlencoded",
+                 body = "<?php=1&user_login=admin&trp-edit-translation=preview&redirect_to=" }
+  check(r.ids["10018"] == "block", "premise: 10018 fires (" .. show(r) .. ")")
+  check(r.rule_id == 10018, "416 + 10018: the armed 10018 keeps the headline (" .. show(r) .. ")")
+end
+
 -- Each held rule alone still blocks.
 do
   local r = run{ method = "POST", ct = "text/plain;charset=UTF-8",
@@ -95,6 +106,35 @@ do
   r = run{ method = "POST", ct = "application/xml",
            body = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><x>&e;</x>' }
   check(r.rule_id == 307 and r.action == "block", "307 alone blocks (" .. show(r) .. ")")
+  r = run{ method = "POST", ct = "application/xml",
+           body = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY % p PUBLIC "x" "http://203.0.113.5/e.dtd">%p;]><r/>' }
+  check(r.rule_id == 307 and r.action == "block", "307: a PUBLIC parameter entity blocks (" .. show(r) .. ")")
+  -- An Illustrator SVG: DOCTYPE PUBLIC, internal entities only. Not a block.
+  r = run{ method = "POST", uri = "/wp-json/wp/v2/media", ct = "image/svg+xml",
+           body = '<?xml version="1.0"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [<!ENTITY ns_extend "http://ns.adobe.com/Extensibility/1.0/">]><svg systemLanguage="en"/>' }
+  check(r.ids["307"] == "challenge_v2", "307 on an Illustrator SVG stays challenge_v2 (" .. tostring(r.ids["307"]) .. ")")
+  -- 303's constructor + .prototype leg stays challenge_v2.
+  r = run{ method = "POST", uri = "/wp-json/custom/v1/save", ct = "application/json",
+           body = '{"js":"function F(){}; F.prototype.x = 1; var c = o.constructor;"}' }
+  check(r.ids["303"] == "challenge_v2", "303 JS_PROTO_CONSTRUCTOR stays challenge_v2 (" .. tostring(r.ids["303"]) .. ")")
+  -- 416: a cPanel Web Disk PUT of a .php file is the customer's own upload.
+  do
+    local hit, _, _, _, hits = waf.check({ uri = "/public_html/index.php", args = "", method = "PUT",
+      raw_uri = "/public_html/index.php", host = "webdisk.example.gr", ip = "198.51.100.9",
+      body = "<?php echo 1;", cookie = "",
+      headers = { host = "webdisk.example.gr", ["user-agent"] = "Microsoft-WebDAV-MiniRedir/10.0.19045",
+                  ["content-type"] = "application/octet-stream" } })
+    local saw416 = false
+    for _, h in ipairs(hits or {}) do if h.waf_rule_id == 416 then saw416 = true end end
+    check(not saw416, "416 skips a Web Disk PUT")
+    hit, _, _, _, hits = waf.check({ uri = "/public_html/index.php", args = "", method = "POST",
+      raw_uri = "/public_html/index.php", host = "webdisk.example.gr", ip = "198.51.100.9",
+      body = "<?php echo 1;", cookie = "",
+      headers = { host = "webdisk.example.gr", ["content-type"] = "application/octet-stream" } })
+    saw416 = false
+    for _, h in ipairs(hits or {}) do if h.waf_rule_id == 416 then saw416 = true end end
+    check(saw416, "416 still reads a POST on a Web Disk host")
+  end
   r = run{ method = "POST", uri = "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
            ct = "application/x-www-form-urlencoded", body = "<?php echo(md5(\"Hello PHPUnit\"));" }
   check(r.rule_id == 416 and r.action == "block", "416 alone blocks: the PHPUnit sweep (" .. show(r) .. ")")
@@ -206,6 +246,10 @@ do
           "/") == true, "a rest_route that only starts with the route is still checked")
   check(det.detect_ctrl_chars("q=rest_route=/optimization-detective/v1/url-metrics:store", ctl, h,
           "/") == true, "the string inside another field's value is still checked")
+  check(det.detect_ctrl_chars("rest_route=/optimization-detective/v1/url-metrics:store", ctl, h,
+          "/login") == true, "rest_route on another app's /login is still checked")
+  check(det.detect_ctrl_chars("rest_route=/optimization-detective/v1/url-metrics:store", ctl, h,
+          "/en/") == false, "rest_route under a language prefix")
 end
 
 if fails > 0 then

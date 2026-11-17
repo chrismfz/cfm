@@ -2744,6 +2744,10 @@ local function check_impl(ctx, st)
     local mode = rule_mode(CFG.rule_js_proto, "logonly")
     if mode ~= "disabled" then
       local tag = det.detect_js_proto(args, body, get_norm_ab())
+      -- Only the __proto__ leg was measured (all 18 917 burn-in hits): the
+      -- constructor + .prototype leg is ordinary JavaScript source too, so it
+      -- stays at challenge_v2 under a block mode.
+      if tag == "JS_PROTO_CONSTRUCTOR" and mode == "block" then mode = "challenge_v2" end
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_JS_PROTO:" .. tag, ttl, mode, RULE_IDS.rule_js_proto) then goto done end
@@ -2759,6 +2763,11 @@ local function check_impl(ctx, st)
     local mode = rule_mode(CFG.rule_xxe, "logonly")
     if mode ~= "disabled" and body_inspect_ok then
       local tag = det.detect_xxe(body, headers)
+      -- The detector is loose (a DOCTYPE and the word `system` anywhere; an
+      -- ENTITY and `public` anywhere): an Illustrator SVG's internal
+      -- entities match it. A block needs an external entity declaration
+      -- (`<!ENTITY x SYSTEM "…">` / `PUBLIC "…"`); the rest stays challenge_v2.
+      if tag and mode == "block" and not det.xxe_external_entity(body) then mode = "challenge_v2" end
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
@@ -2777,9 +2786,12 @@ local function check_impl(ctx, st)
   -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
   -- /remote.php/webdav): a sync client uploads a user's .php files there
   -- as their raw body.
+  -- Nor a PUT / PATCH on a cPanel Web Disk host (webdisk.<domain>, Apache to
+  -- cpdavd): the customer's own WebDAV client uploads their .php files.
   do
     local mode = rule_mode(CFG.rule_php_file_body, "logonly")
-    local webdav = (m_lower ~= "post") and lower(uri or ""):find("/remote%.php/") ~= nil
+    local webdav = (m_lower ~= "post") and (lower(uri or ""):find("/remote%.php/") ~= nil
+      or lower(ctx.host or ""):find("^webdisk%.") ~= nil)
     if mode ~= "disabled" and (body or "") ~= "" and not webdav
        and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
       local tag = det.detect_php_file_body(body, headers)
