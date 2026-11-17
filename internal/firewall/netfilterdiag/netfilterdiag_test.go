@@ -303,3 +303,42 @@ func hasFinding(r Report, code string) bool {
 	}
 	return false
 }
+
+// earth before 2026-11-17: Imunify360's iptables-nft chain at -100 (reached by
+// a jump from PREROUTING) DNATs Cloudflare's ranges to WebShield ahead of CFM's
+// web redirect at the -99 default.
+const imunifyAheadFixture = `{"nftables":[
+ {"chain":{"family":"ip","table":"nat","name":"PREROUTING","type":"nat","hook":"prerouting","prio":-100,"policy":"accept","handle":1}},
+ {"chain":{"family":"ip","table":"nat","name":"INPUT_imunify360","handle":2}},
+ {"chain":{"family":"inet","table":"cfm_redirect","name":"prerouting","type":"nat","hook":"prerouting","prio":-99,"policy":"accept","handle":3}},
+ {"rule":{"family":"ip","table":"nat","chain":"PREROUTING","handle":10,"expr":[{"counter":{"packets":0,"bytes":0}},{"jump":{"target":"INPUT_imunify360"}}]}},
+ {"rule":{"family":"ip","table":"nat","chain":"INPUT_imunify360","handle":11,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":2083}},{"dnat":{"port":52229}}]}},
+ {"rule":{"family":"ip","table":"nat","chain":"INPUT_imunify360","handle":12,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"port":52223}}]}},
+ {"rule":{"family":"inet","table":"cfm_redirect","chain":"prerouting","handle":13,"expr":[{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":443}},{"dnat":{"port":9043}}]}}
+]}`
+
+func TestWebDNATAhead(t *testing.T) {
+	r, err := Analyze([]byte(imunifyAheadFixture), Expected{InputPriority: -50, DNATPriority: -99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prio, found, ahead := WebDNATAhead(r)
+	if !found || prio != -99 || len(ahead) != 1 || ahead[0].Owner != "imunify" || ahead[0].Target != "port=52223" {
+		t.Fatalf("prio=%d found=%v ahead=%+v", prio, found, ahead)
+	}
+	// CFM first (-101): nothing ahead. The panel-port rule never counted.
+	r, _ = Analyze([]byte(strings.Replace(imunifyAheadFixture, `"prio":-99`, `"prio":-101`, 1)), Expected{})
+	if _, found, ahead := WebDNATAhead(r); !found || len(ahead) != 0 {
+		t.Fatalf("CFM first: found=%v ahead=%+v", found, ahead)
+	}
+	// Equal priority is ambiguous: it counts.
+	r, _ = Analyze([]byte(strings.Replace(imunifyAheadFixture, `"prio":-99`, `"prio":-100`, 1)), Expected{})
+	if _, _, ahead := WebDNATAhead(r); len(ahead) != 1 {
+		t.Fatalf("equal priority: %+v", ahead)
+	}
+	// Web DNAT off.
+	r, _ = Analyze([]byte(fixture[:strings.Index(fixture, "\n")]+"]}"), Expected{})
+	if _, found, _ := WebDNATAhead(r); found {
+		t.Fatal("no cfm_redirect chain, found")
+	}
+}

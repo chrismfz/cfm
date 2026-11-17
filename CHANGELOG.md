@@ -71,6 +71,18 @@ back-filled here — see the git/PR history for that period.
   daemon logs a note at start when either is present, and they are gone from
   the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
+### Added
+- **`edge_health` check H, `web-dnat-order`: is web traffic reaching the
+  edge?** A connection is NAT'd once, by the first nat chain that rewrites it.
+  Imunify360 DNATs its sets to WebShield at priority -100, and CFM's web
+  redirect defaults to -99 ("Imunify first"). On a cPanel node that set holds
+  Cloudflare's ranges, so every Cloudflare visitor bypassed the edge's WAF,
+  challenge and edge bans. earth sent ~29% of its web requests to WebShield
+  for months; the edge saw 235 Cloudflare requests an hour. The check warns
+  when a non-CFM DNAT of tcp/80 or 443 runs before CFM's redirect AND
+  WebShield served 100+ requests in the last 15 min, and names the fix
+  (`NFT_DNAT_PRIORITY = -101`). The warning reaches `whats_wrong`.
+
 ### Fixed
 - **`cfm realip` now reads nginx per site, so cPanel ea-nginx nodes are
   judged correctly.** nginx takes the client from each `server{}`'s own

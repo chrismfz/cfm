@@ -689,6 +689,9 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 		findings = append(findings, sev.add("origin-real-ip", "ok", text, rEv, ""))
 	}
 
+	// ── Check H: web traffic reaches the edge, not a DNAT ahead of it ──────────
+	findings = append(findings, webDNATOrderFinding(ctx, &sev))
+
 	sort.SliceStable(findings, func(i, j int) bool {
 		return sevRank(findings[i]["severity"].(string)) > sevRank(findings[j]["severity"].(string))
 	})

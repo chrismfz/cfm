@@ -1078,3 +1078,44 @@ func dedupeFindings(in []Finding) []Finding {
 	}
 	return out
 }
+
+// WebDNATAhead returns the non-CFM DNAT/redirect rules for tcp/80 or tcp/443
+// that run no later than CFM's web redirect (inet cfm_redirect, prerouting).
+// A connection is NAT'd once, by the first nat chain that rewrites it, so what
+// such a rule matches never reaches the CFM edge. Imunify360 sends its sets
+// (remote_proxy_static holds Cloudflare's ranges, graylist, splashscreen,
+// captcha) to WebShield that way at -100: earth, at the -99 default, sent ~29%
+// of its web requests there, nearly all of its Cloudflare traffic
+// (2026-11-17). An equal priority counts: registration order is ambiguous.
+// found is false when CFM's web redirect chain is absent (web DNAT off).
+func WebDNATAhead(r Report) (cfmPriority int, found bool, ahead []NATRule) {
+	for _, c := range r.Chains {
+		if c.Family == "inet" && c.Table == "cfm_redirect" && c.Hook == "prerouting" && c.Type == "nat" {
+			if !found || c.Priority < cfmPriority {
+				cfmPriority = c.Priority
+			}
+			found = true
+		}
+	}
+	if !found {
+		return 0, false, nil
+	}
+	for _, n := range r.NATRules {
+		if n.Owner == "cfm" || n.Hook != "prerouting" || n.Priority > cfmPriority || n.Unsatisfiable {
+			continue
+		}
+		if n.Action != "dnat" && n.Action != "redirect" {
+			continue
+		}
+		if n.Family != "ip" && n.Family != "ip6" && n.Family != "inet" {
+			continue
+		}
+		if n.Protocol != "" && n.Protocol != "tcp" {
+			continue
+		}
+		if ruleCanMatchPort(n, 80) || ruleCanMatchPort(n, 443) {
+			ahead = append(ahead, n)
+		}
+	}
+	return cfmPriority, true, ahead
+}
