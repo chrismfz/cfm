@@ -559,18 +559,7 @@ func (b *Backend) loadPortScannerOnce() {
 		addCounts(udp)
 	}
 
-	tc := cfgpkg.ThrottleConfig{
-		WindowSec:  ps.Interval,
-		Hits:       1,
-		Mode:       "ttl",
-		TTLSeconds: ps.TTLSeconds,
-		// The same autoBlockAction runs, so the good-bot exemption applies
-		// to portscan bans too, and its kill switch with it.
-		GoodBotExemptOff: b.cfg.Throttle.GoodBotExemptOff,
-	}
-	if strings.ToLower(ps.Mode) == "permanent" {
-		tc.Mode = "permanent"
-	}
+	tc := firewall.PortscanThrottleConfig(b.cfg)
 
 	var v4, v6 []string
 	for ip, n := range counts {

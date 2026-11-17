@@ -1,11 +1,14 @@
 package firewall
 
 import (
+	"strings"
 	"sync"
 	"time"
 
+	cfgpkg "cfm/internal/config"
 	enrichpkg "cfm/internal/enrich"
 	"cfm/internal/goodbot"
+	"cfm/internal/logging"
 )
 
 // Flood/portscan autoblock good-bot exemption, shared by both engines'
@@ -38,6 +41,14 @@ import (
 // the ban list for good: after autoblockGoodBotMaxInconclusive inconclusive
 // crossings in a row the ban goes ahead. A definitive answer resets the run.
 //
+// The forward-confirms run synchronously, under the engine's autoblock mutex,
+// and an attacker can put a crawler PTR on as many of their own addresses as
+// they like. So they spend a budget, autoblockGoodBotBudget of resolver time
+// per autoblockGoodBotBudgetWindow (the web detector's ban check has the same
+// rule, goodBotBanTickBudget): past it a candidate gets only its cached
+// verdict, and an uncached one is banned as before, never exempted on a
+// guess. A real crawler verified earlier keeps its cached verdict.
+//
 // It needs the enricher's PTR (PTR enrichment on); without one there is no
 // claim to verify and the ban goes ahead.
 
@@ -64,6 +75,8 @@ const (
 	autoblockGoodBotCap             = 4096
 	autoblockGoodBotMaxInconclusive = 3
 	autoblockGoodBotInconclusiveTTL = time.Hour
+	autoblockGoodBotBudget          = 5 * time.Second
+	autoblockGoodBotBudgetWindow    = time.Minute
 )
 
 type autoblockGoodBotVerdict struct {
@@ -80,6 +93,11 @@ var (
 	autoblockGoodBotMu           sync.Mutex
 	autoblockGoodBotCache        = map[string]autoblockGoodBotVerdict{}
 	autoblockGoodBotInconclusive = map[string]autoblockGoodBotRun{}
+	// The resolver-time budget: spent in the window that started at
+	// autoblockGoodBotBudgetStart; overLogged keeps it to one log per window.
+	autoblockGoodBotBudgetStart time.Time
+	autoblockGoodBotBudgetSpent time.Duration
+	autoblockGoodBotOverLogged  bool
 )
 
 // AutoblockGoodBot reports whether the flood/portscan autoblock must skip ip,
@@ -107,12 +125,17 @@ func AutoblockGoodBot(enr *enrichpkg.Enricher, ip string, off bool) (skip bool, 
 	if _, _, ok := goodbot.SuffixName(ptr); !ok {
 		return false, ""
 	}
+	if !autoblockGoodBotTakeBudget(now, ptr, ip) {
+		return false, "" // budget spent: banned as before
+	}
 	name, cacheable := autoblockGoodBotVerify(ptr, ip)
+	done := autoblockGoodBotNow()
 
 	autoblockGoodBotMu.Lock()
 	defer autoblockGoodBotMu.Unlock()
+	autoblockGoodBotBudgetSpent += done.Sub(now)
 	if !cacheable {
-		r := autoblockGoodBotInconclusive[ip]
+		r, seen := autoblockGoodBotInconclusive[ip]
 		if now.Sub(r.last) >= autoblockGoodBotInconclusiveTTL {
 			r.n = 0
 		}
@@ -122,8 +145,18 @@ func AutoblockGoodBot(enr *enrichpkg.Enricher, ip string, off bool) (skip bool, 
 			delete(autoblockGoodBotInconclusive, ip)
 			return false, ""
 		}
-		if len(autoblockGoodBotInconclusive) >= autoblockGoodBotCap {
-			autoblockGoodBotInconclusive = map[string]autoblockGoodBotRun{}
+		if !seen && len(autoblockGoodBotInconclusive) >= autoblockGoodBotCap {
+			// Drop the stale runs first; never wipe live ones (that would
+			// restart every address's count). Still full: no room to count
+			// this address, so it is banned, not skipped uncounted.
+			for k, e := range autoblockGoodBotInconclusive {
+				if now.Sub(e.last) >= autoblockGoodBotInconclusiveTTL {
+					delete(autoblockGoodBotInconclusive, k)
+				}
+			}
+			if len(autoblockGoodBotInconclusive) >= autoblockGoodBotCap {
+				return false, ""
+			}
 		}
 		autoblockGoodBotInconclusive[ip] = r
 		return true, "good-bot PTR " + ptr + " not verified (lookup did not complete); this crossing skipped"
@@ -148,6 +181,46 @@ func AutoblockGoodBot(enr *enrichpkg.Enricher, ip string, off bool) (skip bool, 
 		return true, "FCrDNS-verified good bot " + name
 	}
 	return false, ""
+}
+
+// autoblockGoodBotTakeBudget reports whether a forward-confirm may run now:
+// the window's resolver time is not spent yet. The time is charged after the
+// lookup, so one lookup can run past the budget (each has its own 2 s cap).
+func autoblockGoodBotTakeBudget(now time.Time, ptr, ip string) bool {
+	autoblockGoodBotMu.Lock()
+	defer autoblockGoodBotMu.Unlock()
+	if now.Sub(autoblockGoodBotBudgetStart) >= autoblockGoodBotBudgetWindow {
+		autoblockGoodBotBudgetStart, autoblockGoodBotBudgetSpent, autoblockGoodBotOverLogged = now, 0, false
+	}
+	if autoblockGoodBotBudgetSpent < autoblockGoodBotBudget {
+		return true
+	}
+	if !autoblockGoodBotOverLogged {
+		autoblockGoodBotOverLogged = true
+		logging.Logf("[autoblock][goodbot] forward-confirm budget (%s per %s) spent; unverified crawler-PTR addresses are blocked as before until the window ends (first: %s ptr=%s)",
+			autoblockGoodBotBudget, autoblockGoodBotBudgetWindow, ip, ptr)
+	}
+	return false
+}
+
+// PortscanThrottleConfig is the ThrottleConfig the port scanner hands
+// autoBlockAction (both engines): Hits=1, since PS_LIMIT is already the
+// threshold, PS_INTERVAL as the window, PS_MODE/PS_TTL, and the good-bot
+// kill switch from the throttle config, because the same autoBlockAction and
+// its good-bot exemption run for portscan bans.
+func PortscanThrottleConfig(cfg *cfgpkg.Config) cfgpkg.ThrottleConfig {
+	ps := cfg.Portscan
+	tc := cfgpkg.ThrottleConfig{
+		WindowSec:        ps.Interval,
+		Hits:             1,
+		Mode:             "ttl",
+		TTLSeconds:       ps.TTLSeconds,
+		GoodBotExemptOff: cfg.Throttle.GoodBotExemptOff,
+	}
+	if strings.ToLower(ps.Mode) == "permanent" {
+		tc.Mode = "permanent"
+	}
+	return tc
 }
 
 // PruneSeen bounds a per-address "last seen" map the autoblock keeps for log
@@ -188,5 +261,6 @@ func resetAutoblockGoodBot() {
 	autoblockGoodBotMu.Lock()
 	autoblockGoodBotCache = map[string]autoblockGoodBotVerdict{}
 	autoblockGoodBotInconclusive = map[string]autoblockGoodBotRun{}
+	autoblockGoodBotBudgetStart, autoblockGoodBotBudgetSpent, autoblockGoodBotOverLogged = time.Time{}, 0, false
 	autoblockGoodBotMu.Unlock()
 }

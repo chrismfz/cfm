@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	cfgpkg "cfm/internal/config"
 )
 
 func TestAutoblockGoodBot(t *testing.T) {
@@ -145,5 +147,93 @@ func TestPruneSeen(t *testing.T) {
 	PruneSeen(small, 90*time.Second)
 	if len(small) != 1 {
 		t.Errorf("pruned a map below the cap")
+	}
+}
+
+// Forward-confirms spend a resolver-time budget per window: past it an
+// uncached candidate is banned (not exempted on a guess), a cached verdict
+// still holds, and the next window has a fresh budget.
+func TestAutoblockGoodBotBudget(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	oldNow := autoblockGoodBotNow
+	autoblockGoodBotNow = func() time.Time { return now }
+	defer func() { autoblockGoodBotNow = oldNow }()
+	calls := 0
+	restore := SetAutoblockGoodBotForTest(
+		func(string) string { return "x.googlebot.com" },
+		func(_, ip string) (string, bool) {
+			calls++
+			now = now.Add(2 * time.Second) // a slow resolver
+			if ip == "192.0.2.1" {
+				return "googlebot", true
+			}
+			return "", false // timing out
+		})
+	defer restore()
+
+	if s, _ := AutoblockGoodBot(nil, "192.0.2.1", false); !s {
+		t.Fatal("verified crawler not skipped")
+	}
+	for i := 2; i <= 4; i++ { // 2 s each: 8 s spent after the third lookup
+		AutoblockGoodBot(nil, fmt.Sprintf("192.0.2.%d", i), false)
+	}
+	before := calls
+	if s, _ := AutoblockGoodBot(nil, "192.0.2.50", false); s || calls != before {
+		t.Errorf("past the budget: skip=%t, %d new lookups; want a ban with no lookup", s, calls-before)
+	}
+	if s, _ := AutoblockGoodBot(nil, "192.0.2.1", false); !s || calls != before {
+		t.Errorf("past the budget the cached crawler lost its verdict (skip=%t)", s)
+	}
+	now = now.Add(time.Minute)
+	if AutoblockGoodBot(nil, "192.0.2.50", false); calls != before+1 {
+		t.Errorf("the next window did not verify again (%d lookups)", calls-before)
+	}
+}
+
+// A full inconclusive-run map is never wiped (that restarted every address's
+// count): stale runs go first, and with none, a new address is banned.
+func TestAutoblockGoodBotInconclusiveCap(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	oldNow := autoblockGoodBotNow
+	autoblockGoodBotNow = func() time.Time { return now }
+	defer func() { autoblockGoodBotNow = oldNow }()
+	restore := SetAutoblockGoodBotForTest(
+		func(string) string { return "x.googlebot.com" },
+		func(string, string) (string, bool) { return "", false })
+	defer restore()
+
+	autoblockGoodBotMu.Lock()
+	for i := 0; i < autoblockGoodBotCap; i++ {
+		autoblockGoodBotInconclusive[fmt.Sprintf("10.0.%d.%d", i>>8, i&255)] = autoblockGoodBotRun{n: 1, last: now}
+	}
+	autoblockGoodBotInconclusive["10.0.0.0"] = autoblockGoodBotRun{n: 2, last: now} // one short of the ban
+	autoblockGoodBotMu.Unlock()
+
+	if s, _ := AutoblockGoodBot(nil, "198.51.100.1", false); s {
+		t.Error("a new address with the run map full of live runs was skipped uncounted")
+	}
+	if s, _ := AutoblockGoodBot(nil, "10.0.0.0", false); s {
+		t.Error("a full map reset the count of an address one crossing from its ban")
+	}
+
+	now = now.Add(2 * time.Hour) // every run is stale now
+	if s, _ := AutoblockGoodBot(nil, "198.51.100.2", false); !s {
+		t.Error("stale runs were not pruned to make room")
+	}
+}
+
+// The port scanner's config carries the good-bot kill switch (it runs the
+// same autoBlockAction), and its PS_MODE / PS_TTL / PS_INTERVAL.
+func TestPortscanThrottleConfig(t *testing.T) {
+	cfg := &cfgpkg.Config{}
+	cfg.Portscan = cfgpkg.PortscanConfig{Interval: 30, TTLSeconds: 600, Mode: "permanent"}
+	cfg.Throttle.GoodBotExemptOff = true
+	tc := PortscanThrottleConfig(cfg)
+	if !tc.GoodBotExemptOff || tc.Mode != "permanent" || tc.Hits != 1 || tc.WindowSec != 30 || tc.TTLSeconds != 600 {
+		t.Errorf("PortscanThrottleConfig = %+v", tc)
+	}
+	cfg.Portscan.Mode, cfg.Throttle.GoodBotExemptOff = "temporary", false
+	if tc := PortscanThrottleConfig(cfg); tc.GoodBotExemptOff || tc.Mode != "ttl" {
+		t.Errorf("PortscanThrottleConfig(temporary, exempt on) = %+v", tc)
 	}
 }

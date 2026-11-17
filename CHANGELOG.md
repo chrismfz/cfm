@@ -42,8 +42,12 @@ back-filled here — see the git/PR history for that period.
   that does not forward-confirm (spoofed) is blocked as before. A
   forward-confirm that does not complete skips that crossing, so one DNS
   blip cannot ban a real crawler, but the third such crossing in a row bans:
-  an address's PTR is its owner's to set. It needs PTR enrichment (the PTR
-  comes from the enricher). The skip is logged (`[autoblock][ignored] …
+  an address's PTR is its owner's to set. The forward-confirms spend a
+  budget of 5 s of resolver time per minute (they run under the autoblock
+  lock, and fake crawler PTRs cost an attacker nothing); past it an address
+  without a cached verdict is blocked as before, and one line is logged
+  (`[autoblock][goodbot] forward-confirm budget … spent`). It needs PTR
+  enrichment (the PTR comes from the enricher). The skip is logged (`[autoblock][ignored] …
   FCrDNS-verified good bot meta`), not notified: a crawler re-crosses the
   threshold every window. The startup `[config] throttle:` line now ends in
   `goodbot_exempt=true|false`. Kill switch: `THROTTLE_GOODBOT_EXEMPT = 0` in `cfm.conf`. Existing
