@@ -296,6 +296,11 @@ type ThrottleConfig struct {
 	Sources     []string // e.g. ["syn","portflood","pps"]
 	SetTTL      int      // seconds for nft set timeout (tracking)
 	CooldownSec int      // seconds to suppress repeat autoblocks per IP
+	// GoodBotExemptOff is THROTTLE_GOODBOT_EXEMPT = 0. By default (false) an
+	// FCrDNS-verified good bot (internal/goodbot: Googlebot, Bingbot, Meta's
+	// *.fbsv.net, …) is never autoblocked by a flood heuristic; the flood
+	// meters still drop its excess packets.
+	GoodBotExemptOff bool
 }
 
 // throttleModeWarned holds the unrecognised THROTTLE_MODE values already
@@ -404,19 +409,21 @@ func (c *Config) SetDefaults() {
 	}
 	// Editions: no hard default; user may choose ASN or City or both
 
-	// THROTTLE_MODE: unset means "permanent"; an unrecognised value means a
-	// bounded block (THROTTLE_TTL), with a warning. It used to fall back to
+	// THROTTLE_MODE: unset, or an unrecognised value (with a warning), means
+	// a bounded block of THROTTLE_TTL (default 72h). Both used to mean
 	// "permanent", and the reference cfm.conf shipped THROTTLE_MODE = "tlt"
 	// (for "ttl"), so every throttle autoblock (syn, portflood, connlimit, …)
-	// was a permanent ban, written to cfm.deny and reported to the API. The
-	// cfm-admin login brute-force autoblock follows this mode too.
+	// was a permanent ban, written to cfm.deny and reported to the API: Meta's
+	// link-preview proxies sat in cfm.deny for months (2026). A permanent ban
+	// is the operator's explicit THROTTLE_MODE = "permanent". The cfm-admin
+	// login brute-force autoblock follows this mode too.
 	if c.Throttle.TTLSeconds == 0 {
-		c.Throttle.TTLSeconds = 24 * 3600
+		c.Throttle.TTLSeconds = 72 * 3600
 	}
 	c.Throttle.Mode = strings.ToLower(strings.TrimSpace(c.Throttle.Mode))
 	switch c.Throttle.Mode {
 	case "":
-		c.Throttle.Mode = "permanent"
+		c.Throttle.Mode = "ttl"
 	case "permanent", "ttl", "dryrun", "alert":
 	default:
 		if _, seen := throttleModeWarned.LoadOrStore(c.Throttle.Mode, true); !seen {
@@ -780,6 +787,14 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			cfg.Throttle.SetTTL = parseInt(val)
 		case "THROTTLE_COOLDOWN":
 			cfg.Throttle.CooldownSec = parseInt(val)
+		case "THROTTLE_GOODBOT_EXEMPT":
+			// Only an explicit off disables it: a typo keeps the exemption.
+			switch strings.ToLower(strings.TrimSpace(val)) {
+			case "0", "false", "no", "off":
+				cfg.Throttle.GoodBotExemptOff = true
+			default:
+				cfg.Throttle.GoodBotExemptOff = false
+			}
 
 		// Portscan
 		case "PS_ENABLED":
@@ -1159,7 +1174,7 @@ func IsKnownKey(key string) bool {
 		"LOG_STDOUT", "LOG_FILE", "API_LOG_STDOUT", "API_LOG_FILE", "DETECTOR_LOG_STDOUT", "DETECTOR_LOG_FILE", "CHALLENGES_LOG_STDOUT", "CHALLENGES_LOG_FILE",
 		"SMTP_LOG_STDOUT", "SMTP_LOG_FILE", "WAF_LOG_STDOUT", "WAF_LOG_FILE", "MYSQL_LOG_STDOUT", "MYSQL_LOG_FILE",
 		"NFT_INPUT_PRIORITY", "NFT_DNAT_PRIORITY", "CHALLENGE_HTTP_LISTEN", "CHALLENGE_HTTPS_LISTEN", "TCP_IN", "TCP_OUT", "UDP_IN", "UDP_OUT", "CONNLIMIT", "PORTFLOOD", "PKT_RATE", "PKT_BURST", "PKT_MODE",
-		"THROTTLE_ENABLED", "THROTTLE_WINDOW", "THROTTLE_HITS", "THROTTLE_MODE", "THROTTLE_TTL", "THROTTLE_SOURCES", "THROTTLE_SET_TTL", "THROTTLE_COOLDOWN",
+		"THROTTLE_ENABLED", "THROTTLE_WINDOW", "THROTTLE_HITS", "THROTTLE_MODE", "THROTTLE_TTL", "THROTTLE_SOURCES", "THROTTLE_SET_TTL", "THROTTLE_COOLDOWN", "THROTTLE_GOODBOT_EXEMPT",
 		"PS_ENABLED", "PS_INTERVAL", "PS_MODE", "PS_TTL", "PS_LIMIT", "PS_DIVERSITY", "PS_TRACK_TCP", "PS_TRACK_UDP", "PS_ONLY_PORTS", "PS_PORTS",
 		"SMTP_BLOCK", "SMTP_PORTS", "SMTP_ALLOWLOCAL", "SMTP_REDIRECT", "SMTP_REDIRECT_PORT", "SMTP_ALLOWUSER", "SMTP_ALLOWGROUP", "SMTP_ALLOW_UIDS", "SMTP_ALLOW_GIDS",
 		"SMTP_LOG", "SMTP_LOG_LIMIT", "SMTP_LOG_BURST", "SMTP_LOG_NFLOG", "SMTP_LOG_ENRICH",

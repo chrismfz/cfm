@@ -2,12 +2,10 @@ package webdetector
 
 import (
 	"context"
-	"errors"
-	"net"
 	"sort"
-	"strings"
 	"time"
 
+	"cfm/internal/goodbot"
 	"cfm/internal/logging"
 )
 
@@ -244,24 +242,12 @@ func orDash(s string) string {
 	return s
 }
 
-// goodBotPTRSuffixes maps a good-bot's canonical PTR domain suffix to its name.
-// Membership alone is NOT trust — the PTR is forward-confirmed (FCrDNS) before a
-// bot is treated as good, so a spoofed UA/PTR can't earn an exemption.
-var goodBotPTRSuffixes = map[string]string{
-	".googlebot.com":      "googlebot",
-	".google.com":         "google",
-	".search.msn.com":     "bingbot",
-	".crawl.yahoo.net":    "yahoo",
-	".applebot.apple.com": "applebot",
-	".yandex.com":         "yandex",
-	".yandex.net":         "yandex",
-	".yandex.ru":          "yandex",
-	// Meta's crawler fleet (facebookexternalhit / meta-externalagent /
-	// meta-externalads) reverses to *.fbsv.net and forward-confirms. Added
-	// 2026-08-21 after CHALLENGE_SUBNET live-FP'd Meta's 57.141.20.0/24 on a
-	// shop vhost (60+ crawler IPs in one /24 tripped SUBNET_MIN_IPS).
-	".fbsv.net": "meta",
-}
+// goodBotPTRSuffixes is a read-only copy of the FCrDNS good-bot registry
+// (internal/goodbot, the one list shared with the L4 flood autoblock), taken
+// at init, for the code that lists it. Matching goes through goodbot itself
+// (goodBotSuffixName). Membership alone is NOT trust: the PTR is
+// forward-confirmed (FCrDNS) before a bot is treated as good.
+var goodBotPTRSuffixes = goodbot.Suffixes()
 
 // verifiedGoodBot returns a good-bot name when ptr is a known good-bot host AND
 // forward-confirms back to ip (FCrDNS); "" otherwise. A PTR that claims a good
@@ -278,22 +264,11 @@ func verifiedGoodBot(ptr, ip string) string {
 }
 
 // goodBotSuffixName reports the good-bot name whose canonical PTR suffix matches
-// ptr, plus the normalised host (trimmed, lowercased, no trailing dot) used for
-// the forward-confirm. This is the MATCH only — membership is never trust; a
-// caller that needs trust must forward-confirm (verifiedGoodBot). Single-sourced
-// so the candidate pre-check (looksLikeGoodBotPTR) and the verifier can never
-// drift (CLAUDE.md §6).
+// ptr, plus the normalised host to forward-confirm (goodbot.SuffixName). This
+// is the MATCH only — membership is never trust; a caller that needs trust
+// must forward-confirm (verifiedGoodBot).
 func goodBotSuffixName(ptr string) (name, host string, ok bool) {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(ptr), "."))
-	if host == "" {
-		return "", "", false
-	}
-	for suf, nm := range goodBotPTRSuffixes {
-		if strings.HasSuffix(host, suf) {
-			return nm, host, true
-		}
-	}
-	return "", host, false
+	return goodbot.SuffixName(ptr)
 }
 
 // forwardConfirms resolves host and reports whether any A/AAAA equals ip (FCrDNS).
@@ -303,42 +278,13 @@ func forwardConfirms(host, ip string) bool {
 }
 
 // forwardConfirmsE is forwardConfirms with the resolver error exposed, so a
-// caller can distinguish a definitive non-match (spoofed / wrong IP → a real
-// negative) from a transient lookup failure (err != nil → inconclusive). The
-// good-bot verdict cache uses this so a DNS blip on a real crawler's
-// forward-confirm is not pinned as "not a bot" for the negative TTL.
+// caller can tell a definitive non-match (spoofed / wrong IP) from a transient
+// lookup failure (err != nil → inconclusive).
 func forwardConfirmsE(host, ip string) (matched bool, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	return forwardConfirmsWith(ctx, net.DefaultResolver.LookupHost, host, ip)
+	return goodbot.ForwardConfirms(host, ip)
 }
 
 // forwardConfirmsWith is forwardConfirmsE over an injectable lookup (tests).
-// A name that does not exist (NXDOMAIN / no address: IsNotFound) is an ANSWER,
-// not a blip: the claimed crawler name can't confirm anything, so it is a
-// definitive non-match. That is the natural spoof — a PTR of x.googlebot.com,
-// a name nobody outside Google can create — and treating it as transient left
-// the verdict uncached, so every request (and every ChallengeV2 reject) from
-// such an IP re-ran the lookup.
 func forwardConfirmsWith(ctx context.Context, lookup func(context.Context, string) ([]string, error), host, ip string) (matched bool, err error) {
-	addrs, err := lookup(ctx, host)
-	if err != nil {
-		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-			return false, nil
-		}
-		return false, err
-	}
-	want := net.ParseIP(ip)
-	for _, a := range addrs {
-		// Compare as parsed IPs so a non-canonical IPv6 spelling still matches
-		// (raw string compare would false-negative a legit AAAA good bot).
-		if ap := net.ParseIP(a); ap != nil && want != nil && ap.Equal(want) {
-			return true, nil
-		}
-		if a == ip {
-			return true, nil
-		}
-	}
-	return false, nil
+	return goodbot.ForwardConfirmsWith(ctx, lookup, host, ip)
 }
