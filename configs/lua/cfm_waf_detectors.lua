@@ -1131,13 +1131,17 @@ _M.php_score_marker_in = function(t)
 end
 
 -- The body 404's head pass cannot read as PHP gets it: a multipart body (by
--- its media type, as PHP chooses its reader), or a JSON one carrying escapes.
+-- its media type, as PHP chooses its reader), or a JSON one carrying a
+-- \u00XX / \/ escape.
 -- Rule 417 reads a short body only then (or when 404 did not run).
 function _M.php_body_head_blind(body, headers)
   local mt = php_media_type(php_content_type(headers or {}))
   if mt == "multipart/form-data" then return true end
-  return (body or ""):find("\\", 1, true) ~= nil
-     and (has(mt, "json") or (body or ""):find("^%s*[%[{]") ~= nil)
+  -- Only the escapes json_unescape_ascii decodes change what 404 read
+  -- (`\n`, `\"` are in nearly every JSON body and change nothing).
+  body = body or ""
+  return (body:find("\\u00", 1, true) or body:find("\\/", 1, true)) ~= nil
+     and (has(mt, "json") or body:find("^%s*[%[{]") ~= nil)
 end
 
 -- cap_len: how much of the raw body to read; 404 reads its 2 KB head

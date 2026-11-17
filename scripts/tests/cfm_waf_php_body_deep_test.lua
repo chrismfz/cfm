@@ -177,6 +177,13 @@ do
   check(called == 0, "417 skips a short body 404 read (got " .. called .. " deep calls)")
 end
 
+-- Sixth review: `\n` / `\"` change nothing 404 read; a short JSON body with a
+-- \u00 escape reaches 417 through cfm_waf's call site.
+check(det.php_body_head_blind('{"t":"a\\nb \\"q\\""}', { ["content-type"] = "application/json" }) == false,
+      "JSON with only \\n / \\\" escapes: 404 read it")
+fires(req('{"c":"\\u003c?php system(\\u0024_GET[1]);"}', "/wp-json/x/v1/save", "application/json"),
+      "short JSON body with \\u00 escapes", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+
 -- ── 404 disabled: 417 still runs on its own ───────────────────────────────
 set_only({ rule_php_webshell_body = "disabled", rule_php_webshell_body_deep = "logonly" })
 fires(req(editor_save(PLUGIN_HEAD .. INJECTION .. PLUGIN_TAIL)), "404 disabled, 417 alone", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
