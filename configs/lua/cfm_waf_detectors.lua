@@ -1140,21 +1140,24 @@ function _M.detect_php_webshell_body(body, headers, cap_len)
   end
 
   local raw = cap(body, cap_len)
+  -- Only escapes that can decode to `<`, `?`, `$` (or a double encoding,
+  -- %25): `%20`, `%2F`, `%3D` are in nearly every form body and would open
+  -- the gate for all of them.
   if deep and not (raw:find("<?", 1, true) or raw:find("$_", 1, true)
-                   or raw:find("%3", 1, true) or raw:find("%2", 1, true)
-                   or raw:find("\\u00", 1, true)) then
+                   or raw:find("%%3[cCfF]") or raw:find("%24", 1, true)
+                   or raw:find("%25", 1, true) or raw:find("\\u00", 1, true)) then
     return nil
   end
   if multipart then
-    local acc, total = {}, 0
+    -- Each text field on its own: a shell sits in one field, and markers
+    -- spread over several ordinary fields must not add up to a score.
+    local hit
     each_multipart_field(raw, ct, function(_, v)
-      if v and v ~= "" and total < cap_len then
-        acc[#acc + 1] = v
-        total = total + #v
+      if not hit and v and #v > 0 then
+        hit = _M.detect_php_webshell_body(v, { ["content-type"] = "text/plain" }, cap_len)
       end
     end)
-    if total == 0 then return nil end
-    raw = table.concat(acc, "\n")
+    return hit
   elseif has(lct, "json") or raw:find("^%s*[%[{]") then
     if raw:find("\\", 1, true) then raw = util.json_unescape_ascii(raw) end
   end

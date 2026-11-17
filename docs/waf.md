@@ -1673,13 +1673,14 @@ read (`php_webshell_deep_scan_len`, 32 KB = `waf_body_max_len`):
   or an escape that may decode to one (`%3C`, `%24`, `%25`).
 
 **Also read** (review, 2026-11-17):
-- a multipart body's plain **text** fields (a save form posted as
-  multipart; file parts stay 402 / 415's);
+- a multipart body's plain **text** fields, each scored on its own (a save
+  form posted as multipart; file parts stay 402 / 415's);
 - a JSON body's `\u00XX` / `\/` escapes, as `json_decode` hands them to the
   app (`\u003c?php`, `\u0024_POST`). 404's head pass reads them too now.
 
-The raw gate also passes `%3…` / `%2…` (`<%3Fphp`, `%24`, `%25` double
-encoding) and `\u00`.
+The raw gate also passes `%3C` / `%3F` / `%24` (`<%3Fphp`), `%25` (double
+encoding) and `\u00`, but not `%20` / `%2F` / `%3D`, which are in nearly every
+form body.
 
 **Cost.** Nothing on a form with no PHP marker. About +0.4 ms on a 30 KB post
 with HTML. About +5 ms on a 30 KB PHP file saved through an editor, which is

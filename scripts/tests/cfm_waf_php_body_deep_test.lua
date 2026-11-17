@@ -142,6 +142,14 @@ clean(req("data=" .. string.rep("a", 30000), "/x"), "a large plain body (raw gat
 -- A multipart FILE part is 402 / 415's, never this rule's.
 clean(req("--b\r\nContent-Disposition: form-data; name=\"x\"; filename=\"a.txt\"\r\n\r\n" .. string.rep("x", 3000) ..
           "<?php eval($_POST['c']);\r\n--b--\r\n", "/x", "multipart/form-data; boundary=b"), "multipart file part")
+-- Markers spread over separate ordinary fields do not add up.
+clean(req("--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nThe $_GET array holds the query.\r\n" ..
+          "--b\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n<?xml version=\"1.0\"?><x/>" .. string.rep(" ", 2500) .. "\r\n" ..
+          "--b\r\nContent-Disposition: form-data; name=\"c\"\r\n\r\nWe exec( nothing here.\r\n--b--\r\n",
+          "/ticket", "multipart/form-data; boundary=b"), "multipart: markers across fields")
+-- A large urlencoded body with only %20 / %2F / %3D escapes stays out of the gate.
+check(det.detect_php_webshell_body("q=" .. string.rep("a%20b%2Fc%3Dd%3A", 2000),
+      { ["content-type"] = "application/x-www-form-urlencoded" }, 32768) == nil, "%20/%2F/%3D-only body: gate closed")
 -- A multipart form of ordinary text (a contact form with an attachment-less body).
 clean(req("--b\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\n" .. string.rep("Γεια σας, θα ήθελα πληροφορίες. ", 150) ..
           "\r\n--b--\r\n", "/contact", "multipart/form-data; boundary=b"), "multipart text form, no PHP")
