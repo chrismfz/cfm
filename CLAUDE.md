@@ -525,21 +525,27 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   322-327, so family-only keying autoblocks logonly recon. Families with an edge-`block`
   rule today (the Go registry, `DefaultMode: "block"`, is the source — check it
   before editing this list): `WAF_SQLI` (301), `WAF_SQLI_LEXICAL` (309, since
-  2026-08-23), `WAF_RCE` (320, 329), `WAF_UPLOAD_FNAME` (401, 414),
+  2026-08-23), `WAF_RCE` (320, 329, 332 since 2026-11-17), `WAF_UPLOAD_FNAME` (401, 414),
   `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
   proper-noun drop-path subset), `WAF_BACKDOOR` since 2026-11-04 (440, a fake
   plugin's own PHP file called with its download / run command; its ban held
-  per rule, `HoldAutoblock`, through a burn-in), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305)
+  per rule, `HoldAutoblock`, through a burn-in; and 438, the base64 `<?php`
+  opener, since 2026-11-17), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305),
   `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
-  rules; 511 pingback held per rule since 2026-10-15) — all armed to 1 — plus
+  rules; 511 pingback held per rule since 2026-10-15), and since 2026-11-17
+  `WAF_JS_PROTO` (303), `WAF_XXE` (307) and `WAF_PHP_WEBSHELL_BODY` (416),
+  each with its one block rule held per rule (`HoldAutoblock`, so the family
+  is armed but bans nothing; 303 is the React2Shell sweep, ~830 bans a day
+  armed) — all armed to 1 — plus
   `WAF_TRAVERSAL` since 2026-09-05 (rule 101;
   raw-path rule 103 since 2026-09-22; **held at 0** through its burn-in, see
   below) — those are the only ones that
   can fire in Phase 1. A held RULE can also
   ship in code: `HoldAutoblock` on its `WAFRule` (`waf_rule_ids.go`) is the
   default for a `RULE_<id>` key, so the hold reaches configs that predate the
-  rule (10019 and 10020, the TranslatePress id-lookup leg and the
-  logged-in reset-preview request; 511, the xmlrpc pingback WordPress itself
+  rule (10020, the TranslatePress logged-in reset-preview request — its
+  id-lookup leg 10019 was held too and is armed since 2026-11-17; 303, 307 and
+  416 since 2026-11-17, evaluated late like the rest; 511, the xmlrpc pingback WordPress itself
   sends, deferred in `cfm_waf.lua` like them; 10022, CVE-2026-109618's
   length-less multipart leg, which a chunked upload client also sends;
   10026, the PixelYourSite session-copy leg (raw path, Referer host,
@@ -579,7 +585,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   hit is what counts), but an accumulate threshold (e.g. 40) counts distinct
   cooldown windows, not raw hits, and two block rules of one family in the same
   window push twice — retune when Phase 2 turns on challenge-tier families.
-  A held block RULE (`WAFRule.HoldAutoblock`, e.g. 10019/10020) shadows armed ones
+  A held block RULE (`WAFRule.HoldAutoblock`, e.g. 10020, 303) shadows armed ones
   exactly like a held family does, so it runs late in `cfm_waf.lua`, next to
   traversal.
 - **An nft ban never stops a client behind a trusted proxy** (Cloudflare): on

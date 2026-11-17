@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **WAF rule 10029: the Fabrik list-filter eval (CVE-2026-67282), logonly.**
+  The Joomla Fabrik flaw behind the dmkomotinis.gr compromise (earth,
+  2026-11-12): an `[eval]` index set on a list-filter field makes Fabrik run
+  the filter value as PHP. The rule logs any request field (query or POST)
+  with an `[eval]` index on a Fabrik request; `[eval]=0` is logged under its
+  own tag. Fabrik's own list filter never sends `[eval]` (7 days of all 8
+  edge nodes' access logs: only the attacker did). Logonly for a burn-in; the
+  file-writing payloads are already blocked by rule 332. Update Fabrik to
+  4.7.2+, which also fixes CVE-2026-66915.
 - **`edge_health` check H, `web-dnat-order`: is web traffic reaching the
   edge?** A connection is NAT'd once, by the first nat chain that rewrites it.
   Imunify360 DNATs its sets to WebShield at priority -100, and CFM's web
@@ -85,6 +94,38 @@ back-filled here — see the git/PR history for that period.
   in the IP's total, so they dilute the 403 share. The second needs the new
   `cfm.lua` (older edges keep writing `cfm_block` for rule blocks); the conf's
   focused-log map also matches `cfm_block_rule`.
+- **WAF tier review of 2026-11-17: five rules move to block, one ban is armed.**
+  From 7 days of `cfm.waf.log` and edge `access.log` on the 8 edge nodes.
+  A block is also enforced on the cPanel / WHM / webmail ports for what that
+  gate reads (it reads no body); cPanel's own API and session paths pass it
+  before the WAF.
+  - 332 (PHP code in the query) and 416 (a PHP file as the raw POST / PUT
+    body), logonly since 2026-11-13: every hit was an exploit (332: 44 from 34
+    IPs — ThinkPHP, pboot, Drupal, Fabrik-style eval; 416: 289 from 269 IPs —
+    the PHPUnit `eval-stdin.php` sweep and a PUT dropper). 332 is armed with
+    `WAF_RCE` (6 h ban + alert). 416's ban is held (`RULE_416 = 0`).
+  - 303 (`__proto__` prototype pollution), 307 (XXE) and 438 (a base64
+    `<?php` opener in a POST body), challenge_v2 until now: 303 is the
+    React2Shell sweep (~19 000 hits from ~5 800 IPs, not one solved a
+    challenge), 307 85 hits from datacenters, 438 14 exploit hits (Bricks,
+    WP Project Manager). 438 is armed with `WAF_BACKDOOR`. 303 and 307 keep
+    their bans held (`RULE_303 = 0`: ~830 bans and alerts a day armed;
+    `RULE_307 = 0` through a burn-in).
+  - What stays below block: 303's `constructor` + `.prototype` leg (plain
+    JavaScript source carries it; all the measured hits were `__proto__`)
+    and a 307 match without an external entity declaration
+    (`<!ENTITY x SYSTEM|PUBLIC "…">`; an Illustrator SVG's internal
+    entities matched the old test) stay challenge_v2. 416 skips a PUT /
+    PATCH on a cPanel Web Disk host (`webdisk.<domain>`, under the same
+    gates as the panel proxy hosts: proxysubdomains on, tenant override off),
+    the customer's own WebDAV upload, as it skips Nextcloud's `/remote.php/`.
+    A 307 block also covers a DOCTYPE naming an external DTD by SYSTEM.
+  - The held block rules (303, 307, 416) now run after every armed block
+    rule, so a request that also carries an armed payload keeps that rule's
+    ban and alert.
+  - 10019 (TranslatePress id lookup, CVE-2026-19632) is armed: 87 hits in a
+    week, all from datacenters, none from Greece or a home network.
+    `RULE_10019 = 0` holds it again.
 - **`attack on` now arms the vhost's challenge, holds for a TTL and survives
   a reload** (`cfm webtop attack on <vhost> [--ttl 6h]`, the cfm-admin
   Under-Attack toggle, the `vhost/attack` API).
@@ -174,6 +215,16 @@ back-filled here — see the git/PR history for that period.
   the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
 ### Fixed
+- **Two challenge false positives from the 2026-11-17 tier review.**
+  - Rule 701's `SSRF_DWORD_IP` fired on any 10-digit number after `://`, so a
+    shop admin searching `https://4932498770` (a phone number pasted into the
+    WordPress link box) was challenged. It now fires only on a value an IPv4
+    address can be (≤ 4294967295).
+  - Rule 601 (control characters) challenged the WordPress Optimization
+    Detective beacon (`…/optimization-detective/v1/url-metrics:store`, the
+    Performance Lab plugin), which visitors' browsers post on every page
+    (enateam.gr, Greek visitors, all week). That route is no longer read by
+    601; other routes on the same site still are.
 - **`cfm realip` now reads nginx per site, so cPanel ea-nginx nodes are
   judged correctly.** nginx takes the client from each `server{}`'s own
   `set_real_ip_from` list when it has one, and cPanel's ea-nginx gives every

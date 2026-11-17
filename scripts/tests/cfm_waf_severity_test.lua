@@ -1718,7 +1718,7 @@ do
   -- snapshot that somehow reports nothing at "challenge" for the wrong reason).
   local must_be_challenge_v2 = {
     "rule_xss", "rule_ip_host", "rule_sqli_union_variant", "rule_proxy_header_sqli",
-    "rule_debug_toggles", "rule_header_flood", "rule_ssrf", "rule_js_proto",
+    "rule_debug_toggles", "rule_header_flood", "rule_ssrf",
     "rule_ctrl_chars", "rule_serialize", "rule_c2_tunnel", "rule_auth_burst",
     "rule_php_webshell_body", "rule_cmd_params", "rule_cmd_payload", "rule_bad_ua",
     -- logonly→challenge_v2 2026-09-23 (PR3): attack-only, a human's solve passes.

@@ -72,8 +72,9 @@ local function clean(c, label)
   check(hit ~= true, label .. " — must NOT fire (got " .. tostring(reason) .. ")")
 end
 
-check(waf.get_config().rule_php_code_args == "logonly", "332 ships logonly")
-check(waf.get_config().rule_php_file_body == "logonly", "416 ships logonly")
+-- Both promoted logonly→block 2026-11-17 after a clean 7-day fleet burn-in.
+check(waf.get_config().rule_php_code_args == "block", "332 ships block")
+check(waf.get_config().rule_php_file_body == "block", "416 ships block")
 
 -- ── Rule 332 ────────────────────────────────────────────────────────────────
 set_only({ rule_php_code_args = "logonly" })

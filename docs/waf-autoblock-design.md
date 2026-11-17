@@ -450,6 +450,23 @@ bans. With three deferred blocks (101/103 by position, 201 and 511 by `st.*`)
 the generic fix above (`record()` continuing past a held block) is due; it
 was left out of this change to keep it small.
 
+**Rules 303, 307 and 416 block with their bans held, in the late group
+(2026-11-17).** The 2026-11-17 tier review promoted them to block after a
+7-day read of the 8 edge nodes: 303 (`__proto__`, the React2Shell sweep:
+~19 000 hits from ~5 800 IPs, no solve), 307 (XXE, 85 hits, all datacenter)
+and 416 (a PHP file as the raw body, 289 hits, the PHPUnit `eval-stdin.php`
+sweep). Each is its family's only block rule, so the promotion arms the
+family; the ban is held per rule (`HoldAutoblock`, `RULE_<id> = 0`) rather
+than per family, so `heldAutoblockFamilies` still holds one family
+(`WAF_TRAVERSAL`) and the "second held family" trigger of the decision
+record above is not reached. As held block rules they run with the late
+group, before traversal: 303 was step 14 and 307 step 22, ahead of the armed
+SQLi / upload / CVE rules; 416 was 60e, ahead of the armed 10018
+(`cfm_waf_tier_review_2026_11_17_test.lua` pins an armed 301 keeping the
+headline over each). 332 (WAF_RCE) and 438 (WAF_BACKDOOR), promoted the
+same day, are armed and stay where they are; 10019 was un-held (armed) and
+stays in the late group, where an armed rule is merely late.
+
 ## Open questions (decide before Phase 1)
 
 - **Detector name:** `waf_security` (sibling of `exim_security`,
