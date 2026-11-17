@@ -29,6 +29,24 @@ back-filled here — see the git/PR history for that period.
   so a node that says `permanent` stays permanent until you edit it.
 
 ### Fixed
+- **A WooCommerce sync no longer gets challenged, then banned.** Requests to
+  WooCommerce's authenticated REST API (`/wp-json/wc/v1`–`v3`, legacy
+  `/wc-api/v1`–`v3`, at the site root or one install directory down) no longer
+  count toward the per-IP challenges (`CHALLENGE_UNIQPATHS_IP`,
+  `CHALLENGE_ERR_RATIO`, `CHALLENGE_RPS_TOTAL`, `CHALLENGE_RPS_4XX/5XX`,
+  `CHALLENGE_POST_RATIO`): they leave the IP's total for those triggers, and
+  the IP's other requests decide alone. So the error and POST ratios are now
+  taken over those other requests (API 200s no longer dilute them), and an IP
+  that sends only these calls is not checked by `CHALLENGE_HTTP10` either. A
+  product sync to kiamaia.gr (mars, 2026-11-17) writes a new
+  `/products/<id>/variations/<id>` per request, and some come back 404: it was
+  put under a challenge it cannot solve, the challenge page's 403s fed
+  `403_flood`, and the IP was banned every 30 s while the sync ran. The Store
+  API (`/wp-json/wc/store/…`, cart and checkout, no credentials) and every
+  other route keep every challenge; a marker mid-path, an escape or a
+  credential route never matches. Nothing else changes: no challenge or ban
+  already on the IP is lifted, and the WAF, the 403/404/40x counters and
+  `agent_flood` count these requests as before.
 - **The L4 flood autoblock no longer bans verified crawlers and Meta's
   link-preview proxies.** Meta's `fwdproxy-*.fbsv.net` addresses (Facebook
   link previews, `facebookexternalhit`, the in-app browser) tripped
@@ -189,6 +207,12 @@ back-filled here — see the git/PR history for that period.
   findable.
 
 ### Changed
+- **`[webdetector] AGENT_COUNT` ships as `35` (was `20`).** The 7-day read of
+  the 8 edge nodes (2026-11-17): ~5 800 `agent_flood` bans, 85% Go-http-client
+  scanners and 10% Bytespider and similar crawlers; the few Greek site owners
+  it caught were developers running curl against their own WordPress. Nodes
+  keep their own `detectors.conf` value until it is edited.
+
 - **The proxied IP filter's log line names the client's country and
   network.** Each `[proxied_ipfilter]` line in `cfm.log` now ends with
   `cc=` / `asn=` / `asn_name=` from the node's GeoIP database (read when the

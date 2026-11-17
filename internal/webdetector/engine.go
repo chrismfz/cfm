@@ -231,13 +231,16 @@ type bucketSW struct {
 	ipsChalRule map[string]map[int]int // ip -> ruleIndex -> count
 
 	// Lightweight per-IP counters for challenge thresholds
-	ips4xx       map[string]int
-	ips5xx       map[string]int
-	ipsPOST      map[string]int
-	ipsNoUA      map[string]int
-	ipsHTTP10    map[string]int
-	ipsMalformed map[string]int                 // 400+414+431 per IP
-	ipsUniqUA    map[string]map[uint64]struct{} // UA churn: ip -> set(hash(ua))
+	ips4xx    map[string]int
+	ips5xx    map[string]int
+	ipsPOST   map[string]int
+	ipsNoUA   map[string]int
+	ipsHTTP10 map[string]int
+	// ipsChalExempt: requests the per-IP challenge triggers leave out of the
+	// IP's total (isWooAdminAPIPath), so they set no rate or ratio either.
+	ipsChalExempt map[string]int
+	ipsMalformed  map[string]int                 // 400+414+431 per IP
+	ipsUniqUA     map[string]map[uint64]struct{} // UA churn: ip -> set(hash(ua))
 
 	// 40x combo support (403+404) for IP-level detectors
 	ips40x     map[string]int
@@ -1781,6 +1784,11 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	// skip: a 403 none of the error counters below count (skip403), worked
 	// out once per record.
 	skip := skip403(rec)
+	// wooAPI: a WooCommerce authenticated REST call, which the per-IP
+	// challenge counters below do not count (isWooAdminAPIPath).
+	// The "wc" test keeps the full match off the hot path for almost every
+	// record.
+	wooAPI := (strings.Contains(p, "wc") || strings.Contains(p, "WC")) && isWooAdminAPIPath(p)
 
 	// Per-IP error thresholds (optional)
 	if rec.IP != "" {
@@ -1961,7 +1969,7 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		// IMPORTANT: count path-only (no query) and ignore static assets
 		// to avoid false positives on WP admin / heavy asset pages.
 		if e.cfg.ChallengeIPUniqPathsEnabled && e.cfg.ChallengeIPUniqPathsMin > 0 {
-			if !isStaticAssetPath(p) {
+			if !isStaticAssetPath(p) && !wooAPI {
 				if b.ipUniqPaths == nil {
 					b.ipUniqPaths = make(map[string]map[uint64]struct{})
 				}
@@ -2022,17 +2030,26 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// Per-IP challenge counters (only allocate maps if a related threshold is enabled)
 	if rec.IP != "" {
+		if wooAPI && (e.cfg.ChallengeIPRPSMin > 0 || e.cfg.ChallengeIP4xxRPSMin > 0 ||
+			e.cfg.ChallengeIP5xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0 ||
+			e.cfg.ChallengeIPPostRatioMin > 0 || e.cfg.ChallengeIPNoUAMin > 0 ||
+			e.cfg.ChallengeIPHTTP10Min > 0) {
+			if b.ipsChalExempt == nil {
+				b.ipsChalExempt = make(map[string]int)
+			}
+			b.ipsChalExempt[rec.IP]++
+		}
 		// status class counters. A skip403 403 is no client error here either:
 		// on 2026-11-17 a traffic rule's refusals put a shopper's home IP
 		// under CHALLENGE_ERR_RATIO next to the 403_flood ban (rigel).
-		if (e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 4 && !skip {
+		if (e.cfg.ChallengeIP4xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 4 && !skip && !wooAPI {
 			if b.ips4xx == nil {
 				b.ips4xx = make(map[string]int)
 			}
 			b.ips4xx[rec.IP]++
 			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, UA: rec.UA, Sub: "4xx", TS: rec.TS}
 		}
-		if (e.cfg.ChallengeIP5xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 5 {
+		if (e.cfg.ChallengeIP5xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0) && rec.Status/100 == 5 && !wooAPI {
 			if b.ips5xx == nil {
 				b.ips5xx = make(map[string]int)
 			}
@@ -2041,7 +2058,7 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		}
 
 		// method ratio
-		if e.cfg.ChallengeIPPostRatioMin > 0 && rec.Method == "post" {
+		if e.cfg.ChallengeIPPostRatioMin > 0 && rec.Method == "post" && !wooAPI {
 			if b.ipsPOST == nil {
 				b.ipsPOST = make(map[string]int)
 			}

@@ -243,7 +243,7 @@ Legend: **bold** = change stock; ⚠ = needs operator sign-off in review;
 |---|---|---|---|
 | `[webdetector] BLOCK` | 2h | 1h / 1h / 1h / 1h | **1h** |
 | `[webdetector] OPENRESTY_OK_IP_TTL` | 10m | 45m ×4 (+rigel, virgo) | **45m** |
-| `[webdetector] AGENT_COUNT` | 20 | 25 / 25 / 25 / 35 | **25** |
+| `[webdetector] AGENT_COUNT` | 35 (was 20; set 2026-11-17, see the stock comment) | 25 / 25 / 25 / 35 | **35** (shipped) |
 | `[webdetector] AGENT_LIST` | curl,wget,python-requests,Go-http-client,spider,FacebookExternalHit | 3 of 4: python-requests,Go-http-client,spider | **python-requests,Go-http-client,spider** ⚠ (fleet dropped curl/wget/FacebookExternalHit as FP-prone — legit tooling & FB previews) |
 | `[webdetector] IP404_COUNT` | 250 | 200 / 300 / 280 / 350 | **300** |
 | `[webdetector] IP40X_COMBO` | 120 | 160 / 290 / 220 / 300 | **250** |
