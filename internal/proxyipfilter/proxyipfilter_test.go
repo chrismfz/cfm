@@ -364,3 +364,30 @@ func TestGeoFields(t *testing.T) {
 		t.Fatalf("sanitised: %q", got)
 	}
 }
+
+// The line Decide writes ends with the geo fields, and Stats says whether a
+// resolver is set.
+func TestDecideLineCarriesGeo(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	var lines []string
+	orig := logf
+	logf = func(f string, a ...interface{}) { lines = append(lines, fmt.Sprintf(f, a...)) }
+	t.Cleanup(func() { logf = orig; SetGeo(nil) })
+	SetFeed("MYBLOCK", false, []string{"69.63.184.14"}, nil)
+
+	SetGeo(nil)
+	if Stats()["geo"] != false {
+		t.Fatal("no resolver: geo=false")
+	}
+	SetGeo(func(string) (string, uint, string) { return "US", 32934, "Facebook, Inc." })
+	if Stats()["geo"] != true {
+		t.Fatal("resolver set: geo=true")
+	}
+	Decide("69.63.184.14", "infonews24.gr")
+	want := "[proxied_ipfilter] would_block ip=69.63.184.14 host=infonews24.gr block=feed:MYBLOCK allow=- " +
+		"mode=feed:log,local:log n=1 cc=US asn=32934 asn_name=Facebook,_Inc."
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("line:\n got %q\nwant %q", lines, want)
+	}
+}

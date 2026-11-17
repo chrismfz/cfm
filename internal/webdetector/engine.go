@@ -784,7 +784,8 @@ func NewEngine(cfg Config) *Engine {
 		}
 	}
 
-	// Wire enricher into bridge for country fallback in handleDecision. ← ADD THIS
+	// Wire the enricher into the bridge: the country fallback in
+	// handleDecision, and the proxied IP filter's cc= / asn= log fields.
 	if e.nginxBridge != nil && e.enr != nil {
 		e.nginxBridge.SetEnricher(e.enr)
 	} else if e.nginxBridge != nil {

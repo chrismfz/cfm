@@ -93,7 +93,8 @@ node's GeoIP database (an mmdb read when the line is written, no DNS; `-`
 when it does not know, spaces in the name as `_`). They are what the review
 reads: a `cc=GR` would_block is the likely customer, and a foreign one on a
 network that serves real users (Google, Microsoft, Meta, a CDN) needs a look
-before enforce, unlike a scanner's hosting provider.
+before enforce, unlike a scanner's hosting provider. `proxied_ipfilter.geo` in the stats says whether the
+fields are filled (false: the node has no enricher, every field reads `-`).
 
 ## Next
 

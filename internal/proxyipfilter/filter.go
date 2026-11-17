@@ -397,7 +397,7 @@ func Decide(ip, host string) (enforce, listed bool) {
 		if len(v.Allows) > 0 {
 			allow = strings.Join(v.Allows, ",")
 		}
-		logging.Logf("[proxied_ipfilter] %s ip=%s host=%s block=%s allow=%s mode=feed:%s,local:%s n=%d %s",
+		logf("[proxied_ipfilter] %s ip=%s host=%s block=%s allow=%s mode=feed:%s,local:%s n=%d %s",
 			what, ip, orDash(host), strings.Join(v.Blocks, ","), allow,
 			modeFeed.Load().(string), modeLocal.Load().(string), n, geoFields(ip))
 	}
@@ -409,6 +409,9 @@ func Decide(ip, host string) (enforce, listed bool) {
 type GeoFunc func(ip string) (cc string, asn uint, asnName string)
 
 var geo atomic.Pointer[GeoFunc]
+
+// logf writes a would_block / allowed / block line (a var for the tests).
+var logf = logging.Logf
 
 // SetGeo gives the log line its cc= / asn= / asn_name= fields (nil: none).
 // The webdetector engine sets it with its enricher. A read for the weekly
@@ -542,6 +545,7 @@ func Stats() map[string]any {
 		"blocked":     nBlocked.Load(),
 		"allowed":     nAllowed.Load(),
 		"forgotten":   nForgotten.Load(),
+		"geo":         geo.Load() != nil, // the log line's cc= / asn= fields are filled
 		"sources":     srcs,
 	}
 }
