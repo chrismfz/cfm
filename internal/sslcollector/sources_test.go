@@ -739,3 +739,113 @@ func TestRefreshCarriesAPairCaughtMidRewrite(t *testing.T) {
 		t.Fatalf("failure clocks left after recovery: %d", n)
 	}
 }
+
+// TestPayloadSkipsACarriedPairWithNoPEM: a pair carried through a rewrite
+// (buildFailCarry) still has its old names, but its files read empty or cut.
+// writePayload must skip it, making the payload incomplete (the edge merges
+// it), rather than send an empty key in a complete payload: a worker with no
+// older pair for the name (one just started) would replace with that.
+func TestPayloadSkipsACarriedPairWithNoPEM(t *testing.T) {
+	dir := t.TempDir()
+	_, _, aPEM, aKey := genTestCert(t, "a.example.gr", nil, nil)
+	_, _, bPEM, bKey := genTestCert(t, "b.example.gr", nil, nil)
+	acert, akey := filepath.Join(dir, "a.cert"), filepath.Join(dir, "a.key")
+	bcert, bkey := filepath.Join(dir, "b.cert"), filepath.Join(dir, "b.key")
+	for p, b := range map[string][]byte{acert: aPEM, akey: aKey, bcert: bPEM, bkey: bKey} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pairs := []Pair{
+		{Source: SrcGeneric, CertPath: acert, KeyPath: akey},
+		{Source: SrcGeneric, CertPath: bcert, KeyPath: bkey},
+	}
+	discoverPairsHook = func() []Pair { return pairs }
+	t.Cleanup(func() { discoverPairsHook = nil })
+
+	c := New(Config{})
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	payload := func() (payloadResult, string) {
+		var buf strings.Builder
+		res, err := c.writePayload(&buf, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res, buf.String()
+	}
+	if res, body := payload(); !res.Complete || !strings.Contains(body, "a.example.gr") {
+		t.Fatalf("setup: complete=%v, a present=%v", res.Complete, strings.Contains(body, "a.example.gr"))
+	}
+
+	for _, cut := range [][]byte{nil, aKey[:len(aKey)/2]} {
+		// a's key is cut mid-rewrite (carried), and b changes in the same
+		// Refresh, so the version moves.
+		if err := os.WriteFile(akey, cut, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, _, b2PEM, b2Key := genTestCert(t, "b.example.gr", nil, nil)
+		if err := os.WriteFile(bcert, b2PEM, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(bkey, b2Key, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if c.EntryForHost("a.example.gr") == nil {
+			t.Fatal("setup: a is not carried")
+		}
+		res, body := payload()
+		if res.Complete {
+			t.Errorf("key cut to %d bytes: the payload is complete; want incomplete", len(cut))
+		}
+		if strings.Contains(body, "a.example.gr") {
+			t.Errorf("key cut to %d bytes: the carried pair was sent", len(cut))
+		}
+		if !strings.Contains(body, "b.example.gr") {
+			t.Errorf("key cut to %d bytes: the other pair is missing", len(cut))
+		}
+	}
+}
+
+// TestRefreshDoesNotCarryADanglingCertLink: an indexed pair whose cert is now
+// a dangling symlink (an LE live/ link whose archive was removed) is a removed
+// cert, not one mid-rewrite: it leaves the index at once.
+func TestRefreshDoesNotCarryADanglingCertLink(t *testing.T) {
+	dir := t.TempDir()
+	_, _, certPEM, keyPEM := genTestCert(t, "link.example.gr", nil, nil)
+	real, key := filepath.Join(dir, "archive.pem"), filepath.Join(dir, "k.pem")
+	link := filepath.Join(dir, "live.pem")
+	if err := os.WriteFile(real, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	pairs := []Pair{{Source: SrcLetsEncrypt, CertPath: link, KeyPath: key}}
+	discoverPairsHook = func() []Pair { return pairs }
+	t.Cleanup(func() { discoverPairsHook = nil })
+	c := New(Config{})
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.EntryForHost("link.example.gr") == nil {
+		t.Fatal("setup: not indexed")
+	}
+	if err := os.Remove(real); err != nil {
+		t.Fatal(err)
+	}
+	pairs = nil // the scanner skips the dangling link
+	if err := c.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.EntryForHost("link.example.gr") != nil {
+		t.Fatal("a pair whose cert link dangles was carried")
+	}
+}

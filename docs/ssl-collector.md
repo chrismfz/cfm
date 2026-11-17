@@ -115,9 +115,13 @@ mid-rewrite, and an indexed cert file the scanners skip because it is empty
 for a moment. Without the carry, the payload is still complete without that
 pair, the edge replaces its store, and the site serves the default cert
 until the next Refresh. While carried, the entry's files are read again at
-payload time. When they can be read, they are sent. When they cannot, the
-payload is incomplete and the edge merges it. A cert file that is gone (the
-account or domain was removed) drops the entry at once.
+payload time. When they can be read and hold a PEM block, they are sent.
+When they cannot, or hold none (empty, cut mid-write), the entry is left out,
+the payload is incomplete, and the edge merges it. A cert file that is gone,
+or a cert symlink that dangles (the account or domain was removed), drops the
+entry at once. A pair that stays broken leaves at the first Refresh after the
+10 minutes, which can be the 15-minute discovery tick: up to about 25
+minutes in all.
 
 On top of that:
 

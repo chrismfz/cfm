@@ -2,8 +2,10 @@ package sslcollector
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +19,12 @@ import (
 	"time"
 )
 
+// fakePEM is a PEM block of n filler bytes: what writePayload's getPEM needs
+// to send an entry (it skips a file with no PEM block, as one cut mid-rewrite).
+func fakePEM(typ string, n int) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: bytes.Repeat([]byte{0x5a}, n)})
+}
+
 // newSnapshotCollector seeds a Collector with one exact + one wild entry backed
 // by real files, and points the snapshot at a temp path.
 func newSnapshotCollector(t *testing.T) (*Collector, string) {
@@ -24,10 +32,10 @@ func newSnapshotCollector(t *testing.T) (*Collector, string) {
 	tmp := t.TempDir()
 	certPath := filepath.Join(tmp, "cert.pem")
 	keyPath := filepath.Join(tmp, "key.pem")
-	if err := os.WriteFile(certPath, []byte(strings.Repeat("CERT", 64)), 0o644); err != nil {
+	if err := os.WriteFile(certPath, fakePEM("CERTIFICATE", 64), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(keyPath, []byte(strings.Repeat("KEY", 64)), 0o600); err != nil {
+	if err := os.WriteFile(keyPath, fakePEM("PRIVATE KEY", 64), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	col := New(Config{CacheDir: tmp})
@@ -162,7 +170,7 @@ func TestIncompleteSnapshotIsNeitherServedNorKept(t *testing.T) {
 	col, path := newSnapshotCollector(t)
 	// a.example.com gets its own key file (the wild entry keeps the shared one).
 	key := col.exact["a.example.com"].KeyPath + ".a"
-	if err := os.WriteFile(key, []byte("KEYA"), 0o600); err != nil {
+	if err := os.WriteFile(key, fakePEM("PRIVATE KEY", 4), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	col.exact["a.example.com"] = &Entry{Fingerprint: "fpA2", CertPath: col.exact["a.example.com"].CertPath, KeyPath: key, NotAfter: time.Now().Add(24 * time.Hour)}
@@ -273,7 +281,7 @@ func TestDumpAllRebuildsAnIncompletePayload(t *testing.T) {
 	col, path := newSnapshotCollector(t)
 	_ = os.Remove(path)
 	key := col.exact["a.example.com"].KeyPath + ".a"
-	if err := os.WriteFile(key, []byte("KEYA"), 0o600); err != nil {
+	if err := os.WriteFile(key, fakePEM("PRIVATE KEY", 4), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	col.exact["a.example.com"] = &Entry{Fingerprint: "fpA2", CertPath: col.exact["a.example.com"].CertPath, KeyPath: key, NotAfter: time.Now().Add(24 * time.Hour)}
@@ -335,14 +343,17 @@ func bigCollector(t *testing.T) (*Collector, string) {
 	dir := filepath.Dir(path)
 	col.exact = map[string]*Entry{}
 	col.wildSuffix = map[string]*Entry{}
-	pem := strings.Repeat("MIIFazCCBFOgAwIBAgISA0123456789abcdefghijklmnopqrstuvwxyz0123/+\n", 120)
+	// PEM blocks (getPEM skips a file with none) of real-cert size.
+	line := "MIIFazCCBFOgAwIBAgISA0123456789abcdefghijklmnopqrstuvwxyz01234/+\n" // 64 base64 chars
+	certBody := "-----BEGIN CERTIFICATE-----\n" + strings.Repeat(line, 120) + "-----END CERTIFICATE-----\n"
+	keyBody := "-----BEGIN PRIVATE KEY-----\n" + strings.Repeat(line, 26) + "-----END PRIVATE KEY-----\n"
 	for i := 0; i < 60; i++ {
 		cp := filepath.Join(dir, fmt.Sprintf("c%d.pem", i))
 		kp := filepath.Join(dir, fmt.Sprintf("k%d.pem", i))
-		if err := os.WriteFile(cp, []byte(pem), 0o644); err != nil {
+		if err := os.WriteFile(cp, []byte(certBody), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(kp, []byte(pem[:1700]), 0o600); err != nil {
+		if err := os.WriteFile(kp, []byte(keyBody), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		e := &Entry{Fingerprint: fmt.Sprintf("fp%03d", i), CertPath: cp, KeyPath: kp, NotAfter: time.Now().Add(24 * time.Hour)}

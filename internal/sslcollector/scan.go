@@ -113,7 +113,9 @@ func (c *Collector) Refresh(ctx context.Context) error {
 		if seen[k] {
 			continue
 		}
-		if _, err := os.Lstat(old.CertPath); err != nil {
+		// Stat, not Lstat: a dangling symlink (an LE live/ link whose
+		// archive was removed) is a removed cert, not one mid-rewrite.
+		if _, err := os.Stat(old.CertPath); err != nil {
 			continue
 		}
 		failed[k] = true
@@ -153,10 +155,11 @@ func (c *Collector) Refresh(ctx context.Context) error {
 // once. The payload is still complete without it, the edge REPLACES its store
 // on a complete payload (sslcollector.lua ingest_dumpall), and the site served
 // the default cert until the next Refresh. Carried, the entry stays in the
-// payload: when its files can be read, they are sent; when they cannot,
-// getPEM skips it and the payload is incomplete, which the edge merges. A pair
-// still failing after this long (a key that became a dangling symlink) leaves
-// the index.
+// payload: when its files can be read and hold PEM, they are sent; when they
+// cannot or do not (empty, cut mid-write), getPEM skips it and the payload is
+// incomplete, which the edge merges. A pair still failing after this long (a
+// key that became a dangling symlink) leaves the index at the first Refresh
+// past it, which can be the 15-minute discovery tick: up to ~25 minutes.
 const buildFailCarry = 10 * time.Minute
 
 // pairKey identifies a cert/key pair across Refreshes.

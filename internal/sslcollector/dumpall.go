@@ -28,6 +28,12 @@ import (
 // returned and the caller continues with leaf-only behaviour. Only a
 // failure to read CertPath itself is propagated as an error, because
 // without the leaf there is nothing to serve.
+// hasPEMBlock reports whether b holds at least one complete PEM block.
+func hasPEMBlock(b []byte) bool {
+	blk, _ := pem.Decode(b)
+	return blk != nil
+}
+
 func assembleCertPEM(certPath, chainPath string) ([]byte, error) {
 	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
@@ -168,6 +174,15 @@ func (c *Collector) writePayload(w io.Writer, at io.WriterAt) (payloadResult, er
 		}
 		keyPEM, err := os.ReadFile(e.KeyPath)
 		if err != nil {
+			return "", "", false
+		}
+		// A file that reads but holds no PEM (empty, or cut mid-rewrite: what
+		// a carried entry's files look like, scan.go buildFailCarry) is
+		// skipped like an unreadable one, so the payload is incomplete and
+		// the edge merges it. Sent, an empty key in a complete payload left a
+		// worker that had no older pair for the name (one just started) with
+		// none.
+		if !hasPEMBlock(certPEM) || !hasPEMBlock(keyPEM) {
 			return "", "", false
 		}
 		cert, key := string(certPEM), string(keyPEM)
