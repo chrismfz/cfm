@@ -459,6 +459,25 @@ func TestEdgeHealthReport_WebDNATOrder(t *testing.T) {
 		!strings.Contains(f["next"].(string), "NFT_DNAT_PRIORITY = -101") || !strings.Contains(f["summary"].(string), "imunify") {
 		t.Fatalf("imunify first, busy: %v", f)
 	}
+	if strings.Contains(f["next"].(string), "challenge") || !strings.Contains(f["next"].(string), "drops") {
+		t.Fatalf("a graylisted client is dropped by Imunify, not challenged: %q", f["next"])
+	}
+	// A line longer than the read buffer (a scanner's huge URI) is skipped,
+	// not the end of the count.
+	long := `9.9.9.9 - - [` + now.Format("02/Jan/2006:15:04:05 -0700") + `] "GET /` + strings.Repeat("a", 200<<10) + ` HTTP/1.1" 404 1 a.gr "-" "ua" WL:"0" "-" XFF:"-" CAPTCHA:"0" PEER:9.9.9.9` + "\n"
+	if err := os.WriteFile(log, []byte(b.String()[:strings.Index(b.String(), "\n")+1]+long+b.String()[strings.Index(b.String(), "\n")+1:]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if ev := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order")["evidence"].(map[string]any); ev["webshield_requests"] != 151 {
+		t.Fatalf("long line: %v", ev)
+	}
+	// A DNAT ahead at -200: CFM cannot go ahead of it (nft refuses -201).
+	edgeHealthNATReport = func(context.Context) (netfilterdiag.Report, error) {
+		return netfilterdiag.Analyze([]byte(strings.Replace(nftJSON("-99"), `"prio":-100`, `"prio":-200`, 1)), netfilterdiag.Expected{})
+	}
+	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); strings.Contains(f["next"].(string), "-201") || !strings.Contains(f["next"].(string), "has to move later") {
+		t.Fatalf("-200: %v", f["next"])
+	}
 	// CFM first: ok, whatever WebShield logs.
 	setNFT("-101")
 	if f := findFinding(t, buildEdgeHealthReport(context.Background(), 1000), "web-dnat-order"); f["severity"] != "ok" {

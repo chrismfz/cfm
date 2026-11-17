@@ -303,7 +303,7 @@ func (l layout) probeApache(stack string) Probe {
 // include chain. With no server{} block found, the http-level settings decide.
 func (l layout) probeNginx(panel string) Probe {
 	ds, servers := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from", "real_ip_header")
-	trust, header, inLocation := "", "", 0
+	trust, header, inLocation, httpList := "", "", 0, false
 	type own struct {
 		list, loopback bool
 		src, header    string
@@ -328,11 +328,14 @@ func (l layout) probeNginx(panel string) Probe {
 			}
 		case d.name == "real_ip_header" && len(d.args) > 0:
 			header = d.args[0]
-		case d.name == "set_real_ip_from" && trust == "" && anyLoopback(d.args):
-			trust = l.display(d.file)
+		case d.name == "set_real_ip_from":
+			httpList = true
+			if trust == "" && anyLoopback(d.args) {
+				trust = l.display(d.file)
+			}
 		}
 	}
-	p := Probe{Stack: StackNginx, Source: trust, ng: &nginxVerdict{}}
+	p := Probe{Stack: StackNginx, Source: trust, ng: &nginxVerdict{httpList: httpList}}
 	if header != "" && !edgeHeaders[strings.ToLower(header)] {
 		p.ng.httpBadHeader = header
 	}
@@ -443,6 +446,7 @@ func (l layout) probeNginx(panel string) Probe {
 // nginxVerdict is what the plan needs from an nginx probe.
 type nginxVerdict struct {
 	httpBadHeader string // an http-level real_ip_header the edge does not set
+	httpList      bool   // http{} has its own set_real_ip_from list (a server-level list replaces it)
 	untrusted     []nginxSite
 }
 

@@ -53,6 +53,10 @@ type walker struct {
 	want     map[string]bool
 	servers  []nginxServer
 	cur      int // nginx: the server{} being walked, -1 outside one
+	// reinclude: walk a file at every place it is included (nginx, where a
+	// server-level file applies to each server{} that includes it). Apache's
+	// verdict is server-level only, so its walk reads each file once.
+	reinclude bool
 }
 
 func newWalker(l layout, names ...string) *walker {
@@ -71,6 +75,9 @@ func (w *walker) enter(path string) ([]byte, bool) {
 		return nil, false
 	}
 	cf, cached := w.cache[path]
+	if cached && !w.reinclude {
+		return nil, false
+	}
 	if !cached {
 		if w.files >= walkMaxFiles {
 			return nil, false
@@ -185,6 +192,7 @@ func (w *walker) apacheFile(path string, serverRoot *string, inVhost bool, depth
 // server{} block.
 func (l layout) nginxDirectives(main, prefix string, names ...string) ([]directive, []nginxServer) {
 	w := newWalker(l, append(names, "server_name")...)
+	w.reinclude = true
 	w.nginxFile(l.fs(main), prefix, nil, 0)
 	asked := map[string]bool{}
 	for _, n := range names {
@@ -229,16 +237,48 @@ func (w *walker) nginxFile(path, prefix string, stack []string, depth int) {
 		return
 	}
 	defer w.leave(path)
+	// Tokenized the way nginx's ngx_conf_read_token does: inside '...' or
+	// "..." (with backslash escapes) nothing is syntax, `${var}` belongs to
+	// its token, and `#` starts a comment only at the start of a token. A
+	// quoted regex with a quantifier (`location ~ "^/(\d{4})/"`) used to
+	// open and close blocks here, and the server{} the following directives
+	// were attributed to drifted.
 	var stmt strings.Builder
-	inComment := false
+	inComment, escaped, varBrace := false, false, false
+	var quote rune
+	lastSpace := true
+	var prev rune
 	for _, c := range string(b) {
 		switch {
 		case inComment:
 			if c == '\n' {
 				inComment = false
+				lastSpace = true
 			}
-		case c == '#':
+			continue
+		case quote != 0:
+			stmt.WriteRune(c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == quote:
+				quote = 0
+			}
+		case varBrace:
+			stmt.WriteRune(c)
+			if c == '}' {
+				varBrace = false
+			}
+		case c == '#' && lastSpace:
 			inComment = true
+		case (c == '"' || c == '\'') && lastSpace:
+			quote = c
+			stmt.WriteRune(c)
+		case c == '{' && prev == '$':
+			varBrace = true
+			stmt.WriteRune(c)
 		case c == ';':
 			w.nginxStatement(path, prefix, stack, strings.Fields(stmt.String()), depth)
 			stmt.Reset()
@@ -265,6 +305,8 @@ func (w *walker) nginxFile(path, prefix string, stack []string, depth int) {
 		default:
 			stmt.WriteRune(c)
 		}
+		lastSpace = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ';' || c == '{' || c == '}'
+		prev = c
 	}
 }
 

@@ -167,10 +167,17 @@ func (l layout) planNginx(pl *Plan) {
 	mainConf := l.fs(l.nginxMain)
 	si := l.fs(l.cpanelNginxServerIncludes)
 	switch {
-	case p.Panel == PanelCPanel && len(reachable) > 0 && isDir(si):
+	case p.Panel == PanelCPanel && len(reachable) > 0 && isDir(si) && !ng.httpList:
 		// ea-nginx: every site server{} includes server-includes/*.conf, after
 		// cloudflare.conf; set_real_ip_from adds to the block's list there.
+		// Only with no http-level list: a block without its own list inherits
+		// http{}'s, and the file would give it a loopback-only one instead.
 		pl.Action, pl.Path = ActionWrite, filepath.Join(si, nginxDropIn)
+	case p.Panel == PanelCPanel && len(reachable) > 0 && isDir(si):
+		pl.Content = ""
+		pl.Reason = "http{} has its own set_real_ip_from list, which a set_real_ip_from in conf.d/server-includes/ " +
+			"would replace for every server{} that inherits it; add to the lists of the " + strconv.Itoa(len(ng.untrusted)) +
+			" server{} block(s) that do not trust the edge (e.g. " + siteExamples(ng.untrusted) + ") by hand:\n" + nginxTrust
 	case len(ng.untrusted) > 0 && len(inherit) == 0:
 		// Every block that does not trust the edge has its own list: an
 		// http-level trust would change nothing, and the probe would still warn.

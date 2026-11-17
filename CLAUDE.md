@@ -603,9 +603,10 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   at the -99 default, every Cloudflare visitor skipped the edge on earth for
   months (~29% of its web requests, 2026-11-17). Imunify nodes run
   `NFT_DNAT_PRIORITY = -101`; `edge_health` check H (`web-dnat-order`) warns
-  when a DNAT runs ahead while WebShield serves real traffic. The fleet
-  blacklist (`MYBLOCK`) is nft-only, so it does not stop a proxied client
-  either: `docs/imunify-webshield-parity.md` (P1).
+  when a DNAT runs ahead while WebShield serves real traffic. With CFM first,
+  a graylisted direct visitor is dropped by Imunify's own filter (it accepts
+  that set only on WebShield's ports), never challenged. What WebShield did
+  that CFM lost, measured: `docs/imunify-webshield-parity.md`.
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;

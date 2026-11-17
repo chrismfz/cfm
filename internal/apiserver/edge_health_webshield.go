@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -70,15 +71,30 @@ func countWebShield(path string, now, window int64) webShieldCount {
 		}
 	}
 	from := now - window
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	// A line longer than the buffer (a scanner's huge URI) is still counted,
+	// and never ends the count: bufio.Scanner stopped there, and the partial
+	// count read as complete.
+	rd := bufio.NewReaderSize(f, 64<<10)
 	first := start > 0 // the first line after a seek is partial
-	for sc.Scan() {
+	for {
+		line, err := rd.ReadSlice('\n')
+		long := false
+		if err == bufio.ErrBufferFull {
+			// Its timestamp is near the start: count it from the first chunk
+			// (XFF, at the end, stays unread), and drop the rest of the line.
+			// ReadSlice's buffer is reused, so copy what is kept.
+			line, long = append([]byte(nil), line...), true
+			for err == bufio.ErrBufferFull {
+				_, err = rd.ReadSlice('\n')
+			}
+		}
+		if err != nil && len(line) == 0 {
+			break
+		}
 		if first {
 			first = false
 			continue
 		}
-		line := sc.Bytes()
 		ts, ok := webShieldTime(line)
 		if !ok {
 			continue
@@ -91,6 +107,9 @@ func countWebShield(path string, now, window int64) webShieldCount {
 			continue
 		}
 		c.total++
+		if long {
+			continue
+		}
 		if i := bytes.Index(line, []byte(`XFF:"`)); i >= 0 && !bytes.HasPrefix(line[i+5:], []byte(`-"`)) {
 			c.proxied++
 		}
@@ -148,12 +167,23 @@ func webDNATOrderFinding(ctx context.Context, sev *severityTracker) map[string]a
 	for o := range owners {
 		who = append(who, o)
 	}
+	sort.Strings(who) // a stable summary: whats_wrong compares runs
 	ev["ahead_rules"], ev["ahead_count"], ev["ahead_owners"] = rules, len(ahead), strings.Join(who, ",")
 	order := strings.Join(who, "/") + " DNATs tcp/80 or tcp/443 at priority " + itoa(minPrio) +
 		", before CFM's web redirect at " + itoa(cfmPrio) + ", so the connections it matches never reach the CFM edge (WAF, challenge, edge bans)"
 	want := minPrio - 1
+	// Imunify's filter accepts its graylist / captcha sets only on WebShield's
+	// own ports and drops them on every other (9080/9043 included): with CFM
+	// first, a graylisted direct visitor is dropped, not challenged
+	// (docs/imunify-webshield-parity.md, P3).
 	next := "set NFT_DNAT_PRIORITY = " + itoa(want) + " in /etc/cfm/cfm.conf and run `cfm dnat on --priority " + itoa(want) +
-		"` (one transaction; the redirect never lapses). Clients Imunify greylists then meet CFM's challenge instead of WebShield's"
+		"` (one transaction; the redirect never lapses). Clients on Imunify's graylist then get no WebShield captcha: " +
+		"Imunify's own filter drops their new connections to the edge's ports"
+	if want <= -200 {
+		// nft refuses a nat chain at -200 or below (dnat.minNATChainPriority).
+		next = "CFM's web redirect cannot run ahead of a nat chain at priority " + itoa(minPrio) +
+			" (nft refuses a nat chain at -200 or below): that chain has to move later"
+	}
 	switch {
 	case !ws.read:
 		return sev.add(check, "unknown", order+"; no WebShield access log to measure how much", ev, next)

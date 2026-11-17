@@ -758,3 +758,49 @@ func TestCLI(t *testing.T) {
 		t.Fatalf("unknown subcommand rc=%d", rc)
 	}
 }
+
+// nginx's tokenizer: nothing inside quotes is syntax, `${var}` is part of its
+// token, and `#` comments only at a token's start. A quoted regex quantifier
+// used to open and close blocks, and the server{} the next directives were
+// credited to drifted.
+func TestNginxTokenizerQuotesAndVarBraces(t *testing.T) {
+	l, r := testLayout(t)
+	put(t, r, "etc/nginx/nginx.conf", "http {\n    include /etc/nginx/conf.d/*.conf;\n}\n")
+	put(t, r, "etc/nginx/conf.d/a.conf", `server {
+    server_name shop.gr;
+    add_header X-Brace "}";
+    set_real_ip_from 127.0.0.1;
+    location ~ "^/(\d{4})/{2}" { return 301 https://${host}/x#frag; }
+    add_header X-A 'a;b}{c # not a comment';
+}
+server {
+    server_name blog.gr;
+}
+`)
+	p := l.probe("nginx")
+	// blog.gr has no list and http{} none: untrusted. The old tokenizer
+	// closed shop.gr at the quoted "}", took its trust for http-level, and
+	// blog.gr inherited it.
+	if p.Trusted || p.Servers != 2 || p.UntrustedServers != 1 || !strings.Contains(p.Note, "blog.gr") || strings.Contains(p.Note, "shop.gr") {
+		t.Fatalf("probe = %+v", p)
+	}
+	_, servers := l.nginxDirectives(l.nginxMain, l.nginxPrefix, "set_real_ip_from")
+	if len(servers) != 2 || strings.Join(servers[0].names, ",") != "shop.gr" || strings.Join(servers[1].names, ",") != "blog.gr" {
+		t.Fatalf("servers = %+v", servers)
+	}
+}
+
+// cPanel with an http-level set_real_ip_from list: a server-includes trust
+// would replace it for every block that inherits it, so the plan is manual.
+func TestCPanelEaNginxHTTPListIsManual(t *testing.T) {
+	l, r := eaNginxHost(t)
+	put(t, r, "etc/nginx/conf.d/lb.conf", "set_real_ip_from 10.0.0.5;\n")
+	p := l.probe("")
+	if p.Trusted {
+		t.Fatalf("probe = %+v", p)
+	}
+	pl := l.plan(p)
+	if pl.Action != ActionManual || !strings.Contains(pl.Reason, "http{} has its own set_real_ip_from list") || !strings.Contains(pl.Reason, nginxTrust) {
+		t.Fatalf("plan = %+v", pl)
+	}
+}
