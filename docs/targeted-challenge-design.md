@@ -123,18 +123,39 @@ fallback), triggered by the under-attack state rather than only by a reject.
 >   1. The verify of a qualifying solve answers 403 with `X-CFM-Confirm`, an
 >      HMAC token bound to (ip, host, PoW token), and logs `result=v2_confirm`.
 >   2. The page shows a native Continue button, once the tab is visible.
->   3. A trusted click re-posts the same solve with the token. Its PoW is
->      checked as of the token's issue time, so the PoW's 2-minute TTL never
->      sends the visitor back. The token lives 5 minutes, the `cfm_chal`
->      cookie's own lifetime.
+>   3. A trusted click re-posts the same solve with the token and `clk`
+>      (the click; a new log-only `sig` reading). A re-post with the token
+>      and still no trusted input (no `clk`, pointer, touch or key) is asked
+>      again with the same token (a re-post never mints a new one, so one PoW
+>      cannot be kept alive by re-posting). Its PoW is checked as of the token's issue time, so the PoW's
+>      2-minute TTL never sends the visitor back. The token lives 5 minutes,
+>      but the `cfm_chal` cookie the re-post needs expires 300 s after it was
+>      set, so the window is up to 5 minutes and can be shorter (the page then
+>      reloads into a fresh challenge).
 >   4. The solve logs `v2_confirm=clicked v2_confirm_ms=<ms>` (history
 >      payload keys of the same names, withheld from scoped callers as
 >      `v2_*`).
 >
 >   A `v2_confirm` line with no later clicked solve from the same ip and host
->   is a visitor who did not click.
-> - **Where it applies:** web scope only. A `www.` host also follows its
->   apex's attack state.
+>   is a visitor who did not click. The shown confirm is a log line only, not
+>   a history row (it decides nothing, and under attack it is high volume);
+>   reads count it from `cfm.challenges.log*`. A confirm-asked solve still
+>   feeds the under-attack solve rate, so `auto` is not starved by a farm
+>   that never clicks.
+> - **Honest limits** (the header of `challenge_confirm.go`): a farm that
+>   reads the 403 and posts `clk:1` with the token passes, and a CDP click is
+>   trusted; a token is reusable from the same ip and host until it expires
+>   (~7 minutes after the PoW was issued instead of 2).
+> - **Where it applies:** web scope only. A `www.` host with no state of its
+>   own follows its apex's (`attack off` on the `www.` host wins). An
+>   FCrDNS-verified good bot is never asked (it cannot click): the Rung-1
+>   waiver's verdict and rules (`CHALLENGE_GOODBOT_EXEMPT`; not under a rung
+>   mark, not on a vhost in lockdown).
+> - **The override is in memory:** a cPanel user can set it on their own vhost
+>   (24 h max), and a config reload (a `detectors.conf` save, a tailed log's
+>   rotation) clears it, so a test must re-arm it after one. Each visitor
+>   outside the audience makes two verify POSTs, which count toward the
+>   verify rate limit.
 > - **The state challenges nobody by itself,** so a test needs a served
 >   challenge: `cfm webtop challenge add <vhost>` + `cfm webtop attack on
 >   <vhost>` (or the cfm-admin Under-Attack toggle).

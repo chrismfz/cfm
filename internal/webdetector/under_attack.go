@@ -44,6 +44,7 @@ package webdetector
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -189,6 +190,17 @@ type attackVhost struct {
 	evidence        string // last transition's evidence (kept consistent with `on`)
 }
 
+// effectiveOverride is the override as of now: a TTL-bounded forced-ON
+// override past its expiry reads as 0 (AUTO). The ONE copy of that rule, for
+// every read path (VhostAttackState, underAttackHosts, vhostAttackKind); the
+// evalUnderAttack tick still owns the actual clearing.
+func (st *attackVhost) effectiveOverride(now time.Time) int8 {
+	if st.override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
+		return 0
+	}
+	return st.override
+}
+
 // underAttackTracker holds the per-vhost state machine and the solve-rate feed.
 // Self-contained (own mutex), mirroring subnetGoodBotState.
 type underAttackTracker struct {
@@ -262,10 +274,7 @@ func (t *underAttackTracker) underAttackHosts() []string {
 		// Same expiry treatment as VhostAttackState: an expired TTL-bounded
 		// forced-ON override counts only via its auto state (review finding —
 		// the two read paths must report the same truth).
-		override := st.override
-		if override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
-			override = 0
-		}
+		override := st.effectiveOverride(now)
 		if override == +1 || (override == 0 && st.on) {
 			out = append(out, host)
 		}
@@ -599,14 +608,11 @@ func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, eviden
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if st := t.hosts[host]; st != nil {
-		switch st.override {
+		// An expired TTL-bounded override reads as AUTO immediately — don't
+		// wait for the tick to clear it (the tick still owns the actual state
+		// transition).
+		switch st.effectiveOverride(time.Now()) {
 		case +1:
-			// An expired TTL-bounded override reads as AUTO immediately —
-			// don't wait for the tick to clear it (the tick still owns the
-			// actual state transition).
-			if !st.overrideExpires.IsZero() && !time.Now().Before(st.overrideExpires) {
-				return st.on, st.since, st.evidence
-			}
 			return true, st.since, st.evidence
 		case -1:
 			return false, st.since, st.evidence
@@ -619,29 +625,42 @@ func (e *Engine) VhostAttackState(host string) (on bool, since time.Time, eviden
 // vhostAttackKind reports whether host is UNDER_ATTACK because an operator
 // holds it there (an unexpired forced-ON override: `cfm webtop attack on`,
 // the cfm-admin toggle) or because the detector's automatic state is on with
-// no override. The same truth VhostAttackState reports, split by cause, for
-// the confirm step (challenge_confirm.go), whose default mode acts on the
-// operator's override only. False/false while the detector is off.
-func (e *Engine) vhostAttackKind(host string, now time.Time) (manual, auto bool) {
+// no override, for the confirm step (challenge_confirm.go), whose default mode
+// acts on the operator's override only. own says the host has a state of its
+// own (on, or any override, forced-off included), so a caller falling back to
+// a www. host's apex does it only when the www. host says nothing itself.
+// VhostAttackState's truth split by cause, except that this also reads
+// nothing while the detector is off (UNDER_ATTACK=0), where an override
+// cannot be set.
+func (e *Engine) vhostAttackKind(host string, now time.Time) (manual, auto, own bool) {
 	if e == nil || e.attack == nil || !e.cfg.UnderAttack || host == "" {
-		return false, false
+		return false, false, false
 	}
 	t := e.attack
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	st := t.hosts[host]
 	if st == nil {
-		return false, false
+		return false, false, false
 	}
-	override := st.override
-	if override == +1 && !st.overrideExpires.IsZero() && !now.Before(st.overrideExpires) {
-		override = 0
-	}
-	switch override {
+	switch st.effectiveOverride(now) {
 	case +1:
-		return true, false
+		return true, false, true
 	case -1:
-		return false, false
+		return false, false, true
 	}
-	return false, st.on
+	return false, st.on, st.on
+}
+
+// confirmAttackState is the confirm step's under-attack read: the host's own
+// state, else, for a www. host with no state of its own, its apex's (an
+// operator forces `attack on example.gr`; visitors arrive on www.). A www.
+// host the operator forced off stays off.
+func (e *Engine) confirmAttackState(host string) (manual, auto bool) {
+	now := time.Now()
+	manual, auto, own := e.vhostAttackKind(host, now)
+	if !own && strings.HasPrefix(host, "www.") {
+		manual, auto, _ = e.vhostAttackKind(strings.TrimPrefix(host, "www."), now)
+	}
+	return manual, auto
 }

@@ -223,6 +223,12 @@ type humanitySignals struct {
 	// and scored by NOTHING. A client claiming hidden only withholds its
 	// window size, which it can already do by omitting it: the D5b residual.
 	HID *int `json:"hid"`
+	// CLK (2026-11-17) counts the trusted clicks on the under-attack confirm
+	// step's Continue button (challenge_confirm.go); only that page sends it.
+	// The confirm re-post needs trusted input, and a click with no pointer
+	// movement (the button appears under a still cursor) is input too.
+	// Client-authored like every count here: the D5b residual.
+	CLK *int `json:"clk"`
 }
 
 // Bounds for the retained readings. These exist for DIGIT SANITY only — a
@@ -1077,6 +1083,7 @@ func (s *humanitySignals) sanitize() {
 	if s.HID != nil && *s.HID != 1 {
 		s.HID = nil
 	}
+	dropInt(&s.CLK)
 }
 
 // uaClaimsMobile reports whether the UA presents itself as a touch device —
@@ -1370,6 +1377,7 @@ func (s *humanitySignals) sigFields() []sigField {
 	addFloat("mj", s.MJ, 1)
 	addFloat("pd", s.PD, 0)
 	addInt("hid", s.HID)
+	addInt("clk", s.CLK)
 	// rf (2026-11-10, E4 read 6): the software-renderer FAMILY, present only
 	// when the sw_renderer detection matched (softwareRendererFamily, the
 	// same call the scorer makes) — absent for a hardware or unreported
@@ -1471,8 +1479,9 @@ func (s ChallengeSolve) HumanitySuffix() string {
 	if s.V2Rescued != "" && s.V2Grain != "" {
 		out += " v2_rescued=" + s.V2Rescued
 	}
-	// The under-attack confirm step (challenge_confirm.go): last, so no
-	// field a parser already reads moves.
+	// The under-attack confirm step (challenge_confirm.go): last within the
+	// humanity suffix (the fields that follow the suffix on a line still
+	// move, as they did for every member added here).
 	if s.V2Confirm != "" {
 		out += fmt.Sprintf(" v2_confirm=%s v2_confirm_ms=%d", s.V2Confirm, s.V2ConfirmMS)
 	}

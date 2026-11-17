@@ -1,14 +1,18 @@
 package webdetector
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"cfm/internal/detectors/core"
 )
 
 // challenge_confirm.go — the under-attack confirm step
@@ -20,20 +24,40 @@ import (
 // a datacenter ASN counts as outside), earns no clearance on its first POST.
 // The verify answers 403 with an X-CFM-Confirm token instead, and the page
 // shows one native "Continue" button. The click re-posts the same solve with
-// the token, and it passes (absent a certain tell, which Rung 1 already
-// rejected). It is not a reject: D5b holds (absence never convicts), and the
-// button is the recourse D5c promised.
-//
-// What it buys is cost and a corpus, not a wall: a farm must now script a
-// click on every solve, and the click's approach is measured by the page's
-// existing trajectory readings. A CDP click is a trusted click (the HONEST
-// LIMITS block in challenge_v2.go).
+// the token AND the click itself (clk, a trusted click on the button; the
+// approach to it moves the pointer counts too). A re-post with the token and
+// still no trusted input is asked again. A confirmed re-post passes (absent
+// a certain tell, which Rung 1 already rejected). It is not a reject: D5b
+// holds (absence never convicts), and the button is the recourse D5c promised.
 //
 // The PoW a confirm re-post carries was valid when the confirm was issued.
 // Its freshness is checked at the token's issue time, so a visitor who takes
 // a minute to click is not sent back to solve again. The token lives
-// confirmTokenTTL, which the cfm_chal cookie's own 300 s lifetime bounds
-// anyway.
+// confirmTokenTTL, but the cfm_chal cookie the re-post also needs expires
+// 300 s after it was SET (it is set only when missing), so the real window
+// is up to 5 minutes and can be shorter; past it the page reloads into a
+// fresh challenge.
+//
+// HONEST LIMITS. What it buys is cost and a corpus, not a wall:
+//   - the counts are client-authored, like all of Rung 1: a farm that reads
+//     the 403 and posts clk:1 with the token passes, and a CDP click is a
+//     trusted click. It must now handle a second round trip on every solve
+//     (today's farm stacks post once), and the click's approach is measured
+//     by the page's existing trajectory readings;
+//   - a token is not single-use: one (PoW, token) pair can mint clearance
+//     again from the same ip and host until the token expires (~7 minutes
+//     after the PoW was issued, instead of the PoW's own 2). A PoW is
+//     reusable within its TTL already, and clearance is per (ip, host). A
+//     re-post is never answered with a NEW token, so that bound holds;
+//   - every human outside the audience now makes two verify POSTs, which
+//     count toward the verify rate limit (rlVerifyBurst): a busy CGNAT
+//     address reaches it sooner while a vhost is under attack;
+//   - the default `manual` mode follows the in-memory override, which a
+//     cPanel user can also set on their own vhost (24 h max), and which a
+//     config reload (a detectors.conf save, a tailed log's rotation) clears;
+//   - a shown confirm is a log line only (result=v2_confirm), not a history
+//     row: it decides nothing, and under attack it is high volume. The
+//     clicked solve's row carries v2_confirm=clicked.
 //
 // Knobs ([webdetector], read on every reload):
 //   CHALLENGE_V2_CONFIRM          off | manual (default) | auto
@@ -70,6 +94,10 @@ type challengeConfirmState struct {
 	// attack reports whether host is UNDER_ATTACK under an operator override
 	// (manual) or the detector's automatic state (auto). nil = unwired.
 	attack func(host string) (manual, auto bool)
+	// record feeds a confirm-asked solve to the under-attack solve rate
+	// (Engine.RecordUnderAttackSolve): a solve that never clicks must still
+	// count, or `auto` would starve the state that asks it. nil = none.
+	record func(ChallengeSolve)
 }
 
 var challengeConfirm = challengeConfirmState{
@@ -124,11 +152,43 @@ func ConfigureChallengeV2Confirm(mode, audience string) {
 }
 
 // SetUnderAttackConfirmState wires the under-attack read the gate needs (the
-// engine's tracker); nil unwires, and the step never fires.
-func SetUnderAttackConfirmState(fn func(host string) (manual, auto bool)) {
+// engine's tracker) and the solve-rate feed for a confirm-asked solve; a nil
+// attack unwires, and the step never fires.
+func SetUnderAttackConfirmState(attack func(host string) (manual, auto bool), record func(ChallengeSolve)) {
 	challengeConfirm.mu.Lock()
-	challengeConfirm.attack = fn
+	challengeConfirm.attack = attack
+	challengeConfirm.record = record
 	challengeConfirm.mu.Unlock()
+}
+
+// recordConfirmAsked feeds a confirm-asked solve to the solve rate.
+func recordConfirmAsked(s ChallengeSolve) {
+	challengeConfirm.mu.RLock()
+	fn := challengeConfirm.record
+	challengeConfirm.mu.RUnlock()
+	if fn != nil {
+		fn(s)
+	}
+}
+
+// confirmGoodBot reports whether an FCrDNS-verified good bot skips the
+// confirm: it cannot click. The same rules as the Rung-1 waiver
+// (challengeV2WaiverBar at the vhost grain: never under a rung mark, never on
+// a vhost in lockdown) and the same verdict and CHALLENGE_GOODBOT_EXEMPT knob
+// (challengeV2GoodBot, which may forward-confirm a crawler-looking PTR inline,
+// bounded; it runs only for a solve about to be asked).
+func confirmGoodBot(ctx context.Context, s ChallengeSolve) bool {
+	if challengeV2WaiverBar(v2GrainVhost, s.IP, s.Host, s.Scope) != "" {
+		return false
+	}
+	bot, _ := challengeV2GoodBot(ctx, s.IP, s.PTR)
+	return bot != ""
+}
+
+// confirmInput reports whether a confirm re-post carries trusted input: the
+// click on the button (clk), or pointer, touch or key events.
+func confirmInput(sig *humanitySignals) bool {
+	return sig != nil && intVal(sig.PTR)+intVal(sig.TCH)+intVal(sig.KEY)+intVal(sig.CLK) > 0
 }
 
 // confirmRequired reports whether a solve that passed Rung 1 must still
@@ -213,11 +273,22 @@ func (s ChallengeSolve) ConfirmLine() string {
 	if s.V2Via != "" {
 		via = " v2_via=" + s.V2Via
 	}
-	grain := s.V2Grain
-	if grain == "" {
-		grain = "-"
+	// v2= only when armed, as on the solve line.
+	grain := ""
+	if s.V2Grain != "" {
+		grain = " v2=" + s.V2Grain
 	}
-	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_confirm hs=%d tells=%s%s v2=%s tls_fp=%s ua=%q%s%s%s%s",
-		s.IP, s.Host, s.URI, s.HumanityScore, s.HumanityTells, s.SignalSuffix(), grain, s.TLSFingerprintOrDash(), s.UA,
+	// hs=- and tells=- as the solve line has them: hs 0 is a real score
+	// ("scored clean"), and most of this population has no tells.
+	hs := strconv.Itoa(s.HumanityScore)
+	if core.HumanityNoReport(s.HumanityNoPayload, s.HumanityScore) {
+		hs = "-"
+	}
+	tells := s.HumanityTells
+	if tells == "" {
+		tells = "-"
+	}
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_confirm hs=%s tells=%s%s%s tls_fp=%s ua=%q%s%s%s%s",
+		s.IP, s.Host, s.URI, hs, tells, s.SignalSuffix(), grain, s.TLSFingerprintOrDash(), s.UA,
 		s.GeoSuffix(), s.SrcSuffix(), via, s.ScopeSuffix())
 }

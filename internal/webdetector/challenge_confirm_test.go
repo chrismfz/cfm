@@ -1,14 +1,17 @@
 package webdetector
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,13 +22,14 @@ import (
 func withConfirm(t *testing.T, mode, audience string, attack func(host string) (bool, bool)) {
 	t.Helper()
 	challengeConfirm.mu.RLock()
-	prevMode, prevAud, prevAttack := challengeConfirm.mode, challengeConfirm.audience, challengeConfirm.attack
+	prevMode, prevAud, prevAttack, prevRecord := challengeConfirm.mode, challengeConfirm.audience, challengeConfirm.attack, challengeConfirm.record
 	challengeConfirm.mu.RUnlock()
 	ConfigureChallengeV2Confirm(mode, audience)
-	SetUnderAttackConfirmState(attack)
+	SetUnderAttackConfirmState(attack, nil)
 	t.Cleanup(func() {
 		challengeConfirm.mu.Lock()
-		challengeConfirm.mode, challengeConfirm.audience, challengeConfirm.attack = prevMode, prevAud, prevAttack
+		challengeConfirm.mode, challengeConfirm.audience = prevMode, prevAud
+		challengeConfirm.attack, challengeConfirm.record = prevAttack, prevRecord
 		challengeConfirm.mu.Unlock()
 	})
 }
@@ -170,28 +174,43 @@ func TestVhostAttackKind(t *testing.T) {
 	e := &Engine{attack: newUnderAttackTracker()}
 	e.cfg.UnderAttack = true
 	now := time.Now()
+	kind := func(h string, at time.Time) [3]bool {
+		m, a, own := e.vhostAttackKind(h, at)
+		return [3]bool{m, a, own}
+	}
 
-	if m, a := e.vhostAttackKind("x.example", now); m || a {
-		t.Fatalf("unknown host: %v %v", m, a)
+	if got := kind("x.example", now); got != [3]bool{} {
+		t.Fatalf("unknown host: %v", got)
 	}
 	e.SetVhostAttackOverride("x.example", true, now, 0)
-	if m, a := e.vhostAttackKind("x.example", now); !m || a {
-		t.Errorf("forced on: manual=%v auto=%v", m, a)
+	if got := kind("x.example", now); got != [3]bool{true, false, true} {
+		t.Errorf("forced on: %v", got)
 	}
 	e.SetVhostAttackOverride("y.example", true, now, time.Minute)
-	if m, _ := e.vhostAttackKind("y.example", now.Add(2*time.Minute)); m {
+	if got := kind("y.example", now.Add(2*time.Minute)); got[0] {
 		t.Error("an expired TTL-bound override still reads manual")
 	}
 	e.attack.hosts["z.example"] = &attackVhost{on: true}
-	if m, a := e.vhostAttackKind("z.example", now); m || !a {
-		t.Errorf("automatic state: manual=%v auto=%v", m, a)
+	if got := kind("z.example", now); got != [3]bool{false, true, true} {
+		t.Errorf("automatic state: %v", got)
 	}
 	e.SetVhostAttackOverride("z.example", false, now, 0)
-	if m, a := e.vhostAttackKind("z.example", now); m || a {
-		t.Errorf("forced off: manual=%v auto=%v", m, a)
+	if got := kind("z.example", now); got != [3]bool{false, false, true} {
+		t.Errorf("forced off: %v (own must be true: the operator said off)", got)
 	}
+
+	// www. follows its apex only when it has no state of its own.
+	e.SetVhostAttackOverride("shop.example", true, now, 0)
+	if m, _ := e.confirmAttackState("www.shop.example"); !m {
+		t.Error("www. host with no state: want the apex's manual override")
+	}
+	e.SetVhostAttackOverride("www.shop.example", false, now, 0)
+	if m, a := e.confirmAttackState("www.shop.example"); m || a {
+		t.Error("www. host forced off: the apex's override must not apply")
+	}
+
 	e.cfg.UnderAttack = false
-	if m, a := e.vhostAttackKind("x.example", now); m || a {
+	if got := kind("x.example", now); got != [3]bool{} {
 		t.Error("detector off: the override must not read")
 	}
 }
@@ -252,6 +271,9 @@ func TestVerify_ConfirmStepThenClickPasses(t *testing.T) {
 	})
 	const ip, host = "198.51.100.20", "www.ventus.example"
 	withConfirm(t, "manual", "GR,CY", manualOn(host))
+	var fed []string
+	var fedMu sync.Mutex
+	SetUnderAttackConfirmState(manualOn(host), func(s ChallengeSolve) { fedMu.Lock(); fed = append(fed, s.IP); fedMu.Unlock() })
 
 	// The farm's hs-0 profile: a hardware renderer, 8 cores, no input.
 	body := `{"v":1,"wd":false,"ptr":0,"tch":0,"key":0,"mv":0,"hc":8,"ow":1440,"oh":900}`
@@ -267,6 +289,25 @@ func TestVerify_ConfirmStepThenClickPasses(t *testing.T) {
 	}
 	if solved, rejects := capt.counts(); solved != 0 || rejects != 0 {
 		t.Fatalf("a confirm cleared or rejected something: solved=%d rejects=%d", solved, rejects)
+	}
+	fedMu.Lock()
+	if len(fed) == 0 || fed[0] != ip {
+		t.Errorf("a confirm-asked solve must feed the under-attack solve rate: %v", fed)
+	}
+	fedMu.Unlock()
+
+	// The token copied into a second POST with still no input is asked again
+	// with the SAME token: a re-post never mints a new one (that would keep
+	// one PoW alive for as long as a client keeps re-posting).
+	resp = post(body, map[string]string{confirmHeader: tok})
+	if resp.StatusCode != http.StatusForbidden || resp.Header.Get(confirmHeader) != tok {
+		t.Fatalf("token without input: status=%d token=%q, want 403 and the same token", resp.StatusCode, resp.Header.Get(confirmHeader))
+	}
+	if resp := post("", map[string]string{confirmHeader: tok}); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("token with an empty body: status=%d, want 403", resp.StatusCode)
+	}
+	if solved, _ := capt.counts(); solved != 0 {
+		t.Fatal("a token without input cleared the solve")
 	}
 
 	// The click re-posts the same solve, now with the approach to the button.
@@ -344,7 +385,8 @@ func TestVerify_ConfirmOutlivesThePowTTL(t *testing.T) {
 	if resp := post(noInput, nil); resp.StatusCode != http.StatusForbidden || resp.Header.Get(confirmHeader) != "" {
 		t.Fatalf("control: the stale PoW alone must fail verify, got status=%d", resp.StatusCode)
 	}
-	if resp := post(noInput, map[string]string{confirmHeader: tok}); resp.StatusCode != http.StatusSeeOther {
+	clicked := `{"v":1,"wd":false,"ptr":0,"tch":0,"key":0,"mv":0,"clk":1}`
+	if resp := post(clicked, map[string]string{confirmHeader: tok}); resp.StatusCode != http.StatusSeeOther {
 		t.Fatalf("confirmed re-post after the PoW TTL: status=%d, want 303", resp.StatusCode)
 	}
 	if solved, _ := capt.counts(); solved != 1 {
@@ -356,14 +398,43 @@ func TestConfirmLine(t *testing.T) {
 	s := ChallengeSolve{IP: "198.51.100.1", Host: "h.example", URI: "/", HumanityScored: true, UA: "ua", Scope: "web",
 		V2Grain: "vhost", V2Via: "auto:under_attack", CountryISO: "US"}
 	line := s.ConfirmLine()
-	for _, want := range []string{"result=v2_confirm", "hs=0", "v2=vhost", "v2_via=auto:under_attack", "scope=web", `ua="ua"`} {
+	for _, want := range []string{"result=v2_confirm", "hs=0", " v2=vhost ", "v2_via=auto:under_attack", "scope=web", `ua="ua"`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("confirm line %q lacks %q", line, want)
 		}
 	}
+	if !strings.Contains(line, " hs=0 tells=- ") {
+		t.Errorf("a scored-clean confirm must say hs=0 tells=-: %q", line)
+	}
 	s.V2Grain, s.V2Via = "", ""
-	if !strings.Contains(s.ConfirmLine(), " v2=- ") {
-		t.Errorf("an unarmed confirm must say v2=-: %q", s.ConfirmLine())
+	if strings.Contains(s.ConfirmLine(), " v2=") {
+		t.Errorf("an unarmed confirm must carry no v2=, as the solve line: %q", s.ConfirmLine())
+	}
+	s.HumanityNoPayload = true
+	if !strings.Contains(s.ConfirmLine(), " hs=- ") {
+		t.Errorf("no payload must read hs=-, not a scored 0: %q", s.ConfirmLine())
+	}
+}
+
+// v2_confirm reaches the history row, and the scoped strip removes it with
+// the rest of the v2_* family (it says an operator's override covered the
+// visitor).
+func TestRecordChallengeSolved_PersistsConfirmAndScopedStripsIt(t *testing.T) {
+	e := newSolveTestEngine(t)
+	e.RecordChallengeSolved(ChallengeSolve{
+		IP: "203.0.113.50", Host: "shop.example.com", URI: "/", HumanityScored: true,
+		V2Grain: v2GrainVhost, V2Via: "auto:under_attack", V2Confirm: confirmClicked, V2ConfirmMS: 1834,
+	})
+	ev := latestSolveEvent(t, e)
+	if ev.Payload["v2_confirm"] != confirmClicked || toF(ev.Payload["v2_confirm_ms"]) != 1834 {
+		t.Fatalf("payload lacks the confirm: %v", ev.Payload)
+	}
+	rows := []HistoryEvent{ev}
+	redactScopedHistoryRows(httptest.NewRequest(http.MethodGet, "/x", nil).WithContext(scopedCtx("shop.example.com")), rows)
+	for _, k := range []string{"v2_confirm", "v2_confirm_ms"} {
+		if _, present := rows[0].Payload[k]; present {
+			t.Errorf("%s crossed the scoped boundary", k)
+		}
 	}
 }
 
@@ -412,5 +483,36 @@ assert.strictEqual(cfmConfirmToken(429, "T"), "");
 	}
 	if out, err := exec.Command(node, fn).CombinedOutput(); err != nil {
 		t.Fatalf("cfmConfirmToken: %v\n%s", err, out)
+	}
+}
+
+// A verified good bot cannot click, so it is never asked: the same verdict and
+// rules as the Rung-1 waiver.
+func TestVerify_ConfirmSkipsAVerifiedGoodBot(t *testing.T) {
+	base, capt := startVerifyServer(t)
+	setSolveEnricher(t, func(ip string) enrich.Result {
+		return enrich.Result{CountryISO: "US", ASN: 15169, ASNName: "Google LLC", PTR: "crawl-66-249-66-1.googlebot.com"}
+	})
+	const ip, host = "66.249.66.1", "bot.example"
+	withConfirm(t, "manual", "GR,CY", manualOn(host))
+	SetChallengeV2GoodBot(func(_ context.Context, gip, _ string) (string, string) {
+		if gip == ip {
+			return "googlebot", ""
+		}
+		return "", ""
+	})
+	t.Cleanup(func() { SetChallengeV2GoodBot(nil) })
+
+	noInput := `{"v":1,"wd":false,"ptr":0,"tch":0,"key":0,"mv":0}`
+	if resp := verifyPoster(t, base, ip, host, confirmUA, time.Now().UTC())(noInput, nil); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("verified good bot: status=%d, want 303 with no confirm", resp.StatusCode)
+	}
+	// Not under a rung mark: a mark withdraws the waiver, as for Rung 1.
+	MarkChallengeV2(ip, host)
+	if resp := verifyPoster(t, base, ip, host, confirmUA, time.Now().UTC())(noInput, nil); resp.Header.Get(confirmHeader) == "" {
+		t.Errorf("good bot under a rung mark: status=%d, want the confirm", resp.StatusCode)
+	}
+	if solved, _ := capt.counts(); solved != 1 {
+		t.Errorf("solved=%d, want 1", solved)
 	}
 }

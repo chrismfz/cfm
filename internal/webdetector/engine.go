@@ -882,14 +882,10 @@ func NewEngine(cfg Config) *Engine {
 	// (challenge_confirm.go); a rebuilt engine re-wires it.
 	// A www. host also follows its apex's state, as its v2 tier does (an
 	// operator forces `attack on example.gr`; visitors arrive on www.).
-	SetUnderAttackConfirmState(func(host string) (bool, bool) {
-		now := time.Now()
-		manual, auto := e.vhostAttackKind(host, now)
-		if !manual && !auto && strings.HasPrefix(host, "www.") {
-			manual, auto = e.vhostAttackKind(strings.TrimPrefix(host, "www."), now)
-		}
-		return manual, auto
-	})
+	// A confirm-asked solve still counts toward the vhost's under-attack
+	// solve rate (RecordUnderAttackSolve), or a farm that never clicks
+	// would starve the automatic state that asks it.
+	SetUnderAttackConfirmState(e.confirmAttackState, e.RecordUnderAttackSolve)
 
 	return e
 }

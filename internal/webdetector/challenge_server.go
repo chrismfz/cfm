@@ -1161,12 +1161,26 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// carries the confirm token, and the page shows a Continue button
 		// whose click re-posts this solve with it. Never a reject (D5b): the
 		// click passes absent a certain tell, which Rung 1 rejected above.
+		// A re-post with the token but still no trusted input (no click on
+		// the button, no pointer, touch or key) is asked again with the SAME
+		// token: a new one minted from a re-post would keep one PoW alive
+		// for as long as a client keeps re-posting. A verified good bot is
+		// never asked (confirmGoodBot).
 		if v2On {
-			if confirmOK {
+			switch {
+			case confirmOK && confirmInput(hsSig):
 				solve.V2Confirm = confirmClicked
-				solve.V2ConfirmMS = verifyAt.Sub(confirmAt).Milliseconds()
-			} else if confirmRequired(solve, hsSig) {
+				if ms := verifyAt.Sub(confirmAt).Milliseconds(); ms > 0 {
+					solve.V2ConfirmMS = ms
+				}
+			case confirmOK:
+				setNoStore(w.Header())
+				w.Header().Set(confirmHeader, r.Header.Get(confirmHeader))
+				http.Error(w, "confirm", http.StatusForbidden)
+				return
+			case confirmRequired(solve, hsSig) && !confirmGoodBot(r.Context(), solve):
 				logging.LogfCHALLENGES("%s", solve.ConfirmLine())
+				recordConfirmAsked(solve)
 				setNoStore(w.Header())
 				w.Header().Set(confirmHeader, issueConfirmToken(ipStr, host, powTok, verifyAt))
 				http.Error(w, "confirm", http.StatusForbidden)
@@ -2769,8 +2783,9 @@ func challengeHTML() string {
   // showConfirm replaces the spinner with one native button. It waits for a
   // page someone can see (a background tab shows it when it comes back), and
   // only a trusted click or key press (ev.isTrusted) re-posts the solve with
-  // the token. The page's input listeners keep running, so the re-post
-  // carries the approach to the button. No timer, no puzzle.
+  // the token and clk, the click; the server asks again without trusted
+  // input. The page's input listeners keep running, so the re-post carries
+  // the approach to the button. No timer, no puzzle.
   function showConfirm(sol, ctok) {
     var shown = false;
     var show = function () {
@@ -2793,13 +2808,18 @@ func challengeHTML() string {
         b.textContent = 'Continue';
         b.addEventListener('click', function (ev) {
           if (ev && ev.isTrusted === false) return;
+          HS.clk = (HS.clk || 0) + 1;
           b.disabled = true;
           b.textContent = 'Checking…';
           send(sol, ctok);
         });
+        // The give-up message of a later reject writes here (.muted).
+        var m = document.createElement('div');
+        m.className = 'muted';
         card.appendChild(h);
         card.appendChild(p);
         card.appendChild(b);
+        card.appendChild(m);
         try { b.focus(); } catch (e) {}
       } catch (e) {
         setTimeout(function(){ location.reload(); }, 1200);
