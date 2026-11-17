@@ -962,7 +962,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// the solve is then checked like any other.
 		powAt := verifyAt
 		confirmAt, confirmOK := time.Time{}, false
-		if ct := r.Header.Get(confirmHeader); ct != "" {
+		// Web scope only, where tokens are issued: a panel verify never
+		// honours one (the token does not bind scope).
+		if ct := r.Header.Get(confirmHeader); ct != "" && scope == "web" {
 			if confirmAt, confirmOK = verifyConfirmToken(ct, ipStr, host, powTok, verifyAt); confirmOK {
 				powAt = confirmAt
 			}

@@ -653,14 +653,17 @@ func (e *Engine) vhostAttackKind(host string, now time.Time) (manual, auto, own 
 }
 
 // confirmAttackState is the confirm step's under-attack read: the host's own
-// state, else, for a www. host with no state of its own, its apex's (an
-// operator forces `attack on example.gr`; visitors arrive on www.). A www.
-// host the operator forced off stays off.
+// state OR, for a www. host, its apex's (an operator forces `attack on
+// example.gr`; visitors arrive on www., which may well be in the automatic
+// state itself — that must not hide the apex's override). Only a www. host the
+// operator forced off ignores its apex.
 func (e *Engine) confirmAttackState(host string) (manual, auto bool) {
 	now := time.Now()
 	manual, auto, own := e.vhostAttackKind(host, now)
-	if !own && strings.HasPrefix(host, "www.") {
-		manual, auto, _ = e.vhostAttackKind(strings.TrimPrefix(host, "www."), now)
+	forcedOff := own && !manual && !auto
+	if strings.HasPrefix(host, "www.") && !forcedOff {
+		am, aa, _ := e.vhostAttackKind(strings.TrimPrefix(host, "www."), now)
+		manual, auto = manual || am, auto || aa
 	}
 	return manual, auto
 }

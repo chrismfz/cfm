@@ -204,6 +204,11 @@ func TestVhostAttackKind(t *testing.T) {
 	if m, _ := e.confirmAttackState("www.shop.example"); !m {
 		t.Error("www. host with no state: want the apex's manual override")
 	}
+	// www. in the automatic state must not hide the apex's operator override.
+	e.attack.hosts["www.shop.example"] = &attackVhost{on: true}
+	if m, a := e.confirmAttackState("www.shop.example"); !m || !a {
+		t.Errorf("www. auto + apex manual: manual=%v auto=%v, want both", m, a)
+	}
 	e.SetVhostAttackOverride("www.shop.example", false, now, 0)
 	if m, a := e.confirmAttackState("www.shop.example"); m || a {
 		t.Error("www. host forced off: the apex's override must not apply")

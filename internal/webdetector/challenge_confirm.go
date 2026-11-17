@@ -281,8 +281,9 @@ func (s ChallengeSolve) ConfirmLine() string {
 	if s.V2Grain != "" {
 		grain = " v2=" + s.V2Grain
 	}
-	// hs=- and tells=- as the solve line has them: hs 0 is a real score
-	// ("scored clean"), and most of this population has no tells.
+	// The reject line's shape (tells= always present, "-" when empty, as
+	// most of this population has none), with the solve line's hs=- for no
+	// payload: hs 0 is a real score ("scored clean").
 	hs := strconv.Itoa(s.HumanityScore)
 	if core.HumanityNoReport(s.HumanityNoPayload, s.HumanityScore) {
 		hs = "-"

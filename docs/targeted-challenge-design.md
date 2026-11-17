@@ -147,8 +147,9 @@ fallback), triggered by the under-attack state rather than only by a reject.
 >   reads the 403 and re-posts with the token and `X-CFM-Click` passes, and a CDP click is
 >   trusted; a token is reusable from the same ip and host until it expires
 >   (~7 minutes after the PoW was issued instead of 2).
-> - **Where it applies:** web scope only. A `www.` host with no state of its
->   own follows its apex's (`attack off` on the `www.` host wins). An
+> - **Where it applies:** web scope only (a panel verify never honours a
+>   token). A `www.` host also follows its apex's state, whatever its own
+>   automatic state (`attack off` on the `www.` host wins). An
 >   FCrDNS-verified good bot is never asked (it cannot click): the Rung-1
 >   waiver's verdict and rules (`CHALLENGE_GOODBOT_EXEMPT`; not under a rung
 >   mark, not on a vhost in lockdown).
