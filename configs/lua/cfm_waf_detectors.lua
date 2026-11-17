@@ -1116,29 +1116,50 @@ end
 
 -- cap_len: how much of the raw body to read; 404 reads its 2 KB head
 -- (php_webshell_max_scan_len), rule 417 the whole body the edge read
--- (php_webshell_deep_scan_len). A deep read first checks the raw body for
--- what a score of min_score needs (`<?` or `$_`, or an escape that may
--- decode to one), so an ordinary large form is never decoded.
+-- (php_webshell_deep_scan_len). A deep read:
+--   * first checks the raw body for what a score of min_score needs (`<?`
+--     or `$_`) or an escape that may decode to one (`%3…`, `%2…`, `\u00`),
+--     so an ordinary large form is never decoded;
+--   * also reads a multipart body's plain text fields (a webshell editor's
+--     or a file manager's save form posted as multipart; file parts stay
+--     402 / 415's).
+-- Both passes read a JSON body's \u00XX / \/ escapes as PHP's json_decode
+-- hands them to the app (`\u003c?php`, `\u0024_POST`).
 function _M.detect_php_webshell_body(body, headers, cap_len)
   if not body or body == "" then return nil end
 
   headers = headers or {}
   local ct = header_string(headers["content-type"] or headers["Content-Type"])
-  if not is_textual_body_content_type(ct) then
+  local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
+  cap_len = tonumber(cap_len) or head_len
+  local deep = cap_len > head_len
+  local lct = lower(ct)
+  local multipart = has(lct, "multipart/form-data")
+  if not is_textual_body_content_type(ct) and not (deep and multipart) then
     return nil
   end
 
-  local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
-  cap_len = tonumber(cap_len) or head_len
-  if cap_len > head_len then
-    local raw = cap(body, cap_len)
-    if not (raw:find("<?", 1, true) or raw:find("$_", 1, true)
-            or raw:find("%%3[cC]") or raw:find("%24", 1, true) or raw:find("%25", 1, true)) then
-      return nil
-    end
+  local raw = cap(body, cap_len)
+  if deep and not (raw:find("<?", 1, true) or raw:find("$_", 1, true)
+                   or raw:find("%3", 1, true) or raw:find("%2", 1, true)
+                   or raw:find("\\u00", 1, true)) then
+    return nil
+  end
+  if multipart then
+    local acc, total = {}, 0
+    each_multipart_field(raw, ct, function(_, v)
+      if v and v ~= "" and total < cap_len then
+        acc[#acc + 1] = v
+        total = total + #v
+      end
+    end)
+    if total == 0 then return nil end
+    raw = table.concat(acc, "\n")
+  elseif has(lct, "json") or raw:find("^%s*[%[{]") then
+    if raw:find("\\", 1, true) then raw = util.json_unescape_ascii(raw) end
   end
 
-  local s = normalize(cap(body, cap_len))
+  local s = normalize(raw)
   if s == "" then return nil end
 
   if has(ct, "application/x-www-form-urlencoded") then

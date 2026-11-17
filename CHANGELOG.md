@@ -65,7 +65,8 @@ back-filled here — see the git/PR history for that period.
   header fills the first 2 KB (rigel, 2026-11-17). Both reached the disk.
   Rule 417 runs 404's scorer over the whole body the edge reads (32 KB), and
   only when 404 found nothing and the raw body holds a `<?` / `$_` or an
-  escape of one. Logonly through burn-in, since a whole legitimate plugin
+  escape of one. It also reads a multipart body's text fields and a JSON
+  body's `\u00XX` escapes (404's head pass now reads the escapes too). Logonly through burn-in, since a whole legitimate plugin
   saved through an editor is scored too. See `docs/waf.md`, "Rule 417".
 - **Imunify360 RBL locks now reach the fleet list.** On a cPanel node with
   Imunify, a mail login from an address on Imunify's global RBL is refused

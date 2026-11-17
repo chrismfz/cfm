@@ -110,6 +110,23 @@ fires(req("content=" .. urlenc(urlenc(SHELL)) .. "&save=1", "/sag.php"), "double
 fires(req('{"content":"' .. (string.rep("x", 2500) .. "<?php if(isset($_POST[\\\"c\\\"])){eval($_POST[\\\"c\\\"]);}") .. '"}',
           "/wp-json/x/v1/save", "application/json"), "JSON body, PHP past 2 KB", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
 
+-- JSON escapes, as json_decode hands them to the app (review 2026-11-17).
+fires(req('{"content":"' .. string.rep("x", 2500) ..
+          '\\u003c?php if(isset(\\u0024_POST[\\u0022c\\u0022])){eval\\u0028\\u0024_POST[\\u0022c\\u0022]);}"}',
+          "/wp-json/x/v1/save", "application/json"), "JSON body with \\u00XX escapes", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+-- `<` raw, `?` encoded, no superglobal: the gate's %3 must let it through.
+fires(req("note=" .. string.rep("x", 2500) .. "&content=<%3Fphp eval(base64_decode(%22ZWNobyAx%22));"),
+      "<%3Fphp with no superglobal", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+-- A multipart TEXT field (a save form posted as multipart), past 2 KB.
+fires(req("--b\r\nContent-Disposition: form-data; name=\"pad\"\r\n\r\n" .. string.rep("x", 3000) ..
+          "\r\n--b\r\nContent-Disposition: form-data; name=\"content\"\r\n\r\n" .. SHELL .. "\r\n--b--\r\n",
+          "/sag.php", "multipart/form-data; boundary=b"), "multipart text field", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+
+-- ── 404 disabled: 417 still runs on its own ───────────────────────────────
+set_only({ rule_php_webshell_body = "disabled", rule_php_webshell_body_deep = "logonly" })
+fires(req(editor_save(PLUGIN_HEAD .. INJECTION .. PLUGIN_TAIL)), "404 disabled, 417 alone", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")
+set_only({ rule_php_webshell_body = "challenge_v2", rule_php_webshell_body_deep = "logonly" })
+
 -- ── 404 keeps a head hit; 417 then stays silent ────────────────────────────
 fires(req(editor_save("<?php eval($_POST['c']); ?>" .. PLUGIN_TAIL .. INJECTION)), "eval in the head", 404, "WAF_PHP_WEBSHELL_BODY:RAW_")
 
@@ -122,9 +139,12 @@ clean(req(editor_save(LEGIT)), "a legitimate plugin file saved through the edito
 local FORM = "title=" .. urlenc(string.rep("Ένα μεγάλο κείμενο άρθρου με <b>HTML</b> και λίστες. ", 120)) .. "&status=publish"
 clean(req(FORM, "/wp-admin/post.php"), "a large post form with HTML, no PHP")
 clean(req("data=" .. string.rep("a", 30000), "/x"), "a large plain body (raw gate)")
--- multipart is 402 / 415's (file parts), never this rule's
-clean(req("--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\n" .. string.rep("x", 3000) .. "<?php eval($_POST['c']);\r\n--b--\r\n",
-          "/x", "multipart/form-data; boundary=b"), "multipart body")
+-- A multipart FILE part is 402 / 415's, never this rule's.
+clean(req("--b\r\nContent-Disposition: form-data; name=\"x\"; filename=\"a.txt\"\r\n\r\n" .. string.rep("x", 3000) ..
+          "<?php eval($_POST['c']);\r\n--b--\r\n", "/x", "multipart/form-data; boundary=b"), "multipart file part")
+-- A multipart form of ordinary text (a contact form with an attachment-less body).
+clean(req("--b\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\n" .. string.rep("Γεια σας, θα ήθελα πληροφορίες. ", 150) ..
+          "\r\n--b--\r\n", "/contact", "multipart/form-data; boundary=b"), "multipart text form, no PHP")
 
 -- ── Rule 415's tag names the file's extension (its burn-in needed it) ─────
 do
