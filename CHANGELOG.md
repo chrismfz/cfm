@@ -72,6 +72,23 @@ back-filled here — see the git/PR history for that period.
   the reference config. `AUTH_MFA_LOGIN_VERIFY_ENABLED` is unchanged.
 
 ### Fixed
+- **`cfm realip` now reads nginx per site, so cPanel ea-nginx nodes are
+  judged correctly.** nginx takes the client from each `server{}`'s own
+  `set_real_ip_from` list when it has one, and cPanel's ea-nginx gives every
+  vhost one (`cloudflare.conf`, Cloudflare's ranges only). The check read only
+  the http-level settings. On earth it warned "logs 127.0.0.1 for every
+  visitor" while the sites logged real IPs, because Imunify360's
+  `server-includes/imunify360-webshield.conf` trusts 127.0.0.1 in every site
+  block. Worse, `cfm realip fix` would have written an http-level file that
+  reaches no vhost and turned the check green. Now each site `server{}` must
+  trust the edge (`servers` / `untrusted_servers` in `edge_health`
+  evidence). On cPanel the fix writes `/etc/nginx/conf.d/server-includes/cfm-realip.conf`,
+  which every site block includes. Elsewhere, when every untrusted block keeps
+  its own list, it names those blocks and leaves the change to the operator
+  instead of writing a file that changes nothing. cPanel's proxy-subdomain
+  blocks (`cpanel.` / `webmail.` / `whm.` ...) proxy to cpsrvd and are
+  reported but not counted. On earth they are where 127.0.0.1 shows, in
+  ea-nginx's own log only.
 - **No CFML-OBS-004 (ptrace) alerts for a tenant's own `killall`.** Like
   `pgrep` and `pkill`, `killall` reads `/proc/<pid>/stat` for every process
   it scans, and each read raised OBS-004 (`ptrace=read sameuid=1`). It

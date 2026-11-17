@@ -37,9 +37,9 @@ DirectAdmin, `/etc/nginx/nginx.conf`) along its `Include` / `IncludeOptional` /
 `include` chain. A file the server never loads does not count. Neither does a
 setting inside one `<VirtualHost>` or `server{}`: it covers that site only, so
 it is reported ("override the server-level ones for those sites") and the
-verdict rests on the server-level settings. A `server{}` with its own
-`set_real_ip_from` list replaces the http-level list for that site, which is
-worth knowing after a fix.
+verdict rests on the server-level settings. nginx is the exception: it is
+read per `server{}` (below), because a block's own `set_real_ip_from` list
+replaces the http-level one.
 
 The origin is the process listening on **:80**, the port the edge proxies to
 (`ss -ltnp`). That is right even when Apache and nginx both run (DirectAdmin
@@ -59,9 +59,26 @@ What counts, per stack:
 - **LiteSpeed:** `useIpInProxyHeader` 1 in `httpd_config.xml`, or 2 ("Trusted
   IP Only") with `127.0.0.1T` in the Access Control allow list (mars). The
   Apache RemoteIP trust it loads (`loadApacheConf`) also counts.
-- **nginx:** an http-level `set_real_ip_from` listing the loopback. The default
-  `real_ip_header` (`X-Real-IP`) or any of the edge's headers is fine;
-  `proxy_protocol` or any other header is reported. `stream{}` is ignored.
+- **nginx:** per `server{}` block, the way nginx resolves it. A block with its
+  own `set_real_ip_from` list uses only that list, and the http-level list only
+  when it has none; its own `real_ip_header` likewise beats the http-level one
+  (default `X-Real-IP`). Every site block must end up trusting the loopback
+  with one of the edge's headers; `proxy_protocol` or any other header is
+  reported. Lines inside `location{}` and anything under `stream{}` are not
+  counted. With no `server{}` found, the http-level settings decide.
+  - **cPanel ea-nginx** includes `conf.d/includes-optional/cloudflare.conf`
+    (Cloudflare's ranges, `real_ip_header CF-Connecting-IP`) in every
+    `server{}`, so an http-level trust reaches no vhost. The site blocks also
+    include `conf.d/server-includes/*.conf`, and a `set_real_ip_from 127.0.0.1`
+    there adds to the block's list: Imunify360's
+    `imunify360-webshield.conf` does that, and so does the file
+    `cfm realip fix` writes. earth (2026-11-17) logged real IPs that way while
+    the http-level-only reading of this check warned.
+  - The cPanel **proxy-subdomain** blocks (every name `cpanel.`, `webmail.`,
+    `whm.`, `webdisk.`, `cpcalendars.`, `cpcontacts.`, `autoconfig.`,
+    `autodiscover.`) include only `cloudflare.conf`. They proxy to cpsrvd, and
+    only ea-nginx's own log reads 127.0.0.1 for them, so they are reported in
+    the note and not counted.
 
 ## Fix: `cfm realip fix`
 
@@ -81,8 +98,10 @@ has a deadline.
 | DirectAdmin Apache | a marked block in `/etc/httpd/conf/extra/httpd-includes.conf` |
 | Debian/Ubuntu Apache | `/etc/apache2/conf-enabled/cfm-remoteip.conf` |
 | EL Apache | `/etc/httpd/conf.d/cfm-remoteip.conf` |
+| cPanel ea-nginx | `/etc/nginx/conf.d/server-includes/cfm-realip.conf` (included by every site `server{}`; cPanel keeps it across rebuilds) |
 | DirectAdmin nginx | a marked block in `/etc/nginx/nginx-includes.conf` (loaded inside `http{}`) |
 | nginx | `/etc/nginx/conf.d/cfm-realip.conf` (when `nginx.conf` includes `conf.d/*.conf`) |
+| nginx, every untrusted block with its own list | nothing: an http-level trust would not reach them; the blocks are named, add `set_real_ip_from 127.0.0.1;` to their lists |
 | LiteSpeed | nothing: WebAdmin → Server → General → *Use Client IP in Header* = "Trusted IP Only", add `127.0.0.1T` to Security → Access Control → Allowed List, restart |
 | NGM | nothing: NGM renders nginx itself, and a hand-written file is overwritten on apply. The trust has to come from NGM's templates (NGM `docs/cfm-integration-map.md`, "real_ip gap") |
 

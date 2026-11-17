@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -134,14 +135,49 @@ func (l layout) planNginx(pl *Plan) {
 			"(NGM docs/cfm-integration-map.md), not a file CFM drops in (apply would overwrite it)"
 		return
 	}
-	if h := strings.TrimSuffix(p.Header, " (default)"); h != "" && !edgeHeaders[strings.ToLower(h)] {
+	ng := p.ng
+	if ng == nil {
+		ng = &nginxVerdict{}
+	}
+	// With server{} blocks read, an http-level header they inherit shows up as
+	// their own bad header below; one every block overrides does not matter.
+	if h := ng.httpBadHeader; h != "" && p.Servers == 0 {
 		pl.Reason = "real_ip_header " + h + " is not a header the edge sets; change it to X-Real-IP " +
 			"(or remove it for the X-Real-IP default) by hand"
 		return
 	}
+	var bad, inherit, reachable []nginxSite
+	for _, u := range ng.untrusted {
+		switch {
+		case u.badHeader != "":
+			bad = append(bad, u)
+		case !u.ownList:
+			inherit = append(inherit, u)
+		}
+		if u.badHeader == "" && u.serverIncludes {
+			reachable = append(reachable, u)
+		}
+	}
+	if len(bad) > 0 {
+		pl.Reason = "real_ip_header " + bad[0].badHeader + " (in effect for e.g. " + siteExamples(bad) +
+			") is not a header the edge sets; change it to X-Real-IP by hand"
+		return
+	}
 	pl.Content = nginxTrust
 	mainConf := l.fs(l.nginxMain)
+	si := l.fs(l.cpanelNginxServerIncludes)
 	switch {
+	case p.Panel == PanelCPanel && len(reachable) > 0 && isDir(si):
+		// ea-nginx: every site server{} includes server-includes/*.conf, after
+		// cloudflare.conf; set_real_ip_from adds to the block's list there.
+		pl.Action, pl.Path = ActionWrite, filepath.Join(si, nginxDropIn)
+	case len(ng.untrusted) > 0 && len(inherit) == 0:
+		// Every block that does not trust the edge has its own list: an
+		// http-level trust would change nothing, and the probe would still warn.
+		pl.Content = ""
+		pl.Reason = strconv.Itoa(len(ng.untrusted)) + " server{} block(s) (e.g. " + siteExamples(ng.untrusted) +
+			") keep their own set_real_ip_from list, which replaces the http-level one, so an http-level " +
+			"trust would not reach them; add to each of those lists:\n" + nginxTrust
 	case p.Panel == PanelDirectAdmin && isFile(l.fs(l.daNginxIncludes)) && includes(mainConf, "nginx-includes.conf"):
 		pl.Action, pl.Path, pl.Managed = ActionWrite, l.fs(l.daNginxIncludes), true
 	case isDir(l.fs(l.nginxConfD)) && includes(mainConf, "conf.d/*.conf"):
