@@ -335,7 +335,16 @@ So the detector keeps them apart from the password failures:
   not propagated).
 - **Mail:** none per ban (`core.ExtraNotify`), unless
   `USER_DISABLED_NOTIFY = 1`. There are hundreds a day on an Imunify node. The
-  ban, the report and the detector log still happen.
+  ban, the report and the detector log still happen, and the alert log
+  records each ban as `muted`.
+- **Cooldown:** a capped ban does not stamp the section's `BLOCK_COOLDOWN`,
+  so the same address's password failures still get their permanent ban
+  right after it.
+- **Client-chosen text:** the verdict and the source address are read only
+  from the server's text. The reason must appear before `user=<`, and the
+  address is the last `rip=`. A username such as `x(user_disabled)@…` or
+  `rip=203.0.113.50,…` therefore cannot turn a password failure into a capped
+  ban, or name another address to ban.
 - **Off switch:** `USER_DISABLED_IP = 0` turns the bucket off.
 
 ### `challenge_solver_farm` — why it exists

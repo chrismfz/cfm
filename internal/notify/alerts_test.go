@@ -161,3 +161,25 @@ func TestEnqueuePathUsesHostnameOverride(t *testing.T) {
 		t.Fatalf("rows: %+v", page.Rows)
 	}
 }
+
+// Event.Mute (a detector's core.ExtraNotify = no on a ban) is recorded as muted
+// and sent nowhere: the alert log still shows the ban.
+func TestEmitMuteRecordsMuted(t *testing.T) {
+	s := installTestStore(t)
+	ch := &recordingChannel{}
+	installTestConfig(t, &config{Enabled: true, DedupeTTL: time.Minute, Channels: []Channel{ch}})
+	if err := Emit(Event{Kind: "DOVECOT/USER_DISABLED", SrcIP: "103.199.18.15", Reason: "DOVECOT/USER_DISABLED", Mute: true}); err != nil {
+		t.Fatal(err)
+	}
+	s.Flush()
+	page, err := s.List(alerts.Filter{}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].Delivery != alerts.DeliveryMuted || page.Rows[0].IP != "103.199.18.15" {
+		t.Fatalf("rows %+v, want one muted row", page.Rows)
+	}
+	if ch.sent != 0 {
+		t.Fatalf("a muted event was sent %d times", ch.sent)
+	}
+}

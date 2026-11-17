@@ -20,6 +20,11 @@ type Event struct {
 	Samples    []string
 	Extra      map[string]string
 	Severity   string // "info" | "warning" | "critical"
+	// Mute records the event in the alert store as muted and sends nothing,
+	// like a [detector] override with notify = 0. Set by the detector sink
+	// for an alert carrying core.ExtraNotify = no: the alert log must still
+	// show every ban.
+	Mute bool
 }
 
 type Channel interface {

@@ -61,3 +61,26 @@ func TestSectionSinkMaxBlockTTLDryRun(t *testing.T) {
 		t.Fatalf("dry run blocked or reported: %v %v", fw.left, fw.reports)
 	}
 }
+
+// A capped finding does not stamp the section cooldown: the same IP's main
+// finding (dovecot: a password failure, permanent) right after it still bans.
+func TestSectionSinkCappedFindingLeavesCooldown(t *testing.T) {
+	fw := &sinkSetFake{left: map[string]time.Duration{}}
+	s := &sectionSink{section: "dovecot_auth", pol: blockPolicy{Mode: "permanent", Cooldown: 30 * time.Minute},
+		fw: fw, inner: &capturingSink{}, last: map[string]time.Time{}}
+	ip := "103.199.18.15"
+	s.Publish(core.Alert{When: time.Now(), Kind: "DOVECOT/USER_DISABLED", Key: ip,
+		Extra: map[string]string{"ip": ip, core.ExtraMaxBlockTTL: "24h"}})
+	if fw.left[ip] != 24*time.Hour {
+		t.Fatalf("capped ban %v, want 24h", fw.left[ip])
+	}
+	s.Publish(core.Alert{When: time.Now(), Kind: "DOVECOT/AUTHFAIL", Key: ip, Extra: map[string]string{"ip": ip}})
+	if got, ok := fw.left[ip]; !ok || got != 0 {
+		t.Fatalf("after the password failure: %v (present=%v), want permanent", got, ok)
+	}
+	// The main finding does stamp it, as before.
+	s.Publish(core.Alert{When: time.Now(), Kind: "DOVECOT/AUTHFAIL", Key: ip, Extra: map[string]string{"ip": ip}})
+	if len(fw.reports) != 2 {
+		t.Fatalf("reports %v, want 2 (the second AUTHFAIL is inside the cooldown)", fw.reports)
+	}
+}

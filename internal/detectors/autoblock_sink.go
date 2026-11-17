@@ -724,8 +724,11 @@ func (s *sectionSink) Publish(a core.Alert) {
 		}
 	}
 
-	// If we truly blocked and a cooldown is set, stamp it now (after success)
-	if blockOK && effectivePol.Cooldown > 0 {
+	// If we truly blocked and a cooldown is set, stamp it now (after success).
+	// Not for a capped finding (core.ExtraMaxBlockTTL): it is the weaker one,
+	// and its stamp would make the section skip the same IP's main finding
+	// (dovecot: a password failure's permanent ban) for the cooldown.
+	if blockOK && effectivePol.Cooldown > 0 && maxBlockTTL(out.Extra) == 0 {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.last[ipStr] = time.Now()
@@ -769,11 +772,10 @@ func (s *sectionSink) Publish(a core.Alert) {
 		copyAlertFields(ev.Extra, out.Extra)
 
 		// A detector may ask for the ban and the report without the mail
-		// (core.ExtraNotify): the block, the API report and the detector log
-		// still happen.
-		if out.Extra[core.ExtraNotify] != core.NotifyNo {
-			notify.Enqueue(ev)
-		}
+		// (core.ExtraNotify): the event still reaches the alert store, as
+		// muted, and the block, the API report and the detector log happen.
+		ev.Mute = out.Extra[core.ExtraNotify] == core.NotifyNo
+		notify.Enqueue(ev)
 
 		// Report to API. SEND_TO_API gates whether we report at all; when we do,
 		// SEND_TO_BLOCKLIST (leniency) selects the destination list: "lenient"
@@ -837,9 +839,8 @@ func (s *sectionSink) Publish(a core.Alert) {
 			ev.Extra["block_mode"] = m
 		}
 		copyAlertFields(ev.Extra, out.Extra)
-		if out.Extra[core.ExtraNotify] != core.NotifyNo {
-			notify.Enqueue(ev)
-		}
+		ev.Mute = out.Extra[core.ExtraNotify] == core.NotifyNo
+		notify.Enqueue(ev)
 	}
 	// --- end NEW ---
 

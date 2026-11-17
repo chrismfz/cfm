@@ -1,6 +1,7 @@
 package dovecot
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -209,6 +210,43 @@ func TestUserDisabledVariantsAndOff(t *testing.T) {
 	for al := range ch {
 		if _, ok := al.Extra[core.ExtraNotify]; ok {
 			t.Errorf("USER_DISABLED_NOTIFY=1 must not suppress the mail: %v", al.Extra)
+		}
+	}
+}
+
+// The username is client-chosen text after `user=<`: it must not change the
+// verdict or name the address. A brute force with "(user_disabled)" in the
+// username stays a password failure (permanent ban, not the capped one), a
+// "rip=" in it does not frame another address, and a noise phrase in it does
+// not silence the failure.
+func TestUsernameCannotSteerTheVerdict(t *testing.T) {
+	cases := []struct {
+		name, line, wantKind, wantIP string
+	}{
+		{"user_disabled in the username",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<x(user_disabled)@victim.gr>, method=PLAIN, rip=198.51.100.7, lip=84.54.49.203`,
+			"AUTHFAIL|ip", "198.51.100.7"},
+		{"rip= in the username",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<rip=203.0.113.50,a@b.gr>, method=PLAIN, rip=198.51.100.7, lip=84.54.49.203`,
+			"AUTHFAIL|ip", "198.51.100.7"},
+		{"rip= in the username of a user_disabled line",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Connection closed (user disabled, 1 attempts in 2 secs) (user_disabled): user=<rip=203.0.113.50,a@b.gr>, method=PLAIN, rip=198.51.100.7, lip=84.54.49.203`,
+			kindDisabledIP, "198.51.100.7"},
+		{"noise phrase in the username",
+			`Nov 17 12:00:00 earth dovecot[1]: imap-login: Login aborted: Logged out (auth failed, 1 attempts in 2 secs) (auth_failed): user=<no auth attempts in 0 secs>, method=PLAIN, rip=198.51.100.7`,
+			"AUTHFAIL|ip", "198.51.100.7"},
+	}
+	for _, c := range cases {
+		a := NewAuth(Config{Mode: "file", AuthFailPerIP: 1, AuthFailPerUser: 1, UserDisabledPerIP: 1})
+		a.processLine(time.Now(), c.line)
+		var ipKinds []string
+		for _, p := range a.pending {
+			if strings.HasSuffix(p.kindKey, "|ip") {
+				ipKinds = append(ipKinds, p.kindKey+"="+p.key)
+			}
+		}
+		if len(ipKinds) != 1 || ipKinds[0] != c.wantKind+"="+c.wantIP {
+			t.Errorf("%s: ip buckets %v, want [%s=%s]", c.name, ipKinds, c.wantKind, c.wantIP)
 		}
 	}
 }

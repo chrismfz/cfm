@@ -207,6 +207,11 @@ func Emit(ev Event) error {
 	}
 	key = renderLiteral(key, ev)
 
+	if ev.Mute {
+		recordAlert(ev, alerts.DeliveryMuted, "")
+		return nil
+	}
+
 	// detector override lookup
 	ov, hasOV := matchOverride(c, ev)
 	if hasOV && !ov.Notify {

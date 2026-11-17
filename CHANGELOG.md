@@ -28,9 +28,14 @@ back-filled here — see the git/PR history for that period.
   bans them for at most `USER_DISABLED_BLOCK_TTL = 24h`, even though the
   section's `BLOCK` is permanent, and reports them to cfm-web. GR/CY addresses
   get the section leniency. No mail is sent per ban unless
-  `USER_DISABLED_NOTIFY = 1`. A detector can now cap one finding's ban
-  (`core.ExtraMaxBlockTTL`) and skip its mail on the block path
-  (`core.ExtraNotify`). See `docs/DETECTORS.md`, "dovecot_auth — logins refused
+  `USER_DISABLED_NOTIFY = 1`; the alert log still records each ban, as
+  muted. A detector can now cap one finding's ban (`core.ExtraMaxBlockTTL`)
+  and skip its mail on the block path (`core.ExtraNotify`).
+- **Security:** the dovecot detector reads the verdict and the source address
+  only from the server's text. Before, a username such as
+  `rip=203.0.113.50,a@b.gr` made it ban (and report to the fleet) the address
+  in the username instead of the client's, and a noise phrase in the username
+  hid a password failure. See `docs/DETECTORS.md`, "dovecot_auth — logins refused
   as user_disabled".
 - **WAF rule 530 measures WooCommerce add-to-cart crawling (logonly).**
   A `GET ?add-to-cart=<id>` makes WooCommerce write a session and a cart, and

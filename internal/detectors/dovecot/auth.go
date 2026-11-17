@@ -114,7 +114,13 @@ func NewAuth(cfg Config) *Auth {
 	a.samples = core.NewSampleRing(cfg.SampleLimit)
 	a.gate = core.NewAlertGate(cfg.Cooldown)
 	a.counts = core.NewSlidingCounter(cfg.Window, 0)
-	a.disCounts = core.NewSlidingCounter(cfg.UserDisabledWindow, 0)
+	// Capped per key: the threshold is a handful, and a phone retrying a
+	// suspended mailbox all day must not keep every timestamp for 24 hours.
+	disCap := 64
+	if 2*cfg.UserDisabledPerIP > disCap {
+		disCap = 2 * cfg.UserDisabledPerIP
+	}
+	a.disCounts = core.NewSlidingCounter(cfg.UserDisabledWindow, disCap)
 	// Lines we care about (keep this fast pre-filter).
 	// The `dovecot` tag is PID-tolerant (`dovecot[1234]:`), because BOTH sources
 	// we read are syslog-framed WITH the pid: /var/log/maillog (rsyslog) and
@@ -255,28 +261,38 @@ func (a *Auth) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
 func (a *Auth) processLine(now time.Time, line string) {
 	ll := strings.ToLower(line)
-	if a.reDisabled.MatchString(ll) {
+	// The verdict (the reason and its code) is the server's text BEFORE
+	// `user=<`; the username after it is whatever the client tried, and may
+	// itself read "(user_disabled)", "no auth attempts in 0 secs" or
+	// "rip=1.2.3.4,". So the reason is matched in the head only: a password
+	// failure whose username says "(user_disabled)" must stay a password
+	// failure, or a brute force would trade the permanent ban for a capped one.
+	head := ll
+	if i := strings.Index(ll, "user=<"); i >= 0 {
+		head = ll[:i]
+	}
+	if a.reDisabled.MatchString(head) {
 		// Never a password failure: its own bucket only, per IP (the mailbox
 		// is the victim, not the attacker).
 		if a.cfg.UserDisabledPerIP > 0 {
-			if ip := lineIP(a.reRip, ll); ip != "" {
+			if ip := lineIP(a.reRip, ll, head); ip != "" {
 				a.bump(now, kindDisabledIP, ip, line)
 			}
 		}
 		return
 	}
-	if !a.reQuick.MatchString(ll) {
+	if !a.reQuick.MatchString(head) {
 		return
 	}
 
 	// Ignore pure noise:
 	// e.g. "Aborted login by logging out (no auth attempts in 0 secs)"
-	if strings.Contains(ll, "no auth attempts in 0 secs") {
+	if strings.Contains(head, "no auth attempts in 0 secs") {
 		return
 	}
 
 	// ip
-	if ip := lineIP(a.reRip, ll); ip != "" {
+	if ip := lineIP(a.reRip, ll, head); ip != "" {
 		a.bump(now, "AUTHFAIL|ip", ip, line)
 	}
 
@@ -295,14 +311,18 @@ func (a *Auth) processLine(now time.Time, line string) {
 
 const kindDisabledIP = "DISABLED|ip"
 
-// lineIP is the source address of a dovecot line: rip=, else the first IP in
-// it, canonical (IPv4 as dotted quad); "" when there is none.
-func lineIP(reRip *regexp.Regexp, ll string) string {
+// lineIP is the source address of a dovecot line, canonical (IPv4 as dotted
+// quad); "" when there is none. It is the LAST rip=: dovecot writes rip after
+// user=<…>, and a username such as "rip=203.0.113.50,a@b.gr" would otherwise
+// name the address to ban (a third party's, reported to the whole fleet).
+// Without a rip=, the first IP in head (the text before user=<) is used, never
+// one from the username.
+func lineIP(reRip *regexp.Regexp, ll, head string) string {
 	ipStr := ""
-	if m := reRip.FindStringSubmatch(ll); m != nil && m[1] != "" {
-		ipStr = m[1]
+	if ms := reRip.FindAllStringSubmatch(ll, -1); len(ms) > 0 && ms[len(ms)-1][1] != "" {
+		ipStr = ms[len(ms)-1][1]
 	} else {
-		ipStr = firstIPInLine(ll)
+		ipStr = firstIPInLine(head)
 	}
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
