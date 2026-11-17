@@ -1,6 +1,7 @@
 package blocklists
 
 import (
+	"cfm/internal/proxyipfilter"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -156,6 +157,7 @@ func (m *Manager) Reload(feeds []Feed) {
 	for name := range m.runs {
 		if _, ok := next[name]; !ok {
 			m.stopOneLocked(name)
+			proxyipfilter.DropFeed(name)
 		}
 	}
 	m.feeds = next
@@ -284,6 +286,11 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	}
 	r.lastHash, r.haveHash = h, true
 	r.lastApply = time.Now() // start the resync clock at apply completion
+	// The same content for the proxied-client filter: nft never sees a
+	// visitor behind Cloudflare, the bridge's decision does (internal/proxyipfilter).
+	// After every successful apply, so the first fetch after a start (never a
+	// skip: there is no hash yet) fills it.
+	proxyipfilter.SetFeed(r.feed.Name, r.feed.Type == TypeAllow, res.V4, res.V6)
 	m.mu.Lock()
 	r.lastAppliedAt = r.lastApply
 	r.lastErr = nil

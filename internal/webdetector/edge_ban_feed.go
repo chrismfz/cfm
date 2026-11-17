@@ -13,6 +13,7 @@ import (
 
 	"cfm/internal/edgeban"
 	"cfm/internal/logging"
+	"cfm/internal/proxyipfilter"
 )
 
 // The edge's copy of the edge bans (cfm_edgeban.lua) is kept current by a
@@ -89,6 +90,9 @@ type EdgeBanStatus struct {
 	WouldBlock int64     `json:"would_block"`
 	Blocked    int64     `json:"blocked"`
 	SyncMS     float64   `json:"last_sync_ms"`
+	// The rest of nft's IP filter for a proxied client (internal/proxyipfilter):
+	// its modes, would-block / blocked / allowed counts and each source's size.
+	ProxiedIPFilter map[string]any `json:"proxied_ipfilter"`
 }
 
 func newEdgeBanEpoch() string {
@@ -289,7 +293,7 @@ func (b *NginxBridge) edgeBanCount(would, blocked string) {
 
 // EdgeBanStatus reports the edge-ban feed (zero value without a bridge).
 func (b *NginxBridge) EdgeBanStatus() EdgeBanStatus {
-	st := EdgeBanStatus{Enabled: edgeban.Enabled(), Mode: edgeban.EdgeMode()}
+	st := EdgeBanStatus{Enabled: edgeban.Enabled(), Mode: edgeban.EdgeMode(), ProxiedIPFilter: proxyipfilter.Stats()}
 	if s := edgeban.Default(); s != nil {
 		st.Ready = s.Ready()
 		st.Cleared = s.Cleared()

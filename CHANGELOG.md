@@ -18,6 +18,15 @@ back-filled here — see the git/PR history for that period.
 ## [Unreleased]
 
 ### Added
+- **The fleet blacklist and the node's own IP lists now reach visitors behind
+  Cloudflare (log mode).** nft sees only the proxy's address, so cfm-web's
+  blacklist (~270k addresses), `cfm.deny` and the TTL bans never applied to a
+  Cloudflare visitor: on earth, addresses other nodes had banned for WAF hits
+  got 200s through Cloudflare. The lists now also live in the daemon's memory
+  (~1 MB, never in the edge's Lua), and the edge's per-request decision asks
+  them, allows first as in nft. `[webdetector] PROXIED_IPFILTER_FEED` /
+  `PROXIED_IPFILTER_LOCAL` = `log` (default: a line per client in `cfm.log`
+  naming the lists it is on), `enforce`, `off`. See `docs/proxied-ipfilter.md`.
 - **Under attack, a "Continue" button for the visitors the challenge cannot
   tell apart** (`CHALLENGE_V2_CONFIRM`,
   `docs/targeted-challenge-design.md` §4).

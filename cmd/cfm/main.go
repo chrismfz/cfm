@@ -17,6 +17,7 @@ import (
 	"cfm/internal/mailtraffic"
 	"cfm/internal/notify"
 	"cfm/internal/panelauth"
+	"cfm/internal/proxyipfilter"
 	"cfm/internal/safefs"
 	"cfm/internal/srcreportcli"
 	status "cfm/internal/status"
@@ -895,6 +896,11 @@ func runDaemon(args []string) {
 
 	blMgr = blocklists.NewManager(blocklists.ApplierFunc(be.ApplyFeed))
 	blocklists.SetActive(blMgr) // read by GET /api/v1/firewall/feeds
+
+	// The node's own allow/block sets for the proxied-client filter
+	// (internal/proxyipfilter): the feeds arrive from the manager above, these
+	// are re-read from the kernel every minute.
+	proxyipfilter.StartLocalRefresh(context.Background(), be.ListSetElementsRaw, proxyipfilter.LocalRefreshEvery)
 
 	// Start scheduler
 	blMgr.Start(context.Background())

@@ -34,6 +34,7 @@ import (
 	"cfm/internal/edgeban"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/proxyipfilter"
 	"cfm/internal/safefs"
 	"cfm/internal/sslcollector"
 	"context"
@@ -2127,10 +2128,18 @@ func (b *NginxBridge) writeEdgeBan(w http.ResponseWriter, r *http.Request) bool 
 		return false
 	}
 	if ok, _ := edgeban.IsBanned(ip); !ok {
-		return false
+		// Not one of this node's web bans: the verdict nft's IP filter would
+		// give the visitor if it came direct (fleet blacklist, local bans,
+		// every allow first; internal/proxyipfilter). Logged in log mode,
+		// answered only in enforce mode.
+		if !proxyipfilter.Decide(ip, q.Get("host")) {
+			return false
+		}
+		w.Header().Set("X-CFM-Proxied-IPFilter", "1")
+	} else {
+		w.Header().Set("X-CFM-Edge-Ban", "1")
 	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("X-CFM-Edge-Ban", "1")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"ip_action":    "block",
 		"vhost_action": "allow",
