@@ -146,6 +146,37 @@ check(det.detect_php_webshell_body('{"c":"\\u003c?php system(\\u0024_GET[1]);"}'
 -- A short urlencoded body with no PHP: the gate keeps it out, nothing fires.
 clean(req("name=Maria&email=m%40example.gr&msg=Hello%20there"), "short ordinary form")
 
+-- Fifth review (2026-11-17).
+-- `multipart/form-data` in a Content-Type PARAMETER: PHP reads the body as
+-- urlencoded (media type), so 404 reads it too (it hid from both before).
+do
+  local c = req("content=" .. urlenc("<?php system($_GET['c']);"))
+  c.headers["content-type"] = "application/x-www-form-urlencoded; x=multipart/form-data"
+  fires(c, "multipart/form-data in a CT parameter", 404, "WAF_PHP_WEBSHELL_BODY:")
+end
+-- assert( + popen( score 6 with no `<?` / `$_`: the early-out no longer drops them.
+check(det.detect_php_webshell_body("x=assert($a);popen($b,'r');", { ["content-type"] = "text/plain" }) == "RAW_ASSERT",
+      "assert + popen reach the scorer")
+-- A multipart field is read as PHP hands it to the app: not percent-decoded.
+clean(req("--b\r\nContent-Disposition: form-data; name=\"log\"\r\n\r\n%3C%3Fphp system(%24_GET[1]);\r\n--b--\r\n",
+          "/contact", "multipart/form-data; boundary=b"), "percent-escapes in a multipart field")
+-- A short urlencoded body 404 already read is not scored again by 417.
+check(det.php_body_head_blind("a=1&b=2", { ["content-type"] = "application/x-www-form-urlencoded" }) == false,
+      "short urlencoded body: 404 read it")
+check(det.php_body_head_blind("--b\r\n", { ["content-type"] = "multipart/form-data; boundary=b" }) == true,
+      "multipart: 404 could not read it")
+check(det.php_body_head_blind('{"a":"\\u003c"}', { ["content-type"] = "application/json" }) == true,
+      "JSON with escapes: 404 could not read it")
+do
+  set_only({ rule_php_webshell_body = "challenge_v2", rule_php_webshell_body_deep = "logonly" })
+  local called = 0
+  local orig = det.detect_php_webshell_body
+  det.detect_php_webshell_body = function(b, h, cl, f) if cl then called = called + 1 end; return orig(b, h, cl, f) end
+  waf.check(req("name=Maria&msg=system+update+tonight"))
+  det.detect_php_webshell_body = orig
+  check(called == 0, "417 skips a short body 404 read (got " .. called .. " deep calls)")
+end
+
 -- ── 404 disabled: 417 still runs on its own ───────────────────────────────
 set_only({ rule_php_webshell_body = "disabled", rule_php_webshell_body_deep = "logonly" })
 fires(req(editor_save(PLUGIN_HEAD .. INJECTION .. PLUGIN_TAIL)), "404 disabled, 417 alone", 417, "WAF_PHP_WEBSHELL_BODY:DEEP_")

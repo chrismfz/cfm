@@ -70,6 +70,11 @@ back-filled here — see the git/PR history for that period.
   no multipart body) and a JSON body's `\u00XX` escapes. Logonly through
   burn-in, since a whole legitimate plugin saved through an editor is scored
   too. See `docs/waf.md`, "Rule 417".
+  Rule 404 (challenge_v2) changes with it in two narrow ways. It now reads a
+  body by its media type, as PHP does: an urlencoded body whose Content-Type
+  carried `multipart/form-data` in a parameter escaped both rules. And a body
+  scoring on `assert(` / `popen(` / `proc_open(` alone is no longer dropped
+  before scoring.
 - **Imunify360 RBL locks now reach the fleet list.** On a cPanel node with
   Imunify, a mail login from an address on Imunify's global RBL is refused
   before any password check, and dovecot logs it as `user_disabled`. CFM's

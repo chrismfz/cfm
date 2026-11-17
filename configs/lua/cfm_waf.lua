@@ -1561,7 +1561,9 @@ local function check_impl(ctx, st)
     local mode = rule_mode(CFG.rule_php_webshell_body, "logonly")
     if mode ~= "disabled" and body_inspect_ok then
       local head_tag = det.detect_php_webshell_body(body, headers)
-      -- 417 (late, below) reads the whole body only when the head scored nothing.
+      -- 417 (late, below) reads the whole body only when the head scored
+      -- nothing, and a short body only where the head could not read it.
+      st.php_body_head_read = true
       st.php_body_head_hit = head_tag ~= nil
       if head_tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
@@ -2895,10 +2897,12 @@ local function check_impl(ctx, st)
 
   -- ── 404's scorer over the whole body (417, logonly burn-in) ──────────────
   -- Only when 404's 2 KB head scored nothing: PHP saved through a form field
-  -- (an editor, a file manager's put) sits wherever the file puts it, and 404
-  -- never reads a multipart body or decodes a JSON one's escapes, so a short
-  -- body is read too. detect_php_webshell_body's cheap raw gate keeps a body
-  -- with nothing a score can come from out of the decoder. Late, before
+  -- (an editor, a file manager's put) sits wherever the file puts it. A body
+  -- no longer than the head is read only where 404 could not read it as PHP
+  -- gets it (a multipart body, a JSON one with escapes: php_body_head_blind)
+  -- or when 404 did not run; otherwise 417 would score what 404 just scored.
+  -- detect_php_webshell_body's cheap raw gate keeps a body with nothing a
+  -- score can come from out of the decoder. Late, before
   -- only 612 and 530: cfm.lua pushes the headline hit alone, and at step 15
   -- it took the headline (and the push) from the logonly body rules that run
   -- after it (331 on a wget || curl dropper, 421-425, 430-439, 330).
@@ -2907,7 +2911,8 @@ local function check_impl(ctx, st)
     if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit then
       local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
       local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
-      if deep_len > head_len then
+      if deep_len > head_len
+         and (#body > head_len or not st.php_body_head_read or det.php_body_head_blind(body, headers)) then
         local tag = det.detect_php_webshell_body(body, headers, deep_len)
         if tag then
           local ttl = (dmode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec

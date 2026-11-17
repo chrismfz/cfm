@@ -1668,24 +1668,32 @@ the file puts it, and two compromises on the fleet passed that way:
 
 **What it does.** Rule 417 runs the same scorer over the whole body the edge
 read (`php_webshell_deep_scan_len`, 32 KB = `waf_body_max_len`):
-- only when 404 scored nothing. A short body is read too: 404 never reads a
-  multipart body, nor decodes a JSON body's escapes;
-- only after a cheap raw check finds something a score of 5 can come from:
-  `<?`, `$_`, a global callable's name (`eval`, `exec`, `system`, `assert`,
-  `passthru`, `popen`, `proc_open`: two of them score 6 with no `<?` or `$_`),
-  a webshell's name, or an escape that may decode to one of these (`%3C`,
-  `%3F`, `%24`, `%5F`, `%25`, `\u00`). Not `%20` / `%2F` / `%3D`, which are in
-  nearly every form body. A callable spelled with %-encoded letters, with no
-  `<?` / `$_`, is not read (residual). With `php_webshell_min_score` below 5
-  the check is off.
+- only when 404 scored nothing. A body no longer than 404's 2 KB head is read
+  only where 404 could not read it as PHP gets it (a multipart body, a JSON
+  body with escapes) or when 404 is disabled;
+- only after a cheap raw check finds one of the scorer's markers
+  (`PHP_SCORE_MARKERS`: `<?`, `$_`, the global callables it counts, the
+  webshell names) or an escape that may decode to one (`%3C`, `%3F`, `%24`,
+  `%5F`, `%25`, `\u00`). Not `%20` / `%2F` / `%3D`, which are in nearly every
+  form body. The scorer's own early-out reads the same list. A score of 5
+  with no `<?` / `$_` needs a callable or a webshell name; one spelled with
+  %-encoded letters is not read (residual). With `php_webshell_min_score`
+  below 5 the check is off.
 
 **Also read** (review, 2026-11-17):
-- a multipart body's plain **text** fields, each scored on its own (a save
-  form posted as multipart; file parts stay 402 / 415's). The boundary is read
-  from every Content-Type line, joined as PHP gets them;
+- a multipart body's plain **text** fields, each scored on its own and as PHP
+  hands them to the app: not percent-decoded (a save form posted as
+  multipart; file parts stay 402 / 415's). Multipart is decided by the media
+  type, as PHP does, and the boundary is read from every Content-Type line;
 - a JSON body's `\u00XX` / `\/` escapes, as `json_decode` hands them to the
   app (`\u003c?php`, `\u0024_POST`). 417 only: 404's head pass ships at
   challenge_v2 and does not decode them.
+
+**404 changes from the same reviews.** 404 now reads a body's media type the
+way PHP does: an urlencoded body whose Content-Type carried
+`multipart/form-data` in a parameter was read by neither rule. Its early-out
+now admits `assert` / `popen` / `proc_open`, which it scores but used to drop
+before scoring.
 
 **Order.** 417 runs late, after every rule but 612 and 530. cfm.lua pushes
 only the headline hit, and at step 15 (next to 404) 417 took the headline,
@@ -1693,9 +1701,10 @@ and the push, from the logonly body rules that run after it. A `wget || curl`
 dropper reported 417 instead of 331, whose burn-in then lost it. Those rules
 now keep the headline, and 417 shows in `also_rule_ids`.
 
-**Cost.** Nothing on a form with no PHP marker. About +0.4 ms on a 30 KB post
-with HTML. About +5 ms on a 30 KB PHP file saved through an editor, which is
-rare.
+**Cost.** On a body past 2 KB with no marker, a lowercased copy and about 20
+plain finds: ~0.17 ms on a 20 KB form. A short body 404 already read costs
+nothing. About +0.4 ms on a 30 KB post with HTML. About +5 ms on a 30 KB PHP
+file saved through an editor, which is rare.
 
 **Logonly through burn-in.** A whole legitimate plugin file saved through an
 editor is scored too: a global `exec(` / `system(` call plus a superglobal
