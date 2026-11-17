@@ -597,6 +597,12 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   step goes AFTER it, or a banned proxied client walks through it. That check
   is `[webdetector] EDGE_BAN_MODE` = `enforce` (default since 2026-11-10) or `log`.
   Kill switch `[webdetector] EDGE_BAN`.
+  The rest of nft's IP filter (the fleet feeds, `block_v4`, every allow)
+  reaches a proxied client through `internal/proxyipfilter` instead: the lists
+  in the daemon's memory (never in Lua: 268 k fleet entries vs the edge copy's
+  20 k), asked by the same decision, after the edge ban store, allows first as
+  in `inet cfm input`. `[webdetector] PROXIED_IPFILTER_FEED` / `_LOCAL` =
+  `log` (default) | `enforce` | `off` (`docs/proxied-ipfilter.md`).
 - **A connection is NAT'd once, by the first nat chain that rewrites it.**
   Imunify360 DNATs its sets to WebShield at -100 (`ip nat PREROUTING`), and its
   `remote_proxy_static` set holds Cloudflare's ranges. With CFM's web redirect
@@ -1035,6 +1041,7 @@ because of that. Hard-won points:
 | Alert log (every notifier event + its delivery outcome → `/var/lib/cfm/alerts.db`, `/api/v1/alerts`, cfm-admin Alerts, MCP `alerts`) | `docs/alerts.md` |
 | Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |
 | Vhost lockdown (no client exemption on a manual vhost challenge: crawler storms) | `docs/vhost-lockdown.md` |
+| Proxied-client IP filter (fleet feeds, local bans and allows for clients behind Cloudflare) | `docs/proxied-ipfilter.md` |
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
