@@ -17,14 +17,38 @@ func ResolveForAuto() string { return resolveMySQLErrorLog() }
 // without a database). The lifecycle retries it slowly; see lifecycle.go.
 var errNoCredentials = errors.New("no MySQL credentials found (tried DSN, /root/.my.cnf, /etc/cfm/mysql_governor.cnf, DirectAdmin conf)")
 
+// connectError: a credential source produced a DSN but the connect failed.
+// Its text names the source and the driver error, never the DSN (it holds a
+// password).
+type connectError struct {
+	source string
+	err    error // nil when the DSN itself did not parse
+}
+
+func (e *connectError) Error() string {
+	if e.err == nil {
+		return "invalid DSN from " + e.source
+	}
+	return "connect via " + e.source + " failed: " + e.err.Error()
+}
+
+func (e *connectError) Unwrap() error { return e.err }
+
 // openPingTimeout bounds each connect+ping, so a DSN pointing at a host that
-// never answers cannot hold up the caller (the first attempt runs inline at
-// daemon start).
+// never answers cannot stall the connect loop.
 var openPingTimeout = 5 * time.Second
 
+// Credential file locations, in priority order after an explicit DSN. Vars so
+// tests can point them at fixtures.
+var (
+	rootMyCnfPath     = "/root/.my.cnf"
+	governorCnfPath   = "/etc/cfm/mysql_governor.cnf"
+	daMySQLConfigPath = "/usr/local/directadmin/conf/mysql.conf"
+)
+
 // openDB tries credential sources in priority order. It returns
-// errNoCredentials when none produced a DSN, else the last connect error,
-// labelled with its source. Errors never carry the DSN (it holds a password).
+// errNoCredentials when none produced a DSN, else the last source's
+// *connectError.
 func openDB(cfg GovernorConfig) (*sql.DB, error) {
 	type source struct {
 		name string
@@ -37,8 +61,8 @@ func openDB(cfg GovernorConfig) (*sql.DB, error) {
 			}
 			return "", fmt.Errorf("no explicit DSN")
 		}},
-		{"/root/.my.cnf", func() (string, error) { return dsnFromMyCNF("/root/.my.cnf") }},
-		{"/etc/cfm/mysql_governor.cnf", func() (string, error) { return dsnFromMyCNF("/etc/cfm/mysql_governor.cnf") }},
+		{rootMyCnfPath, func() (string, error) { return dsnFromMyCNF(rootMyCnfPath) }},
+		{governorCnfPath, func() (string, error) { return dsnFromMyCNF(governorCnfPath) }},
 		{"DirectAdmin conf", dsnFromDAConf},
 	}
 
@@ -50,7 +74,8 @@ func openDB(cfg GovernorConfig) (*sql.DB, error) {
 		}
 		db, err := sql.Open("mysql", dsn)
 		if err != nil {
-			lastErr = fmt.Errorf("invalid DSN from %s", src.name)
+			// The parse error can quote the DSN: drop it.
+			lastErr = &connectError{source: src.name}
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), openPingTimeout)
@@ -58,7 +83,7 @@ func openDB(cfg GovernorConfig) (*sql.DB, error) {
 		cancel()
 		if err != nil {
 			db.Close()
-			lastErr = fmt.Errorf("connect via %s failed: %w", src.name, err)
+			lastErr = &connectError{source: src.name, err: err}
 			continue
 		}
 		return db, nil
@@ -128,8 +153,7 @@ func dsnFromMyCNF(path string) (string, error) {
 
 func dsnFromDAConf() (string, error) {
 	// DirectAdmin stores MySQL root credentials here
-	path := "/usr/local/directadmin/conf/mysql.conf"
-	f, err := os.Open(path)
+	f, err := os.Open(daMySQLConfigPath)
 	if err != nil {
 		return "", err
 	}

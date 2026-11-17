@@ -28,14 +28,22 @@ back-filled here — see the git/PR history for that period.
   doubling to every 5 min while credentials exist but the connect fails;
   every 5 min, a file check with no connection, on a node with no
   credentials) and stops once it connects or the daemon shuts down. Each
-  connect is bounded to 5 s. `cfm.service` stays free of any ordering on
-  `mariadb`/`mysqld`, so a node without a database waits on nothing.
+  connect is bounded to 5 s, and none of it runs inline at startup: the API
+  comes up whatever the database does. `cfm.service` stays free of any
+  ordering on `mariadb`/`mysqld`, so a node without a database waits on
+  nothing.
+- **`[mysql_governor] ENABLED = 0` is honoured.** It used to be read as "no
+  section", so the governor started anyway with the built-in defaults
+  (monitor mode, polling the processlist every 5 s). A disabled governor now
+  makes no connection; re-enabling it in `detectors.conf` starts it without a
+  restart.
 - **`/api/v1/mysql/*` answers a JSON 503 while the governor is not running**
   (`{"error":"mysql governor not running","reason":…}`; the reason is
   withheld from scoped callers) instead of the web UI's HTML. `cfm mysqltop`
   and the MCP `mysql_pressure` / `whats_wrong` tools show that message,
   and the CLI names a non-JSON answer from an older daemon instead of
-  failing in the JSON parser. The startup log no longer says "no working
+  failing in the JSON parser (a 401/403 reads as the token problem it is).
+  The 503 carries a `Retry-After` of the next connect attempt. The startup log no longer says "no working
   credentials found" when the credentials were found and the connect failed:
   it names the credential source and the connect error.
 

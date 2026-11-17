@@ -1371,10 +1371,10 @@ func runDaemon(args []string) {
 			return
 		}
 
-		// Start the MySQL governor. If MySQL is not up yet (cfm.service has no
-		// ordering on the database, on purpose: many nodes run none), the
-		// lifecycle keeps retrying in the background; its routes answer 503
-		// until it connects.
+		// Start the MySQL governor in the background. If MySQL is not up yet
+		// (cfm.service has no ordering on the database, on purpose: many nodes
+		// run none), the lifecycle keeps retrying; its routes answer 503 until
+		// it connects. [mysql_governor] ENABLED = 0 keeps it from starting.
 		govLc.Start(ctx, func() *mysql.GovernorConfig {
 			if c, ok := detpkg.GetPendingGovernorConfig(); ok {
 				return &c

@@ -712,28 +712,41 @@ func fetchGovernorJSON(baseURL, path string, out any) error {
 // governorRespError turns a non-2xx or non-JSON governor response into a
 // readable error. The daemon answers 503 {"error","reason"} while the governor
 // is not running; an older daemon, which did not register the routes at all
-// then, answers its web UI's HTML page.
+// then, answers its web UI's HTML page with a 2xx. Only that case is blamed on
+// the governor: the auth guards answer 401/403 through http.Error, which is
+// text/plain, and must read as what they are.
 func governorRespError(resp *http.Response) error {
 	ct := resp.Header.Get("Content-Type")
 	isJSON := strings.Contains(ct, "json")
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && isJSON {
+	ok := resp.StatusCode >= 200 && resp.StatusCode < 300
+	if ok && isJSON {
 		return nil
 	}
-	if isJSON {
-		var e struct {
-			Error  string `json:"error"`
-			Reason string `json:"reason"`
+	if ok {
+		return fmt.Errorf("daemon answered HTTP %d with %q, not JSON: the MySQL governor routes are not served "+
+			"(an older daemon whose governor is not running? see /var/log/cfm/cfm.mysql.log)", resp.StatusCode, ct)
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var e struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	// The body is tried as JSON whatever the Content-Type: http.Error sends
+	// a JSON body as text/plain.
+	if json.Unmarshal(raw, &e) == nil && e.Error != "" {
+		if e.Reason != "" {
+			return fmt.Errorf("%s: %s (see /var/log/cfm/cfm.mysql.log)", e.Error, e.Reason)
 		}
-		if json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e) == nil && e.Error != "" {
-			if e.Reason != "" {
-				return fmt.Errorf("%s: %s (see /var/log/cfm/cfm.mysql.log)", e.Error, e.Reason)
-			}
-			return fmt.Errorf("%s (HTTP %d)", e.Error, resp.StatusCode)
-		}
+		return fmt.Errorf("%s (HTTP %d)", e.Error, resp.StatusCode)
+	}
+	snippet := strings.TrimSpace(string(raw))
+	if len(snippet) > 200 {
+		snippet = snippet[:200] + "…"
+	}
+	if snippet == "" {
 		return fmt.Errorf("daemon answered HTTP %d", resp.StatusCode)
 	}
-	return fmt.Errorf("daemon answered HTTP %d with %q, not JSON: the MySQL governor routes are not served "+
-		"(governor not running? see /var/log/cfm/cfm.mysql.log)", resp.StatusCode, ct)
+	return fmt.Errorf("daemon answered HTTP %d: %s", resp.StatusCode, snippet)
 }
 
 func postGovernorJSON(baseURL, path string, out any) error {

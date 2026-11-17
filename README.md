@@ -1145,14 +1145,19 @@ Credentials are auto-detected in this order:
 3. `/etc/cfm/mysql_governor.cnf`
 4. `/usr/local/directadmin/conf/mysql.conf` (DirectAdmin)
 
-If MySQL is not reachable when the daemon starts (`cfm.service` deliberately
-has no ordering on `mariadb`/`mysqld`, since many nodes run no database), the
-governor keeps retrying in the background: every 5 s doubling to every 5 min
-while credentials exist but the connect fails, every 5 min (a file check, no
-connection) while no credentials exist at all. Until it connects,
-`/api/v1/mysql/*` and `cfm mysqltop` answer "mysql governor not running" with
-the reason; `/var/log/cfm/cfm.mysql.log` logs each change of reason and the
-eventual start.
+The governor connects in the background, so a slow or absent database never
+holds up the daemon. If MySQL is not reachable yet (`cfm.service`
+deliberately has no ordering on `mariadb`/`mysqld`, since many nodes run no
+database), it keeps retrying: every 5 s doubling to every 5 min while
+credentials exist but the connect fails, every 5 min (a file check, no
+connection) while no credentials exist at all. `ENABLED = 0` in
+`[mysql_governor]` keeps it from starting: no connection is made, and the
+5-minute check only re-reads the config, so re-enabling it there starts it
+without a restart (disabling a running governor still needs one). Until it
+runs, `/api/v1/mysql/*` and `cfm mysqltop` answer "mysql governor not running"
+with the reason (and a `Retry-After` of the next attempt);
+`/var/log/cfm/cfm.mysql.log` logs each change of reason and the eventual
+start.
 
 ### Operating Modes
 

@@ -26,8 +26,10 @@ var (
 	pendingGovReady bool
 )
 
-// GetPendingGovernorConfig returns the parsed GovernorConfig if the
-// [mysql_governor] section was found and ENABLED=1.
+// GetPendingGovernorConfig returns the parsed GovernorConfig once the
+// [mysql_governor] section has been read (ok=true); ok=false means no section
+// (built-in defaults apply). ENABLED = 0 returns ok=true with Enabled=false,
+// which the governor lifecycle reads as "do not start".
 func GetPendingGovernorConfig() (mysql.GovernorConfig, bool) {
 	pendingGovMu.Lock()
 	defer pendingGovMu.Unlock()
@@ -134,7 +136,7 @@ func init() {
 	// -------------------------------------------------------------------------
 	Register("mysql_governor", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		if !kvBool(kv, "ENABLED", true) {
-			setPendingGovernorConfig(mysql.GovernorConfig{}, false)
+			setPendingGovernorConfig(mysql.GovernorConfig{Enabled: false}, true)
 			logMySQLGovf("[detectors] %s disabled in detectors.conf", section)
 			return nil, nil
 		}

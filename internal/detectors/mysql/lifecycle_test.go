@@ -8,14 +8,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// testLifecycle returns a lifecycle whose connect fails until ok is set, and
-// whose governor never touches a database.
+// testLifecycle returns a lifecycle whose connect fails with failWith until ok
+// is set, and whose governor never touches a database.
 func testLifecycle(failWith error, ok *atomic.Bool, attempts *atomic.Int32) *GovernorLifecycle {
 	l := NewGovernorLifecycle()
 	l.newGovernor = func(cfg GovernorConfig) (*Governor, error) {
@@ -31,6 +34,11 @@ func testLifecycle(failWith error, ok *atomic.Bool, attempts *atomic.Int32) *Gov
 	l.run = func(context.Context, *Governor) {}
 	l.pacing = retryPacing{min: time.Millisecond, max: 4 * time.Millisecond, noCreds: time.Millisecond}
 	return l
+}
+
+func connRefused() error {
+	return fmt.Errorf("mysql_governor: cannot connect: %w",
+		&connectError{source: "/root/.my.cnf", err: errors.New("dial unix /run/mysqld/mysqld.sock: connect: connection refused")})
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -50,6 +58,17 @@ func serve(h http.Handler, path string) *httptest.ResponseRecorder {
 	return rec
 }
 
+// assertStopped fails if attempts still grow: the loop must have exited.
+func assertStopped(t *testing.T, attempts *atomic.Int32, why string) {
+	t.Helper()
+	time.Sleep(10 * time.Millisecond)
+	n := attempts.Load()
+	time.Sleep(20 * time.Millisecond)
+	if attempts.Load() != n {
+		t.Fatalf("connect loop kept running %s", why)
+	}
+}
+
 // The orion case: MySQL comes up after the daemon. The governor must start on
 // a retry, and its routes must answer 503 JSON (never fall through to HTML)
 // until then, then the real handler.
@@ -59,16 +78,15 @@ func TestLifecycleStartsGovernorWhenMySQLComesUpLater(t *testing.T) {
 
 	var ok atomic.Bool
 	var attempts atomic.Int32
-	l := testLifecycle(fmt.Errorf("connect via /root/.my.cnf failed: %w", errors.New("connection refused")), &ok, &attempts)
+	l := testLifecycle(connRefused(), &ok, &attempts)
 
 	var cfgCalls atomic.Int32
 	cfg := func() *GovernorConfig {
 		cfgCalls.Add(1)
-		return &GovernorConfig{Mode: "enforce"}
+		return &GovernorConfig{Enabled: true, Mode: "enforce"}
 	}
-	if g := l.Start(ctx, cfg); g != nil {
-		t.Fatalf("Start returned a governor while MySQL is down")
-	}
+	l.Start(ctx, cfg)
+	waitFor(t, "a few failed attempts", func() bool { return attempts.Load() >= 3 })
 
 	rec := serve(l.AdminHandler(), "/api/v1/mysql/state")
 	if rec.Code != http.StatusServiceUnavailable {
@@ -91,7 +109,6 @@ func TestLifecycleStartsGovernorWhenMySQLComesUpLater(t *testing.T) {
 		t.Fatalf("scoped route while down: HTTP %d %s", rec.Code, rec.Body)
 	}
 
-	waitFor(t, "a few retries", func() bool { return attempts.Load() >= 3 })
 	ok.Store(true)
 	waitFor(t, "governor start", func() bool { return l.Governor() != nil })
 
@@ -99,41 +116,81 @@ func TestLifecycleStartsGovernorWhenMySQLComesUpLater(t *testing.T) {
 		t.Fatalf("Status after start = %q, want empty", l.Status())
 	}
 	if got := l.Governor().cfg.Mode; got != "enforce" {
-		t.Fatalf("governor mode = %q: the retry must use the config current at that attempt", got)
+		t.Fatalf("governor mode = %q: an attempt must use the config current at that attempt", got)
 	}
 	if cfgCalls.Load() != attempts.Load() {
 		t.Fatalf("config read %d times for %d attempts, want once per attempt", cfgCalls.Load(), attempts.Load())
 	}
 
-	rec = serve(l.AdminHandler(), "/api/v1/mysql/state")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("admin route after start: HTTP %d %s", rec.Code, rec.Body)
+	for _, h := range []http.Handler{l.AdminHandler(), l.AdminHandler()} { // built once, then reused
+		rec = serve(h, "/api/v1/mysql/state")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("admin route after start: HTTP %d %s", rec.Code, rec.Body)
+		}
+		var st GovernorState
+		if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || st.Flavor != "test" {
+			t.Fatalf("state after start = %+v (%v)", st, err)
+		}
 	}
-	var st GovernorState
-	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil || st.Flavor != "test" {
-		t.Fatalf("state after start = %+v (%v)", st, err)
-	}
-
-	// Started: no more attempts.
-	n := attempts.Load()
-	time.Sleep(20 * time.Millisecond)
-	if attempts.Load() != n {
-		t.Fatalf("retry kept running after the governor started")
-	}
+	assertStopped(t, &attempts, "after the governor started")
 }
 
-// MySQL up at daemon start: the governor starts inline, no retry goroutine.
-func TestLifecycleStartsInlineWhenMySQLIsUp(t *testing.T) {
+// MySQL up at daemon start: one attempt, and Start never blocks on it.
+func TestLifecycleStartReturnsAtOnceAndConnectsOnce(t *testing.T) {
 	var ok atomic.Bool
 	ok.Store(true)
 	var attempts atomic.Int32
 	l := testLifecycle(nil, &ok, &attempts)
-	if g := l.Start(context.Background(), nil); g == nil {
-		t.Fatal("Start returned nil with MySQL up")
+	release := make(chan struct{})
+	inner := l.newGovernor
+	l.newGovernor = func(cfg GovernorConfig) (*Governor, error) {
+		<-release // a database that answers slowly
+		return inner(cfg)
 	}
-	if g := l.Start(context.Background(), nil); g == nil || attempts.Load() != 1 {
-		t.Fatalf("second Start: gov=%v attempts=%d, want the same governor and no new attempt", g, attempts.Load())
+
+	done := make(chan struct{})
+	go func() { l.Start(context.Background(), nil); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start blocked on the connect")
 	}
+	close(release)
+	waitFor(t, "governor start", func() bool { return l.Governor() != nil })
+
+	l.Start(context.Background(), nil)
+	assertStopped(t, &attempts, "after a second Start")
+	if attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
+// [mysql_governor] ENABLED = 0 must keep the governor from starting, with no
+// connection attempted, until the operator re-enables it.
+func TestLifecycleDisabledNeverConnectsUntilReEnabled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ok atomic.Bool
+	ok.Store(true) // MySQL is up: only the config keeps it off
+	var attempts atomic.Int32
+	l := testLifecycle(nil, &ok, &attempts)
+
+	var enabled atomic.Bool
+	var cfgCalls atomic.Int32
+	l.Start(ctx, func() *GovernorConfig {
+		cfgCalls.Add(1)
+		return &GovernorConfig{Enabled: enabled.Load()}
+	})
+	waitFor(t, "several config polls", func() bool { return cfgCalls.Load() >= 3 })
+	if attempts.Load() != 0 || l.Governor() != nil {
+		t.Fatalf("disabled governor: %d connect attempts, governor=%v; want none", attempts.Load(), l.Governor())
+	}
+	if !strings.Contains(l.Status(), "ENABLED = 0") {
+		t.Fatalf("Status = %q, want the disabled reason", l.Status())
+	}
+
+	enabled.Store(true)
+	waitFor(t, "governor start after re-enable", func() bool { return l.Governor() != nil })
 }
 
 // A node without a database must not retry forever after shutdown.
@@ -141,28 +198,40 @@ func TestLifecycleRetryStopsWithContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var ok atomic.Bool
 	var attempts atomic.Int32
-	l := testLifecycle(errNoCredentials, &ok, &attempts)
+	l := testLifecycle(fmt.Errorf("mysql_governor: cannot connect: %w", errNoCredentials), &ok, &attempts)
 	l.Start(ctx, nil)
 	waitFor(t, "a retry", func() bool { return attempts.Load() >= 2 })
 	cancel()
-	time.Sleep(10 * time.Millisecond)
-	n := attempts.Load()
-	time.Sleep(20 * time.Millisecond)
-	if attempts.Load() != n {
-		t.Fatalf("retry kept running after the context ended")
-	}
+	assertStopped(t, &attempts, "after the context ended")
 	if !strings.Contains(l.Status(), "no MySQL credentials") {
 		t.Fatalf("Status = %q", l.Status())
+	}
+}
+
+// Retry-After tells the client when the next attempt actually is.
+func TestLifecycleRetryAfterFollowsSchedule(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ok atomic.Bool
+	var attempts atomic.Int32
+	l := testLifecycle(fmt.Errorf("mysql_governor: cannot connect: %w", errNoCredentials), &ok, &attempts)
+	l.pacing = retryPacing{min: time.Hour, max: time.Hour, noCreds: 10 * time.Minute}
+	l.Start(ctx, nil)
+	waitFor(t, "the first attempt", func() bool { return l.retryAfterSeconds() > 0 })
+
+	rec := serve(l.AdminHandler(), "/api/v1/mysql/state")
+	s, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	if err != nil || s < 590 || s > 600 {
+		t.Fatalf("Retry-After = %q, want ~600 (the no-credentials poll)", rec.Header().Get("Retry-After"))
 	}
 }
 
 func TestNextRetryDelay(t *testing.T) {
 	p := NewGovernorLifecycle().pacing
 	backoff := p.min
-	connErr := errors.New("connection refused")
 	var got []time.Duration
 	for i := 0; i < 9; i++ {
-		got = append(got, p.next(connErr, &backoff))
+		got = append(got, p.next(connRefused(), &backoff))
 	}
 	want := []time.Duration{5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second,
 		80 * time.Second, 160 * time.Second, 5 * time.Minute, 5 * time.Minute, 5 * time.Minute}
@@ -172,12 +241,68 @@ func TestNextRetryDelay(t *testing.T) {
 		}
 	}
 
-	wrapped := fmt.Errorf("mysql_governor: cannot connect: %w", errNoCredentials)
-	if d := p.next(wrapped, &backoff); d != retryNoCredsDelay {
-		t.Fatalf("no-credentials delay = %v, want %v", d, retryNoCredsDelay)
+	for _, e := range []error{fmt.Errorf("mysql_governor: cannot connect: %w", errNoCredentials), errGovernorDisabled} {
+		if d := p.next(e, &backoff); d != retryNoCredsDelay {
+			t.Fatalf("%v: delay = %v, want %v", e, d, retryNoCredsDelay)
+		}
+		if backoff != retryMinDelay {
+			t.Fatalf("%v must reset the connect backoff, got %v", e, backoff)
+		}
 	}
-	if backoff != retryMinDelay {
-		t.Fatalf("no-credentials must reset the connect backoff, got %v", backoff)
+}
+
+// The log de-duplicates on the failure class, which must not change when only
+// the driver's wording does.
+func TestFailureClassIsStableAcrossWording(t *testing.T) {
+	wrap := func(err error) error {
+		return fmt.Errorf("mysql_governor: cannot connect: %w", &connectError{source: "DSN", err: err})
+	}
+	a := failureClass(wrap(errors.New("dial tcp 10.0.0.5:3306: i/o timeout")))
+	b := failureClass(wrap(context.DeadlineExceeded))
+	if a != b || a != "connect:DSN" {
+		t.Fatalf("classes %q / %q, want both connect:DSN", a, b)
+	}
+	if failureClass(fmt.Errorf("x: %w", errNoCredentials)) != "no-credentials" || failureClass(errGovernorDisabled) != "disabled" {
+		t.Fatal("no-credentials / disabled not classified")
+	}
+}
+
+// openDB tells "no credentials" from "connect failed", names the source, and
+// never puts the DSN's password in an error.
+func TestOpenDBClassifiesFailuresWithoutLeakingTheDSN(t *testing.T) {
+	dir := t.TempDir()
+	oRoot, oGov, oDA := rootMyCnfPath, governorCnfPath, daMySQLConfigPath
+	t.Cleanup(func() { rootMyCnfPath, governorCnfPath, daMySQLConfigPath = oRoot, oGov, oDA })
+	rootMyCnfPath = filepath.Join(dir, "root.my.cnf")
+	governorCnfPath = filepath.Join(dir, "mysql_governor.cnf")
+	daMySQLConfigPath = filepath.Join(dir, "da-mysql.conf")
+	oTimeout := openPingTimeout
+	openPingTimeout = 2 * time.Second
+	t.Cleanup(func() { openPingTimeout = oTimeout })
+
+	// No source at all: a node without a database.
+	if _, err := openDB(GovernorConfig{}); !errors.Is(err, errNoCredentials) {
+		t.Fatalf("no sources: err = %v, want errNoCredentials", err)
+	}
+
+	// A config file, but nothing listens on its socket.
+	sock := filepath.Join(dir, "absent.sock")
+	if err := os.WriteFile(governorCnfPath, []byte("[client]\nuser=cfm_governor\npassword=s3cretPW\nsocket="+sock+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := openDB(GovernorConfig{})
+	var ce *connectError
+	if !errors.As(err, &ce) || ce.source != governorCnfPath || errors.Is(err, errNoCredentials) {
+		t.Fatalf("down socket: err = %v, want a connectError from %s", err, governorCnfPath)
+	}
+	if strings.Contains(err.Error(), "s3cretPW") {
+		t.Fatalf("error leaks the password: %v", err)
+	}
+
+	// An unparsable explicit DSN, tried first: its error must not quote it.
+	_, err = openDB(GovernorConfig{DSN: "root:s3cretPW@bogus(nowhere"})
+	if err == nil || strings.Contains(err.Error(), "s3cretPW") {
+		t.Fatalf("bad DSN: err = %v, want an error without the password", err)
 	}
 }
 
@@ -202,5 +327,16 @@ func TestGovernorRespError(t *testing.T) {
 	err = governorRespError(mk(200, "text/html; charset=utf-8", "<!doctype html>"))
 	if err == nil || !strings.Contains(err.Error(), "not JSON") || strings.Contains(err.Error(), "invalid character") {
 		t.Fatalf("HTML: %v", err)
+	}
+
+	// The admin guard's 403 goes through http.Error: JSON body, text/plain.
+	// It is a token problem and must not be blamed on the governor.
+	err = governorRespError(mk(403, "text/plain; charset=utf-8", `{"error":"admin token required"}`+"\n"))
+	if err == nil || !strings.Contains(err.Error(), "admin token required (HTTP 403)") || strings.Contains(err.Error(), "governor") {
+		t.Fatalf("403: %v", err)
+	}
+	err = governorRespError(mk(502, "text/html", "<html>Bad Gateway</html>"))
+	if err == nil || !strings.Contains(err.Error(), "HTTP 502: <html>Bad Gateway</html>") || strings.Contains(err.Error(), "governor") {
+		t.Fatalf("502: %v", err)
 	}
 }
