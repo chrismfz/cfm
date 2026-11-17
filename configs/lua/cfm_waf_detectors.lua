@@ -9052,38 +9052,35 @@ end
 -- A shopper's GET add-to-cart is a click on the shop's own link: a same-site
 -- Referer, or Sec-Fetch-Site same-origin / same-site under a no-referrer
 -- policy. A shopper who already has a cart or is logged in carries the
--- WooCommerce session or login cookie. Any of those stands the rule down.
--- Everything else is tagged:
+-- WooCommerce session or login cookie. Any of those stands the rule down,
+-- whatever the UA: an in-app browser can carry a crawler token (the Pinterest
+-- app's UA names Pinterest), and a person's click must never be tagged a
+-- crawler's. Everything else is tagged:
 --   CRAWLER     — a self-declared bot UA (named crawler tokens, or a generic
---                 bot / crawl / spider / indexer / agent word);
+--                 `...bot/`, crawl, spider, indexer or agent word);
 --   NO_REFERER  — a browser UA, no Referer, no same-site Fetch Metadata;
 --   XSITE       — a browser UA whose Referer is another site (a link in an
 --                 ad, a comparison site or an email: possibly a person).
--- Logonly for measurement: every token above is client-authored, so a tag
--- may never key enforcement by itself, and the stand-downs can be forged.
--- That is acceptable for what the rule is for (the cost of crawling), not a
--- security boundary. Only GET / HEAD and the query string: a product page's
--- own form POSTs add-to-cart in the body.
+-- Logonly for measurement: every input is client-authored, so a tag may never
+-- key enforcement by itself, and the stand-downs can be forged (a crawler that
+-- sends a same-site Referer or a cart cookie is not counted). That is
+-- acceptable for what the rule is for (the cost of crawling), not a security
+-- boundary. Only GET / HEAD and the query string: a product page's own form
+-- POSTs add-to-cart in the body.
 --
--- The name is read as PHP reads it (php_request_fields), behind a cheap
--- pre-check on the decoded query. Its tables and helper live inside the
--- function: the main chunk is at Lua's 200-local limit.
-function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host)
+-- The gate is the memoized normalize(args & body) surface the other field
+-- rules share (`nab`, lowercased); past it the name is read as PHP reads it
+-- (php_request_fields), case-sensitively: WooCommerce reads `add-to-cart`
+-- and PHP keys are case-sensitive, so `ADD-TO-CART` adds nothing to a cart.
+-- The tables and helpers live inside the function: the main chunk is at
+-- Lua's 200-local limit.
+function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host, nab)
   if method ~= "get" and method ~= "head" then return nil end
   if not args or args == "" then return nil end
-  local d = args:find("[%%+]") and _form_unescape(args) or args
-  if not has(lower(d), "add-to-cart") then return nil end
-  -- Past the cheap gate: built only for a request that names the field.
-  local CART_WANT = { ["add-to-cart"] = true }
-  local CART_SESSION_COOKIES = { "wp_woocommerce_session_", "woocommerce_items_in_cart", "wordpress_logged_in_" }
-  local function ua_says_bot(ua)
-    if ua_is_declared_crawler(ua) then return true end
-    return ua:find("bot[%s/;%)%-_]") ~= nil or ua:find("bot$") ~= nil
-        or has(ua, "crawl") or has(ua, "spider") or has(ua, "indexer")
-        or has(ua, "externalagent") or has(ua, "fetcher")
-  end
   headers = headers or {}
-  local f = _M.php_request_fields(method, args, "", headers, CART_WANT)["add-to-cart"]
+  if not field_gate_open(method, args, "", headers, nab, "add-to-cart") then return nil end
+  -- Past the gate: only a request that names the field pays for the parse.
+  local f = _M.php_request_fields(method, args, "", headers)["add-to-cart"]
   if not f then return nil end
   local any = false
   for i = 1, #f do
@@ -9092,18 +9089,30 @@ function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host)
   if not any then return nil end
 
   local ck = lower(cookie or header_string(headers["cookie"] or headers["Cookie"]) or "")
-  for i = 1, #CART_SESSION_COOKIES do
-    if has(ck, CART_SESSION_COOKIES[i]) then return nil end
+  for _, name in ipairs({ "wp_woocommerce_session_", "woocommerce_items_in_cart", "wordpress_logged_in_" }) do
+    if has(ck, name) then return nil end
+  end
+  local site = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
+  if site == "same-origin" or site == "same-site" then return nil end
+  -- Same site for a Referer: the host itself, or one under the other
+  -- (www.shop.gr / shop.gr, m.shop.gr). Not same_site's sibling rule: two
+  -- tenants under one public suffix (a.com.gr, b.com.gr) are siblings.
+  local ref = url_host(header_string(headers["referer"] or headers["Referer"]))
+  local host = request_host(headers, req_host)
+  if ref and host ~= "" and (ref == host or ref:sub(-#host - 1) == "." .. host
+                              or host:sub(-#ref - 1) == "." .. ref) then
+    return nil
   end
 
   local ua = lower(header_string(headers["user-agent"] or headers["User-Agent"]) or "")
-  local site = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
-  local ref = url_host(header_string(headers["referer"] or headers["Referer"]))
-  local host = request_host(headers, req_host)
-  -- A crawler is tagged whatever it sends: a bot may carry a Referer.
-  if ua ~= "" and ua_says_bot(ua) then return "CRAWLER" end
-  if site == "same-origin" or site == "same-site" then return nil end
-  if ref and host ~= "" and same_site(ref, host) then return nil end
+  -- The generic word needs a version slash or the end after "bot"
+  -- (SERankingBacklinksBot/1.0, ClaudeBot/1.0): a device name such as
+  -- "CUBOT X50" is followed by a space.
+  if ua ~= "" and (ua_is_declared_crawler(ua) or ua:find("bot/") or ua:find("bot[;%)]") or ua:find("bot$")
+                   or has(ua, "crawl") or has(ua, "spider") or has(ua, "indexer")
+                   or has(ua, "externalagent") or has(ua, "fetcher")) then
+    return "CRAWLER"
+  end
   if ref then return "XSITE" end
   return "NO_REFERER"
 end

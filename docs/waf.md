@@ -1894,18 +1894,23 @@ cost ~37 hours of backend time a day.
 **Fires on** a `GET` / `HEAD` whose query string carries `add-to-cart` (read
 as PHP reads the name, so `add%2Dto%2Dcart` counts) with a value holding a
 digit, and tags the client:
-- `CRAWLER`: a self-declared bot UA, whatever else it sends;
+- `CRAWLER`: a self-declared bot UA;
 - `NO_REFERER`: a browser UA, no Referer, no same-site Fetch Metadata;
 - `XSITE`: a browser UA with another site's Referer (an ad, a comparison
   site, an email: possibly a person).
 
 **Stands down** for a shopper's click (a same-site Referer, `www.` or not, or
 `Sec-Fetch-Site` same-origin / same-site under a no-referrer policy) and for a
-client with a WooCommerce session or a WordPress login cookie. The product
-page's own form POSTs `add-to-cart` in the body and is out of scope.
+client with a WooCommerce session or a WordPress login cookie, whatever the
+UA: an in-app browser can carry a crawler token (the Pinterest app's UA names
+Pinterest), and a person's click must never be tagged a crawler's. A
+same-site Referer is the host itself or one under the other (`www.`, `m.`),
+never a sibling under a public suffix. The name is matched as PHP reads it,
+case-sensitively (`ADD-TO-CART` adds nothing to a cart). The product page's
+own form POSTs `add-to-cart` in the body and is out of scope.
 
 **Limits.** Every input is client-authored: a crawler that forges a same-site
-Referer, or presents a cookie by that name, passes. That is acceptable for a
+Referer, or presents a cookie by that name, is not counted. That is acceptable for a
 cost signal and is why no tag may key enforcement by itself. Crawlers on the
 bypass list (Googlebot, Bingbot, ...) skip the WAF at Step 0 and are not
 measured here.

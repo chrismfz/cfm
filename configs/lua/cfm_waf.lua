@@ -2892,7 +2892,7 @@ local function check_impl(ctx, st)
   do
     local mode = rule_mode(CFG.rule_wc_cart_get_crawl, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_wc_cart_get_crawl(m_lower, args, headers, cookie, ctx.host)
+      local tag = det.detect_wc_cart_get_crawl(m_lower, args, headers, cookie, ctx.host, get_norm_ab())
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CART_CRAWL:" .. tag, ttl, mode, RULE_IDS.rule_wc_cart_get_crawl) then goto done end

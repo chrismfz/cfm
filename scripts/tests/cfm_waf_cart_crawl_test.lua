@@ -79,9 +79,10 @@ fires(req({ uri = "/shop/page/15/", args = "add_to_wishlist=4784&_wpnonce=f22f48
       "meta-externalagent, wishlist + add-to-cart", "CRAWLER")
 fires(req({ uri = "/product/x/", args = "add-to-cart=12368", ua = SERANKING }), "SERankingBacklinksBot", "CRAWLER")
 fires(req({ uri = "/product/x/", args = "add-to-cart=12368", ua = INDEXER }), "meta-webindexer", "CRAWLER")
--- A crawler carrying a same-site Referer is still a crawler.
-fires(req({ uri = "/product/x/", args = "add-to-cart=12368", ua = META, referer = "https://dreamworld.gr/shop/" }),
-      "crawler with a same-site Referer", "CRAWLER")
+-- A same-site Referer stands the rule down whatever the UA (forgeable; see
+-- the in-app browser cases below for why).
+clean(req({ uri = "/product/x/", args = "add-to-cart=12368", ua = META, referer = "https://dreamworld.gr/shop/" }),
+      "crawler UA with a same-site Referer")
 fires(req({ method = "HEAD", uri = "/product/x/", args = "add-to-cart=12368", ua = META }), "HEAD by a crawler", "CRAWLER")
 
 -- ── Browser UA, no Referer (the residential rotation) ──────────────────────
@@ -112,6 +113,24 @@ clean(req({ uri = "/shop/", args = "add-to-cart=3801", cookie = "wp_woocommerce_
       "a shopper with a cart")
 clean(req({ uri = "/shop/", args = "add-to-cart=3801", cookie = "wordpress_logged_in_8e1e=staff%7C1%7Cabc" }), "a logged-in user")
 
+-- ── People whose UA looks like a bot ──────────────────────────────────────
+local PINTEREST_APP = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [Pinterest/iOS]"
+local CUBOT = "Mozilla/5.0 (Linux; Android 13; CUBOT X50 Build/TP1A.220624.014) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36"
+clean(req({ uri = "/shop/", args = "add-to-cart=3801", ua = PINTEREST_APP, referer = "https://dreamworld.gr/shop/" }),
+      "Pinterest in-app browser, a same-site click")
+clean(req({ uri = "/shop/", args = "add-to-cart=3801", ua = PINTEREST_APP, site = "same-origin" }),
+      "Pinterest in-app browser, same-origin Fetch Metadata")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", ua = CUBOT }), "a CUBOT phone is a browser UA", "NO_REFERER")
+clean(req({ uri = "/shop/", args = "add-to-cart=3801", ua = CUBOT, referer = "https://dreamworld.gr/shop/" }),
+      "a CUBOT phone, a same-site click")
+
+-- ── Same site, strictly ────────────────────────────────────────────────────
+clean(req({ uri = "/shop/", args = "add-to-cart=3801", referer = "https://m.dreamworld.gr/shop/" }), "Referer on a subdomain")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", host = "shop.com.gr", referer = "https://other.com.gr/" }),
+      "a sibling under a public suffix is another site", "XSITE")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", host = "dreamworld.gr", referer = "https://notdreamworld.gr/" }),
+      "a host that only ends the same", "XSITE")
+
 -- ── Out of scope ───────────────────────────────────────────────────────────
 clean(req({ method = "POST", uri = "/product/x/", args = "add-to-cart=3801" }), "POST (the product form)")
 clean(req({ uri = "/product/x/", args = "add-to-cart=" }), "empty id")
@@ -119,6 +138,8 @@ clean(req({ uri = "/product/x/", args = "add-to-cart=abc" }), "non-numeric id")
 clean(req({ uri = "/wp-content/plugins/woocommerce/assets/js/frontend/add-to-cart.min.js", args = "ver=9.2.5" }), "the add-to-cart script")
 clean(req({ uri = "/product/x/", args = "add-to-cart-variation=5" }), "a different parameter (add-to-cart-variation)")
 clean(req({ uri = "/product/x/", args = "page=add-to-cart" }), "add-to-cart as a value")
+clean(req({ uri = "/product/x/", args = "ADD-TO-CART=3801" }), "upper-case name (PHP keys are case-sensitive)")
+clean(req({ uri = "/product/x/", args = "Add-To-Cart=3801", ua = META }), "mixed-case name, crawler")
 
 -- ── Disabled ───────────────────────────────────────────────────────────────
 set_only({ rule_wc_cart_get_crawl = "disabled" })
