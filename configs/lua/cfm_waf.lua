@@ -3012,6 +3012,17 @@ local PUSH_KEY_KEEPS_TAG = {
   WAF_CART_CRAWL = true,
 }
 
+-- Families whose push window is longer than push_cooldown_sec. Rule 530's
+-- clients send about one request per IP per minute (Meta's ~350 addresses
+-- spread ~130 a day each; the residential rotation 1-2 per address), so a
+-- 60 s window pushed nearly every hit: ~80 k waf_trigger rows, RPCs and
+-- waf.log lines a day on one node. An hour per (ip, tag) keeps who and which
+-- population, and drops most of the volume. Logonly-only families only: a
+-- longer window on a block tier would delay a ban.
+local PUSH_COOLDOWN_FAMILY = {
+  WAF_CART_CRAWL = 3600,
+}
+
 -- also_rule_ids: the distinct waf_rule_ids in a check()'s `hits` other than
 -- the headline one — the first ALSO_RULE_IDS_MAX in evaluation order, then
 -- sorted (capping after a sort would always drop the high ids, the 10xxx CVE
@@ -3088,7 +3099,7 @@ function _M.should_push(shdict, ip, reason, action, rule_id)
     key_reason = key_reason .. "#" .. rid
   end
   local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
-  local ok = shdict:add(k, 1, CFG.push_cooldown_sec)
+  local ok = shdict:add(k, 1, PUSH_COOLDOWN_FAMILY[fam] or CFG.push_cooldown_sec)
   return ok == true
 end
 

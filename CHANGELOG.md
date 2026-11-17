@@ -27,7 +27,9 @@ back-filled here — see the git/PR history for that period.
   (`WAF_CART_CRAWL`) tags each one `CRAWLER`, `NO_REFERER` or `XSITE`. It
   stands down for a shopper's click (same-site Referer or Fetch Metadata) and
   for a cart or login cookie. Logonly: nothing is blocked, and the family has
-  no block rule, so `waf_security` never arms it. See `docs/waf.md`, "Rule 530".
+  no block rule, so `waf_security` never arms it. Its pushes are kept to one
+  per client and tag an hour, so the burn-in adds no flood of history rows.
+  See `docs/waf.md`, "Rule 530".
 
 ### Fixed
 - **The Apache TSV fallback log no longer fills the disk on cPanel.**

@@ -1895,7 +1895,9 @@ cost ~37 hours of backend time a day.
 as PHP reads the name, so `add%2Dto%2Dcart` counts) with a value holding a
 digit, and tags the client:
 - `CRAWLER`: a self-declared bot UA;
-- `NO_REFERER`: a browser UA, no Referer, no same-site Fetch Metadata;
+- `NO_REFERER`: not a self-declared bot (a browser UA, an in-app browser
+  such as Pinterest's, or no UA at all), no Referer, no same-site Fetch
+  Metadata;
 - `XSITE`: a browser UA with another site's Referer (an ad, a comparison
   site, an email: possibly a person).
 
@@ -1916,7 +1918,10 @@ bypass list (Googlebot, Bingbot, ...) skip the WAF at Step 0 and are not
 measured here.
 
 **Push window.** The tag stays in the push key (`PUSH_KEY_KEEPS_TAG`), so
-the burn-in can compare the three populations per IP.
+the burn-in can compare the three populations per IP, and the window is an
+hour, not 60 s (`PUSH_COOLDOWN_FAMILY`). These clients send about one request
+per IP per minute, so a 60 s window pushed nearly every hit (~80 k history
+rows a day on mars). The burn-in counts clients per hour, not requests.
 
 **What next.** After the burn-in (`waf_activity` / `cfm.waf.log`,
 `node="all"`), the likely action for `CRAWLER` is not a block. It is an

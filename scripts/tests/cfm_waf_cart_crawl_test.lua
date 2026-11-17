@@ -112,6 +112,16 @@ clean(req({ uri = "/shop/", args = "add-to-cart=3801", site = "same-site" }), "n
 clean(req({ uri = "/shop/", args = "add-to-cart=3801", cookie = "wp_woocommerce_session_8e1e=1%7C%7C1%7C%7C2; woocommerce_items_in_cart=1" }),
       "a shopper with a cart")
 clean(req({ uri = "/shop/", args = "add-to-cart=3801", cookie = "wordpress_logged_in_8e1e=staff%7C1%7Cabc" }), "a logged-in user")
+-- The cookie only in the header (ctx.cookie empty) still stands it down.
+do
+  local c = req({ uri = "/shop/", args = "add-to-cart=3801" })
+  c.headers.cookie = "_ga=1; wp_woocommerce_session_8e1e=1"
+  c.cookie = ""
+  clean(c, "cart cookie in the header only")
+end
+-- By name, not anywhere in the string.
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", cookie = "x=wordpress_logged_in_; y=wp_woocommerce_session_" }),
+      "the names as cookie values", "NO_REFERER")
 
 -- ── People whose UA looks like a bot ──────────────────────────────────────
 local PINTEREST_APP = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 [Pinterest/iOS]"
@@ -121,6 +131,15 @@ clean(req({ uri = "/shop/", args = "add-to-cart=3801", ua = PINTEREST_APP, refer
 clean(req({ uri = "/shop/", args = "add-to-cart=3801", ua = PINTEREST_APP, site = "same-origin" }),
       "Pinterest in-app browser, same-origin Fetch Metadata")
 fires(req({ uri = "/shop/", args = "add-to-cart=3801", ua = CUBOT }), "a CUBOT phone is a browser UA", "NO_REFERER")
+-- A link shared on Pinterest opens in its in-app browser with no Referer: a
+-- person, not the Pinterest crawler.
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", ua = PINTEREST_APP }),
+      "Pinterest in-app browser, no Referer", "NO_REFERER")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", ua = "Pinterest/0.2 (+http://www.pinterest.com/bot.html)" }),
+      "the Pinterest crawler", "CRAWLER")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801",
+            ua = "Mozilla/5.0 (Linux; Android 14; SM-S918B Build/UP1A; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/154.0.0.0 Mobile Safari/537.36 musical_ly_2023909030" }),
+      "TikTok in-app browser, no Referer", "NO_REFERER")
 clean(req({ uri = "/shop/", args = "add-to-cart=3801", ua = CUBOT, referer = "https://dreamworld.gr/shop/" }),
       "a CUBOT phone, a same-site click")
 
@@ -140,6 +159,21 @@ clean(req({ uri = "/product/x/", args = "add-to-cart-variation=5" }), "a differe
 clean(req({ uri = "/product/x/", args = "page=add-to-cart" }), "add-to-cart as a value")
 clean(req({ uri = "/product/x/", args = "ADD-TO-CART=3801" }), "upper-case name (PHP keys are case-sensitive)")
 clean(req({ uri = "/product/x/", args = "Add-To-Cart=3801", ua = META }), "mixed-case name, crawler")
+
+-- ── Push window: an hour per (ip, tag) for this family, 60 s for others ───
+do
+  local adds = {}
+  local fake = { add = function(_, k, _, ttl)
+    if adds[k] then return false end
+    adds[k] = ttl; return true
+  end }
+  check(waf.should_push(fake, "1.2.3.4", "WAF_CART_CRAWL:CRAWLER", "logonly", 530) == true, "first push")
+  check(waf.should_push(fake, "1.2.3.4", "WAF_CART_CRAWL:CRAWLER", "logonly", 530) == false, "second push in the window")
+  check(waf.should_push(fake, "1.2.3.4", "WAF_CART_CRAWL:NO_REFERER", "logonly", 530) == true, "another tag pushes")
+  check(adds["wafpush|WAF_CART_CRAWL:CRAWLER|logonly|1.2.3.4"] == 3600, "530 window is an hour")
+  check(waf.should_push(fake, "1.2.3.4", "WAF_SQLI:X", "block", 301) == true, "other family pushes")
+  check(adds["wafpush|WAF_SQLI#301|block|1.2.3.4"] == 60, "other families keep 60 s")
+end
 
 -- ── Disabled ───────────────────────────────────────────────────────────────
 set_only({ rule_wc_cart_get_crawl = "disabled" })

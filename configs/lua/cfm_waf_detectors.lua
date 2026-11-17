@@ -9058,7 +9058,8 @@ end
 -- crawler's. Everything else is tagged:
 --   CRAWLER     — a self-declared bot UA (named crawler tokens, or a generic
 --                 `...bot/`, crawl, spider, indexer or agent word);
---   NO_REFERER  — a browser UA, no Referer, no same-site Fetch Metadata;
+--   NO_REFERER  — not a self-declared bot (a browser UA, an in-app browser,
+--                 or no UA at all), no Referer, no same-site Fetch Metadata;
 --   XSITE       — a browser UA whose Referer is another site (a link in an
 --                 ad, a comparison site or an email: possibly a person).
 -- Logonly for measurement: every input is client-authored, so a tag may never
@@ -9088,9 +9089,14 @@ function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host, na
   end
   if not any then return nil end
 
-  local ck = lower(cookie or header_string(headers["cookie"] or headers["Cookie"]) or "")
+  -- cfm_waf.check passes ctx.cookie ("" when absent); fall back to the header.
+  local ck = cookie
+  if ck == nil or ck == "" then ck = header_string(headers["cookie"] or headers["Cookie"]) or "" end
+  ck = lower(ck)
+  -- By cookie NAME (the start of the string or after a ';'), not anywhere:
+  -- a value holding one of these words is no cart.
   for _, name in ipairs({ "wp_woocommerce_session_", "woocommerce_items_in_cart", "wordpress_logged_in_" }) do
-    if has(ck, name) then return nil end
+    if ck:find("^%s*" .. name) or ck:find(";%s*" .. name) then return nil end
   end
   local site = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
   if site == "same-origin" or site == "same-site" then return nil end
@@ -9105,10 +9111,16 @@ function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host, na
   end
 
   local ua = lower(header_string(headers["user-agent"] or headers["User-Agent"]) or "")
+  -- An in-app browser is a person, though its app's name is also a crawler
+  -- token: the Pinterest app appends "[Pinterest/iOS]" / "[Pinterest/Android]"
+  -- (its crawler says Pinterestbot / "Pinterest/0.2"), and a link shared there
+  -- opens with no Referer. ua_is_in_app_browser covers the named in-app
+  -- tokens 612 already measures apart.
+  local in_app = ua_is_in_app_browser(ua) or ua:find("[pinterest/", 1, true) ~= nil
   -- The generic word needs a version slash or the end after "bot"
   -- (SERankingBacklinksBot/1.0, ClaudeBot/1.0): a device name such as
   -- "CUBOT X50" is followed by a space.
-  if ua ~= "" and (ua_is_declared_crawler(ua) or ua:find("bot/") or ua:find("bot[;%)]") or ua:find("bot$")
+  if ua ~= "" and not in_app and (ua_is_declared_crawler(ua) or ua:find("bot/") or ua:find("bot[;%)]") or ua:find("bot$")
                    or has(ua, "crawl") or has(ua, "spider") or has(ua, "indexer")
                    or has(ua, "externalagent") or has(ua, "fetcher")) then
     return "CRAWLER"
