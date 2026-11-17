@@ -35,21 +35,26 @@ back-filled here — see the git/PR history for that period.
 - **`[mysql_governor] ENABLED = 0` is honoured.** The detectors manager
   never calls a disabled section's factory, so the governor saw "no section"
   and started anyway with the built-in defaults (monitor mode, polling the
-  processlist every 5 s). A disabled governor now makes no connection, and
-  re-enabling it in `detectors.conf` starts it without a restart. Removing
-  the section now falls back to the built-in defaults instead of keeping the
-  last parsed config. A `detectors.conf` that fails to read changes neither.
+  processlist every 5 s). A disabled governor (every instance disabled, if
+  there are several) now makes no connection, and re-enabling it in
+  `detectors.conf` starts it without a restart. Removing the section falls
+  back to the built-in defaults instead of keeping the last parsed config. A
+  `detectors.conf` that cannot be read on first load holds the governor until
+  it reads (it used to start with the defaults); removing the file while the
+  daemon runs changes nothing.
 - **`/api/v1/mysql/*` answers a JSON 503 while the governor is not running**
-  (`{"error":"mysql governor not running","reason":…}`, with a `Retry-After`
-  of the next connect attempt; scoped callers get neither the reason nor the
-  header) instead of the web UI's HTML. `cfm mysqltop` and the MCP
-  `mysql_pressure` tool show that message (without the reason), and
-  `whats_wrong` lists the governor as `unavailable` rather than as an error.
-  The CLI names a non-JSON answer from an older daemon instead of failing in
-  the JSON parser, and a 401/403 reads as the token problem it is. The
-  startup log no longer says "no working credentials found" when the
-  credentials were found and the connect failed: it names the credential
-  source and the connect error.
+  instead of the web UI's HTML: `{"error":"mysql governor not running: <state>",
+  "reason":…}` with `<state>` one of `no credentials`, `disabled`, `held`,
+  `connect failed`, and a `Retry-After` of the next connect attempt. Scoped
+  callers get only `{"error":"mysql governor not running"}`. `cfm mysqltop`
+  shows the state and reason; the MCP `mysql_pressure` tool shows the state
+  (never the reason); `whats_wrong` lists a governor that is off by design
+  (`no credentials`, `disabled`, `held`) as `unavailable` and one that cannot
+  connect as an error. The CLI names a non-JSON answer from an older daemon
+  instead of failing in the JSON parser, and a 401/403 reads as the token
+  problem it is. The startup log no longer says "no working credentials
+  found" when the credentials were found and the connect failed: it names the
+  credential source and the connect error.
 
 ## 2026.11.17
 

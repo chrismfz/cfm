@@ -672,17 +672,30 @@ func TestEvalMailTrafficFallbackPutsWarningsFirst(t *testing.T) {
 	}
 }
 
-// A 503 (a subsystem that is not running, e.g. the MySQL governor on a node
-// without a database) reads as unavailable, not as an error, and no finding.
-func TestWhatsWrong_503SourceIsUnavailable(t *testing.T) {
-	got := evaluateWhatsWrong(sec("mysql", `{"error":"HTTP 503: mysql governor not running"}`))
-	if got.Sources["mysql"] != "unavailable" {
-		t.Errorf("mysql source = %q, want unavailable", got.Sources["mysql"])
-	}
-	for _, f := range got.Findings {
-		if f.Category == "mysql" {
-			t.Errorf("unexpected mysql finding %+v", f)
+// The MySQL governor off by design (no database, disabled, held) reads as
+// unavailable; one that cannot connect (MySQL down, wrong password) stays an
+// error, as does any other 503. Neither produces a finding.
+func TestWhatsWrong_GovernorNotRunningSource(t *testing.T) {
+	for state, want := range map[string]string{
+		"no credentials": "unavailable",
+		"disabled":       "unavailable",
+		"held":           "unavailable",
+		"connect failed": "error: HTTP 503: mysql governor not running: connect failed",
+		"starting":       "error: HTTP 503: mysql governor not running: starting",
+	} {
+		got := evaluateWhatsWrong(sec("mysql", `{"error":"HTTP 503: mysql governor not running: `+state+`"}`))
+		if got.Sources["mysql"] != want {
+			t.Errorf("%s: mysql source = %q, want %q", state, got.Sources["mysql"], want)
 		}
+		for _, f := range got.Findings {
+			if f.Category == "mysql" {
+				t.Errorf("%s: unexpected mysql finding %+v", state, f)
+			}
+		}
+	}
+	got := evaluateWhatsWrong(sec("mysql", `{"error":"HTTP 503"}`))
+	if got.Sources["mysql"] != "error: HTTP 503" {
+		t.Errorf("bare 503: mysql source = %q, want an error", got.Sources["mysql"])
 	}
 }
 

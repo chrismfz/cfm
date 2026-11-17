@@ -3,9 +3,11 @@ package mysql
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +46,11 @@ const (
 // errGovernorDisabled: [mysql_governor] ENABLED = 0.
 var errGovernorDisabled = errors.New("disabled in detectors.conf ([mysql_governor] ENABLED = 0)")
 
+// errGovernorHeld: not started for a reason other than ENABLED = 0, such as
+// a detectors.conf that could not be read on first load (GovernorConfig
+// HoldReason). Paced like a disabled governor: no connection is made.
+var errGovernorHeld = errors.New("held")
+
 // retryPacing is the pacing one lifecycle uses (the constants above; a test
 // shrinks its own copy).
 type retryPacing struct {
@@ -68,7 +75,7 @@ type retryPacing struct {
 // cfm/internal/detectors/mysql and cfm/internal/detectors.
 type GovernorLifecycle struct {
 	gov       atomic.Pointer[Governor]
-	status    atomic.Pointer[string] // why no governor runs yet; nil once started
+	status    atomic.Pointer[govStatus] // why no governor runs yet; nil once started
 	nextRetry atomic.Int64           // unix nanos of the next attempt; 0 = none scheduled
 	started   atomic.Bool
 
@@ -91,8 +98,7 @@ func NewGovernorLifecycle() *GovernorLifecycle {
 	}
 	l.admin = &lazyGovernorHandler{lc: l, register: (*Governor).RegisterHTTPAdmin, withReason: true}
 	l.scoped = &lazyGovernorHandler{lc: l, register: (*Governor).RegisterHTTPScoped}
-	s := "starting"
-	l.status.Store(&s)
+	l.status.Store(&govStatus{state: "starting", reason: "starting"})
 	return l
 }
 
@@ -117,6 +123,9 @@ func (l *GovernorLifecycle) attempt(ctx context.Context, cfg func() *GovernorCon
 		}
 	}
 	if !resolved.Enabled {
+		if resolved.HoldReason != "" {
+			return fmt.Errorf("%w: %s", errGovernorHeld, resolved.HoldReason)
+		}
 		return errGovernorDisabled
 	}
 	g, err := l.newGovernor(resolved)
@@ -183,6 +192,8 @@ func failureClass(err error) string {
 		return "no-credentials"
 	case errors.Is(err, errGovernorDisabled):
 		return "disabled"
+	case errors.Is(err, errGovernorHeld):
+		return "held"
 	}
 	var ce *connectError
 	if errors.As(err, &ce) {
@@ -196,7 +207,7 @@ func failureClass(err error) string {
 // backoff: once a connect becomes possible, its first failure should be
 // retried quickly again.
 func (p retryPacing) next(err error, backoff *time.Duration) time.Duration {
-	if errors.Is(err, errNoCredentials) || errors.Is(err, errGovernorDisabled) {
+	if errors.Is(err, errNoCredentials) || errors.Is(err, errGovernorDisabled) || errors.Is(err, errGovernorHeld) {
 		*backoff = p.min
 		return p.noCreds
 	}
@@ -205,9 +216,29 @@ func (p retryPacing) next(err error, backoff *time.Duration) time.Duration {
 	return d
 }
 
+// govStatus is why no governor runs: a one-word state, safe for any admin
+// surface (MCP, whats_wrong), and the full reason (credential sources, driver
+// text) for the admin HTTP API and the log.
+type govStatus struct {
+	state  string // starting | no credentials | disabled | held | connect failed | failed
+	reason string
+}
+
+// govState is the one-word state for a failed attempt.
+func govState(err error) string {
+	switch c := failureClass(err); {
+	case c == "no-credentials":
+		return "no credentials"
+	case c == "disabled", c == "held":
+		return c
+	case strings.HasPrefix(c, "connect:"):
+		return "connect failed"
+	}
+	return "failed"
+}
+
 func (l *GovernorLifecycle) setStatus(err error) {
-	s := err.Error()
-	l.status.Store(&s)
+	l.status.Store(&govStatus{state: govState(err), reason: err.Error()})
 }
 
 // Governor returns the running *Governor, or nil while MySQL is unavailable.
@@ -219,7 +250,15 @@ func (l *GovernorLifecycle) Governor() *Governor {
 // Status returns why no governor runs, or "" once one does.
 func (l *GovernorLifecycle) Status() string {
 	if s := l.status.Load(); s != nil {
-		return *s
+		return s.reason
+	}
+	return ""
+}
+
+// State returns the one-word state (see govStatus), or "" once running.
+func (l *GovernorLifecycle) State() string {
+	if s := l.status.Load(); s != nil {
+		return s.state
 	}
 	return ""
 }
@@ -264,9 +303,12 @@ func (h *lazyGovernorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	g := h.lc.Governor()
 	if g == nil {
 		body := map[string]string{"error": "mysql governor not running"}
-		// Admin only: the reason, and Retry-After, whose value (5-40 s vs
-		// ~300 s) would tell a scoped caller which state the node is in.
+		// Admin only: the state, the reason, and Retry-After, whose value
+		// (5-40 s vs ~300 s) would tell a scoped caller which state the node
+		// is in. The state goes in `error`, the field MCP carries: it lets
+		// whats_wrong tell "no database here" from "MySQL down".
 		if h.withReason {
+			body["error"] = "mysql governor not running: " + h.lc.State()
 			body["reason"] = h.lc.Status()
 			if s := h.lc.retryAfterSeconds(); s > 0 {
 				w.Header().Set("Retry-After", strconv.Itoa(s))

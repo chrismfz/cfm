@@ -38,7 +38,7 @@ func TestMySQLGovernorRoutesAnswer503JSONWhileNotRunning(t *testing.T) {
 			continue
 		}
 		var body map[string]string
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["error"] != "mysql governor not running" {
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || !strings.HasPrefix(body["error"], "mysql governor not running") {
 			t.Errorf("%s: body %q (%v), want the governor-not-running JSON", p, rec.Body, err)
 		}
 	}

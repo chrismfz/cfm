@@ -181,9 +181,10 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 		}
 		if e := sectionError(body); e != "" {
 			sources[key] = "error: " + e
-			// A 503 is a subsystem that is not running (e.g. the MySQL
-			// governor on a node without a database), not a failure.
-			if strings.HasPrefix(e, "HTTP 503") {
+			// A MySQL governor that is not running by design (no database on
+			// the node, or disabled) is unavailable, not a failure. One that
+			// cannot connect (MySQL down, wrong credentials) stays an error.
+			if isGovernorOffByDesign(e) {
 				sources[key] = "unavailable"
 			}
 			return false
@@ -944,4 +945,19 @@ func topSignals(sig map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s(%d)", r.k, r.n))
 	}
 	return "top: " + strings.Join(parts, ", ")
+}
+
+// isGovernorOffByDesign reports a section error that is the MySQL governor's
+// 503 for a node with no database credentials, or a governor disabled or held
+// by its config ("mysql governor not running: <state>", lifecycle.go).
+func isGovernorOffByDesign(e string) bool {
+	const p = "HTTP 503: mysql governor not running: "
+	if !strings.HasPrefix(e, p) {
+		return false
+	}
+	switch strings.TrimPrefix(e, p) {
+	case "no credentials", "disabled", "held":
+		return true
+	}
+	return false
 }

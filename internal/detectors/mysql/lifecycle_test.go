@@ -99,13 +99,18 @@ func TestLifecycleStartsGovernorWhenMySQLComesUpLater(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("503 body is not JSON: %v: %s", err, rec.Body)
 	}
-	if body["error"] != "mysql governor not running" || !strings.Contains(body["reason"], "connection refused") {
+	// Admin: a one-word state in `error` (what MCP carries), the detail in
+	// `reason` (what only the admin HTTP API shows).
+	if body["error"] != "mysql governor not running: connect failed" || !strings.Contains(body["reason"], "connection refused") {
 		t.Fatalf("503 body = %v", body)
 	}
 
-	// Scoped callers get no reason (it names the node's credential files).
+	// Scoped callers get neither the state nor the reason (it names the
+	// node's credential files).
 	rec = serve(l.ScopedHandler(), "/api/v1/mysql/user-summary?user=x")
-	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "reason") {
+	var sb map[string]string
+	if rec.Code != http.StatusServiceUnavailable || json.Unmarshal(rec.Body.Bytes(), &sb) != nil ||
+		len(sb) != 1 || sb["error"] != "mysql governor not running" {
 		t.Fatalf("scoped route while down: HTTP %d %s", rec.Code, rec.Body)
 	}
 
@@ -191,6 +196,50 @@ func TestLifecycleDisabledNeverConnectsUntilReEnabled(t *testing.T) {
 
 	enabled.Store(true)
 	waitFor(t, "governor start after re-enable", func() bool { return l.Governor() != nil })
+}
+
+// A governor held by its config (detectors.conf unreadable on first load)
+// makes no connection, says why, and starts once the hold lifts.
+func TestLifecycleHeldThenReleased(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var ok atomic.Bool
+	ok.Store(true)
+	var attempts atomic.Int32
+	l := testLifecycle(nil, &ok, &attempts)
+	var held atomic.Bool
+	held.Store(true)
+	var cfgCalls atomic.Int32
+	l.Start(ctx, func() *GovernorConfig {
+		cfgCalls.Add(1)
+		if held.Load() {
+			return &GovernorConfig{Enabled: false, HoldReason: "waiting for a readable detectors.conf"}
+		}
+		return &GovernorConfig{Enabled: true}
+	})
+	waitFor(t, "several config polls", func() bool { return cfgCalls.Load() >= 3 })
+	if attempts.Load() != 0 || l.State() != "held" || !strings.Contains(l.Status(), "readable detectors.conf") {
+		t.Fatalf("held: attempts=%d state=%q status=%q", attempts.Load(), l.State(), l.Status())
+	}
+	held.Store(false)
+	waitFor(t, "governor start after the hold", func() bool { return l.Governor() != nil })
+}
+
+func TestGovState(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("x: %w", errNoCredentials), "no credentials"},
+		{errGovernorDisabled, "disabled"},
+		{fmt.Errorf("%w: why", errGovernorHeld), "held"},
+		{connRefused(), "connect failed"},
+		{errors.New("boom"), "failed"},
+	} {
+		if got := govState(c.err); got != c.want {
+			t.Errorf("govState(%v) = %q, want %q", c.err, got, c.want)
+		}
+	}
 }
 
 // A node without a database must not retry forever after shutdown.

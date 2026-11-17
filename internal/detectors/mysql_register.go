@@ -3,6 +3,7 @@ package detectors
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,24 +37,49 @@ func GetPendingGovernorConfig() (mysql.GovernorConfig, bool) {
 	return pendingGovCfg, pendingGovReady
 }
 
-// syncPendingGovernorFromSections runs on every successfully read
-// detectors.conf, before the factories. The manager never calls a disabled
-// section's factory, and a removed section has none to call, so those two
-// states are set here; an enabled section's factory sets the full config.
-func syncPendingGovernorFromSections(byName map[string]KV) {
+// syncPendingGovernor runs on every detectors rebuild, right before the
+// factories. The manager never calls a disabled section's factory, and a
+// removed section has none to call, so those states are set here; an enabled
+// section's factory sets the full config in the same sweep.
+//
+//   - config read: no [mysql_governor] section → built-in defaults; every
+//     such section (instances included) disabled → do not start; any enabled
+//     → its factory's config.
+//   - first load unreadable (not missing): hold the governor until a read
+//     succeeds, rather than start it with defaults the file may disable.
+//   - any other failed read (a missing file at first load keeps the
+//     historical "no config = defaults"; a hot reload never gets here on a
+//     read error): unchanged.
+func syncPendingGovernor(byName map[string]KV, readErr error, firstLoad bool) {
+	if readErr != nil {
+		if firstLoad && !os.IsNotExist(readErr) {
+			setPendingGovernorConfig(mysql.GovernorConfig{
+				Enabled:    false,
+				HoldReason: "waiting for a readable detectors.conf",
+			}, true)
+			logMySQLGovf("[detectors] mysql_governor held: detectors.conf unreadable on first load")
+		}
+		return
+	}
+	found, anyEnabled := false, false
 	for name, kv := range byName {
 		if typ, _ := splitTypeInstance(name); typ != "mysql_governor" {
 			continue
 		}
-		if !kvBool(kv, "ENABLED", true) {
-			if cfg, ok := GetPendingGovernorConfig(); !ok || cfg.Enabled {
-				logMySQLGovf("[detectors] %s disabled in detectors.conf", name)
-			}
-			setPendingGovernorConfig(mysql.GovernorConfig{Enabled: false}, true)
+		found = true
+		if kvBool(kv, "ENABLED", true) {
+			anyEnabled = true
 		}
-		return // enabled: its factory sets the config
 	}
-	setPendingGovernorConfig(mysql.GovernorConfig{}, false) // no section: built-in defaults
+	switch {
+	case !found:
+		setPendingGovernorConfig(mysql.GovernorConfig{}, false)
+	case !anyEnabled:
+		if cfg, ok := GetPendingGovernorConfig(); !ok || cfg.Enabled || cfg.HoldReason != "" {
+			logMySQLGovf("[detectors] mysql_governor disabled in detectors.conf")
+		}
+		setPendingGovernorConfig(mysql.GovernorConfig{Enabled: false}, true)
+	}
 }
 
 func setPendingGovernorConfig(cfg mysql.GovernorConfig, ready bool) {
@@ -156,7 +182,7 @@ func init() {
 	// -------------------------------------------------------------------------
 	Register("mysql_governor", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
 		// ENABLED = 0 never gets here (the manager skips a disabled section):
-		// syncPendingGovernorFromSections records it.
+		// syncPendingGovernor records it.
 
 		// ── SLEEP_REAPER_EXEMPT ──────────────────────────────────────────────
 		exemptRaw := kvStrClean(kv, "SLEEP_REAPER_EXEMPT", "proxysql_monitor,root")

@@ -557,7 +557,8 @@ Capabilities at a glance:
   available, but stage-2 challenge requires the webdetector bridge and therefore
   records a failed challenge until the normal config loads. A first-load read
   error retries regular detectors automatically; restart after recovery to
-  reapply start-once config consumers such as the MySQL governor.
+  reapply start-once config consumers. The MySQL governor is not one: it is
+  held (not started) until `detectors.conf` reads, then starts by itself.
 - The built-in thresholds intentionally treat 10 direct invalid-token events in
   two minutes as observe, 12 as challenge, and 16 as a 15-minute TTL-block
   candidate. A stale automation token can reach those thresholds quickly.
@@ -1151,13 +1152,19 @@ deliberately has no ordering on `mariadb`/`mysqld`, since many nodes run no
 database), it keeps retrying: every 5 s doubling to every 5 min while
 credentials exist but the connect fails, every 5 min (a file check, no
 connection) while no credentials exist at all. `ENABLED = 0` in
-`[mysql_governor]` keeps it from starting: no connection is made, and the
-5-minute check only re-reads the config, so re-enabling it there starts it
-without a restart (disabling a running governor still needs one). Until it
-runs, `/api/v1/mysql/*` and `cfm mysqltop` answer "mysql governor not running"
-with the reason (and a `Retry-After` of the next attempt);
-`/var/log/cfm/cfm.mysql.log` logs each change of reason and the eventual
-start.
+`[mysql_governor]` (on every instance, if there are several) keeps it from
+starting: no connection is made, and the 5-minute check only re-reads the
+config, so re-enabling it there starts it without a restart (disabling a
+running governor still needs one). A `detectors.conf` that cannot be read on
+first load holds it the same way until the file reads; removing the file
+while the daemon runs leaves the last setting in place. Until it runs,
+`/api/v1/mysql/*` and `cfm mysqltop` answer "mysql governor not running: <state>"
+(`no credentials`, `disabled`, `held`, `connect failed`) with the full reason
+and a `Retry-After` of the next attempt; scoped (cPanel user) callers get only
+"mysql governor not running". MCP `whats_wrong` lists the governor as
+`unavailable` for `no credentials` / `disabled` / `held` and as an error for
+`connect failed`. `/var/log/cfm/cfm.mysql.log` logs each change of state and
+the eventual start.
 
 ### Operating Modes
 
