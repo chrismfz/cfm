@@ -39,6 +39,9 @@ for _, ct in ipairs(TEXTUAL) do
   check(det.detect_ctrl_chars("", CTRL, H(ct), "/") == true, "601 fires on CT " .. ct)
   check(det.detect_bad_utf8("", BAD, H(ct), "/") ~= nil, "611 fires on CT " .. ct)
 end
+-- No headers table at all: read as text, as before.
+check(det.detect_ctrl_chars("", CTRL, nil, "/") == true, "601 reads a body with nil headers")
+check(det.detect_bad_utf8("", BAD, nil, "/") ~= nil, "611 reads a body with nil headers")
 -- A repeated Content-Type header (a table): PHP's type is the first line's.
 local rep = { ["content-type"] = { "application/x-www-form-urlencoded", "multipart/form-data; boundary=z" } }
 check(det.detect_ctrl_chars("", CTRL, rep, "/") == true, "601 fires: first CT line is urlencoded")
