@@ -174,8 +174,13 @@ func TestAutoblockGoodBotBudget(t *testing.T) {
 	if s, _ := AutoblockGoodBot(nil, "192.0.2.1", false); !s {
 		t.Fatal("verified crawler not skipped")
 	}
-	for i := 2; i <= 4; i++ { // 2 s each: 8 s spent after the third lookup
+	// 2 s per lookup against a 5 s budget: 192.0.2.1 (2 s), .2 (4 s) and .3
+	// (6 s) look up; the budget is spent before .4.
+	for i := 2; i <= 4; i++ {
 		AutoblockGoodBot(nil, fmt.Sprintf("192.0.2.%d", i), false)
+	}
+	if calls != 3 {
+		t.Fatalf("%d lookups before the budget refused, want 3 (the one past 4 s still runs)", calls)
 	}
 	before := calls
 	if s, _ := AutoblockGoodBot(nil, "192.0.2.50", false); s || calls != before {
@@ -235,5 +240,81 @@ func TestPortscanThrottleConfig(t *testing.T) {
 	cfg.Portscan.Mode, cfg.Throttle.GoodBotExemptOff = "temporary", false
 	if tc := PortscanThrottleConfig(cfg); tc.GoodBotExemptOff || tc.Mode != "ttl" {
 		t.Errorf("PortscanThrottleConfig(temporary, exempt on) = %+v", tc)
+	}
+}
+
+// An expired positive is honoured (24 h grace) when it cannot be re-verified
+// now, and replaced by a completed re-verify.
+func TestAutoblockGoodBotStaleGrace(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	oldNow := autoblockGoodBotNow
+	autoblockGoodBotNow = func() time.Time { return now }
+	defer func() { autoblockGoodBotNow = oldNow }()
+	answer := func() (string, bool) { return "meta", true }
+	restore := SetAutoblockGoodBotForTest(
+		func(string) string { return "fwdproxy-frc-011.fbsv.net" },
+		func(string, string) (string, bool) { return answer() })
+	defer restore()
+	spend := func() { // the budget is spent for this window
+		autoblockGoodBotMu.Lock()
+		autoblockGoodBotBudgetStart, autoblockGoodBotBudgetSpent = now, autoblockGoodBotBudget
+		autoblockGoodBotMu.Unlock()
+	}
+
+	AutoblockGoodBot(nil, "173.252.127.11", false) // verified at 12:00
+	now = now.Add(31 * time.Minute)
+	spend()
+	if s, why := AutoblockGoodBot(nil, "173.252.127.11", false); !s {
+		t.Errorf("expired positive with the budget spent: banned (%q), want the earlier verdict", why)
+	}
+	if s, _ := AutoblockGoodBot(nil, "198.51.100.9", false); s {
+		t.Error("a never-verified address skipped with the budget spent")
+	}
+
+	now = now.Add(time.Minute) // a new window: the re-verify runs, inconclusively
+	answer = func() (string, bool) { return "", false }
+	if s, _ := AutoblockGoodBot(nil, "173.252.127.11", false); !s {
+		t.Error("expired positive with an inconclusive re-verify: banned, want the earlier verdict")
+	}
+
+	now = now.Add(25 * time.Hour) // past the grace
+	spend()
+	if s, _ := AutoblockGoodBot(nil, "173.252.127.11", false); s {
+		t.Error("a positive past its 24 h grace still honoured with the budget spent")
+	}
+
+	// A completed negative re-verify replaces a stale positive.
+	now = now.Add(time.Minute)
+	answer = func() (string, bool) { return "meta", true }
+	AutoblockGoodBot(nil, "173.252.127.12", false)
+	now = now.Add(31 * time.Minute)
+	answer = func() (string, bool) { return "", true }
+	if s, _ := AutoblockGoodBot(nil, "173.252.127.12", false); s {
+		t.Error("a definitive negative re-verify did not replace the stale positive")
+	}
+}
+
+// A full verdict cache never drops a positive for a negative.
+func TestAutoblockGoodBotCacheKeepsPositives(t *testing.T) {
+	verdicts := map[string]string{}
+	calls := map[string]int{}
+	restore := SetAutoblockGoodBotForTest(
+		func(string) string { return "x.fbsv.net" },
+		func(_, ip string) (string, bool) { calls[ip]++; return verdicts[ip], true })
+	defer restore()
+
+	verdicts["173.252.127.11"] = "meta"
+	AutoblockGoodBot(nil, "173.252.127.11", false)
+	for i := 0; i < autoblockGoodBotCap+50; i++ { // fake-PTR addresses: negatives
+		AutoblockGoodBot(nil, fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255), false)
+	}
+	if s, _ := AutoblockGoodBot(nil, "173.252.127.11", false); !s || calls["173.252.127.11"] != 1 {
+		t.Errorf("after the cache filled with negatives: skip=%t after %d verifies, want the cached positive (1)", s, calls["173.252.127.11"])
+	}
+	autoblockGoodBotMu.Lock()
+	n := len(autoblockGoodBotCache)
+	autoblockGoodBotMu.Unlock()
+	if n > autoblockGoodBotCap {
+		t.Errorf("cache holds %d verdicts, cap %d", n, autoblockGoodBotCap)
 	}
 }

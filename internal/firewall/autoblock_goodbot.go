@@ -66,7 +66,13 @@ var (
 // The verdict cache: a crawler crosses the threshold again every window or
 // so, and each crossing runs under the engine's autoblock mutex. A positive
 // is kept 30 min (crawler addresses are stable), a definitive negative 5 min
-// (a spoofed suffix PTR is not re-resolved on every crossing). Inconclusive
+// (a spoofed suffix PTR is not re-resolved on every crossing). An expired
+// positive is still honoured for autoblockGoodBotStaleGrace when it cannot be
+// re-verified now (budget spent, or the lookup did not complete), as the web
+// detector does (goodBotIPStaleGrace): otherwise an attacker keeping the
+// budget spent would get every real crawler banned once its 30 min ran out.
+// A completed re-verify replaces it either way. A full cache drops expired
+// entries, then negatives, and never wipes positives. Inconclusive
 // results are not cached as verdicts; their run is counted in inconclusive
 // (an entry older than autoblockGoodBotInconclusiveTTL starts a new run).
 const (
@@ -75,6 +81,7 @@ const (
 	autoblockGoodBotCap             = 4096
 	autoblockGoodBotMaxInconclusive = 3
 	autoblockGoodBotInconclusiveTTL = time.Hour
+	autoblockGoodBotStaleGrace      = 24 * time.Hour
 	autoblockGoodBotBudget          = 5 * time.Second
 	autoblockGoodBotBudgetWindow    = time.Minute
 )
@@ -118,14 +125,23 @@ func AutoblockGoodBot(enr *enrichpkg.Enricher, ip string, off bool) (skip bool, 
 		}
 		return false, ""
 	}
+	// An expired positive within the grace: what to fall back on when the
+	// re-verify below cannot run or complete.
+	stale := ""
+	if ok && v.name != "" && now.Before(v.until.Add(autoblockGoodBotStaleGrace)) {
+		stale = v.name
+	}
 	ptr := autoblockGoodBotPTR(enr, ip)
 	if ptr == "" {
 		return false, "" // no PTR: not cached, an attacker's is the common case
 	}
 	if _, _, ok := goodbot.SuffixName(ptr); !ok {
-		return false, ""
+		return false, "" // the address no longer claims a crawler: no stale verdict
 	}
 	if !autoblockGoodBotTakeBudget(now, ptr, ip) {
+		if stale != "" {
+			return true, "FCrDNS-verified good bot " + stale + " (earlier verdict; re-verify budget spent)"
+		}
 		return false, "" // budget spent: banned as before
 	}
 	name, cacheable := autoblockGoodBotVerify(ptr, ip)
@@ -135,6 +151,9 @@ func AutoblockGoodBot(enr *enrichpkg.Enricher, ip string, off bool) (skip bool, 
 	defer autoblockGoodBotMu.Unlock()
 	autoblockGoodBotBudgetSpent += done.Sub(now)
 	if !cacheable {
+		if stale != "" {
+			return true, "FCrDNS-verified good bot " + stale + " (earlier verdict; re-verify did not complete)"
+		}
 		r, seen := autoblockGoodBotInconclusive[ip]
 		if now.Sub(r.last) >= autoblockGoodBotInconclusiveTTL {
 			r.n = 0
@@ -166,21 +185,50 @@ func AutoblockGoodBot(enr *enrichpkg.Enricher, ip string, off bool) (skip bool, 
 	if name != "" {
 		ttl = autoblockGoodBotPosTTL
 	}
-	if len(autoblockGoodBotCache) >= autoblockGoodBotCap {
-		for k, e := range autoblockGoodBotCache {
-			if !now.Before(e.until) {
-				delete(autoblockGoodBotCache, k)
-			}
-		}
-		if len(autoblockGoodBotCache) >= autoblockGoodBotCap {
-			autoblockGoodBotCache = map[string]autoblockGoodBotVerdict{}
-		}
+	if _, present := autoblockGoodBotCache[ip]; present || autoblockGoodBotMakeRoom(now, name != "") {
+		autoblockGoodBotCache[ip] = autoblockGoodBotVerdict{name: name, until: now.Add(ttl)}
 	}
-	autoblockGoodBotCache[ip] = autoblockGoodBotVerdict{name: name, until: now.Add(ttl)}
 	if name != "" {
 		return true, "FCrDNS-verified good bot " + name
 	}
 	return false, ""
+}
+
+// autoblockGoodBotMakeRoom frees a slot in a full verdict cache and reports
+// whether there is one. Caller holds autoblockGoodBotMu. Expired entries go
+// first (a positive only past its stale grace), then negatives. A positive is
+// never dropped for a negative: past that a new negative is simply not cached
+// (it is re-verified on its next crossing, within the budget). A cache full of
+// live positives makes room for a new positive by dropping one of them.
+func autoblockGoodBotMakeRoom(now time.Time, positive bool) bool {
+	if len(autoblockGoodBotCache) < autoblockGoodBotCap {
+		return true
+	}
+	for k, e := range autoblockGoodBotCache {
+		if e.name == "" && !now.Before(e.until) ||
+			e.name != "" && !now.Before(e.until.Add(autoblockGoodBotStaleGrace)) {
+			delete(autoblockGoodBotCache, k)
+		}
+	}
+	if len(autoblockGoodBotCache) < autoblockGoodBotCap {
+		return true
+	}
+	for k, e := range autoblockGoodBotCache {
+		if e.name == "" {
+			delete(autoblockGoodBotCache, k)
+		}
+	}
+	if len(autoblockGoodBotCache) < autoblockGoodBotCap {
+		return true
+	}
+	if !positive {
+		return false
+	}
+	for k := range autoblockGoodBotCache {
+		delete(autoblockGoodBotCache, k)
+		break
+	}
+	return true
 }
 
 // autoblockGoodBotTakeBudget reports whether a forward-confirm may run now:

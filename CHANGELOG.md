@@ -46,7 +46,11 @@ back-filled here — see the git/PR history for that period.
   budget of 5 s of resolver time per minute (they run under the autoblock
   lock, and fake crawler PTRs cost an attacker nothing); past it an address
   without a cached verdict is blocked as before, and one line is logged
-  (`[autoblock][goodbot] forward-confirm budget … spent`). It needs PTR
+  (`[autoblock][goodbot] forward-confirm budget … spent`). A crawler's
+  verdict lasts 30 min, and an expired one is still honoured for 24 h when it
+  cannot be re-verified right then, so spending the budget cannot get a
+  known crawler banned; a full verdict cache drops "not a crawler" entries,
+  never verified ones. It needs PTR
   enrichment (the PTR comes from the enricher). The skip is logged (`[autoblock][ignored] …
   FCrDNS-verified good bot meta`), not notified: a crawler re-crosses the
   threshold every window. The startup `[config] throttle:` line now ends in
