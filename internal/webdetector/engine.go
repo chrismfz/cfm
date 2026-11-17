@@ -21,6 +21,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/enrich"
 	"cfm/internal/logging"
+	"cfm/internal/proxyipfilter"
 	"cfm/internal/telemetry"
 	"cfm/internal/tlsfp"
 	"cfm/internal/unblock"
@@ -786,9 +787,14 @@ func NewEngine(cfg Config) *Engine {
 		}
 	}
 
-	// Wire enricher into bridge for country fallback in handleDecision. ← ADD THIS
+	// Wire the enricher into the bridge: the country fallback in
+	// handleDecision, and the proxied IP filter's cc= / asn= log fields.
 	if e.nginxBridge != nil && e.enr != nil {
 		e.nginxBridge.SetEnricher(e.enr)
+	} else if e.nginxBridge != nil {
+		// No enricher on this engine: drop the previous engine's from the
+		// proxied IP filter's log line (it would keep that one alive).
+		proxyipfilter.SetGeo(nil)
 	}
 
 	// Geo resolver for the verify-side challenge_v2 gate (policy-kinds slice):

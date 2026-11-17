@@ -340,3 +340,54 @@ func TestLogDueConcurrent(t *testing.T) {
 		t.Fatalf("next window: n=%d due=%v (3 999 counted + this one)", n, due)
 	}
 }
+
+func TestGeoFields(t *testing.T) {
+	t.Cleanup(func() { SetGeo(nil) })
+	if got := geoFields("20.43.87.186"); got != "cc=- asn=- asn_name=-" {
+		t.Fatalf("no resolver: %q", got)
+	}
+	SetGeo(func(ip string) (string, uint, string) {
+		if ip == "69.63.184.14" {
+			return "us", 32934, "Facebook, Inc."
+		}
+		return "", 0, ""
+	})
+	if got := geoFields("69.63.184.14"); got != "cc=US asn=32934 asn_name=Facebook,_Inc." {
+		t.Fatalf("resolved: %q", got)
+	}
+	if got := geoFields("192.0.2.1"); got != "cc=- asn=- asn_name=-" {
+		t.Fatalf("unknown to the database: %q", got)
+	}
+	// A name the database holds cannot fake another field.
+	SetGeo(func(string) (string, uint, string) { return "GR", 1, "x cc=US\n" })
+	if got := geoFields("192.0.2.1"); got != "cc=GR asn=1 asn_name=x_cc=US_" {
+		t.Fatalf("sanitised: %q", got)
+	}
+}
+
+// The line Decide writes ends with the geo fields, and Stats says whether a
+// resolver is set.
+func TestDecideLineCarriesGeo(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	var lines []string
+	orig := logf
+	logf = func(f string, a ...interface{}) { lines = append(lines, fmt.Sprintf(f, a...)) }
+	t.Cleanup(func() { logf = orig; SetGeo(nil) })
+	SetFeed("MYBLOCK", false, []string{"69.63.184.14"}, nil)
+
+	SetGeo(nil)
+	if Stats()["geo"] != false {
+		t.Fatal("no resolver: geo=false")
+	}
+	SetGeo(func(string) (string, uint, string) { return "US", 32934, "Facebook, Inc." })
+	if Stats()["geo"] != true {
+		t.Fatal("resolver set: geo=true")
+	}
+	Decide("69.63.184.14", "infonews24.gr")
+	want := "[proxied_ipfilter] would_block ip=69.63.184.14 host=infonews24.gr block=feed:MYBLOCK allow=- " +
+		"mode=feed:log,local:log n=1 cc=US asn=32934 asn_name=Facebook,_Inc."
+	if len(lines) != 1 || lines[0] != want {
+		t.Fatalf("line:\n got %q\nwant %q", lines, want)
+	}
+}

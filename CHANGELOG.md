@@ -175,6 +175,14 @@ back-filled here — see the git/PR history for that period.
   it caught were developers running curl against their own WordPress. Nodes
   keep their own `detectors.conf` value until it is edited.
 
+- **The proxied IP filter's log line names the client's country and
+  network.** Each `[proxied_ipfilter]` line in `cfm.log` now ends with
+  `cc=` / `asn=` / `asn_name=` from the node's GeoIP database (read when the
+  line is written, no DNS). The week of log mode before any enforce is read
+  for two things: a Greek visitor on a block list (the likely customer), and
+  a foreign one on a network that serves real users (Google, Microsoft,
+  Meta, a CDN) rather than a scanner's host. The first read found Meta's
+  forward proxies permanently on two nodes' local block list.
 - **WAF rule 10029 (Fabrik list-filter eval, CVE-2026-67282) blocks.** A
   14-day read of all 8 nodes found `[eval]=0` only from real users (that
   stays logonly) and a set `[eval]` only from the attacker who defaced
