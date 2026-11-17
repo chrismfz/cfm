@@ -34,7 +34,7 @@ do
   local want = {
     rule_php_code_args = "block", rule_php_file_body = "block", rule_js_proto = "block",
     rule_xxe = "block", rule_php_encoded_opener_b64 = "block",
-    rule_cve_fabrik_listfilter_eval = "logonly", rule_cve_translatepress_id_lookup = "block",
+    rule_cve_fabrik_listfilter_eval = "block", rule_cve_translatepress_id_lookup = "block",
     rule_ssrf = "challenge_v2", rule_ctrl_chars = "challenge_v2",
   }
   for k, m in pairs(want) do
@@ -190,7 +190,8 @@ do
   local A = "WAF_CVE:CVE_2026_67282:FABRIK:"
   -- The attacker's probe, exactly as earth logged it.
   local r = fab("&dm_ypodeigma1a___aiton%5Bvalue%5D=1%3B&dm_ypodeigma1a___aiton%5Beval%5D=1&dm_ypodeigma1a___aiton%5Bcondition%5D=%3D")
-  check(r.ids["10029"] == "logonly", "the probe: 10029 logonly (" .. show(r) .. ")")
+  check(r.rule_id == 10029 and r.action == "block" and r.reason == A .. "EVAL_ARG",
+        "the probe: 10029 blocks it, before any payload (" .. show(r) .. ")")
   check(det.detect_cve_fabrik_listfilter_eval("/index.php", "get",
           base .. "&x___y%5Beval%5D=1", "", {}, nil) == "EVAL_ARG", "detector: EVAL_ARG")
   -- Unencoded brackets, and a SEF route with no option field.

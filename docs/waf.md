@@ -1681,6 +1681,14 @@ editor is scored too: a global `exec(` / `system(` call plus a superglobal
 reaches 5. Read its hits fleet-wide before any promotion. Multipart bodies
 stay with 402 / 415 (file parts).
 
+### Fleet read of 702, 10029 and 415 (2026-11-17, 14 days, 8 nodes)
+
+| Rule | Hits | What they were | Decision |
+|---|---:|---|---|
+| 10029 Fabrik `[eval]` | 10 | all `EVAL_ZERO` (`[eval]=0`) from Greek users on three Fabrik sites (Fabrik's own form); `EVAL_ARG` only from the dmkomotinis attacker | **block**, armed (WAF_CVE): the first probe bans |
+| 702 C2 tunnel | 355 | 176 `RENTRY` on `zort.me/shorten` (a URL shortener we host: the known FP source of 611); the rest comment spam with tunnel links, a Joomla `component/ajax` poller, `/wp-22.php?sfilecontent=<?php` writers | stays `challenge_v2`; `zort.me` needs a rule-scoped exclude (operator) |
+| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stays logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`), since the log could not say what was uploaded |
+
 ### Both rules
 
 Family `WAF_RCE` is autoblock-armed for block hits only, and

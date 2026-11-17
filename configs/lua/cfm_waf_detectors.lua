@@ -5590,8 +5590,13 @@ function _M.detect_upload_content_deep(body, headers)
     -- code padded past the edge (`<?=` + blanks) is seen whole, and the `<?`
     -- short open tag, which 402 leaves alone, is read in file bytes here.
     local part = lower(body:sub(s, e))
-    if has(part, "<?php") or has_php_short_echo(part, true) then return "UPLOAD_PHP_TAG_DEEP" end
-    if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP" end
+    -- The tag carries the file's extension (a-z0-9, up to 8; "none"): the
+    -- burn-in's two misses on the fleet were admin media uploads whose file
+    -- the log could not name, so no promotion or carve-out could be decided.
+    local ext = lower(f[1] or ""):match("%.([%w]+)$")
+    ext = ext and ext:sub(1, 8) or "none"
+    if has(part, "<?php") or has_php_short_echo(part, true) then return "UPLOAD_PHP_TAG_DEEP:" .. ext end
+    if has(part, "<jsp:") then return "UPLOAD_JSP_TAG_DEEP:" .. ext end
   end
   return nil
 end

@@ -312,9 +312,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 10027, Name: "rule_cve_magento_polyshell", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	{ID: 10028, Name: "rule_cve_magento_polyshell_unseen", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 	// 10029: CVE-2026-67282, Fabrik (Joomla) list-filter eval RCE: an
-	// `[eval]` index set on a Fabrik request field. Logonly through burn-in
-	// (the file-writing payloads are rule 332's).
-	{ID: 10029, Name: "rule_cve_fabrik_listfilter_eval", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	// `[eval]` index set on a Fabrik request field. Block since 2026-11-17
+	// (14 days on 8 nodes: EVAL_ZERO only from real users, EVAL_ARG only
+	// from the attacker); armed, so the first probe bans before a payload.
+	{ID: 10029, Name: "rule_cve_fabrik_listfilter_eval", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

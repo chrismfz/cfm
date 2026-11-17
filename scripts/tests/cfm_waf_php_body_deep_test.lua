@@ -126,6 +126,21 @@ clean(req("data=" .. string.rep("a", 30000), "/x"), "a large plain body (raw gat
 clean(req("--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\n" .. string.rep("x", 3000) .. "<?php eval($_POST['c']);\r\n--b--\r\n",
           "/x", "multipart/form-data; boundary=b"), "multipart body")
 
+-- ── Rule 415's tag names the file's extension (its burn-in needed it) ─────
+do
+  local function mp(fname, data)
+    return "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"" .. fname ..
+           "\"\r\nContent-Type: text/plain\r\n\r\n" .. data .. "\r\n--b--\r\n"
+  end
+  local H = { ["content-type"] = "multipart/form-data; boundary=b" }
+  local pad = string.rep("13:17 09/11/2026", 200)  -- the krs.php / tig.php padding
+  check(det.detect_upload_content_deep(mp("A.txt", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:txt", "415 tag: .txt")
+  check(det.detect_upload_content_deep(mp("Photo.JPG", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:jpg", "415 tag: lowercased")
+  check(det.detect_upload_content_deep(mp("noext", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:none", "415 tag: no extension")
+  check(det.detect_upload_content_deep(mp("a.verylongextension", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:verylong", "415 tag: capped at 8")
+  check(det.detect_upload_content_deep(mp("a.p-h.p", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:p", "415 tag: last segment, alnum only")
+end
+
 -- ── Disabled ───────────────────────────────────────────────────────────────
 set_only({ rule_php_webshell_body = "challenge_v2", rule_php_webshell_body_deep = "disabled" })
 clean(req(editor_save(PLUGIN_HEAD .. INJECTION .. PLUGIN_TAIL)), "417 disabled")
