@@ -10,7 +10,12 @@ import "strings"
 // The per-IP challenge triggers (CHALLENGE_UNIQPATHS_IP, CHALLENGE_ERR_RATIO,
 // CHALLENGE_RPS_TOTAL, CHALLENGE_RPS_4XX/5XX, CHALLENGE_POST_RATIO) leave these
 // requests out: they count toward no rate, ratio or path set, and leave the
-// IP's total for those triggers (the IP's other requests decide alone). Their
+// IP's total for those triggers (the IP's other requests decide alone). Two
+// consequences: the error and POST ratios are taken over the IP's other
+// requests only (API 200s no longer dilute them), and an IP that sends
+// nothing but these calls meets none of the threshold triggers, so
+// CHALLENGE_HTTP10 does not fire for it either (the WAF and the 403 / 404
+// floods still apply). Their
 // callers are server-to-server clients (ERP, stock and price sync, marketplace
 // connectors) that cannot solve a challenge: on 2026-11-17 a product sync to
 // kiamaia.gr (mars) POSTed ~13 requests a second to a new

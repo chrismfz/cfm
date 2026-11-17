@@ -2024,7 +2024,10 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 
 	// Per-IP challenge counters (only allocate maps if a related threshold is enabled)
 	if rec.IP != "" {
-		if wooAPI {
+		if wooAPI && (e.cfg.ChallengeIPRPSMin > 0 || e.cfg.ChallengeIP4xxRPSMin > 0 ||
+			e.cfg.ChallengeIP5xxRPSMin > 0 || e.cfg.ChallengeIPErrRatioMin > 0 ||
+			e.cfg.ChallengeIPPostRatioMin > 0 || e.cfg.ChallengeIPNoUAMin > 0 ||
+			e.cfg.ChallengeIPHTTP10Min > 0) {
 			if b.ipsChalExempt == nil {
 				b.ipsChalExempt = make(map[string]int)
 			}

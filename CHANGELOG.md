@@ -24,7 +24,9 @@ back-filled here — see the git/PR history for that period.
   count toward the per-IP challenges (`CHALLENGE_UNIQPATHS_IP`,
   `CHALLENGE_ERR_RATIO`, `CHALLENGE_RPS_TOTAL`, `CHALLENGE_RPS_4XX/5XX`,
   `CHALLENGE_POST_RATIO`): they leave the IP's total for those triggers, and
-  the IP's other requests decide alone. A
+  the IP's other requests decide alone. So the error and POST ratios are now
+  taken over those other requests (API 200s no longer dilute them), and an IP
+  that sends only these calls is not checked by `CHALLENGE_HTTP10` either. A
   product sync to kiamaia.gr (mars, 2026-11-17) writes a new
   `/products/<id>/variations/<id>` per request, and some come back 404: it was
   put under a challenge it cannot solve, the challenge page's 403s fed
