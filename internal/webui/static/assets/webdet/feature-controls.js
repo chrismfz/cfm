@@ -302,10 +302,17 @@ export const controlsMixin = {
       }
       const on = !row?.under_attack;
       try {
-        await this.postJSON("v1/challenge/vhost/attack", { host, on });
-        this.actionMsg = on
-          ? `Forced UNDER_ATTACK for ${host}`
-          : `Cleared UNDER_ATTACK for ${host} (auto re-entry suppressed for the holddown)`;
+        const res = await this.postJSON("v1/challenge/vhost/attack", { host, on });
+        if (on) {
+          const until = res?.expires_at ? ` until ${new Date(res.expires_at).toLocaleString()}` : "";
+          let msg = `Forced UNDER_ATTACK for ${host}${until}`;
+          if (res?.ttl_clipped) msg += " (cut to the manual challenge already on it: extend that challenge, then force it again, to hold longer)";
+          else if (res?.ttl_capped) msg += " (capped to the 24h customer limit)";
+          if (res?.tier?.rung) msg += `; verify tier ${res.tier.rung}`;
+          this.actionMsg = msg;
+        } else {
+          this.actionMsg = `Cleared UNDER_ATTACK for ${host} (auto re-entry suppressed for the holddown)`;
+        }
         await this.refreshVhostControls();
       } catch (err) {
         this.actionMsg = `Under-attack override failed for ${host}: ${err}`;

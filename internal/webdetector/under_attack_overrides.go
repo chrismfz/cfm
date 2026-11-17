@@ -344,6 +344,11 @@ func (e *Engine) ForceVhostAttackAs(host string, on bool, ttl time.Duration, act
 	}
 	e.attackOverrides.set(ent)
 	e.SetVhostAttackOverride(host, true, now, ttl)
+	// An automatic entry that landed between the check above and the
+	// override sends no forced ON either: announced as of then.
+	if on, since := e.vhostAttackOnSince(host); on {
+		e.attackOverrides.markAnnounced(host, since)
+	}
 	return armed, expires
 }
 

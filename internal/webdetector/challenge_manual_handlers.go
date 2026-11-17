@@ -776,6 +776,9 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// A fully-qualified name ("example.com.") is the same vhost; keyed with the
+	// dot it would pass the bypass check and arm a key nothing matches.
+	host = strings.TrimSuffix(host, ".")
 	if host == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing host"})
 		return
@@ -798,8 +801,9 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	// The override's arm and the confirm step match hosts exactly: a wildcard
-	// would challenge every matching vhost and confirm on none.
-	if strings.Contains(host, "*") {
+	// would challenge every matching vhost and confirm on none. (`off` stays
+	// allowed, to clear one an earlier build accepted.)
+	if on && strings.Contains(host, "*") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wildcard hosts are not supported: name the vhost"})
 		return
 	}

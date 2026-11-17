@@ -3,6 +3,7 @@ package webdetector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -437,6 +438,7 @@ func TestAttackOverrideRefusesWildcardAndBypassed(t *testing.T) {
 	}{
 		{"host=*.example.com&on=1", http.StatusBadRequest},
 		{"host=allowed.example.com&on=1", http.StatusConflict},
+		{"host=allowed.example.com.&on=1", http.StatusConflict},
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/attack?"+tc.q, nil)
 		rr := httptest.NewRecorder()
@@ -459,6 +461,9 @@ func TestAttackOverrideClippedToAShorterOperatorChallenge(t *testing.T) {
 	resp := attackRequest(t, e, "host=shop.example.com&on=1&ttl=6h", "")
 	if resp["challenge_armed"] != false || resp["ttl_clipped"] != true || resp["challenge_expires_at"] == nil || resp["tier"] == nil {
 		t.Fatalf("response: %#v", resp)
+	}
+	if d, err := time.ParseDuration(fmt.Sprint(resp["ttl"])); err != nil || d > 30*time.Minute {
+		t.Fatalf("response ttl %v after the clip, want <= 30m", resp["ttl"])
 	}
 	_, chExp, _ := e.manualChal.active("shop.example.com")
 	if d := overrideExpiry(e, "shop.example.com").Sub(chExp); d > time.Second || d < -time.Second {

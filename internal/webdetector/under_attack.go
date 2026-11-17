@@ -476,6 +476,8 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 		// Serialized with ForceVhostAttackAs, which persists the record
 		// before setting the tracker: an `attack on` racing this tick either
 		// finishes first (dropped here) or lands after (dropped next tick).
+		// The mutex is per Engine: during a reload the old Engine's API and
+		// the new one's tick are not serialized (the next tick converges).
 		e.attackOpMu.Lock()
 		e.dropAttackOverride(host, "")
 		e.attackOpMu.Unlock()
