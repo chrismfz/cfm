@@ -3815,23 +3815,6 @@ end
 -- Source: uusec xxe-attack.lua.
 -- Only scans XML / form-encoded / text bodies.  Checks for SYSTEM or PUBLIC
 -- entity declarations which are the canonical XXE primitives.
--- An external entity declaration in the body (lowercased, capped): the
--- `<!ENTITY name SYSTEM "…">` / `<!ENTITY name PUBLIC "…" "…">` (or a
--- parameter entity `<!ENTITY % name SYSTEM …>`) an XXE needs. Rule 307 blocks
--- only on this; its looser matches stay at challenge_v2.
-function _M.xxe_external_entity(body)
-  if not body or body == "" then return false end
-  local bl = lower(cap(body, CFG.max_scan_len))
-  local init = 1
-  while true do
-    local s, e = bl:find("<!entity", init, true)
-    if not s then return false end
-    local decl = bl:sub(e + 1, e + 400):match("^[^>]*")
-    if decl:find("%s+system%s*[\"']") or decl:find("%s+public%s*[\"']") then return true end
-    init = e + 1
-  end
-end
-
 function _M.detect_xxe(body, headers)
   if not body or body == "" then return nil end
 
@@ -3856,6 +3839,36 @@ function _M.detect_xxe(body, headers)
   end
 
   return nil
+end
+
+-- An external entity or external DTD in the body (lowercased, capped): the
+-- `<!ENTITY name SYSTEM "…">` / `<!ENTITY name PUBLIC "…" "…">` (a parameter
+-- entity `<!ENTITY % name SYSTEM …>` too) an XXE needs, or a DOCTYPE naming
+-- an external DTD by SYSTEM (`<!DOCTYPE r SYSTEM "http://…/x.dtd">`, the
+-- out-of-band XXE / SSRF probe with no ENTITY in the body). A DOCTYPE PUBLIC
+-- (SVG / XHTML's w3.org DTD) is not counted. Rule 307 blocks only on this;
+-- its looser matches stay at challenge_v2.
+function _M.xxe_external_entity(body)
+  if not body or body == "" then return false end
+  local bl = lower(cap(body, CFG.max_scan_len))
+  local init = 1
+  while true do
+    local s, e = bl:find("<!doctype", init, true)
+    if not s then break end
+    local decl = bl:sub(e + 1, e + 400):match("^[^>%[]*")
+    -- (HTML5's legacy doctype, `<!DOCTYPE html SYSTEM "about:legacy-compat">`,
+    -- names no DTD.)
+    if decl:find("%s+system%s*[\"']") and not decl:find("about:legacy-compat", 1, true) then return true end
+    init = e + 1
+  end
+  init = 1
+  while true do
+    local s, e = bl:find("<!entity", init, true)
+    if not s then return false end
+    local decl = bl:sub(e + 1, e + 400):match("^[^>]*")
+    if decl:find("%s+system%s*[\"']") or decl:find("%s+public%s*[\"']") then return true end
+    init = e + 1
+  end
 end
 
 -- s holds a CR or LF, then only non-word bytes, then `kw` (a pattern):

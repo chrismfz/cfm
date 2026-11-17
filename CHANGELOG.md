@@ -99,8 +99,10 @@ back-filled here — see the git/PR history for that period.
     and a 307 match without an external entity declaration
     (`<!ENTITY x SYSTEM|PUBLIC "…">`; an Illustrator SVG's internal
     entities matched the old test) stay challenge_v2. 416 skips a PUT /
-    PATCH on a cPanel Web Disk host (`webdisk.<domain>`), the customer's
-    own WebDAV upload, as it skips Nextcloud's `/remote.php/`.
+    PATCH on a cPanel Web Disk host (`webdisk.<domain>`, under the same
+    gates as the panel proxy hosts: proxysubdomains on, tenant override off),
+    the customer's own WebDAV upload, as it skips Nextcloud's `/remote.php/`.
+    A 307 block also covers a DOCTYPE naming an external DTD by SYSTEM.
   - The held block rules (303, 307, 416) now run after every armed block
     rule, so a request that also carries an armed payload keeps that rule's
     ban and alert.

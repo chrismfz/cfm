@@ -1530,7 +1530,9 @@ uploaded file on disk, and the bot then passed its splash and kept uploading.
   (`/wp-content/upgrade/wpr<N>.php`). Block with its ban held per rule
   (`RULE_416 = 0`; ~40 bans a day armed), evaluated with the late group.
   It skips a PUT / PATCH on a cPanel Web Disk host (`webdisk.<domain>`),
-  like Nextcloud's `/remote.php/`.
+  like Nextcloud's `/remote.php/`, only under cfm.lua Step 0d's gates
+  (`proxysubdomains=1`, `proxysubdomainsoverride=0`, a registrable domain):
+  the Host is the client's.
 
 The Fabrik `[eval]` index itself is rule 10029 (`WAF_CVE`, CVE-2026-67282,
 logonly; `WAF_CVE.md`).

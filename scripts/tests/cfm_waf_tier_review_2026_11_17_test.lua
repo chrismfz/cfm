@@ -117,7 +117,36 @@ do
   r = run{ method = "POST", uri = "/wp-json/custom/v1/save", ct = "application/json",
            body = '{"js":"function F(){}; F.prototype.x = 1; var c = o.constructor;"}' }
   check(r.ids["303"] == "challenge_v2", "303 JS_PROTO_CONSTRUCTOR stays challenge_v2 (" .. tostring(r.ids["303"]) .. ")")
-  -- 416: a cPanel Web Disk PUT of a .php file is the customer's own upload.
+  -- An external DTD in the DOCTYPE (no ENTITY) blocks; HTML5's legacy doctype does not.
+  r = run{ method = "POST", ct = "application/xml",
+           body = '<?xml version="1.0"?><!DOCTYPE r SYSTEM "http://oob.example/x.dtd"><r/>' }
+  check(r.rule_id == 307 and r.action == "block", "307: DOCTYPE SYSTEM external DTD blocks (" .. show(r) .. ")")
+  check(det.xxe_external_entity('<!DOCTYPE html SYSTEM "about:legacy-compat"><html/>') == false,
+        "HTML5 legacy doctype is no external DTD")
+  -- 416: a cPanel Web Disk PUT of a .php file is the customer's own upload,
+  -- under Step 0d's gates (proxysubdomains=1, override=0, a registrable name).
+  local ph = require("cfm_panel_hosts")
+  local cfgf = os.tmpname()
+  local function panel_cfg(text)
+    local f = assert(io.open(cfgf, "w")); f:write(text); f:close()
+    ph.CPANEL_CONFIG = cfgf; ph._reset_proxy_cfg()
+  end
+  local function webdisk_put(host)
+    local _, _, _, _, hits = waf.check({ uri = "/public_html/index.php", args = "", method = "PUT",
+      raw_uri = "/public_html/index.php", host = host, ip = "198.51.100.9",
+      body = "<?php echo 1;", cookie = "",
+      headers = { host = host, ["content-type"] = "application/octet-stream" } })
+    for _, h in ipairs(hits or {}) do if h.waf_rule_id == 416 then return true end end
+    return false
+  end
+  panel_cfg("proxysubdomains=1\nproxysubdomainsoverride=0\n")
+  check(not webdisk_put("webdisk.example.gr"), "416 skips a Web Disk PUT (proxy subdomains on)")
+  check(webdisk_put("webdisk.com.gr"), "416 reads a PUT to webdisk.<public suffix> (a tenant's own domain)")
+  panel_cfg("proxysubdomains=1\nproxysubdomainsoverride=1\n")
+  check(webdisk_put("webdisk.example.gr"), "416 reads a webdisk. PUT when tenants can override")
+  panel_cfg("")
+  check(webdisk_put("webdisk.example.gr"), "416 reads a webdisk. PUT off cPanel (no config)")
+  os.remove(cfgf); ph._reset_proxy_cfg()
   do
     local hit, _, _, _, hits = waf.check({ uri = "/public_html/index.php", args = "", method = "PUT",
       raw_uri = "/public_html/index.php", host = "webdisk.example.gr", ip = "198.51.100.9",
@@ -125,8 +154,6 @@ do
       headers = { host = "webdisk.example.gr", ["user-agent"] = "Microsoft-WebDAV-MiniRedir/10.0.19045",
                   ["content-type"] = "application/octet-stream" } })
     local saw416 = false
-    for _, h in ipairs(hits or {}) do if h.waf_rule_id == 416 then saw416 = true end end
-    check(not saw416, "416 skips a Web Disk PUT")
     hit, _, _, _, hits = waf.check({ uri = "/public_html/index.php", args = "", method = "POST",
       raw_uri = "/public_html/index.php", host = "webdisk.example.gr", ip = "198.51.100.9",
       body = "<?php echo 1;", cookie = "",

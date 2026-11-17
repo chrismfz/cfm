@@ -2787,11 +2787,27 @@ local function check_impl(ctx, st)
   -- /remote.php/webdav): a sync client uploads a user's .php files there
   -- as their raw body.
   -- Nor a PUT / PATCH on a cPanel Web Disk host (webdisk.<domain>, Apache to
-  -- cpdavd): the customer's own WebDAV client uploads their .php files.
+  -- cpdavd): the customer's own WebDAV client uploads their .php files. The
+  -- Host is the client's, so it counts only under cfm.lua Step 0d's gates:
+  -- a registrable-domain name (cfm_panel_hosts.is_proxy_panel_host, asked
+  -- about the same name under `cpanel.`) and proxysubdomains=1 with
+  -- proxysubdomainsoverride=0, which route every webdisk.* Host to cpdavd.
+  -- Elsewhere a spoofed `Host: webdisk.x` could reach a docroot dropper.
   do
     local mode = rule_mode(CFG.rule_php_file_body, "logonly")
-    local webdav = (m_lower ~= "post") and (lower(uri or ""):find("/remote%.php/") ~= nil
-      or lower(ctx.host or ""):find("^webdisk%.") ~= nil)
+    local webdav = false
+    if m_lower == "put" or m_lower == "patch" then
+      local h = lower(ctx.host or "")
+      if lower(uri or ""):find("/remote%.php/") then
+        webdav = true
+      elseif h:find("^webdisk%.") then
+        local okp, ph = pcall(require, "cfm_panel_hosts")
+        webdav = okp and type(ph) == "table" and ph.is_proxy_panel_host
+          and ph.proxy_hosts_reach_panel
+          and ph.is_proxy_panel_host("cpanel." .. h:sub(9))
+          and ph.proxy_hosts_reach_panel() or false
+      end
+    end
     if mode ~= "disabled" and (body or "") ~= "" and not webdav
        and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
       local tag = det.detect_php_file_body(body, headers)
