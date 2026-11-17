@@ -149,6 +149,14 @@ fires(req({ uri = "/shop/", args = "add-to-cart=3801", host = "shop.com.gr", ref
       "a sibling under a public suffix is another site", "XSITE")
 fires(req({ uri = "/shop/", args = "add-to-cart=3801", host = "dreamworld.gr", referer = "https://notdreamworld.gr/" }),
       "a host that only ends the same", "XSITE")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", host = "shop.com.gr", referer = "https://com.gr/" }),
+      "a public-suffix Referer is not the host's parent", "XSITE")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", host = "shop.gr", referer = "http://gr/" }),
+      "a bare-TLD Referer", "XSITE")
+fires(req({ uri = "/shop/", args = "add-to-cart=3801", host = "m.dreamworld.gr", referer = "https://dreamworld.gr/" }),
+      "the parent of a non-www host is another name", "XSITE")
+clean(req({ uri = "/shop/", args = "add-to-cart=3801", host = "www.m.dreamworld.gr", referer = "https://m.dreamworld.gr/" }),
+      "www. on a subdomain host")
 
 -- ── Out of scope ───────────────────────────────────────────────────────────
 clean(req({ method = "POST", uri = "/product/x/", args = "add-to-cart=3801" }), "POST (the product form)")
@@ -173,6 +181,8 @@ do
   check(adds["wafpush|WAF_CART_CRAWL:CRAWLER|logonly|1.2.3.4"] == 3600, "530 window is an hour")
   check(waf.should_push(fake, "1.2.3.4", "WAF_SQLI:X", "block", 301) == true, "other family pushes")
   check(adds["wafpush|WAF_SQLI#301|block|1.2.3.4"] == 60, "other families keep 60 s")
+  check(waf.should_push(fake, "1.2.3.4", "WAF_CART_CRAWL:CRAWLER", "block", 530) == true, "530 at block: own key")
+  check(adds["wafpush|WAF_CART_CRAWL:CRAWLER#530|block|1.2.3.4"] == 60, "530 promoted keeps the 60 s window")
 end
 
 -- ── Disabled ───────────────────────────────────────────────────────────────

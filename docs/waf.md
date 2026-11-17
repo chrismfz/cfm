@@ -1906,8 +1906,9 @@ digit, and tags the client:
 client with a WooCommerce session or a WordPress login cookie, whatever the
 UA: an in-app browser can carry a crawler token (the Pinterest app's UA names
 Pinterest), and a person's click must never be tagged a crawler's. A
-same-site Referer is the host itself or one under the other (`www.`, `m.`),
-never a sibling under a public suffix. The name is matched as PHP reads it,
+same-site Referer is, after a leading `www.` is dropped from both, the host
+itself or a name under it (`m.`), never its parent (a bare `gr` or `com.gr`)
+and never a sibling under a public suffix. The name is matched as PHP reads it,
 case-sensitively (`ADD-TO-CART` adds nothing to a cart). The product page's
 own form POSTs `add-to-cart` in the body and is out of scope.
 
@@ -1919,7 +1920,8 @@ measured here.
 
 **Push window.** The tag stays in the push key (`PUSH_KEY_KEEPS_TAG`), so
 the burn-in can compare the three populations per IP, and the window is an
-hour, not 60 s (`PUSH_COOLDOWN_FAMILY`). These clients send about one request
+hour, not 60 s (`PUSH_COOLDOWN_FAMILY`, logonly tier only: a promoted rule
+keeps the normal window). These clients send about one request
 per IP per minute, so a 60 s window pushed nearly every hit (~80 k history
 rows a day on mars). The burn-in counts clients per hour, not requests.
 

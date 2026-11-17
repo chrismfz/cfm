@@ -2892,7 +2892,7 @@ local function check_impl(ctx, st)
   do
     local mode = rule_mode(CFG.rule_wc_cart_get_crawl, "logonly")
     if mode ~= "disabled" then
-      local tag = det.detect_wc_cart_get_crawl(m_lower, args, headers, cookie, ctx.host, get_norm_ab())
+      local tag = det.detect_wc_cart_get_crawl(m_lower, args, headers, cookie, ctx.host, get_norm_ab)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CART_CRAWL:" .. tag, ttl, mode, RULE_IDS.rule_wc_cart_get_crawl) then goto done end
@@ -3017,8 +3017,9 @@ local PUSH_KEY_KEEPS_TAG = {
 -- spread ~130 a day each; the residential rotation 1-2 per address), so a
 -- 60 s window pushed nearly every hit: ~80 k waf_trigger rows, RPCs and
 -- waf.log lines a day on one node. An hour per (ip, tag) keeps who and which
--- population, and drops most of the volume. Logonly-only families only: a
--- longer window on a block tier would delay a ban.
+-- population, and drops most of the volume. Applied to the logonly tier only:
+-- an operator who promotes the rule gets the normal window, or its ban and
+-- rung mark would lapse while the client kept hitting.
 local PUSH_COOLDOWN_FAMILY = {
   WAF_CART_CRAWL = 3600,
 }
@@ -3099,7 +3100,8 @@ function _M.should_push(shdict, ip, reason, action, rule_id)
     key_reason = key_reason .. "#" .. rid
   end
   local k  = "wafpush|" .. key_reason .. "|" .. (action or "na") .. "|" .. ip
-  local ok = shdict:add(k, 1, PUSH_COOLDOWN_FAMILY[fam] or CFG.push_cooldown_sec)
+  local win = (action == "logonly" and PUSH_COOLDOWN_FAMILY[fam]) or CFG.push_cooldown_sec
+  local ok = shdict:add(k, 1, win)
   return ok == true
 end
 

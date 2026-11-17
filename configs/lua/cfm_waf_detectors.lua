@@ -9075,10 +9075,13 @@ end
 -- and PHP keys are case-sensitive, so `ADD-TO-CART` adds nothing to a cart.
 -- The tables and helpers live inside the function: the main chunk is at
 -- Lua's 200-local limit.
-function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host, nab)
+function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host, get_nab)
   if method ~= "get" and method ~= "head" then return nil end
   if not args or args == "" then return nil end
   headers = headers or {}
+  -- get_nab is cfm_waf.check's memoized getter, called only now: a request
+  -- that is no GET with a query never builds the surface for this rule.
+  local nab = get_nab and get_nab() or nil
   if not field_gate_open(method, args, "", headers, nab, "add-to-cart") then return nil end
   -- Past the gate: only a request that names the field pays for the parse.
   local f = _M.php_request_fields(method, args, "", headers)["add-to-cart"]
@@ -9100,14 +9103,16 @@ function _M.detect_wc_cart_get_crawl(method, args, headers, cookie, req_host, na
   end
   local site = lower(header_string(headers["sec-fetch-site"] or headers["Sec-Fetch-Site"]) or "")
   if site == "same-origin" or site == "same-site" then return nil end
-  -- Same site for a Referer: the host itself, or one under the other
-  -- (www.shop.gr / shop.gr, m.shop.gr). Not same_site's sibling rule: two
+  -- Same site for a Referer: after a leading "www." is dropped from both,
+  -- the host itself or a name under it (www.shop.gr / shop.gr, m.shop.gr).
+  -- Never the other way round (a bare "gr" or "com.gr" Referer would be the
+  -- parent of every host under it), and not same_site's sibling rule: two
   -- tenants under one public suffix (a.com.gr, b.com.gr) are siblings.
   local ref = url_host(header_string(headers["referer"] or headers["Referer"]))
   local host = request_host(headers, req_host)
-  if ref and host ~= "" and (ref == host or ref:sub(-#host - 1) == "." .. host
-                              or host:sub(-#ref - 1) == "." .. ref) then
-    return nil
+  if ref and host ~= "" then
+    local r, h = ref:gsub("^www%.", ""), host:gsub("^www%.", "")
+    if r == h or r:sub(-#h - 1) == "." .. h then return nil end
   end
 
   local ua = lower(header_string(headers["user-agent"] or headers["User-Agent"]) or "")
