@@ -52,9 +52,10 @@ import (
 //   - every human outside the audience now makes two verify POSTs, which
 //     count toward the verify rate limit (rlVerifyBurst): a busy CGNAT
 //     address reaches it sooner while a vhost is under attack;
-//   - the default `manual` mode follows the in-memory override, which a
-//     cPanel user can also set on their own vhost (24 h max), and which a
-//     config reload (a detectors.conf save, a tailed log's rotation) clears;
+//   - the default `manual` mode follows the operator override (`attack on`,
+//     UNDER_ATTACK_OVERRIDE_TTL, 6h by default), which a cPanel user can
+//     also set on their own vhost (24 h max) and which survives a reload
+//     (under_attack_overrides.go);
 //   - a shown confirm is a log line only (result=v2_confirm), not a history
 //     row: it decides nothing, and under attack it is high volume. The
 //     clicked solve's row carries v2_confirm=clicked.

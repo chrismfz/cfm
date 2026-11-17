@@ -750,8 +750,11 @@ func parseAttackOn(q string, body *bool) (bool, error) {
 // accepted. Scoped tokens may only override their own vhosts (vhostAllowed),
 // mirroring vhost/add|remove, and a scoped on=1 is capped at
 // scopedMaxChallengeTTL (24h) like the panic-button arm (ttl_capped=true).
-// The response carries ttl, expires_at and challenge_armed for on=1, and the
-// arm's tier (rung) when it armed one: an operator tier pin decides it.
+// The response carries ttl, expires_at, challenge_armed, challenge_expires_at
+// and the effective tier for on=1, the arm's tier (rung) when it armed one (a
+// tier pin decides it), and ttl_clipped when an operator's challenge that ends
+// sooner cut the override. A wildcard host is refused (400), and so is an
+// `on` for a cfm.allow-bypassed vhost (409).
 func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Request) {
 	host := normalizeHost(r.URL.Query().Get("host"))
 	onStr := r.URL.Query().Get("on")
@@ -791,7 +794,19 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 	// The override only means anything while the detector is running. Fail loudly
 	// rather than silently no-op (SetVhostAttackOverride is nil-safe when off).
 	if e == nil || !e.cfg.UnderAttack {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "under-attack mode is disabled (UNDER_ATTACK=0)"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "under-attack mode is disabled (UNDER_ATTACK=0); a challenge an earlier `attack on` armed stays until it expires: `cfm webtop challenge remove <vhost>`"})
+		return
+	}
+	// The override's arm and the confirm step match hosts exactly: a wildcard
+	// would challenge every matching vhost and confirm on none.
+	if strings.Contains(host, "*") {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "wildcard hosts are not supported: name the vhost"})
+		return
+	}
+	// A cfm.allow bypass (CHALLENGE_HOST_BYPASS) drops the override and its
+	// arm on the next tick: refuse rather than answer a success that won't hold.
+	if on && e.hostBypassed(host) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "the vhost is bypassed (cfm.allow / CHALLENGE_HOST_BYPASS): it cannot be challenged"})
 		return
 	}
 
@@ -820,7 +835,13 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 			ttlCapped = true
 		}
 	}
+	requested := time.Now().Add(overrideTTL)
 	armed, expires := e.ForceVhostAttackAs(host, on, overrideTTL, actorFromScope(scope))
+	// Cut to an operator's challenge that ends sooner (ForceVhostAttackAs).
+	clipped := on && !armed && expires.Before(requested.Add(-time.Second))
+	if clipped {
+		overrideTTL = time.Until(expires).Round(time.Second)
+	}
 
 	// Audit (slice-D security review I3): this override used to leave NO
 	// trail beyond the generic api.log request line — a scoped customer
@@ -835,7 +856,7 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 	}
 	logging.LogfCHALLENGES(
 		"[challenge][vhost] action=attack_override host=%s on=%v ttl=%s challenge_armed=%v actor=%s",
-		host, on, overrideTTL, armed, actorOrDash(actor),
+		host, on, ttlOrDash(on, overrideTTL), armed, actorOrDash(actor),
 	)
 	payload := map[string]interface{}{"actor": actor, "on": on}
 	if on {
@@ -861,6 +882,15 @@ func (e *Engine) handleChallengeVhostAttack(w http.ResponseWriter, r *http.Reque
 		if armed {
 			resp["rung"] = rungOrV1(e.manualChal.rung(host))
 		}
+		if _, chExp, _ := e.manualChallengeCovering(host); !chExp.IsZero() {
+			resp["challenge_expires_at"] = chExp
+		}
+		if clipped {
+			resp["ttl_clipped"] = true
+		}
+		// The tier the verify gate applies: the arm's, or above it the
+		// automatic side's (under_attack is a CHALLENGE_V2_AUTO_VHOST source).
+		resp["tier"] = tierJSON(e.challengeV2VhostTier(host))
 		if ttlCapped {
 			resp["ttl_capped"] = true
 		}
@@ -955,4 +985,12 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"dc_fraction":       DCFracShadowPercent(host),
 		"state":             e.deriveVhostStateForHost(host, time.Now()),
 	})
+}
+
+// ttlOrDash renders an override's TTL for the audit line ("-" for off).
+func ttlOrDash(on bool, d time.Duration) string {
+	if !on {
+		return "-"
+	}
+	return d.String()
 }

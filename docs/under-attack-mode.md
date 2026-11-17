@@ -110,9 +110,12 @@ UNDER_ATTACK_OVERRIDE_TTL   = 6h    ; how long an operator's `attack on` holds (
 Manual override, like manual challenge: `cfm webtop attack on|off <vhost>`.
 - **on** (`[--ttl 6h]`, since 2026-11-17): force the state for the TTL, and
   arm the vhost's challenge for the same window when no manual challenge
-  covers it, at the tier of an operator pin on the vhost if one is set (a
-  pin set later does not re-tier the arm: the cfm-admin Tier picker or the
-  `vhost/rung` API does).
+  covers it, at the tier of the vhost's pin if one is set (a pin set later,
+  or a second `on`, does not re-tier the arm: the cfm-admin Tier picker or
+  the `vhost/rung` API does). When your own manual challenge covers it, that
+  challenge stays and the override is cut to its expiry (`ttl_clipped`):
+  UNDER_ATTACK never outlives the challenge it rides on. A wildcard host is
+  refused, and so is `on` for a `cfm.allow`-bypassed vhost.
   It survives a reload and a restart. An `on`/`off` sent in the second or
   two a reload takes reaches the file but applies only on the next reload,
   and the file is read once per process (a hand edit takes a restart).
