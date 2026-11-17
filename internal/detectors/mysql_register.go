@@ -36,6 +36,26 @@ func GetPendingGovernorConfig() (mysql.GovernorConfig, bool) {
 	return pendingGovCfg, pendingGovReady
 }
 
+// syncPendingGovernorFromSections runs on every successfully read
+// detectors.conf, before the factories. The manager never calls a disabled
+// section's factory, and a removed section has none to call, so those two
+// states are set here; an enabled section's factory sets the full config.
+func syncPendingGovernorFromSections(byName map[string]KV) {
+	for name, kv := range byName {
+		if typ, _ := splitTypeInstance(name); typ != "mysql_governor" {
+			continue
+		}
+		if !kvBool(kv, "ENABLED", true) {
+			if cfg, ok := GetPendingGovernorConfig(); !ok || cfg.Enabled {
+				logMySQLGovf("[detectors] %s disabled in detectors.conf", name)
+			}
+			setPendingGovernorConfig(mysql.GovernorConfig{Enabled: false}, true)
+		}
+		return // enabled: its factory sets the config
+	}
+	setPendingGovernorConfig(mysql.GovernorConfig{}, false) // no section: built-in defaults
+}
+
 func setPendingGovernorConfig(cfg mysql.GovernorConfig, ready bool) {
 	pendingGovMu.Lock()
 	defer pendingGovMu.Unlock()
@@ -135,11 +155,8 @@ func init() {
 	// [mysql_governor] — processlist monitor + query/conn rules
 	// -------------------------------------------------------------------------
 	Register("mysql_governor", func(section string, kv KV, global KV) (core.PeriodicDetector, error) {
-		if !kvBool(kv, "ENABLED", true) {
-			setPendingGovernorConfig(mysql.GovernorConfig{Enabled: false}, true)
-			logMySQLGovf("[detectors] %s disabled in detectors.conf", section)
-			return nil, nil
-		}
+		// ENABLED = 0 never gets here (the manager skips a disabled section):
+		// syncPendingGovernorFromSections records it.
 
 		// ── SLEEP_REAPER_EXEMPT ──────────────────────────────────────────────
 		exemptRaw := kvStrClean(kv, "SLEEP_REAPER_EXEMPT", "proxysql_monitor,root")

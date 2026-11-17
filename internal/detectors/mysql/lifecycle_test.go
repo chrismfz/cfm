@@ -224,6 +224,13 @@ func TestLifecycleRetryAfterFollowsSchedule(t *testing.T) {
 	if err != nil || s < 590 || s > 600 {
 		t.Fatalf("Retry-After = %q, want ~600 (the no-credentials poll)", rec.Header().Get("Retry-After"))
 	}
+
+	// Its value tells the node's state apart (5-40 s vs ~300 s): scoped
+	// (cPanel user) callers get neither it nor the reason.
+	rec = serve(l.ScopedHandler(), "/api/v1/mysql/user-summary?user=x")
+	if h := rec.Header().Get("Retry-After"); h != "" || rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("scoped 503: HTTP %d Retry-After %q, want 503 without the header", rec.Code, h)
+	}
 }
 
 func TestNextRetryDelay(t *testing.T) {

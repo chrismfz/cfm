@@ -224,6 +224,11 @@ func (m *manager) maybeReload(parent context.Context) {
 		// Only from a config that was read: the degraded start-up keeps to the
 		// control-plane protection above.
 		applyBuiltinLoginBruteforce(&secs)
+		// The governor's pending config must follow ENABLED = 0 and a removed
+		// section, which never reach its factory (the loop below skips a
+		// disabled section). Only from a config that was read: a failed read
+		// must not turn a disabled governor back on.
+		syncPendingGovernorFromSections(secs.ByName)
 	}
 	sig := cfgSig(&secs)
 	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))

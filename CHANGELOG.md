@@ -32,20 +32,24 @@ back-filled here — see the git/PR history for that period.
   comes up whatever the database does. `cfm.service` stays free of any
   ordering on `mariadb`/`mysqld`, so a node without a database waits on
   nothing.
-- **`[mysql_governor] ENABLED = 0` is honoured.** It used to be read as "no
-  section", so the governor started anyway with the built-in defaults
-  (monitor mode, polling the processlist every 5 s). A disabled governor now
-  makes no connection; re-enabling it in `detectors.conf` starts it without a
-  restart.
+- **`[mysql_governor] ENABLED = 0` is honoured.** The detectors manager
+  never calls a disabled section's factory, so the governor saw "no section"
+  and started anyway with the built-in defaults (monitor mode, polling the
+  processlist every 5 s). A disabled governor now makes no connection, and
+  re-enabling it in `detectors.conf` starts it without a restart. Removing
+  the section now falls back to the built-in defaults instead of keeping the
+  last parsed config. A `detectors.conf` that fails to read changes neither.
 - **`/api/v1/mysql/*` answers a JSON 503 while the governor is not running**
-  (`{"error":"mysql governor not running","reason":…}`; the reason is
-  withheld from scoped callers) instead of the web UI's HTML. `cfm mysqltop`
-  and the MCP `mysql_pressure` / `whats_wrong` tools show that message,
-  and the CLI names a non-JSON answer from an older daemon instead of
-  failing in the JSON parser (a 401/403 reads as the token problem it is).
-  The 503 carries a `Retry-After` of the next connect attempt. The startup log no longer says "no working
-  credentials found" when the credentials were found and the connect failed:
-  it names the credential source and the connect error.
+  (`{"error":"mysql governor not running","reason":…}`, with a `Retry-After`
+  of the next connect attempt; scoped callers get neither the reason nor the
+  header) instead of the web UI's HTML. `cfm mysqltop` and the MCP
+  `mysql_pressure` tool show that message (without the reason), and
+  `whats_wrong` lists the governor as `unavailable` rather than as an error.
+  The CLI names a non-JSON answer from an older daemon instead of failing in
+  the JSON parser, and a 401/403 reads as the token problem it is. The
+  startup log no longer says "no working credentials found" when the
+  credentials were found and the connect failed: it names the credential
+  source and the connect error.
 
 ## 2026.11.17
 

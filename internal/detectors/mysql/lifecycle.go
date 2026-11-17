@@ -236,13 +236,13 @@ func (l *GovernorLifecycle) retryAfterSeconds() int {
 
 // AdminHandler serves the admin-only governor routes (RegisterHTTPAdmin). The
 // caller wraps it in its admin guard. While no governor runs it answers 503
-// with the reason.
+// with the reason and a Retry-After of the next attempt.
 func (l *GovernorLifecycle) AdminHandler() http.Handler { return l.admin }
 
 // ScopedHandler serves the user/db-filtered governor routes
 // (RegisterHTTPScoped). The caller wraps it in its scope filter. While no
-// governor runs it answers 503 without the reason: scoped (cPanel user)
-// callers get no detail about the node's database credentials.
+// governor runs it answers 503 without the reason or a Retry-After: scoped
+// (cPanel user) callers learn nothing about the node's database setup.
 func (l *GovernorLifecycle) ScopedHandler() http.Handler { return l.scoped }
 
 // lazyGovernorHandler dispatches to the governor's routes once it exists. The
@@ -264,11 +264,13 @@ func (h *lazyGovernorHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	g := h.lc.Governor()
 	if g == nil {
 		body := map[string]string{"error": "mysql governor not running"}
+		// Admin only: the reason, and Retry-After, whose value (5-40 s vs
+		// ~300 s) would tell a scoped caller which state the node is in.
 		if h.withReason {
 			body["reason"] = h.lc.Status()
-		}
-		if s := h.lc.retryAfterSeconds(); s > 0 {
-			w.Header().Set("Retry-After", strconv.Itoa(s))
+			if s := h.lc.retryAfterSeconds(); s > 0 {
+				w.Header().Set("Retry-After", strconv.Itoa(s))
+			}
 		}
 		writeGovernorJSON(w, http.StatusServiceUnavailable, body)
 		return

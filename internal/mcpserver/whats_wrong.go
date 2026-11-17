@@ -181,6 +181,11 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 		}
 		if e := sectionError(body); e != "" {
 			sources[key] = "error: " + e
+			// A 503 is a subsystem that is not running (e.g. the MySQL
+			// governor on a node without a database), not a failure.
+			if strings.HasPrefix(e, "HTTP 503") {
+				sources[key] = "unavailable"
+			}
 			return false
 		}
 		if !json.Valid(body) {

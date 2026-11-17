@@ -225,17 +225,15 @@ func section(ctx context.Context, d Deps, path string, q url.Values) json.RawMes
 	}
 	if status < 200 || status >= 300 {
 		msg := "HTTP " + strconv.Itoa(status)
-		// Carry the endpoint's own JSON error (e.g. the MySQL governor's 503
-		// "mysql governor not running" + reason) instead of a bare status.
+		// Carry the endpoint's own short JSON error (e.g. the MySQL governor's
+		// 503 "mysql governor not running") instead of a bare status. Only
+		// `error`: detail fields such as the governor's `reason` (credential
+		// file paths, driver text) stay on the admin HTTP API and in the log.
 		var eb struct {
-			Error  string `json:"error"`
-			Reason string `json:"reason"`
+			Error string `json:"error"`
 		}
 		if json.Unmarshal(body, &eb) == nil && eb.Error != "" {
 			msg += ": " + eb.Error
-			if eb.Reason != "" {
-				msg += ": " + eb.Reason
-			}
 		}
 		e, _ := json.Marshal(map[string]any{"error": msg})
 		return e

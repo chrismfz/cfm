@@ -1,8 +1,10 @@
 package mcpserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -667,5 +669,32 @@ func TestEvalMailTrafficFallbackPutsWarningsFirst(t *testing.T) {
 	}
 	if last := fs[len(fs)-1]; last.Title != "more outbound-mail anomalies" || last.Severity != sevInfo {
 		t.Fatalf("the hidden tail is info: %+v", last)
+	}
+}
+
+// A 503 (a subsystem that is not running, e.g. the MySQL governor on a node
+// without a database) reads as unavailable, not as an error, and no finding.
+func TestWhatsWrong_503SourceIsUnavailable(t *testing.T) {
+	got := evaluateWhatsWrong(sec("mysql", `{"error":"HTTP 503: mysql governor not running"}`))
+	if got.Sources["mysql"] != "unavailable" {
+		t.Errorf("mysql source = %q, want unavailable", got.Sources["mysql"])
+	}
+	for _, f := range got.Findings {
+		if f.Category == "mysql" {
+			t.Errorf("unexpected mysql finding %+v", f)
+		}
+	}
+}
+
+// section() carries an endpoint's short `error` on a non-2xx answer, never
+// detail fields such as the MySQL governor's `reason` (credential paths,
+// driver text), which stay on the admin HTTP API.
+func TestSectionCarriesErrorButNotReason(t *testing.T) {
+	d := Deps{Dispatch: func(context.Context, string, url.Values) (int, []byte, error) {
+		return 503, []byte(`{"error":"mysql governor not running","reason":"connect via /root/.my.cnf failed: Access denied for user 'root'@'localhost'"}`), nil
+	}}
+	got := string(section(context.Background(), d, "/api/v1/mysql/top", nil))
+	if !strings.Contains(got, "HTTP 503: mysql governor not running") || strings.Contains(got, "my.cnf") || strings.Contains(got, "Access denied") {
+		t.Fatalf("section = %s", got)
 	}
 }
