@@ -1062,6 +1062,9 @@ local function is_od_url_metrics(uri, args)
   return rr == OD_ROUTE or rr == OD_ROUTE:sub(2) or rr == OD_ROUTE .. "/"
 end
 
+-- Defined below detect_ctrl_chars (forward-declared: 601 calls it).
+local is_textual_body_content_type
+
 function _M.detect_ctrl_chars(args, body, headers, uri)
   if is_known_binaryish_uri(uri) then
     return false
@@ -1079,18 +1082,7 @@ function _M.detect_ctrl_chars(args, body, headers, uri)
     return false
   end
 
-  headers = headers or {}
-  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
-
-  if has(ct, "multipart/form-data") then
-    return false
-  end
-
-  if ct ~= ""
-     and not has(ct, "application/x-www-form-urlencoded")
-     and not has(ct, "application/json")
-     and not has(ct, "application/xml")
-     and not has(ct, "text/") then
+  if not is_textual_body_content_type(php_content_type(headers)) then
     return false
   end
 
@@ -1101,8 +1093,19 @@ function _M.detect_ctrl_chars(args, body, headers, uri)
   return false
 end
 
-local function is_textual_body_content_type(content_type)
-  local ct = lower(content_type or "")
+-- Whether a body is read as text by 601 / 611 / 404: decided by the MEDIA
+-- TYPE, as PHP picks its POST reader (php_media_type), never by a substring
+-- of the whole line. `application/x-www-form-urlencoded; x=multipart/form-data`
+-- fills $_POST, and the substring test skipped it as multipart. Takes a raw
+-- Content-Type or a media type (php_media_type is idempotent on one); 601
+-- and 611 pass php_content_type(headers), every Content-Type line joined as
+-- Apache hands them to PHP. (No wrapper local: the chunk is at Lua's
+-- 200-local limit.)
+-- The upload rules' `has(ct, "multipart/form-data")` gates stay substring
+-- tests on purpose: they over-read (a body PHP reads as text is still
+-- scanned), and every body PHP reads as multipart starts with that type.
+function is_textual_body_content_type(content_type)
+  local ct = php_media_type(content_type)
   if ct == "" then return true end
 
   if has(ct, "multipart/form-data")              then return false end
@@ -7483,8 +7486,9 @@ function _M.detect_bad_utf8(args, body, headers, uri, _na)
   local tag = utf8_walk(_na or normalize(cap(args or "", CFG.max_scan_len)))
   if tag then return tag end
 
-  -- Walk the body only for TEXTUAL content types (urlencoded / JSON / XML /
-  -- text, or an empty CT). Binary uploads carry raw bytes (JPEG / WebP / PNG /
+  -- Walk the body only for TEXTUAL media types (urlencoded / JSON / XML /
+  -- text, or none), read as PHP reads them (is_textual_body_content_type:
+  -- a Content-Type parameter does not change the answer). Binary uploads carry raw bytes (JPEG / WebP / PNG /
   -- ZIP) that routinely form 0xC0/0xC1 + continuation pairs (JPEG SOF markers
   -- 0xFFC0/0xFFC1 etc.) and E0/F0 leads decoding to overlong / surrogate /
   -- out-of-range codepoints — none of which are encoding-bypass primitives,
@@ -7497,9 +7501,7 @@ function _M.detect_bad_utf8(args, body, headers, uri, _na)
   -- image upload, 2026-07-04). The args walk above still covers the URL /
   -- path-traversal vector, and the textual-body walk below still covers the
   -- urlencoded / JSON / XML overlong-slash bypass (test 77c keeps firing).
-  headers = headers or {}
-  local ct = lower(headers["content-type"] or headers["Content-Type"] or "")
-  if not is_textual_body_content_type(ct) then return nil end
+  if not is_textual_body_content_type(php_content_type(headers)) then return nil end
 
   return utf8_walk(normalize(cap(body or "", CFG.max_scan_len)))
 end
