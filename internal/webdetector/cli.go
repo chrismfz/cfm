@@ -1478,11 +1478,17 @@ func runAttackWebTop(baseURL string, args []string) error {
 		return err
 	}
 	if on {
-		fmt.Printf("✓ Under-attack FORCED ON for %v until %v (ttl %v)\n", result["host"], result["expires_at"], result["ttl"])
+		fmt.Printf("✓ Under-attack FORCED ON for %v until %s (ttl %v)\n", result["host"], cliTime(result["expires_at"]), result["ttl"])
 		if armed, _ := result["challenge_armed"].(bool); armed {
-			fmt.Printf("  a %v challenge is armed on it for the same window (reason under_attack); `attack off` removes it\n", result["rung"])
+			fmt.Println("  a challenge is armed on it for the same window (reason under_attack); `attack off` removes it")
 		} else {
-			fmt.Println("  an existing manual challenge covers it and stays as it is")
+			fmt.Printf("  the manual challenge already on it stays as it is (until %s)\n", cliTime(result["challenge_expires_at"]))
+		}
+		if clipped, _ := result["ttl_clipped"].(bool); clipped {
+			fmt.Println("  the override is cut to that challenge's expiry: to hold it longer, extend the challenge, then run `attack on` again")
+		}
+		if tier, ok := result["tier"].(map[string]interface{}); ok {
+			fmt.Printf("  verify tier: %v (%v)\n", tier["rung"], tier["source"])
 		}
 		if capped, _ := result["ttl_capped"].(bool); capped {
 			fmt.Println("  ttl capped at 24h (scoped caller)")
@@ -2063,4 +2069,16 @@ func runIngestSource(baseURL string) error {
 	fmt.Printf("Log file      : %s\n", logFile)
 	fmt.Printf("File active   : %s\n", fileActive)
 	return nil
+}
+
+// cliTime renders an RFC3339 timestamp from an API response in local time.
+func cliTime(v interface{}) string {
+	str, _ := v.(string)
+	if ts, err := time.Parse(time.RFC3339Nano, str); err == nil {
+		return ts.Local().Format("2006-01-02 15:04 MST")
+	}
+	if str == "" {
+		return "-"
+	}
+	return str
 }

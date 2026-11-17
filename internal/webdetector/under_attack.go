@@ -16,8 +16,9 @@ package webdetector
 // rule / nft) lands in later increments. See docs/under-attack-mode.md.
 //
 // Entry (§3), all true for CONFIRM_TICKS consecutive ticks, and only for a vhost
-// the challenge layer already armed (UNDER_ATTACK is reachable ONLY from
-// CHALLENGED — it never challenges a vhost the existing paths left alone):
+// the challenge layer already armed (the automatic entry is reachable ONLY from
+// CHALLENGED — it never challenges a vhost the existing paths left alone; an
+// operator's `attack on` arms the challenge itself, under_attack_overrides.go):
 //
 //  1. challenge armed on the vhost (auto or manual)     — `challenged` arg
 //  2. the challenge is being defeated: distinct solving  — solvesPerMin >= SolvesMin
@@ -420,6 +421,11 @@ func (e *Engine) evalUnderAttack(now time.Time, host string, challenged bool, ro
 
 	if trans != nil {
 		e.emitUnderAttack(now, host, trans.on, row, solves, trans.evidence, trans.mode, out)
+		if trans.on {
+			// A persisted `attack on` is now announced: a reload restores it
+			// as ON without a second alert.
+			e.attackOverrides.markAnnounced(host, now)
+		}
 	}
 }
 
@@ -435,6 +441,14 @@ func (e *Engine) deescalateUnderAttack(now time.Time, host, reason string, out c
 	if t == nil || host == "" {
 		return
 	}
+	// Serialized with ForceVhostAttackAs for the whole tracker+record change
+	// (lock order attackOpMu -> t.mu, as there): an `attack on` either lands
+	// before (its tracker override and record both dropped here) or after
+	// (both dropped on the next tick). The mutex is per Engine: during a
+	// reload the old Engine's API and the new one's tick are not serialized
+	// (the next tick converges).
+	e.attackOpMu.Lock()
+	defer e.attackOpMu.Unlock()
 	t.mu.Lock()
 	st := t.hosts[host]
 	if st == nil || (!st.on && st.override == 0) {
@@ -681,19 +695,38 @@ func (e *Engine) confirmAttackState(host string) (manual, auto bool) {
 }
 
 // restoreForcedOn re-applies a persisted `attack on` after a reload: the
-// override with its remaining window, and the state seeded as already ON, so
-// the first tick's "Operator forced ON: enter (once)" sees no transition and
-// sends no second ON alert / history row.
-func (e *Engine) restoreForcedOn(host string, now time.Time, rem time.Duration) {
+// override with its remaining window and, when its ON was already alerted,
+// the state seeded as ON since then, so the first tick's "Operator forced ON:
+// enter (once)" sees no transition and sends no second ON alert / history row.
+// Not announced: left to that tick, which sends the ON the reload pre-empted.
+func (e *Engine) restoreForcedOn(host string, now time.Time, rem time.Duration, announced bool, since time.Time) {
 	e.SetVhostAttackOverride(host, true, now, rem)
-	if e == nil || e.attack == nil {
+	if e == nil || e.attack == nil || !announced {
 		return
+	}
+	if since.IsZero() {
+		since = now
 	}
 	t := e.attack
 	t.mu.Lock()
 	if st := t.hosts[host]; st != nil && !st.on {
-		st.on, st.since, st.belowFloor = true, now, time.Time{}
+		st.on, st.since, st.belowFloor = true, since, time.Time{}
 		st.evidence = "operator forced (attack on, restored)"
 	}
 	t.mu.Unlock()
+}
+
+// vhostAttackOnSince reports whether host's tracker state is ON, and since
+// when.
+func (e *Engine) vhostAttackOnSince(host string) (bool, time.Time) {
+	if e == nil || e.attack == nil {
+		return false, time.Time{}
+	}
+	t := e.attack
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if st := t.hosts[host]; st != nil && st.on {
+		return true, st.since
+	}
+	return false, time.Time{}
 }

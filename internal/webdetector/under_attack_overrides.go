@@ -65,6 +65,12 @@ type attackOverrideEntry struct {
 	// make an operator's arm the override's).
 	ArmExpiresAt time.Time `json:"arm_expires_at,omitempty"`
 	Actor        string    `json:"actor,omitempty"`
+	// Announced: the vhost's UNDER_ATTACK ON has been alerted and written to
+	// history (Since is when). Only then does a restore seed the state as
+	// already ON; an `attack on` followed by a reload before the first tick
+	// still gets its ON alert from the new Engine.
+	Announced bool      `json:"announced,omitempty"`
+	Since     time.Time `json:"since,omitempty"`
 }
 
 // ownsArm reports whether host's live manual challenge is still the arm this
@@ -116,6 +122,14 @@ func newAttackOverrideStore(path string) *attackOverrideStore {
 	s.load()
 	attackOverrideStores.m[path] = s
 	return s
+}
+
+// resetAttackOverrideStoresForTest forgets the process-wide stores, so the
+// next Engine reads its file from disk as after a restart.
+func resetAttackOverrideStoresForTest() {
+	attackOverrideStores.Lock()
+	attackOverrideStores.m = map[string]*attackOverrideStore{}
+	attackOverrideStores.Unlock()
 }
 
 // loadAttackOverrideFileForTest reads path afresh (bypassing the shared
@@ -198,6 +212,12 @@ func (s *attackOverrideStore) set(e attackOverrideEntry) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The same (unexpired) override refreshed keeps its announcement: a tick
+	// that sent the ON alert between a refresh's read and this write must not
+	// be undone. An expired record starts a new override.
+	if old, ok := s.m[e.Host]; ok && old.Announced && !e.Announced && old.ExpiresAt.After(time.Now()) {
+		e.Announced, e.Since = true, old.Since
+	}
 	s.m[e.Host] = e
 	s.saveLocked()
 }
@@ -214,6 +234,23 @@ func (s *attackOverrideStore) get(host string) (attackOverrideEntry, bool) {
 		return attackOverrideEntry{}, false
 	}
 	return e, true
+}
+
+// markAnnounced records that host's ON transition was alerted (no-op without
+// an entry: an automatic entry has no record).
+func (s *attackOverrideStore) markAnnounced(host string, since time.Time) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.m[host]
+	if !ok || e.Announced {
+		return
+	}
+	e.Announced, e.Since = true, since
+	s.m[host] = e
+	s.saveLocked()
 }
 
 // remove drops host and returns what it held (unexpired or not).
@@ -274,25 +311,50 @@ func (e *Engine) ForceVhostAttackAs(host string, on bool, ttl time.Duration, act
 	}
 	expires = now.Add(ttl)
 	// Arm (or refresh our own earlier arm) unless an operator's manual
-	// challenge already covers the host: theirs stays as it is.
+	// challenge already covers the host: theirs stays as it is, and the
+	// override never outlives it (UNDER_ATTACK and its confirm step act only
+	// where a challenge is served), so it is cut to that challenge's expiry.
 	prev, hadPrev := e.attackOverrides.get(host)
-	covered, _, _ := e.manualChallengeCovering(host)
-	armed = (hadPrev && e.ownsArm(host, prev)) || !covered
+	covered, coverExp, _ := e.manualChallengeCovering(host)
+	own := hadPrev && e.ownsArm(host, prev)
+	armed = own || !covered
 	var armExp time.Time
 	if armed {
-		e.ManualChallengeVhostAs(host, ttl, attackArmReason, e.attackArmRung(host), actor)
+		rung := e.attackArmRung(host)
+		if own {
+			// A refresh keeps the arm's tier: a pin set since, or a re-tier
+			// of the arm (vhost/rung), is not undone by a second `attack on`.
+			rung = e.manualChal.rung(host)
+		}
+		e.ManualChallengeVhostAs(host, ttl, attackArmReason, rung, actor)
 		_, armExp, _ = e.manualChal.active(host)
+	} else if coverExp.Before(expires) {
+		expires, ttl = coverExp, coverExp.Sub(now)
 	}
+	// Persist before the tracker: a cfm.allow tick that deescalates in
+	// between finds the override on its next tick and drops both.
+	ent := attackOverrideEntry{Host: host, ExpiresAt: expires, ArmedChallenge: armed, ArmExpiresAt: armExp, Actor: actor}
+	if hadPrev {
+		ent.Announced, ent.Since = prev.Announced, prev.Since
+	}
+	e.attackOverrides.set(ent)
 	e.SetVhostAttackOverride(host, true, now, ttl)
-	e.attackOverrides.set(attackOverrideEntry{Host: host, ExpiresAt: expires, ArmedChallenge: armed, ArmExpiresAt: armExp, Actor: actor})
+	// Already UNDER_ATTACK (an automatic entry, alerted, before or during
+	// this call): no forced ON transition will come for this override, so it
+	// is announced as of then. Checked after the override, so an automatic
+	// entry racing it is seen too.
+	if on, since := e.vhostAttackOnSince(host); on {
+		e.attackOverrides.markAnnounced(host, since)
+	}
 	return armed, expires
 }
 
-// attackArmRung is the tier of the challenge an `attack on` arms: an
-// operator's tier pin on the vhost (or its apex) when one is set, since a
-// manual v2 arm outranks every pin and "the way down is a v1 pin" must hold
-// through the incident toggle too; else the tier-less default
-// (tierlessArmRung: CHALLENGE_V2_MANUAL, v1 on a wildcard host).
+// attackArmRung is the tier of the challenge an `attack on` arms: the tier pin
+// on the vhost (or its apex) when one is set, whoever set it (an operator's,
+// or a tenant's own on its vhost), since a manual v2 arm outranks every pin
+// and "the way down is a v1 pin" must hold through the incident toggle too;
+// else the tier-less default (tierlessArmRung: CHALLENGE_V2_MANUAL, v1 on a
+// wildcard host). Read when arming only: a refresh keeps the arm's tier.
 func (e *Engine) attackArmRung(host string) string {
 	pin, _ := e.tierPins.covering(host, time.Now())
 	switch pin.Rung {
@@ -319,9 +381,10 @@ func (e *Engine) dropAttackOverride(host, actor string) {
 // restoreAttackOverrides re-applies the persisted `attack on` overrides with
 // their remaining window, once the new Engine's tracker and bridge exist. The
 // challenges they armed are restored by restoreManualChallenges. Like that
-// restore, it writes no history and sends no alert: the state is seeded as
-// already ON, so the first tick sees no transition (the original ON alert and
-// row stand).
+// restore, it writes no history and sends no alert: an override whose ON was
+// already alerted is seeded as ON since then, so the first tick sees no
+// transition (the original ON alert and row stand); one that was not (a
+// reload before the old Engine's first tick) gets its ON from the new one.
 func (e *Engine) restoreAttackOverrides() {
 	now := time.Now()
 	for _, ent := range e.attackOverrides.snapshot() {
@@ -329,9 +392,8 @@ func (e *Engine) restoreAttackOverrides() {
 		if rem <= 0 {
 			continue
 		}
-		e.restoreForcedOn(ent.Host, now, rem)
-		logging.LogfCHALLENGES("[challenge][vhost] action=attack_restore host=%s ttl=%s armed_challenge=%v",
-			ent.Host, rem.Round(time.Second), ent.ArmedChallenge)
+		e.restoreForcedOn(ent.Host, now, rem, ent.Announced, ent.Since)
+		logging.LogfCHALLENGES("[challenge][vhost] action=attack_restore host=%s ttl=%s armed_challenge=%v announced=%v",
+			ent.Host, rem.Round(time.Second), ent.ArmedChallenge, ent.Announced)
 	}
 }
-

@@ -3,6 +3,7 @@ package webdetector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -349,7 +350,7 @@ func TestAttackOverrideScopedTTLBound(t *testing.T) {
 		t.Fatalf("NewHistoryStore: %v", err)
 	}
 	t.Cleanup(hs.Close)
-	e := &Engine{history: hs, cfg: Config{UnderAttack: true}, attack: newUnderAttackTracker()}
+	e := &Engine{history: hs, cfg: Config{UnderAttack: true}, attack: newUnderAttackTracker(), attackOverrides: newAttackOverrideStore("")}
 	e.manualChal.init("")
 
 	// Asked for more than the ceiling: capped at 24h, and said so.
@@ -381,7 +382,7 @@ func TestAttackOverrideScopedTTLBound(t *testing.T) {
 }
 
 func TestAttackOverrideAdminDefaultTTL(t *testing.T) {
-	e := &Engine{cfg: Config{UnderAttack: true}, attack: newUnderAttackTracker()}
+	e := &Engine{cfg: Config{UnderAttack: true}, attack: newUnderAttackTracker(), attackOverrides: newAttackOverrideStore("")}
 	e.manualChal.init("")
 
 	resp := attackRequest(t, e, "host=any.example.com&on=1", "")
@@ -422,5 +423,51 @@ func TestAttackOverrideExpiryReadsAsAuto(t *testing.T) {
 	on, _, _ = e.VhostAttackState("live.example")
 	if !on {
 		t.Fatalf("live bounded override must read forced-on")
+	}
+}
+
+// Refused: a wildcard host (400) and an `on` for a cfm.allow-bypassed vhost
+// (409, the next tick would undo it).
+func TestAttackOverrideRefusesWildcardAndBypassed(t *testing.T) {
+	e := &Engine{cfg: Config{UnderAttack: true, ChallengeHostBypass: []string{"allowed.example.com"}},
+		attack: newUnderAttackTracker(), attackOverrides: newAttackOverrideStore("")}
+	e.manualChal.init("")
+	for _, tc := range []struct {
+		q    string
+		code int
+	}{
+		{"host=*.example.com&on=1", http.StatusBadRequest},
+		{"host=*.example.com&on=0", http.StatusBadRequest},
+		{"host=allowed.example.com&on=1", http.StatusConflict},
+		{"host=allowed.example.com.&on=1", http.StatusConflict},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/challenge/vhost/attack?"+tc.q, nil)
+		rr := httptest.NewRecorder()
+		e.handleChallengeVhostAttack(rr, req)
+		if rr.Code != tc.code {
+			t.Errorf("%s: status %d, want %d", tc.q, rr.Code, tc.code)
+		}
+	}
+	if active, _, _ := e.manualChal.active("allowed.example.com"); active {
+		t.Error("a bypassed vhost was armed")
+	}
+}
+
+// An operator's challenge that ends sooner cuts the override (it never
+// outlives the challenge it rides on), and the response says so.
+func TestAttackOverrideClippedToAShorterOperatorChallenge(t *testing.T) {
+	e := &Engine{cfg: Config{UnderAttack: true}, attack: newUnderAttackTracker(), attackOverrides: newAttackOverrideStore("")}
+	e.manualChal.init("")
+	e.ManualChallengeVhostAs("shop.example.com", 30*time.Minute, "manual", "", "admin")
+	resp := attackRequest(t, e, "host=shop.example.com&on=1&ttl=6h", "")
+	if resp["challenge_armed"] != false || resp["ttl_clipped"] != true || resp["challenge_expires_at"] == nil || resp["tier"] == nil {
+		t.Fatalf("response: %#v", resp)
+	}
+	if d, err := time.ParseDuration(fmt.Sprint(resp["ttl"])); err != nil || d > 30*time.Minute {
+		t.Fatalf("response ttl %v after the clip, want <= 30m", resp["ttl"])
+	}
+	_, chExp, _ := e.manualChal.active("shop.example.com")
+	if d := overrideExpiry(e, "shop.example.com").Sub(chExp); d > time.Second || d < -time.Second {
+		t.Fatalf("override ends %v after the challenge", d)
 	}
 }

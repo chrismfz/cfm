@@ -236,6 +236,11 @@ func TestRestoreAttackOverrides_NoSecondOnAlert(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "o.json")
 	e1 := newForceAttackEngine(t, path)
 	e1.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+	out1 := make(chan core.Alert, 4)
+	e1.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, out1)
+	if len(out1) != 1 {
+		t.Fatalf("attack on sent %d ON alerts, want 1", len(out1))
+	}
 
 	e2 := newForceAttackEngine(t, path)
 	e2.restoreAttackOverrides()
@@ -280,5 +285,141 @@ func TestRunAttackWebTop_TTLFlag(t *testing.T) {
 	}
 	if err := runAttackWebTop(ts.URL, []string{"on", "x.gr", "--bogus"}); err == nil {
 		t.Error("an unknown flag must be refused")
+	}
+}
+
+// A reload before the old Engine's first tick: the ON was never alerted, so
+// the new Engine sends it (once).
+func TestRestoreAttackOverrides_UnannouncedGetsItsOn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "o.json")
+	e1 := newForceAttackEngine(t, path)
+	e1.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+	e2 := newForceAttackEngine(t, path)
+	e2.restoreAttackOverrides()
+	out := make(chan core.Alert, 4)
+	e2.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, out)
+	e2.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, out)
+	if len(out) != 1 {
+		t.Fatalf("got %d ON alerts across the reload, want 1", len(out))
+	}
+}
+
+// A restart: both stores come back from their files (JSON round trip), and
+// `attack off` still recognises and removes the arm its `attack on` made.
+func TestForceVhostAttack_SurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	opath, mpath := filepath.Join(dir, "o.json"), filepath.Join(dir, "m.json")
+	e1 := newForceAttackEngine(t, opath)
+	e1.manualChal.init(mpath)
+	if armed, _ := e1.ForceVhostAttackAs("shop.example", true, 2*time.Hour, "admin"); !armed {
+		t.Fatal("not armed")
+	}
+	resetAttackOverrideStoresForTest()
+	t.Cleanup(resetAttackOverrideStoresForTest)
+	e2 := newForceAttackEngine(t, opath)
+	e2.manualChal.init(mpath)
+	e2.restoreAttackOverrides()
+	ent, ok := e2.attackOverrides.get("shop.example")
+	if !ok || !e2.ownsArm("shop.example", ent) {
+		t.Fatalf("after a restart the arm is not the override's: %+v ok=%v", ent, ok)
+	}
+	e2.ForceVhostAttackAs("shop.example", false, 0, "admin")
+	if active, _ := manualReason(e2, "shop.example"); active {
+		t.Fatal("attack off after a restart left the arm")
+	}
+}
+
+// A second `attack on` after the operator re-armed the vhost by hand leaves
+// their arm (reason, expiry) alone.
+func TestForceVhostAttack_SecondOnKeepsAHandReArm(t *testing.T) {
+	e := newForceAttackEngine(t, "")
+	e.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+	e.ManualChallengeVhostAs("shop.example", 3*time.Hour, "manual", "", "admin")
+	_, before, _ := e.manualChal.active("shop.example")
+	if armed, _ := e.ForceVhostAttackAs("shop.example", true, time.Hour, "admin"); armed {
+		t.Fatal("the second attack on took over a hand re-arm")
+	}
+	_, after, reason := e.manualChal.active("shop.example")
+	if reason != "manual" || !after.Equal(before) {
+		t.Fatalf("hand re-arm changed: reason %q, %v -> %v", reason, before, after)
+	}
+}
+
+// A refresh keeps the arm's tier: a pin set after the first `attack on` does
+// not re-tier it.
+func TestForceVhostAttack_RefreshKeepsTheArmsTier(t *testing.T) {
+	e := newForceAttackEngine(t, "")
+	e.tierPins = sharedTierPinStore("")
+	e.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+	first := e.manualChal.rung("shop.example")
+	other := "v1"
+	if first == "" {
+		other = "v2"
+	}
+	if _, _, _, refusal, _ := e.tierPins.applyPin("shop.example", other, time.Hour, "admin", nil, nil); refusal != "" {
+		t.Fatal(refusal)
+	}
+	e.ForceVhostAttackAs("shop.example", true, 2*time.Hour, "admin")
+	if got := e.manualChal.rung("shop.example"); got != first {
+		t.Fatalf("refresh re-tiered the arm: %q -> %q", first, got)
+	}
+}
+
+// A vhost already in the automatic ON state gets `attack on`: no ON transition
+// comes for the override, so it is persisted as announced, and a restart (the
+// store read back from its file) sends no ON alert.
+func TestForceVhostAttack_AutoOnThenAttackOnRestartsQuietly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "o.json")
+	e1 := newForceAttackEngine(t, path)
+	since := time.Now().Add(-time.Hour).Truncate(time.Second)
+	e1.attack.mu.Lock()
+	e1.attack.hosts["shop.example"] = &attackVhost{on: true, since: since}
+	e1.attack.mu.Unlock()
+	e1.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+
+	resetAttackOverrideStoresForTest()
+	t.Cleanup(resetAttackOverrideStoresForTest)
+	e2 := newForceAttackEngine(t, path)
+	ent, ok := e2.attackOverrides.get("shop.example")
+	if !ok || !ent.Announced || !ent.Since.Equal(since) {
+		t.Fatalf("persisted announcement: %+v ok=%v", ent, ok)
+	}
+	e2.restoreAttackOverrides()
+	out := make(chan core.Alert, 4)
+	e2.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, out)
+	if len(out) != 0 {
+		t.Fatalf("restart sent %d alert(s)", len(out))
+	}
+	if _, s, _ := e2.VhostAttackState("shop.example"); !s.Equal(since) {
+		t.Fatalf("since reset on restore: %v, want %v", s, since)
+	}
+}
+
+// A refresh keeps the announcement, also when the ON alert was sent between
+// its read and its write (the store keeps it).
+func TestForceVhostAttack_RefreshKeepsTheAnnouncement(t *testing.T) {
+	e := newForceAttackEngine(t, "")
+	e.ForceVhostAttackAs("shop.example", true, time.Hour, "admin")
+	e.evalUnderAttack(time.Now(), "shop.example", true, SuspiciousRow{Host: "shop.example"}, make(chan core.Alert, 4))
+	e.ForceVhostAttackAs("shop.example", true, 2*time.Hour, "admin")
+	if ent, _ := e.attackOverrides.get("shop.example"); !ent.Announced {
+		t.Fatal("a refresh lost the announcement")
+	}
+	// The store keeps it even against a write that carries none.
+	ent, _ := e.attackOverrides.get("shop.example")
+	ent.Announced = false
+	e.attackOverrides.set(ent)
+	if got, _ := e.attackOverrides.get("shop.example"); !got.Announced {
+		t.Fatal("set dropped an announcement")
+	}
+}
+
+// An expired record does not lend its announcement to a new override.
+func TestAttackOverrideStore_ExpiredAnnouncementNotInherited(t *testing.T) {
+	s := newAttackOverrideStore("")
+	s.set(attackOverrideEntry{Host: "h.example", ExpiresAt: time.Now().Add(-time.Minute), Announced: true})
+	s.set(attackOverrideEntry{Host: "h.example", ExpiresAt: time.Now().Add(time.Hour)})
+	if got, _ := s.get("h.example"); got.Announced {
+		t.Fatal("a new override inherited an expired announcement")
 	}
 }
