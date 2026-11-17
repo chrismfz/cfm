@@ -498,6 +498,9 @@ validate first" preset was live (fixed 2026-09; `disabled_match` now carries the
 would-be match for the UI). Also: a rule `allow` only ends rule evaluation — it
 never bypasses WAF / vhost challenge / IP block (those are OR'd in `cfm.lua`
 Step 3) — and clearance-cookie holders return at Step 2b before rules run.
+A request only a rule blocks is logged `up=cfm_block_rule` (IP / vhost blocks
+stay `cfm_block`), and the web detector's 403 counters skip it
+(`isRuleBlock403`): a rule's block never escalates into a 403_flood nft ban.
 Rule semantics live in `rules-model.js` on the UI side; change it in the same PR
 as `traffic_rules.go`. Design + open items: `docs/traffic-rules-ux-proposal.md`.
 

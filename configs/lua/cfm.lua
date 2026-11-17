@@ -2191,7 +2191,15 @@ end
 -- Block
 if ip_action == "block" or vh_action == "block" or rule_action == "block" then
   ngx.header["X-CFM-Action"] = "block"
-  ngx.var.cfm_upstream = "cfm_block"; ngx.var.cfm_pass = ""
+  -- A refusal that only a traffic rule asked for is logged as cfm_block_rule:
+  -- the daemon's 403 counters skip it (webdetector isRuleBlock403), so a
+  -- rule's block never grows into a node-wide nft ban for 403_flood.
+  if ip_action ~= "block" and vh_action ~= "block" then
+    ngx.var.cfm_upstream = "cfm_block_rule"
+  else
+    ngx.var.cfm_upstream = "cfm_block"
+  end
+  ngx.var.cfm_pass = ""
   log_route(ngx.WARN, "block ip=" .. ip .. " host=" .. host .. cache_flag ..
     (rule_id ~= "" and (" rule_id=" .. rule_id) or ""))
   return ngx.exit(CFG.block_code)

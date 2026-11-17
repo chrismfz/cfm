@@ -55,20 +55,12 @@ func isWPRestOrigin403(rec LogRec) bool {
 // ok=false when uri is not a WordPress REST call (see isWPRestOrigin403).
 func wpRestRoute(uri string) (string, bool) {
 	path, query, _ := strings.Cut(uri, "?")
-	if path == "" || path[0] != '/' {
-		return "", false
-	}
 	lp := strings.ToLower(path)
-	if strings.Contains(lp, "..") || strings.Contains(lp, "%2e") || strings.Contains(lp, "//") {
-		return "", false
-	}
 	// "/wp-json…" or "/<dir>/wp-json…": strip at most one leading directory,
 	// and only a plausible install directory (wpInstallDir).
-	rest := lp
-	if !strings.HasPrefix(rest, "/wp-json") {
-		if i := strings.IndexByte(rest[1:], '/'); i >= 0 && wpInstallDir(rest[1:1+i]) {
-			rest = rest[1+i:]
-		}
+	_, rest, ok := wpStripInstall(lp, "/wp-json", true)
+	if !ok {
+		return "", false
 	}
 	// A rest_route in the query overrides the path route in WordPress
 	// (WP::parse_request takes $_GET before the permalink's query vars), so the
@@ -156,4 +148,143 @@ func wpInstallDir(seg string) bool {
 		return true
 	}
 	return seg != "" && !strings.ContainsAny(seg, ".%")
+}
+
+// wpStripInstall checks lp (a lowercased path) for a climb or escape and, when
+// it does not start with marker, strips one leading install directory
+// (wpInstallDir; the index.php PATH_INFO pseudo-directory only when
+// allowIndex). It returns the stripped prefix ("" or "/<dir>") and the rest.
+// ok=false for a path that is not absolute, climbs out (`..`, `%2e`) or has
+// an empty segment (`//`). The ONE copy of these guards: REST and admin-ajax
+// both read paths through it.
+func wpStripInstall(lp, marker string, allowIndex bool) (prefix, rest string, ok bool) {
+	if lp == "" || lp[0] != '/' || strings.Contains(lp, "..") ||
+		strings.Contains(lp, "%2e") || strings.Contains(lp, "//") {
+		return "", "", false
+	}
+	if strings.HasPrefix(lp, marker) {
+		return "", lp, true
+	}
+	if i := strings.IndexByte(lp[1:], '/'); i >= 0 {
+		seg := lp[1 : 1+i]
+		if wpInstallDir(seg) && (allowIndex || seg != "index.php") {
+			return lp[:1+i], lp[1+i:], true
+		}
+	}
+	return "", lp, true
+}
+
+// wpAjaxAppDenialMaxBytes: the largest admin-ajax 403 body read as the app's
+// own answer (WordPress's "-1"/"0", a plugin's wp_send_json_error JSON: 6 and
+// 110 bytes in the titan case). An origin WAF's block page is bigger (Apache's
+// default 403 is ~200 bytes, LiteSpeed's ~1.2 KB, Wordfence's ~7 KB), and an
+// EMPTY 403 there is a WAF's too (see isWPAjaxDenial).
+const wpAjaxAppDenialMaxBytes = 128
+
+// isWPAdminAjaxOrigin403 reports whether rec is a 403 the SITE's WordPress
+// gave to an admin-ajax.php call made from the same site's wp-admin: the
+// Referer is a /wp-admin/ page on rec.Host.
+//
+// The 403 counters skip these (skip403), as they skip isWPRestOrigin403: an
+// open wp-admin tab polls admin-ajax every few seconds, and when the login
+// cookie or a plugin's nonce expires WordPress (or the plugin) answers every
+// poll with 403 until the tab is reloaded. On 2026-11-17 that nft-banned a
+// shop's own admin on titan (Barcode Scanner's background indexing on
+// edit.php?post_type=shop_order, 317 origin 403s in a few minutes,
+// IP403_COUNT 250), and the ban took their second site with it. The request
+// still counts in the IP's total, so it dilutes the 403 share.
+//
+// Kept narrow:
+//   - only the ORIGIN's 403 (as isWPRestOrigin403): the edge's own 403s are
+//     the WAF's and keep counting;
+//   - only a small non-empty body (wpAjaxAppDenialMaxBytes): WordPress's or
+//     a plugin's own answer, never an origin WAF's block page (ModSecurity,
+//     Imunify, Wordfence refusing an admin-ajax exploit keep counting);
+//   - only admin-ajax.php at the site root or one install directory down
+//     (not the index.php PATH_INFO pseudo-directory, which is the front
+//     controller);
+//   - the Referer must be http(s), name the same host, and sit under the
+//     SAME install's /wp-admin/;
+//   - not when any action key names a credential (login, password, auth,
+//     token, jwt): an AJAX login answered 403 is a wrong password.
+//
+// Residual: the Referer is the client's to write, so a client that forges a
+// wp-admin Referer gets small app-answered admin-ajax 403s past the counters.
+// What it gains is nothing the origin let through (each was refused), the WAF
+// and the malicious-path counters still see the requests, and WordPress also
+// takes action from a POST body, which the log line does not carry.
+func isWPAdminAjaxOrigin403(rec LogRec) bool {
+	if rec.Status != 403 || !rec.Upstream || rec.Bytes < 1 || rec.Bytes > wpAjaxAppDenialMaxBytes {
+		return false
+	}
+	if rec.UpstreamName != "" && !strings.HasPrefix(rec.UpstreamName, "cfm_apache") {
+		return false
+	}
+	// rec.URI and rec.Ref are lowercased by the parser.
+	path, query, _ := strings.Cut(rec.URI, "?")
+	prefix, rest, ok := wpStripInstall(path, "/wp-admin/", false)
+	if !ok || rest != "/wp-admin/admin-ajax.php" {
+		return false
+	}
+	if wpQueryActionCredential(query) {
+		return false
+	}
+	return wpAdminReferer(rec.Ref, rec.Host, prefix)
+}
+
+// wpQueryActionCredential reports whether ANY key PHP could read as action
+// names a credential, or fails to decode. The log line is lowercased, so key
+// case (which PHP keeps) and order cannot tell which one PHP reads: any of
+// them counts. Keys are read as PHP mangles them (leading spaces dropped,
+// '.' and ' ' to '_', an "action[…]" array key is action too).
+func wpQueryActionCredential(query string) bool {
+	if query == "" {
+		return false
+	}
+	mangle := strings.NewReplacer(".", "_", " ", "_")
+	for _, kv := range strings.Split(query, "&") {
+		k, v, _ := strings.Cut(kv, "=")
+		key, err := url.QueryUnescape(k)
+		if err != nil {
+			key = k
+		}
+		key = mangle.Replace(strings.TrimLeft(key, " "))
+		if key != "action" && !strings.HasPrefix(key, "action[") {
+			continue
+		}
+		a, err := url.QueryUnescape(v)
+		if err != nil || wpRestCredentialRoute(strings.ToLower(a)) {
+			return true
+		}
+	}
+	return false
+}
+
+// wpAdminReferer: ref is an http(s) URL on host (port ignored on both sides)
+// whose path is under /wp-admin/ of the install at prefix ("" = the root).
+func wpAdminReferer(ref, host, prefix string) bool {
+	u, err := url.Parse(ref)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return false
+	}
+	h := strings.ToLower(host)
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h, "]") {
+		h = h[:i]
+	}
+	if h == "" || strings.ToLower(u.Hostname()) != h {
+		return false
+	}
+	rp, rest, ok := wpStripInstall(strings.ToLower(u.EscapedPath()), "/wp-admin/", false)
+	return ok && rp == prefix && strings.HasPrefix(rest, "/wp-admin/")
+}
+
+// skip403 reports whether rec is a 403 the web detector's error counters
+// (403_flood, 40x_combo and the per-IP CHALLENGE_RPS_4XX / ERR_RATIO
+// challenge counters) do not count: the app's own answer to a client it
+// knows (isWPRestOrigin403, isWPAdminAjaxOrigin403) or the edge's refusal for
+// a traffic rule's block (isRuleBlock403). The ONE such predicate; a new
+// counter of client-fault 4xx reads it too.
+func skip403(rec LogRec) bool {
+	return rec.Status == 403 &&
+		(isWPRestOrigin403(rec) || isWPAdminAjaxOrigin403(rec) || isRuleBlock403(rec))
 }
