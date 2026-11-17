@@ -167,8 +167,10 @@
   read 7's proposals. It watches the farm's hs-0 Windows / Mac profile, the
   catch rate per node, human rejects under every v2 source, the
   `solver_farm` humanity lines, and, for the audience floor, each vhost's
-  GR/CY share of unchallenged requests and how stable it is
-  (`docs/targeted-challenge-design.md` §8 has the method). It also counts
+  GR/CY share of its real-input solves and how stable it is week to week
+  (`docs/targeted-challenge-design.md` §8 has the method and the first
+  measurement: the edge's access log cannot give an audience, the real-input
+  solves read 95–100 % GR/CY on the busy Greek shops). It also counts
   the vhosts whose `solver_farm` findings would have entered UNDER_ATTACK
   (≥ 80 % of the passed solves outside the audience), none of which may be
   a Greek audience. The `hid:1`
