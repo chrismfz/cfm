@@ -332,11 +332,13 @@ NGM's own root daemon legitimately writes its config and execs
 `systemctl`/`useradd`/`certbot`/`postfix`/`nginx` — allowlist NGM's control-plane
 `comm`/paths (note `allow_comm` is monitor-only/spoofable) or it self-trips.
 
-The more ambitious "one step further" for PHP is **`cfm-php`** (`docs/cfm-php.md`,
-idea-stage): a Zend extension intercepting dangerous PHP calls on **non-Imunify
-hosts** — and it *names NGM-shaped hosts as targets*. That is the real "protect the
-customer PHP layer" story; LSM only sees the kernel-visible consequences after a
-process spawns. Keep them as the two-layer pair the doc already describes.
+The more ambitious "one step further" for PHP is the PHP-runtime layer: CFM-managed
+**Snuffleupagus** (`docs/roadmaps/php-runtime-defense.md`, design; `cfm
+php-inventory` shipped) intercepting dangerous PHP calls on **non-Imunify hosts**,
+NGM-shaped hosts included. CFM renders the rules and modes and never writes its own
+PHP extension (the `cfm-php` extension seed was dropped on 2026-11-18). That is the
+real "protect the customer PHP layer" story; LSM only sees the kernel-visible
+consequences after a process spawns. Keep them as a two-layer pair.
 
 ## 8. kernsec — orthogonal, coordinate sysctl ownership (§H)
 
@@ -403,12 +405,12 @@ CLAUDE.md §3). This doc is docs-only.
 2. **Scoped-token minting:** provider interface (broker stays authoritative) **or**
    NGM-as-admin-minter shortcut (simpler, crosses the scoped/admin boundary)?
 3. **How far to go:** the "basics" (detect + surface + auth detector + panel-port
-   DNAT) vs the full embed + edge WAF + LSM + eventual `cfm-php`. The ROADMAP's
+   DNAT) vs the full embed + edge WAF + LSM + eventual PHP runtime (Snuffleupagus). The ROADMAP's
    own answer is phased; this doc lets us pick the cut line per phase.
 
 > See also: `docs/ngm-auth-detector.md` (first-slice detector sketch),
 > `ngm/docs/cfm-embed-handshake.md` (first-slice embed-handshake sketch),
 > `ngm/docs/cfm-integration-map.md` (NGM-side driver/surface view),
 > `docs/cpanel-plugin-token-transport.md`, `docs/webui-api-curl-recipes.md`,
-> `docs/ssl-collector.md`, `docs/cfm-lsm.md`, `docs/cfm-php.md`,
+> `docs/ssl-collector.md`, `docs/cfm-lsm.md`, `docs/roadmaps/php-runtime-defense.md`,
 > `docs/dnat-bypass.md`.

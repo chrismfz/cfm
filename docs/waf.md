@@ -2208,6 +2208,91 @@ cfm.lua's vhost-controls panel still shows the "WAF on/off for this host" toggle
 
 ---
 
+## Labelled corpus (BlazeHTTP)
+
+Hit-rates (next section) say how often a rule fires on real traffic; they
+cannot say what the WAF **misses**, and a "noisy" rule may be catching real
+attacks. A labelled corpus answers both, before a change ships:
+
+```bash
+make waf-corpus                                   # fetch + run, print the report
+make waf-corpus ARGS="--out /tmp/before.tsv"      # keep per-sample results
+# … change a rule …
+make waf-corpus ARGS="--out /tmp/after.tsv --baseline /tmp/before.tsv"
+```
+
+`scripts/waf_corpus/blazehttp.sh` fetches [BlazeHTTP](https://github.com/chaitin/blazehttp)
+at a pinned commit into `~/.cache/cfm/` (~33 k benign `.white` and ~650 attack
+`.black` raw-HTTP samples) and runs `scripts/waf_corpus/run.lua` on it. It is
+GPL-3.0: run it, never vendor its samples or code into this repo. Bumping the
+pinned commit changes the corpus, so `--out` files from before are no longer
+comparable.
+
+**What it measures.** The engine, `cfm_waf.check()`, under LuaJIT with the
+shipped rule modes (plus `configs/lua/cfm_waf_config.lua`), given what the edge
+would hand it: `ngx.var.uri` emulated (percent-decoded, slashes merged, dot
+segments resolved; a bad `%`-escape, an escaped NUL or a path above the root is
+nginx's 400 and reported as such), lowercased header names with repeats as a
+list, header names nginx drops by default (`_` and other invalid characters)
+dropped, Content-Length as BlazeHTTP sends it (the body's length, or no header
+without a body), every POST/PUT/PATCH body given to the WAF up to
+`waf_body_max_len`. Each sample is a different client with a fresh shared dict,
+so the per-IP counting rules (501, 512) cannot fire. The `Host` header, and the
+host the WAF is told about, are `waf-corpus.example` (`--keep-host` uses the
+sample's): the corpus's attacks name an IP literal and its benign samples a
+hostname, so rule 602 would otherwise "detect" the layout (32.0% → 85.7%). A
+request with an absolute-form target (`GET http://host/…`) takes its host
+from the target, as nginx does. A file that is not an HTTP/1.x request is
+`parse_error`; leading empty lines are skipped, as nginx skips them.
+
+**What it does not model** (`cfm.lua` is not run): the bypass lists, per-vhost
+exclusions, clearance, traffic rules, IP / vhost decisions, and the body read
+gate. On the edge a body reaches the WAF when its Content-Type is inspectable
+(none, urlencoded, json, multipart, xml, `text/*`) or the path is on `cfm.lua`'s
+dynamic-endpoint list. The report tags each benign enforcing hit that needs the
+body: `ct` (read on any path) or `list` (read only on a listed path).
+
+**Outcome** per sample: `block`, `challenge`, `challenge_v2`, `logonly`, `clean`,
+`nginx_400`, `parse_error`, `error` (the WAF raised). "Detected" is an
+enforcing outcome (block or a challenge tier); the report also gives
+block-only and any-incl.-logonly rows. Rates are over the samples the WAF
+saw: `nginx_400` and `parse_error` have their own rows and are neither a
+detection nor a miss. When a hit is tagged as needing the body, the recheck
+ran the request without its body and without its Content-Length. The per-rule table counts every hit of a sample, not
+only the headline, so a rule that only fires behind a stronger one shows.
+
+### Baseline — 2026-11-18, BlazeHTTP `afc88a94`
+
+Over the samples the WAF saw: 657 of the 658 attacks (one is nginx's 400)
+and all 33 219 benign ones.
+
+| | attack (657) | benign (33 219) |
+|---|---|---|
+| block | 112 (17.0%) | 2 (0.01%) |
+| block + challenge tiers | 210 (32.0%) | 199 (0.60%) |
+| any, incl. logonly | 214 (32.6%) | 204 (0.61%) |
+
+- **False positives** are almost all rule 601 (`rule_ctrl_chars`,
+  challenge_v2): 178 of 199, all analytics / telemetry POST bodies carrying
+  binary or compressed bytes, which the edge reads: 113 declared `text/plain`,
+  36 sent no Content-Type, 28 `application/x-www-form-urlencoded`, 1
+  `application/json`. A fix keyed on "no Content-Type" would clear only the
+  36. Then 302 (`rule_xss`) 17. The two block FPs are arguable
+  labels: a `HEAD /?protocol=authentication` from an MSIE 8 UA (201) and a URL
+  carrying `%00` (101).
+- **Misses** by DVWA module: reflected XSS 59 / 243 detected, SQLi 53 / 118,
+  command execution 0 / 14 (`ip=127.0.0.1; cat /etc/passwd`, `ip=1|whoami`:
+  shell metacharacters in an arbitrarily named parameter, which 310 does not
+  read by design), file inclusion 7 / 10, upload 20 / 20; the non-DVWA samples
+  67 / 243. Examples of what passes: `<xss onafterscriptexecute=alert(1)>`, the
+  JSON `\u`-escaped and `\x`-escaped JS payloads, base64-wrapped template
+  injection.
+
+These are the numbers the ROADMAP's libinjection and normalization items are
+measured against: re-run with `--baseline` and read the changed samples.
+
+---
+
 ## Hit-rate measurement
 
 The "Operating the WAF" section above covers the operator workflow. This

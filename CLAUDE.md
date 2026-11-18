@@ -1064,6 +1064,7 @@ because of that. Hard-won points:
 | Vhost lockdown (no client exemption on a manual vhost challenge: crawler storms) | `docs/vhost-lockdown.md` |
 | Proxied-client IP filter (fleet feeds, local bans and allows for clients behind Cloudflare) | `docs/proxied-ipfilter.md` |
 | Imunify360 vs CFM: what Imunify catches that CFM does not (measured on earth; status of each gap) | `docs/imunify360-gap-analysis.md` · WebShield alone: `docs/imunify-webshield-parity.md` |
+| PHP runtime defense (CFM-managed Snuffleupagus; CFM writes no PHP extension of its own) | `docs/roadmaps/php-runtime-defense.md` |
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
