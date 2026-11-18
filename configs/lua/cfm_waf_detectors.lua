@@ -856,6 +856,151 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   return nil
 end
 
+-- Rule 10030 — a Drupal render-array callback key sent as request data
+-- (WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK,
+--  WAF_CVE:CVE_2018_7600:DRUPAL:<KEY>)
+-- A render array's `#`-keys name PHP callables Drupal calls while it renders.
+-- Request data that lands in one is code execution: Drupalgeddon2
+-- (CVE-2018-7600, Drupal 7/8: `name[#post_render][0]=array_map&name[#suffix]=
+-- eval(...)`) and SA-CORE-2026-014 (CVE-2026-108097, Field UI, every Drupal
+-- before 10.6.19 / 11.3.19 / 11.4.10: a row's `#region_callback` goes to
+-- call_user_func_array). Drupal builds those keys server-side, so no form, API
+-- or link sends one AS A KEY. Two places only, never the words in text (a
+-- quoted search for "#pre_render", a code sample in a post, a Markdown link
+-- `[#pre_render](...)` all carry them in a VALUE):
+--   * a request-field NAME, as PHP splits the query and a urlencoded or
+--     multipart body (each_request_field): `name[#post_render][0]`;
+--   * a JSON object key, `"#key":`, read as json_decode reads it (`"\u0023key":`
+--     and escaped letters too), in a JSON body (POST, PUT, PATCH: JSON:API and
+--     REST updates), and `#region_callback` alone in a field value that is a
+--     JSON document (`rows={"r1":{"#region_callback":...}}`, the lab-route
+--     probe; a render array pasted whole into a field is not an attack);
+--   * Drupal 7's `destination`, which it parses as a URL, so a key in its
+--     query is a field name (`destination=node?q[%2523post_render][]=...`,
+--     the node-delete Drupalgeddon2).
+-- A 7-day read of all 8 edge nodes' access.log (2026-11-18) found these keys
+-- only in attacks: the `#region_callback` probe and a Drupalgeddon2 payload
+-- that reached a site with a 200.
+-- region_callback first: a JSON field value is read for that one alone
+_M._DRUPAL_RENDER_KEYS = { "region_callback", "post_render", "pre_render", "lazy_builder", "access_callback" }
+
+do  -- own block: the module is at Lua's 200-locals limit
+-- the key, when a field name holds `[#key]`
+local function drupal_render_key_in_name(name)
+  if not name:find("#", 1, true) then
+    if not name:find("%", 1, true) then return nil end
+    name = _form_unescape(name)                -- double-encoded `%2523`
+    if not name:find("#", 1, true) then return nil end
+  end
+  name = lower(name)
+  local keys = _M._DRUPAL_RENDER_KEYS
+  for i = 1, #keys do
+    if name:find("[#" .. keys[i] .. "]", 1, true) then return keys[i] end
+  end
+  return nil
+end
+
+-- JSON text as json_decode reads its strings: a `\uXXXX` below 0x80 becomes
+-- its character (`"\u0023\u0072egion_callback"` is `#region_callback`), and
+-- every other escape, a `\"` or a `\u0022` included, becomes \1, so no escaped
+-- quote can open or close a key and no backslash is left.
+local function json_unescape(j)
+  if not j:find("\\", 1, true) then return j end
+  return (j:gsub("\\(.)(%x?%x?%x?%x?)", function(c, hex)
+    if c == "u" and #hex == 4 then
+      local cp = tonumber(hex, 16)
+      if cp < 0x80 and cp ~= 0x22 and cp ~= 0x5c then return string.char(cp) end
+      return "\1"
+    end
+    return "\1" .. hex
+  end))
+end
+
+-- the key, when JSON text `j` holds `"#key"` (the first `nkeys` keys, or
+-- all) as an object key: the quoted
+-- key, its opening quote not escaped, then `:`. Only text that writes a `#`,
+-- a letter or `_` as `\u00XX` pays the unescape (WordPress and page builders
+-- escape `<`, `>`, `&`, `'` and accents, never those).
+local function drupal_render_key_in_json(j, nkeys)
+  if not (j:find("#", 1, true) or j:find("\\u", 1, true)) then return nil end
+  local raw = not (j:find("\\u0023") or j:find("\\u00[4-7]%x"))
+  j = lower(raw and j or json_unescape(j))
+  if not j:find("#", 1, true) then return nil end
+  local keys = _M._DRUPAL_RENDER_KEYS
+  for i = 1, nkeys or #keys do
+    local lit = '"#' .. keys[i] .. '"'
+    local init = 1
+    while true do
+      local a, e = j:find(lit, init, true)
+      if not a then break end
+      if (a == 1 or j:byte(a - 1) ~= 92) and j:find("^%s*:", e + 1) then return keys[i] end
+      init = e + 1
+    end
+  end
+  return nil
+end
+
+local function json_doc(v)
+  return v:find("^%s*[{%[]") ~= nil
+end
+
+-- a large urlencoded source (query or body) is split only when its decoded
+-- text holds the pieces of some key (`region` + `callback`, ...): the same
+-- prefilter the other field-keyed rules use, except that a JSON escape that
+-- can hide a key's `#`, letters or `_` (`\u0072egion`, also double-encoded)
+-- always has it split
+local drupal_render_skip
+do
+  local want = {}
+  for _, k in ipairs(_M._DRUPAL_RENDER_KEYS) do want[k] = true end
+  local hints = want_hints(want)
+  drupal_render_skip = function(s)
+    if #s < SOURCE_PREFILTER_MIN then return false end
+    local d = lower(s:find("[%%+]") and _form_unescape(s) or s)
+    if d:find("\\u0023") or d:find("\\u00[4-7]%x") or d:find("%%5cu00[2-7]%x") then return false end
+    return not holds_hint(d, hints)
+  end
+end
+
+-- a JSON body sent without a JSON Content-Type still gets the JSON budget
+local JSON_CT = { ["Content-Type"] = "application/json" }
+
+function _M.detect_cve_drupal_render_callback(method, args, body, headers)
+  local hit
+  each_request_field(method, args, body, headers, function(k, v, _, enc)
+    if hit then return end
+    hit = drupal_render_key_in_name(k)
+    if hit or not v then return end
+    if enc and v:find("[%%+]") then v = _form_unescape(v) end   -- as PHP: once
+    if lower(k) == "destination" then
+      -- Drupal 7 reads `destination` as a URL (drupal_parse_url), so its query
+      -- registers fields: the node-delete Drupalgeddon2 sends
+      -- `destination=node?q[%2523post_render][]=passthru`
+      hit = drupal_render_key_in_name(v)
+      return
+    end
+    -- a value that is a JSON document: only the Field UI row key, the one
+    -- request data reaches as JSON (the lab-route probe); the others there are
+    -- a pasted render array as often as an attack
+    if not v:find("[#%%\\]") then return end
+    -- a value double-encoded whole (no quote left after PHP's decode)
+    if not v:find('"', 1, true) and v:find("%%22") then v = _form_unescape(v) end
+    if json_doc(v) then hit = drupal_render_key_in_json(v, 1) end
+  end, drupal_render_skip)
+  if not hit and (method == "post" or method == "put" or method == "patch")
+     and body and body ~= "" then
+    local mt = php_media_type(php_content_type(headers)) or ""
+    if mt:find("json", 1, true) then
+      hit = drupal_render_key_in_json(cap(body, body_budget(headers)))
+    elseif mt ~= "multipart/form-data" and mt ~= "application/x-www-form-urlencoded"
+       and json_doc(body) then
+      hit = drupal_render_key_in_json(cap(body, body_budget(JSON_CT)))
+    end
+  end
+  return hit and hit:upper() or nil
+end
+end
+
 -- Rule 10029 — CVE-2026-67282, Fabrik (Joomla) 1.0.0–4.6.7 unauth RCE. Source:
 -- the operator's incident report for dmkomotinis.gr (earth, 2026-11-12) and
 -- that site's edge log: the list filter takes `<table>___<element>[value]`

@@ -331,7 +331,8 @@ do
   local soap = src:find("pcall(wdet.magento_soap_call, lower(uri or \"\"), ngx.var.args)", 1, true)
   check(gate and wrap and first and soap and gate < wrap and wrap < first and first < soap,
     "cfm.lua reads a Magento SOAP body only where its gate would not, after it")
-  check(src:find('local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }', 1, true),
+  local ids = src:match("local BURNIN_ENFORCE_IDS = (%b{})") or ""
+  check(ids:find('["10027"] = true', 1, true) and ids:find('["10028"] = true', 1, true),
     "10027 / 10028 are enforced in the body burn-in")
   check(src:find("waf_ctx.burnin_pass = true", 1, true), "the burn-in second pass is flagged for check()")
 end
