@@ -53,8 +53,8 @@ type Config struct {
 // SSLCOLLECTOR_SOCK_PATH is ignored (with a warning) when it names another.
 const SSLCollectorSockPath = "/var/run/sslcollector.sock"
 
-// warnedIgnoredValue: keys whose ignored value was already logged by this
-// process (IgnoredValueNote).
+// warnedIgnoredValue: the IgnoredValueNote notes (key AND value) this process
+// already logged, so a value changed to another ignored one warns again.
 var warnedIgnoredValue sync.Map
 
 // IgnoredValueNote says why cfm.conf's value for key is not applied, or ""
@@ -1031,7 +1031,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			// Once per process: the file is parsed on every reload and by
 			// most CLI commands.
 			if note := IgnoredValueNote(key, val); note != "" {
-				if _, seen := warnedIgnoredValue.LoadOrStore(key, true); !seen {
+				if _, seen := warnedIgnoredValue.LoadOrStore(note, true); !seen {
 					log.Printf("config: warning: line %d: %s", lineNo, note)
 				}
 			}

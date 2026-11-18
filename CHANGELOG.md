@@ -50,7 +50,7 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **`SSLCOLLECTOR_SOCK_PATH` is fixed at `/var/run/sslcollector.sock`.** The
   edge has only ever connected to that path, so a node that set another one
   silently stopped delivering certificates to the edge. The daemon now ignores
-  any other value and logs a warning (once per process), and `cfm config test`
+  any other value and logs a warning (once per value), and `cfm config test`
   lists it under "ignored values"; the socket stays where it always was.
 
 ### Fixed

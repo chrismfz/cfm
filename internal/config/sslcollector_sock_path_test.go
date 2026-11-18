@@ -11,8 +11,9 @@ import (
 // daemon's: a different SSLCOLLECTOR_SOCK_PATH is ignored with a warning, and
 // the stock line (the fixed path) is accepted silently.
 func TestParseCFMConf_SSLCollectorSockPathIsFixed(t *testing.T) {
-	warnedIgnoredValue.Delete("SSLCOLLECTOR_SOCK_PATH") // once per process
-	t.Cleanup(func() { warnedIgnoredValue.Delete("SSLCOLLECTOR_SOCK_PATH") })
+	forget := func() { warnedIgnoredValue.Range(func(k, _ any) bool { warnedIgnoredValue.Delete(k); return true }) }
+	forget() // once per process: start from a clean slate
+	t.Cleanup(forget)
 	var logs bytes.Buffer
 	oldWriter, oldFlags := log.Writer(), log.Flags()
 	log.SetOutput(&logs)
@@ -37,6 +38,13 @@ func TestParseCFMConf_SSLCollectorSockPathIsFixed(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "SSLCOLLECTOR_SOCK_PATH") {
 		t.Fatalf("warned twice: %q", logs.String())
+	}
+	// A DIFFERENT ignored value (edited, then a reload) warns again.
+	if _, err := ParseCFMConf(strings.NewReader("SSLCOLLECTOR_SOCK_PATH = /run/third.sock\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "/run/third.sock is ignored") {
+		t.Fatalf("a new value must warn again, got %q", logs.String())
 	}
 
 	logs.Reset()
