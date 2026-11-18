@@ -35,6 +35,30 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
+// startConfigSync runs syncConfigs on its own goroutine, so a SpamAssassin lint
+// and spamd restart (seconds, minutes on a loaded box) never hold up the work
+// loop's unblocks and fingerprint-policy pulls. A tick that finds the previous
+// sync still running skips this one. Stop cancels it (the lint and the
+// post-update command run under its context).
+func (r *Runner) startConfigSync() {
+	if !r.fileSyncRunning.CompareAndSwap(false, true) {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-r.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	go func() {
+		defer r.fileSyncRunning.Store(false)
+		defer cancel()
+		r.syncConfigs(ctx)
+	}()
+}
+
 func (r *Runner) syncConfigs(ctx context.Context) {
 	cfg := r.cur()
 	if cfg.BaseURL == "" || cfg.Token == "" {
@@ -55,9 +79,13 @@ func (r *Runner) syncConfigs(ctx context.Context) {
 	// figure out diffs
 	var need []string
 	for path, remoteHash := range tracked {
-		if local := sha1File(path); !strings.EqualFold(local, remoteHash) {
-			need = append(need, path)
+		if local := sha1File(path); strings.EqualFold(local, remoteHash) {
+			continue
 		}
+		if r.files.isParked(path, remoteHash) {
+			continue // failed the SpamAssassin lint; not worth downloading again
+		}
+		need = append(need, path)
 	}
 	if len(need) == 0 {
 		return

