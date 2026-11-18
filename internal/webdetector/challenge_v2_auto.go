@@ -61,6 +61,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -334,8 +335,9 @@ func (t vhostV2Tier) via() string {
 // autoV2Trigger names the automatic source covering host, or "" when none
 // does: the first ARMED source among those the tick has noted on the live
 // vhost challenge covering host, else the first noted one (reported,
-// unarmed). With no live vhost challenge, or no live note, there is no
-// automatic source — the entry's own sticky Reason is never used to arm (it
+// unarmed). vhost_config also counts while host is on the CHALLENGE_VHOST
+// list itself (noted or not). With no live vhost challenge, or no live note
+// or list match, there is no automatic source — the entry's own sticky Reason is never used to arm (it
 // can outlive the source that wrote it). Every source, Under-Attack included,
 // is re-noted by the tick on each cycle it is active and dropped the cycle it
 // turns off; a note nobody drops lives no longer than the challenge entry it
@@ -345,8 +347,21 @@ func (e *Engine) autoV2Trigger(host string) string {
 		return ""
 	}
 	own, apexSrcs, apex, ok := e.nginxBridge.vhostAutoSources(host)
-	if !ok || (len(own) == 0 && len(apexSrcs) == 0) {
-		return "" // the common case: no note — no suppression lookup at all
+	if !ok {
+		return "" // the common case: no live vhost challenge covers host
+	}
+	// vhost_config is read from the config list, not only from the tick's
+	// note: the list is wildcards by default (webmail.*, whm.*, cpanel.*), and
+	// the tick notes a wildcard-matched host only while it is a candidate. A
+	// quiet panel subdomain's first visitors solved under the pattern's
+	// challenge with no note, at v1 (orion/titan, 2026-11-18: 16 farm solves
+	// in 7 hours). The list match is the same predicate the tick notes and
+	// drops on, so the two cannot disagree; the live entry is required above.
+	if e.cfgListsVhost(host) && !slices.Contains(own, autoV2VhostConfig) {
+		own = mergeAutoSources(own, []string{autoV2VhostConfig})
+	}
+	if len(own) == 0 && len(apexSrcs) == 0 {
+		return "" // no note — no suppression lookup at all
 	}
 	if e.hostAutoSuppressed(host) {
 		return ""
@@ -367,6 +382,12 @@ func (e *Engine) autoV2Trigger(host string) string {
 }
 
 // mergeAutoSources unions two noted-source lists into autoSourceOrder.
+// cfgListsVhost reports whether host is on the CHALLENGE_VHOST config list —
+// the tick's own vhost_config note condition (challenge_rules.go).
+func (e *Engine) cfgListsVhost(host string) bool {
+	return len(e.cfg.ChallengeVHost) > 0 && hostMatchAny(host, e.cfg.ChallengeVHost)
+}
+
 func mergeAutoSources(a, b []string) []string {
 	if len(b) == 0 {
 		return a

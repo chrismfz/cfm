@@ -20,7 +20,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **ChallengeV2: a quiet `cpanel.`/`webmail.`/`whm.` subdomain is at v2 from
+  its first solve.** The default `CHALLENGE_VHOST` list is wildcards, and the
+  tick noted a matching host as `vhost_config` only while it had traffic in
+  the window, so the first visitors after a quiet spell solved the always-on
+  panel challenge at v1 and got a cookie: 16 solver-farm solves in seven hours
+  on two nodes. The tier resolver now reads the list itself: a listed host
+  under a live vhost challenge is `vhost_config` with or without a note. A v1
+  pin still decides, and the list alone, with no live challenge, arms nothing.
 
 ## 2026.11.18
 
