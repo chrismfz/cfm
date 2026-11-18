@@ -215,6 +215,18 @@ request so the IP can be banned.
   later phase (scan → suspect alerts/quarantine opt-in → autoblock); kernel deny
   is not planned.
 
+## 11. PHP runtime defense (CFM-managed Snuffleupagus)
+
+Design: `docs/roadmaps/php-runtime-defense.md`. The PHP-VM layer Imunify
+Proactive Defense covers on Imunify hosts: CFM renders Snuffleupagus rules,
+monitor/enforce modes and per-vhost excludes, and never writes its own PHP
+extension (the `cfm-php` extension seed was dropped on 2026-11-18: one engine
+for one purpose). Pairs with §10 at the kernel boundary.
+
+- **P0a `cfm php-inventory`** — done (2026-07-22).
+- **P0b per-vhost PHP handler mapping (alt-php vs ea-php)** — next; it picks
+  the beachhead adapter for P1 (monitor-only, one server).
+
 ---
 
 _Larger design docs live under `docs/`; this roadmap only indexes them. See
