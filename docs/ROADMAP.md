@@ -45,6 +45,13 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
   column, `auth_corpus` MCP tool); next the detector counts FAILED logins per
   IP across vhosts, per vhost, per /24, and flags a success from an IP that
   failed elsewhere. Design + fleet numbers: `docs/webdetector-signals-v2.md`.
+- **Traffic rules: `match.asn_in` / `asn_not_in`** — [next]. Block /
+  throttle / challenge a hosting ASN per vhost (the Singapore-datacenter shop
+  case); cache-only ASN lookup on the hot path, fail-open on a miss.
+  `traffic_rules.go` and `rules-model.js` in the same PR.
+  `docs/traffic-rules-ux-proposal.md` §3a.
+- **Traffic rules: simulate a draft with a `trace`** — [idea]. Why a rule
+  did or did not match, before saving it.
 - **cfm-admin WAF / ban UX** — [idea].
   - Hit-rates view: `/api/v1/waf/hit-rates` and its promotion hint
     (`ok_to_promote` / `silent` / `review` / `noisy`) are CLI/API only today.
@@ -123,9 +130,11 @@ per-ability tokens.
 - **No CSP / frame policy / HSTS on the admin UI** — [decided 2026-08-25].
   Inline scripts, the cPanel iframe and per-host HSTS; reasons in
   `docs/security/control-plane.md` §7.
-- **Pre-auth challenge in front of the direct admin login** — [idea]. Design:
-  `docs/security/challenge-login-gate-design.md` (test both edge and DNAT
-  mode).
+- **No PoW challenge in front of the `/cfm-admin/` login** — [decided
+  2026-11-18]. `:6061` is nft-gated and `:6060` is loopback, so only the edge
+  path is public, and its login already has MFA, the login throttle and the
+  rate limiter. A challenge there risks the SSO / token flows. If one is ever
+  wanted, a path challenge on `/cfm-admin/login` from cfm-admin does it.
 - **Fleet `detectors.conf` fixes** — [next, operator]. Quote typos, missing
   panel `CHALLENGE_VHOST` patterns, `permanent` leniency, dead keys:
   `docs/detectors-config-unification.md` §7.

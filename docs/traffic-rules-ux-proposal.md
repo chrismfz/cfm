@@ -1,6 +1,6 @@
 # Traffic Rules (cfm-admin) — UX review & redesign proposal
 
-Status: **Phase 1 landed** (guided editor, recipes, banners, simulator pre-fill, docs fix — plus the F12 engine fix below). **Phase 2 partially landed:** `country_not_in`, `ip_any` and `verified_bot` (engine + editor chips + recipes). Remaining Phase 2 (`asn_in`, simulate `draft`/`trace`, `group`) and Phase 3 are still proposals. Scope: the
+Status: **Phase 1 landed** (guided editor, recipes, banners, simulator pre-fill, docs fix — plus the F12 engine fix below). **Phase 2 partially landed:** `country_not_in`, `ip_any` and `verified_bot` (engine + editor chips + recipes). Open (2026-11-18): `asn_in` ([next] in `docs/ROADMAP.md`) and simulate `draft`/`trace` ([idea]). Dropped: the `group` field (the `recipe:` note prefix does the job) and Phase 3. §1 (how rules behave) is the part that stays current. Scope: the
 `/cfm-admin/webdetector/rules/` page (`internal/webui/static/webdetector/rules/`,
 `assets/webdet/feature-rules.js`), the rule model in
 `internal/webdetector/traffic_rules.go`, and the edge application path in
