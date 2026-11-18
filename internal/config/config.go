@@ -53,6 +53,25 @@ type Config struct {
 // SSLCOLLECTOR_SOCK_PATH is ignored (with a warning) when it names another.
 const SSLCollectorSockPath = "/var/run/sslcollector.sock"
 
+// warnedIgnoredValue: keys whose ignored value was already logged by this
+// process (IgnoredValueNote).
+var warnedIgnoredValue sync.Map
+
+// IgnoredValueNote says why cfm.conf's value for key is not applied, or ""
+// when it is. val is the value as written after '=' (an inline comment and
+// surrounding quotes are dropped first, as the parser does). The parser's
+// warning and `cfm config test` both read it, so they cannot disagree.
+func IgnoredValueNote(key, val string) string {
+	v := strings.TrimSpace(trimQuotes(stripInlineComment(strings.TrimSpace(val))))
+	switch strings.ToUpper(strings.TrimSpace(key)) {
+	case "SSLCOLLECTOR_SOCK_PATH":
+		if v != "" && v != SSLCollectorSockPath {
+			return "SSLCOLLECTOR_SOCK_PATH=" + v + " is ignored: the sslcollector socket is fixed at " + SSLCollectorSockPath + " (the edge connects to that path only)"
+		}
+	}
+	return ""
+}
+
 // SSLCollectorSockConfig — exposes sslcollector over unix socket for OpenResty
 type SSLCollectorSockConfig struct {
 	Enabled      bool          // SSLCOLLECTOR_SOCK_ENABLE
@@ -1009,8 +1028,12 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 			// The path is fixed: the edge's sslcollector.lua (and the
 			// packaging, and `cfm dnat` diagnostics) only know this one, so a
 			// moved socket silently cut certificate delivery to the edge.
-			if v := strings.TrimSpace(val); v != "" && v != SSLCollectorSockPath {
-				log.Printf("config: warning: SSLCOLLECTOR_SOCK_PATH=%s ignored at line %d: the sslcollector socket is fixed at %s (the edge connects to that path only)", v, lineNo, SSLCollectorSockPath)
+			// Once per process: the file is parsed on every reload and by
+			// most CLI commands.
+			if note := IgnoredValueNote(key, val); note != "" {
+				if _, seen := warnedIgnoredValue.LoadOrStore(key, true); !seen {
+					log.Printf("config: warning: line %d: %s", lineNo, note)
+				}
 			}
 			cfg.SSLCollectorSock.SockPath = SSLCollectorSockPath
 		case "SSLCOLLECTOR_SOCK_TOKEN":

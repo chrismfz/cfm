@@ -335,6 +335,13 @@ func (b *Backend) scanManagedDNATRules(t *nftables.Table, ch *nftables.Chain) (b
 	if err != nil {
 		return false, nil, err
 	}
+	on, found := managedDNATSpecs(rules)
+	return on, found, nil
+}
+
+// managedDNATSpecs returns the chain's CFM DNAT rules (tag and exprs both
+// matching), sorted.
+func managedDNATSpecs(rules []*nftables.Rule) (bool, []dnatRuleSpec) {
 	found := make([]dnatRuleSpec, 0, 3)
 	for _, r := range rules {
 		spec, ok := parseDNATRuleSpecID(string(r.UserData))
@@ -357,7 +364,7 @@ func (b *Backend) scanManagedDNATRules(t *nftables.Table, ch *nftables.Chain) (b
 		}
 		return found[i].sourceSet < found[j].sourceSet
 	})
-	return len(found) > 0, found, nil
+	return len(found) > 0, found
 }
 
 func (b *Backend) DNATShow(family, table string) (string, error) {
@@ -371,27 +378,41 @@ func (b *Backend) DNATShow(family, table string) (string, error) {
 	if ch == nil {
 		return "", nil
 	}
-	on, found, err := b.scanManagedDNATRules(t, ch)
+	rules, err := b.conn.GetRules(t, ch)
 	if err != nil {
 		return "", err
 	}
+	return dnatShowText(family, table, rules, ch.Priority, b.dnatPriority()), nil
+}
+
+// dnatShowText renders the web DNAT chain for `cfm dnat`: the live chain's
+// priority (the configured one when the kernel reports none), the source-IP
+// bypass rules in chain order (they run before every DNAT rule), then the
+// DNAT rules. Empty when no CFM DNAT rule is installed. Callers parse the
+// priority line and the `dport ... dnat to` lines only
+// (parseDNATChainPriority, firewall.ParseDNATListenerPorts).
+func dnatShowText(family, table string, rules []*nftables.Rule, live *nftables.ChainPriority, configured int) string {
+	on, found := managedDNATSpecs(rules)
 	if !on {
-		return "", nil
+		return ""
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "table %s %s {\n", family, table)
 	out.WriteString("  chain prerouting {\n")
 	// The live chain's priority, so drift from the configured value shows.
-	prio := b.dnatPriority()
-	if ch.Priority != nil {
-		prio = int(*ch.Priority)
+	prio := configured
+	if live != nil {
+		prio = int(*live)
 	}
 	out.WriteString(fmt.Sprintf("    type nat hook prerouting priority %d; policy accept;\n\n", prio))
+	for _, line := range dnatBypassShowLines(rules) {
+		fmt.Fprintf(&out, "    %s\n", line)
+	}
 	for _, spec := range found {
 		fmt.Fprintf(&out, "    %s\n", dnatShowRuleLine(spec))
 	}
 	out.WriteString("  }\n}\n")
-	return out.String(), nil
+	return out.String()
 }
 
 func dnatShowRuleLine(spec dnatRuleSpec) string {

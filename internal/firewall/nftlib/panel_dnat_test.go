@@ -62,9 +62,48 @@ func TestPanelDNATShowTextUsesThePanelChainPriority(t *testing.T) {
 }
 
 func TestDNATBypassShowRuleLineRejectsForeignRules(t *testing.T) {
-	for _, ud := range []string{"", "cfm_dnat:v1:x", dnatBypassUserDataPrefix + "not-an-ip"} {
+	// The tag is read like the bypass file: a host CIDR is masked.
+	if l, ok := dnatBypassShowRuleLine([]byte(dnatBypassUserDataPrefix + "192.0.2.7/24")); !ok || l != "ip saddr 192.0.2.0/24 accept" {
+		t.Errorf("CIDR tag rendered %q ok=%t", l, ok)
+	}
+	for _, ud := range []string{"", "cfm_dnat:v1:x", dnatBypassUserDataPrefix + "not-an-ip", dnatBypassUserDataPrefix} {
 		if l, ok := dnatBypassShowRuleLine([]byte(ud)); ok {
 			t.Errorf("%q rendered as %q", ud, l)
 		}
+	}
+}
+
+// `cfm dnat` (web scope) lists the bypass rules too, before the DNAT rules as
+// in the chain, and the lines its callers parse are unchanged: the listener
+// ports (firewall.ParseDNATListenerPorts) and the live priority.
+func TestDNATShowTextListsBypassRules(t *testing.T) {
+	http := dnatRuleSpec{family: nftables.TableFamilyINet, proto: 6, dport: 80, toPort: 9080}
+	https := dnatRuleSpec{family: nftables.TableFamilyINet, proto: 6, dport: 443, toPort: 9043}
+	rules := []*nftables.Rule{
+		{UserData: []byte(dnatLoopbackAcceptTag), Exprs: dnatLoopbackAcceptExprs()},
+		{UserData: []byte(dnatBypassUserDataPrefix + "198.51.100.0/24")},
+		{UserData: []byte(http.id()), Exprs: dnatRuleExprs(http)},
+		{UserData: []byte(https.id()), Exprs: dnatRuleExprs(https)},
+	}
+	live := nftables.ChainPriority(-101)
+	out := dnatShowText("inet", "cfm_redirect", rules, &live, -99)
+	if !strings.Contains(out, "ip saddr 198.51.100.0/24 accept") {
+		t.Fatalf("web status lacks the bypass rule:\n%s", out)
+	}
+	if strings.Index(out, "198.51.100.0/24") > strings.Index(out, dnatShowRuleLine(http)) {
+		t.Errorf("bypass rules must come before the DNAT rules:\n%s", out)
+	}
+	if !strings.Contains(out, "priority -101;") {
+		t.Errorf("want the live priority -101:\n%s", out)
+	}
+	if h, hs, ok := firewall.ParseDNATListenerPorts(out); !ok || h != 9080 || hs != 9043 {
+		t.Errorf("listener ports = %d/%d ok=%t, want 9080/9043:\n%s", h, hs, ok, out)
+	}
+	if out := dnatShowText("inet", "cfm_redirect", rules, nil, -99); !strings.Contains(out, "priority -99;") {
+		t.Errorf("no live priority: want the configured -99:\n%s", out)
+	}
+	// Bypass rules alone are not a DNAT: no CFM DNAT rule, no listing.
+	if out := dnatShowText("inet", "cfm_redirect", rules[:2], &live, -99); out != "" {
+		t.Errorf("a chain without DNAT rules must render empty, got:\n%s", out)
 	}
 }

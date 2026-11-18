@@ -135,9 +135,10 @@ cfm dnat cpanel bypass list
 nft list table inet cfm_panel_redirect     # or inet cfm_redirect for the web scope
 ```
 
-On the `nftlib` engine, `cfm dnat` / `cfm dnat cpanel status` print a
-rendering that leaves the bypass rules out; `nft list table` shows them on
-either engine. If an entry is in the file but
+`cfm dnat` and `cfm dnat cpanel status` list the bypass rules on both
+engines: the exec engine prints the raw table, the `nftlib` engine a
+rendering of the live chain (`ip saddr … accept` / `ip6 saddr … accept`,
+before the DNAT rules, as in the chain). If an entry is in the file but
 not in the table, the DNAT is off or the file was hand-edited (see CLI
 above).
 
