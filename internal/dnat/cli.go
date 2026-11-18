@@ -786,9 +786,10 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			// re-installs. The old line printed the `priority` flag default (-101
 			// for every invocation), so it misreported a panel enabled at any
 			// other priority (e.g. -99 via fallback mode or an explicit flag).
-			// We deliberately do NOT parse the rule text here: the nftlib backend
-			// synthesizes that text from a recomputed value rather than the live
-			// chain, so it is unreliable there.
+			// We deliberately do NOT parse the rule text here: it is the exec
+			// engine's raw `nft list` output on one backend and a rendering of
+			// the live chain on nftlib, and the two print a priority differently
+			// (`dstnat + 1` vs -99).
 			fmt.Printf("State: ON\nInstalled priority: %d\nSelected mode: %s\n", PanelStartupPriority(), selected)
 		} else {
 			fmt.Println("State: OFF")

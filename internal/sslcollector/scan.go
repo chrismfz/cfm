@@ -138,8 +138,12 @@ func (c *Collector) Refresh(ctx context.Context) error {
 	// Persist the snapshot so workers (angie/openresty) can load it on
 	// init_worker before the sslcollector socket is reachable. Best-effort:
 	// errors are logged inside WriteSnapshot; do not propagate, since a
-	// failed snapshot write must never break the running daemon.
-	c.WriteSnapshot()
+	// failed snapshot write must never break the running daemon. A
+	// ReadOnly collector (the `cfm ssl` CLI) never writes it: the file is
+	// the daemon's.
+	if !c.cfg.ReadOnly {
+		c.WriteSnapshot()
+	}
 
 	// Mark as refreshed so Run()'s startup path can skip its own
 	// initial Refresh when the caller already invoked one

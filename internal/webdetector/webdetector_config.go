@@ -63,7 +63,7 @@ type Config struct {
 
 	// Long-window scoring
 	LongFactor int     // how many short windows ~= long horizon (e.g. 10)
-	MinScore   float64 // minimum suspicious score
+	MinScore   float64 // minimum suspicious score (DefaultMinScore when unset)
 
 	// API
 	APIListen string // "127.0.0.1:9070" etc.
@@ -405,6 +405,11 @@ type Config struct {
 // values when it evaluates a shadow-only config where these are left at 0 (the
 // FillDefaults normalization below only sets them when the live arm is enabled) —
 // no divergent literal (CLAUDE.md §5).
+// DefaultMinScore is the long-window suspicious-score floor when
+// [webdetector] MIN_SCORE is unset: the config default, the detectors
+// register's default and the /suspicious API's fallback, all one value.
+const DefaultMinScore = 0.60
+
 const (
 	defaultChallengeSuspiciousScoreOn   = 0.70
 	defaultChallengeSuspiciousMinUniqIP = 80
@@ -428,7 +433,7 @@ func (c *Config) FillDefaults() {
 		c.LongFactor = 10
 	}
 	if c.MinScore <= 0 {
-		c.MinScore = 0.60
+		c.MinScore = DefaultMinScore
 	}
 	if c.APIListen == "" {
 		c.APIListen = "127.0.0.1:9070"

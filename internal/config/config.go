@@ -48,10 +48,15 @@ type Config struct {
 
 // --- Categories ---
 
+// SSLCollectorSockPath is the sslcollector unix socket. It is fixed: the
+// edge's sslcollector.lua connects to this path only, so cfm.conf's
+// SSLCOLLECTOR_SOCK_PATH is ignored (with a warning) when it names another.
+const SSLCollectorSockPath = "/var/run/sslcollector.sock"
+
 // SSLCollectorSockConfig — exposes sslcollector over unix socket for OpenResty
 type SSLCollectorSockConfig struct {
 	Enabled      bool          // SSLCOLLECTOR_SOCK_ENABLE
-	SockPath     string        // SSLCOLLECTOR_SOCK_PATH
+	SockPath     string        // always SSLCollectorSockPath from cfm.conf (SSLCOLLECTOR_SOCK_PATH is not honoured)
 	Token        string        // SSLCOLLECTOR_SOCK_TOKEN (optional)
 	LuaTokenPath string        // SSLCOLLECTOR_LUA_TOKEN_PATH (default /var/lib/cfm/lua/cfm_token.lua)
 	PEMTTL       time.Duration // SSLCOLLECTOR_SOCK_PEM_TTL (default 10m)
@@ -527,7 +532,7 @@ func (c *Config) SetDefaults() {
 
 	// SSLCollector unix socket defaults
 	if c.SSLCollectorSock.SockPath == "" {
-		c.SSLCollectorSock.SockPath = "/var/run/sslcollector.sock"
+		c.SSLCollectorSock.SockPath = SSLCollectorSockPath
 	}
 	if c.SSLCollectorSock.LuaTokenPath == "" {
 		c.SSLCollectorSock.LuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
@@ -1001,7 +1006,13 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "SSLCOLLECTOR_SOCK_ENABLE":
 			cfg.SSLCollectorSock.Enabled = parseBool(val)
 		case "SSLCOLLECTOR_SOCK_PATH":
-			cfg.SSLCollectorSock.SockPath = val
+			// The path is fixed: the edge's sslcollector.lua (and the
+			// packaging, and `cfm dnat` diagnostics) only know this one, so a
+			// moved socket silently cut certificate delivery to the edge.
+			if v := strings.TrimSpace(val); v != "" && v != SSLCollectorSockPath {
+				log.Printf("config: warning: SSLCOLLECTOR_SOCK_PATH=%s ignored at line %d: the sslcollector socket is fixed at %s (the edge connects to that path only)", v, lineNo, SSLCollectorSockPath)
+			}
+			cfg.SSLCollectorSock.SockPath = SSLCollectorSockPath
 		case "SSLCOLLECTOR_SOCK_TOKEN":
 			cfg.SSLCollectorSock.Token = val
 		case "SSLCOLLECTOR_LUA_TOKEN_PATH":

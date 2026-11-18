@@ -41,6 +41,9 @@ func RunCLI(args []string, defaultSockPath, defaultToken string) {
 		DiscoveryEvery: 6 * time.Hour,
 		NegativeTTL:    30 * time.Second,
 		MaxCertCache:   20000,
+		// The daemon owns dump.json and the cache dir: a CLI refresh only
+		// reads the cert files.
+		ReadOnly: true,
 	})
 
 	ctx := context.Background()

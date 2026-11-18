@@ -341,7 +341,9 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	limit := 50
 	minScore := e.cfg.MinScore
 	if minScore <= 0 {
-		minScore = 0.50
+		// The same default the config fills in ([webdetector] MIN_SCORE);
+		// this once fell back to 0.50 and listed rows the config default hid.
+		minScore = DefaultMinScore
 	}
 	rows := decorateDCFracSuspicious(decorateCostSuspicious(decorateFacetSuspicious(decorateShadowSuspicious(decorateSolverFarmSuspicious(applySuspiciousFilter(e.longwin.SuspiciousTop(limit, minScore), parseVhostFilter(r)))))))
 	writeJSON(w, http.StatusOK, rows)

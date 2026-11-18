@@ -31,7 +31,8 @@
 //     (/var/lib/cfm/sslcollector/dump.json, mode 0640) contains cert+key pairs
 //     for all hosted domains.  Encrypting it with a key only available from the
 //     running cfm daemon would prevent exfiltration of the file in isolation.
-//     Controlled via SSLCOLLECTOR_OFFLINE_CACHE in cfm.conf.
+//     SSLCOLLECTOR_OFFLINE_CACHE = 0 does NOT keep the file off the disk: it
+//     only stops the edge workers reading it; the daemon still writes it.
 //     See: docs/ssl-collector.md
 package sslcollector
 

@@ -849,3 +849,45 @@ func TestRefreshDoesNotCarryADanglingCertLink(t *testing.T) {
 		t.Fatal("a pair whose cert link dangles was carried")
 	}
 }
+
+// TestReadOnlyRefreshNeverWritesTheSnapshot: the `cfm ssl` CLI's collector
+// (ReadOnly) indexes the same certs but leaves the daemon's dump.json and
+// cache dir alone; the daemon's collector writes the snapshot as before.
+func TestReadOnlyRefreshNeverWritesTheSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	_, _, certPEM, keyPEM := genTestCert(t, "ro.example.gr", nil, nil)
+	cert, key := filepath.Join(dir, "c.cert"), filepath.Join(dir, "c.key")
+	for p, b := range map[string][]byte{cert: certPEM, key: keyPEM} {
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	discoverPairsHook = func() []Pair { return []Pair{{Source: SrcGeneric, CertPath: cert, KeyPath: key}} }
+	t.Cleanup(func() { discoverPairsHook = nil })
+	origPath := snapshotPathForTests
+	snapshotPathForTests = filepath.Join(dir, "snap", "dump.json")
+	t.Cleanup(func() { snapshotPathForTests = origPath })
+
+	cacheDir := filepath.Join(dir, "cache")
+	ro := New(Config{CacheDir: cacheDir, ReadOnly: true})
+	if err := ro.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ro.EntryForHost("ro.example.gr") == nil {
+		t.Fatal("a ReadOnly collector must still index the certs")
+	}
+	if _, err := os.Stat(snapshotPathForTests); !os.IsNotExist(err) {
+		t.Fatalf("ReadOnly Refresh wrote the snapshot (stat err=%v)", err)
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Fatalf("ReadOnly New created the cache dir (stat err=%v)", err)
+	}
+
+	rw := New(Config{CacheDir: cacheDir})
+	if err := rw.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(snapshotPathForTests); err != nil {
+		t.Fatalf("the daemon's collector must write the snapshot: %v", err)
+	}
+}

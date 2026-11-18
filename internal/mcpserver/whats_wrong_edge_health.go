@@ -79,6 +79,7 @@ var edgeHealthCheckTitles = map[string]string{
 	"origin-ka-tier":         "origin keepalive degraded",
 	"cdn-cached-challenge":   "CDN caching the challenge",
 	"origin-real-ip":         "origin logs 127.0.0.1, not visitors",
+	"web-dnat-order":         "web traffic DNAT'd ahead of the edge",
 }
 
 func edgeHealthTitle(check string) string {

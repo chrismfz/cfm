@@ -150,6 +150,16 @@ func TestEvalEdgeHealth_UnmappedCheckFallsBack(t *testing.T) {
 	}
 }
 
+// Check H has a human title like the others (it once fell back to its raw id).
+func TestEvalEdgeHealth_WebDNATOrderHasTitle(t *testing.T) {
+	fs := evalEdgeHealth(json.RawMessage(edgeHealthBody(
+		[4]string{"web-dnat-order", "warn", "WebShield DNATs ahead of the edge", ""},
+	)))
+	if len(fs) != 1 || fs[0].Title != "web traffic DNAT'd ahead of the edge" {
+		t.Fatalf("findings = %+v, want the web-dnat-order title", fs)
+	}
+}
+
 func TestEvalEdgeHealth_MalformedBodyIsSafe(t *testing.T) {
 	if fs := evalEdgeHealth(json.RawMessage(`not json`)); fs != nil {
 		t.Fatalf("malformed body must yield no findings, got %+v", fs)

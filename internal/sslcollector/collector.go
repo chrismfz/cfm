@@ -78,7 +78,9 @@ func New(cfg Config) *Collector {
 		cfg.MaxCertCache = 20000
 	}
 
-	_ = os.MkdirAll(cfg.CacheDir, 0o700)
+	if !cfg.ReadOnly {
+		_ = os.MkdirAll(cfg.CacheDir, 0o700)
+	}
 
 	return &Collector{
 		cfg:        cfg,

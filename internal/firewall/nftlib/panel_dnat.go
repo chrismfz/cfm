@@ -114,17 +114,31 @@ func (b *Backend) PanelDNATStatus() (bool, string, error) {
 	if len(rules) == 0 {
 		return false, "", nil
 	}
-	return true, panelDNATShowText(rules, b.dnatPriority()), nil
+	return true, panelDNATShowText(rules, ch.Priority), nil
 }
 
-func panelDNATShowText(rules []*nftables.Rule, priority int) string {
+// panelDNATShowText renders the live panel chain the way `nft list table`
+// would, for `cfm dnat cpanel status`. The priority is the chain's own, as
+// the kernel reports it: the panel chain is installed at the panel priority
+// (PanelDNATOn's argument, dnat.PanelStartupPriority), never the web
+// redirect's NFT_DNAT_PRIORITY, which this used to print. The source-IP
+// bypass rules are listed too, as the exec engine's raw table shows them.
+func panelDNATShowText(rules []*nftables.Rule, priority *nftables.ChainPriority) string {
 	var out strings.Builder
 	out.WriteString("table inet cfm_panel_redirect {\n")
 	out.WriteString("  chain prerouting {\n")
-	fmt.Fprintf(&out, "    type nat hook prerouting priority %d; policy accept;\n\n", priority)
+	if priority != nil {
+		fmt.Fprintf(&out, "    type nat hook prerouting priority %d; policy accept;\n\n", int32(*priority))
+	} else {
+		out.WriteString("    type nat hook prerouting; policy accept; # priority not reported by the kernel\n\n")
+	}
 	for _, r := range rules {
 		if dnatLoopbackAcceptMatches(r) {
 			out.WriteString("    iif \"lo\" accept\n")
+			continue
+		}
+		if line, ok := dnatBypassShowRuleLine(r.UserData); ok {
+			fmt.Fprintf(&out, "    %s\n", line)
 			continue
 		}
 		spec, ok := parseDNATRuleSpecID(string(r.UserData))

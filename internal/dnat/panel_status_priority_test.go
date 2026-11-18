@@ -26,7 +26,7 @@ func (b panelStatusStub) PanelDNATAcceptState() map[int]string    { return nil }
 // by a prior `panel on` — `status` must report that installed value, not the
 // -101 flag default it used to print regardless. It is read from the persisted
 // operator choice (PanelStartupPriority), which is correct on both firewall
-// backends (the nftlib backend's synthesized rule text is not).
+// backends (the rule text prints a priority differently per backend).
 func TestPanelStatusReportsInstalledPriority(t *testing.T) {
 	dir := t.TempDir()
 	origPath := panelDNATPriorityPath
