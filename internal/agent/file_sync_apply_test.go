@@ -147,6 +147,7 @@ func TestApplyUpdatesRefusesSpamassassinCode(t *testing.T) {
 		f.update(f.saDir+"evil2.cf", "tryplugin Evil x.pm\n", "systemctl restart spamd"),
 		f.update(f.saDir+"evil3.cf", "include /etc/cfm/x.cf\n", "systemctl restart spamd"),
 		f.update(f.saDir+"evil4.cf", "include ../../etc/cfm/x.cf\n", ""),
+		f.update(f.saDir+"evil5.cf", "loadplugin Foo;system(\"id\")\n", ""),
 		f.update(f.saDir+"v999.pre", "score A 1\n", "systemctl restart spamd"),
 		f.update(f.saDir+"x.pm", "1;\n", ""),
 	}
@@ -163,7 +164,7 @@ func TestApplyUpdatesRefusesSpamassassinCode(t *testing.T) {
 		}
 	}
 	res = st.applyUpdates(context.Background(), []ConfigUpdate{
-		f.update(f.saDir+"myip.cf", "loadplugin    Mail::SpamAssassin::Plugin::DCC\ndcc_home /var/dcc\n", ""),
+		f.update(f.saDir+"myip.cf", "loadplugin    Mail::SpamAssassin::Plugin::DCC\nloadplugin Mail::SpamAssassin::Plugin::SPF # sender checks\ndcc_home /var/dcc\n", ""),
 		f.update(f.saDir+"inc.cf", "include extra/rules.cf\ninclude "+f.saDir+"more.cf\n", ""),
 		f.update(f.saDir+"ok.cf", "describe X mentions loadplugin in text\n", ""),
 	}, f.allowed())
@@ -383,29 +384,30 @@ func TestSyncConfigsSkipsParkedDownload(t *testing.T) {
 // startConfigSync never runs two syncs at once: a tick during a slow sync is
 // skipped rather than queued.
 func TestStartConfigSyncDoesNotOverlap(t *testing.T) {
+	entered := make(chan struct{}, 4)
 	release := make(chan struct{})
 	var listCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		listCalls.Add(1)
+		entered <- struct{}{}
 		<-release
 		_ = json.NewEncoder(w).Encode(map[string]any{"tracked_files": map[string]string{}})
 	}))
 	defer srv.Close()
 	r := New(Config{BaseURL: srv.URL, Token: "t", Interval: time.Hour})
 	r.startConfigSync()
-	for i := 0; i < 50 && listCalls.Load() == 0; i++ {
-		time.Sleep(10 * time.Millisecond)
-	}
+	<-entered           // the first sync is inside its request
 	r.startConfigSync() // still running: skipped
 	close(release)
-	for i := 0; i < 100 && r.fileSyncRunning.Load(); i++ {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if n := listCalls.Load(); n != 1 {
-		t.Fatalf("list-files called %d times, want 1", n)
+	deadline := time.Now().Add(10 * time.Second)
+	for r.fileSyncRunning.Load() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
 	}
 	if r.fileSyncRunning.Load() {
 		t.Fatal("sync still marked running")
+	}
+	if n := listCalls.Load(); n != 1 {
+		t.Fatalf("list-files called %d times, want 1", n)
 	}
 }
 
@@ -515,5 +517,69 @@ func TestPostUpdateNotCancelledByStop(t *testing.T) {
 	}
 	if strings.Join(f.cmds[0], " ") != "systemctl restart spamd" {
 		t.Fatalf("restartsrv not run as a systemd job: %v", f.cmds[0])
+	}
+}
+
+// While the lint backoff runs, SpamAssassin files are not downloaded (they
+// would only be deferred again); other files still are.
+func TestSyncConfigsSkipsSpamassassinDownloadsDuringBackoff(t *testing.T) {
+	f := newSyncFixture(t)
+	saPath, otherPath := f.saDir+"keywords.cf", f.other+"cfm.conf"
+	sa, other := f.update(saPath, "score X 1\n", ""), f.update(otherPath, "x=1\n", "")
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agent/list-files":
+			_ = json.NewEncoder(w).Encode(map[string]any{"tracked_files": map[string]string{saPath: sa.Hash, otherPath: other.Hash}})
+		case "/api/agent/get-updates":
+			var req FileUpdatesRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			asked = append(asked, req.Files...)
+			_ = json.NewEncoder(w).Encode(map[string]any{"configs": []ConfigUpdate{}})
+		}
+	}))
+	defer srv.Close()
+	r := New(Config{BaseURL: srv.URL, Token: "t", Interval: time.Hour})
+	r.files.lintRetryAt = time.Now().Add(time.Hour)
+	r.syncConfigs(context.Background())
+	if len(asked) != 1 || asked[0] != otherPath {
+		t.Fatalf("downloaded %v during the lint backoff", asked)
+	}
+}
+
+// When a lint inside the narrowing-down fails to run, the parts not judged
+// yet are left unwritten for after the backoff instead of being linted on a
+// box that just timed out.
+func TestApplyUpdatesBisectStopsOnLintFailure(t *testing.T) {
+	f := newSyncFixture(t)
+	var ups []ConfigUpdate
+	for i := 0; i < 4; i++ {
+		ups = append(ups, f.update(f.saDir+fmt.Sprintf("r%d.cf", i), fmt.Sprintf("score R%d 1\n", i), "systemctl restart spamd"))
+	}
+	f.lint = func(n int) (string, error) {
+		switch n {
+		case 0:
+			return "", nil // baseline
+		case 1:
+			return badRuleLint, &exitError // the whole set: narrow down
+		default:
+			return "", context.DeadlineExceeded // first half: did not run
+		}
+	}
+	var st fileSyncState
+	res := st.applyUpdates(context.Background(), ups, f.allowed())
+	if f.lintCalls != 3 {
+		t.Fatalf("%d lints, want 3 (no lint after the failure)", f.lintCalls)
+	}
+	if len(res.Written) != 0 || len(res.Deferred) != 2 || len(f.cmds) != 0 {
+		t.Fatalf("%+v cmds=%v", res, f.cmds)
+	}
+	for _, u := range ups {
+		if _, err := os.Stat(u.TargetPath); err == nil {
+			t.Errorf("%s left on disk", u.TargetPath)
+		}
+		if st.isParked(u.TargetPath, u.Hash) {
+			t.Errorf("%s parked without a verdict", u.TargetPath)
+		}
 	}
 }

@@ -135,6 +135,11 @@ func (st *fileSyncState) lintFailed() {
 
 func (st *fileSyncState) lintOK() { st.lintRetryAt, st.lintBackoff = time.Time{}, 0 }
 
+// lintWaiting reports whether SpamAssassin changes are waiting out a backoff.
+func (st *fileSyncState) lintWaiting() bool {
+	return !st.lintRetryAt.IsZero() && now().Before(st.lintRetryAt)
+}
+
 // isParked reports whether path's version hash is parked.
 func (st *fileSyncState) isParked(path, hash string) bool {
 	h, ok := st.parked[filepath.Clean(path)]
@@ -275,7 +280,7 @@ func (st *fileSyncState) applySpamassassin(ctx context.Context, sa []pendingWrit
 		}
 		return kept
 	}
-	if t := st.lintRetryAt; !t.IsZero() && now().Before(t) {
+	if st.lintWaiting() {
 		for _, w := range sa {
 			res.Deferred = append(res.Deferred, w.path)
 		}
@@ -332,6 +337,14 @@ func (st *fileSyncState) bisect(ctx context.Context, bin string, baseline map[st
 	half := len(ws) / 2
 	var kept []pendingWrite
 	for _, part := range [][]pendingWrite{ws[:half], ws[half:]} {
+		if st.lintWaiting() {
+			// A lint in an earlier part did not run: the box is too loaded to
+			// judge the rest now. Leave it unwritten for after the backoff.
+			for _, w := range part {
+				res.Deferred = append(res.Deferred, w.path)
+			}
+			continue
+		}
 		var onDisk []pendingWrite
 		for _, w := range part {
 			if writePending(w) {
@@ -401,6 +414,9 @@ func pathUnder(p string, prefixes []string) bool {
 
 func isSpamassassinFile(p string) bool { return strings.HasPrefix(p, spamassassinDir) }
 
+// perlPackageName is what a `loadplugin Module` name must look like.
+var perlPackageName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(::[A-Za-z0-9_]+)*$`)
+
 // saPluginLine and saIncludeLine match the SpamAssassin directives that can
 // pull code or other files into spamd.
 var (
@@ -421,8 +437,13 @@ func saContentRefusal(path, content string) string {
 		return "only .cf rule files may be distributed to " + spamassassinDir + " (a .pre or .pm file loads Perl into spamd)"
 	}
 	for _, m := range saPluginLine.FindAllStringSubmatch(content, -1) {
-		if m[3] != "" {
+		if m[3] != "" && !strings.HasPrefix(m[3], "#") { // a trailing "# comment" is not a path
 			return fmt.Sprintf("%s %s loads Perl from the file %s into spamd, which runs as root", m[1], m[2], m[3])
+		}
+		if !perlPackageName.MatchString(m[2]) {
+			// Not a package name: what SpamAssassin's loader does with it
+			// depends on its version; don't find out.
+			return fmt.Sprintf("%s %q is not a Perl package name", m[1], m[2])
 		}
 	}
 	for _, m := range saIncludeLine.FindAllStringSubmatch(content, -1) {

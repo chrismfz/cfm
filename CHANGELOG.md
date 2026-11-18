@@ -34,9 +34,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (`[files] REFUSED post_update_command`). Every action runs as a `systemctl`
   job (cPanel's restartsrv too), so a cfm restart mid-command cannot leave
   spamd stopped. For the same reason only `.cf` rule files are accepted under
-  `/etc/mail/spamassassin/`, with `loadplugin` by module name only (a plugin
-  file path is Perl run as root) and `include` only inside that dir; a
-  refused version is logged once and not downloaded again. A change there is
+  `/etc/mail/spamassassin/`, with `loadplugin` by Perl package name only (a
+  plugin file path is Perl run as root; the distributed `myip.cf` loads SPF,
+  DKIM, DCC and HashBL by name and is unaffected) and `include` only inside
+  that dir; a refused version is logged once and not downloaded again. A change there is
   linted first (`spamassassin --lint`, the cPanel copy or the system one): a
   problem the new files introduced, one the lint before the write did not
   report as often, rolls them back (old content and mode) and skips the
@@ -45,8 +46,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   until cfm-web sends a different version). Problems that were already there,
   also when the update moves their line number (a `dcc_*` line with the DCC
   plugin off, a missing Hashcash plugin), do not block it, and a lint that
-  cannot run (a timeout on a loaded box) defers the change with a growing
-  delay (1 min doubling to 1 h) instead of judging it. The sync now runs off
+  cannot run (a timeout on a loaded box) defers the change, and the files
+  not judged yet, with a growing delay (1 min doubling to 1 h) instead of
+  judging it; they are not downloaded again meanwhile. The sync now runs off
   the work loop, so a lint and restart never delay unblocks or policy pulls.
 - **WAF rule overrides in `/etc/cfm/cfm_waf_config.lua` now apply.** The docs
   and several release notes (2026.09.22, 2026.10.09, 2026.11.14) told

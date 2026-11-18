@@ -85,6 +85,9 @@ func (r *Runner) syncConfigs(ctx context.Context) {
 		if r.files.isParked(path, remoteHash) {
 			continue // failed the SpamAssassin lint; not worth downloading again
 		}
+		if isSpamassassinFile(filepath.Clean(path)) && r.files.lintWaiting() {
+			continue // would only be deferred again until the lint backoff ends
+		}
 		need = append(need, path)
 	}
 	if len(need) == 0 {
