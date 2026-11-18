@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.18
+
 ### Security
 - **Drupal render-array injection blocked (rule 10030).** A request that
   sends a Drupal render-array callback key (`#region_callback`,
@@ -58,8 +62,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   count for a tenant whose sites include the server's hostname, although the
   rows themselves were already hidden from it. The operator's view is
   unchanged.
-
-## 2026.11.18
 
 ### Security
 - **Hardened /cfm-admin path normalisation in the auth middleware**, and in
