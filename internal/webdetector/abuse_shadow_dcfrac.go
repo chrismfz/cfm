@@ -20,7 +20,7 @@ import (
 //     pure noise. Exclusion is FCrDNS (verifiedGoodBot), the same rigorous check the
 //     challenge exemption uses — a spoofed googlebot PTR cannot earn the exclusion.
 //
-// Cost discipline (CLAUDE.md §6 — do not create a per-tick DNS storm): ASN
+// Cost discipline (do not create a per-tick DNS storm): ASN
 // classification is a cheap inline mmdb lookup (LookupCachedOrAsync, no DNS) done
 // for every IP under a per-tick IP budget (vhosts past the budget are deferred and
 // logged, never silently dropped; a single vhost that alone exceeds a full budget
@@ -235,7 +235,7 @@ func (e *Engine) emitAbuseShadowDatacenterFrac(now time.Time) {
 	}
 
 	if deferred > 0 {
-		// No silent caps (CLAUDE.md §5): say what the budget dropped this tick.
+		// No silent caps: say what the budget dropped this tick.
 		logging.LogfABUSESHADOW("[abuse-shadow] signal=dc_fraction deferred_vhosts=%d reason=ip_enrich_budget", deferred)
 	}
 

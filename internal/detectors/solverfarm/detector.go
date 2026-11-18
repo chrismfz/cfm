@@ -76,14 +76,14 @@ const (
 	// XHWindow × fingerprinted-solve-rate; the cap stops a pathological burst from
 	// growing it without bound. Overflow is counted and logged, not silently
 	// dropped. A const (like the two above), not a config knob — an operator never
-	// needs to tune it, and CLAUDE.md §5 keeps hidden config keys out of the tree.
+	// needs to tune it, and a knob nobody sets is one more hidden config key.
 	maxXHRecords = 100000
 	// maxFindingIPs caps the fingerprint-accurate IP sample carried on an emitted
 	// finding (for the fleet store's per-IP enrichment / block surface). A bounded
 	// sample, not the full set: a residential-proxy pool rotates through thousands
 	// of addresses over days, but the store dedups across findings and accumulates
 	// the population over time, so a per-finding cap keeps the payload small without
-	// losing coverage. Not a config knob (CLAUDE.md §5).
+	// losing coverage. Not a config knob (same reason).
 	maxFindingIPs = 128
 )
 

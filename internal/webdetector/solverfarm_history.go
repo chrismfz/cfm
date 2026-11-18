@@ -11,7 +11,7 @@ import (
 // solverFarmGoodBot is the FCrDNS good-bot verdict cache for the finding emit —
 // its OWN instance (not the edge bridge's, not dcfrac's), per the documented
 // principle that a shared good-bot cache must never claim a decision the caller
-// didn't make (CLAUDE.md §6 / nginx_bridge_goodbot.go): here the verdict only
+// didn't make (nginx_bridge_goodbot.go): here the verdict only
 // TAGS an address in the durable finding as a verified crawler, it grants no
 // challenge exemption and no datacenter-count exclusion, so its visibility line
 // says exactly that. Same battle-tested machinery (cache-only lookups, bounded

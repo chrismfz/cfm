@@ -1706,7 +1706,7 @@ Class-2 burst.
       and `≥ MIN_REQ(50)` requests. Verified crawlers excluded via FCrDNS (else a
       crawled shop reads ~100% datacenter — the techking/shopzy trap). **Origin is
       never innocence**: datacenter-ASN alone drives NO decision — corroborating
-      feature only. Cost-bounded (CLAUDE.md §6): cheap mmdb ASN class for all IPs
+      feature only. Cost-bounded: cheap mmdb ASN class for all IPs
       under a per-tick IP budget (logged deferral, no silent cap; a single
       over-budget vhost is processed anyway so the biggest floods stay visible);
       the good-bot exclusion runs through a shared FCrDNS **verdict cache**
