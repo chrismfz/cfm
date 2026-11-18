@@ -391,6 +391,74 @@ local function strip_sql_comments(s)
   return (s:gsub("%-%-[^\n]*", ""))
 end
 
+-- strip_sql_comments_query: the strip for the PATH + QUERY surface only
+-- (2026-11-18, docs/waf.md "SQLi gaps, 2026-11-18"). The args+body surface
+-- keeps strip_sql_comments above, unchanged: a JSON or minified-code body is
+-- one line, so its first `--` (`var(--wp--preset…)` in every Gutenberg save)
+-- hides the rest of it, and reading that rest would put whole posts in front
+-- of the block-tier SQLi rules with no way to measure it (bodies are not in
+-- the access logs). The query side was replayed over the fleet's logs.
+-- Three differences, all bypasses seen on the fleet or one step from it:
+--   * A comment no longer hides what follows its part: a `--` used to strip to
+--     the END of the scan string, so `?x=--&id=1'+union+select+…` hid the
+--     injection in `id` from rules 301 / 309 / 319 (the same for a `/*` in one
+--     parameter and its `*/` in a later one, or a `--` in the path,
+--     `/index.php/--?id=…`). Each part between `&` and `?` is also stripped
+--     alone, the delimiters kept. The scan string is DECODED, so such a
+--     character is not always a boundary (`id=1'/*%26*/union select` is one
+--     parameter, run by MySQL as `1'union select`): the result is the per-part
+--     strip, then `&`, then the whole string stripped as one part. Each
+--     reading catches what the other hides; the detectors only ask whether a
+--     shape occurs anywhere.
+--   * A MySQL / MariaDB executable comment, `/*!…*/` (`/*!50000select*/`,
+--     `/*M!…*/`), is RUN by the server, so its content is kept (the version
+--     number dropped) instead of removed with it: `catid=0' /*!11110procedure*/
+--     /*!11110analyse*/ (/*!11110extractvalue*/(…` hid `extractvalue(` from
+--     rule 309 (scanners on several sites per node in 8 days).
+--   * A `--` comment that ends its part leaves ` --` (its text dropped), so a
+--     detector can see that a comment closed the value (`' order by 1--`);
+--     one the next line continues after is dropped whole, as above
+--     (`1'--\nunion select` still reads `1'\nunion select`).
+local function strip_sql_comment_part(s)
+  if s:find("/*", 1, true) then
+    local out, i = {}, 1
+    local a = s:find("/*", i, true)
+    while a do
+      out[#out + 1] = s:sub(i, a - 1)
+      local b = s:find("*/", a + 2, true)
+      if not b then
+        out[#out + 1] = s:sub(a)
+        i = #s + 1
+        break
+      end
+      -- executable comment: keep what the server runs (a space before it, as
+      -- the comment separated it from the text before; none after, so
+      -- `/*!extractvalue*/(` still reads as a call)
+      local run = s:sub(a + 2, b - 1):match("^[mM]?!%d*(.*)$")
+      if run then out[#out + 1] = " " .. run end
+      i = b + 2
+      a = s:find("/*", i, true)
+    end
+    out[#out + 1] = s:sub(i)
+    s = table.concat(out)
+  end
+  if s:find("--", 1, true) then
+    s = s:gsub("%-%-[^\n]*\n", "\n"):gsub("%-%-[^\n]*$", " --")
+  end
+  return s
+end
+
+local function strip_sql_comments_query(s)
+  if not s:find("/*", 1, true) and not s:find("--", 1, true) then return s end
+  if not s:find("[&?]") then return strip_sql_comment_part(s) end
+  local out = {}
+  for part, d in s:gmatch("([^&?]*)([&?]?)") do
+    out[#out + 1] = strip_sql_comment_part(part) .. d
+  end
+  out[#out + 1] = "&" .. strip_sql_comment_part(s)
+  return table.concat(out)
+end
+
 -- The URI+query scan surface shared by traversal/rce/xss/sqli. URI and query
 -- are capped INDEPENDENTLY (not cap(uri.."?"..args, N)) so a long path can't
 -- evict the query from the window and query padding can't evict the path —
@@ -613,6 +681,7 @@ _M.json_unescape_ascii                = json_unescape_ascii
 _M.uri_scan_cap                       = uri_scan_cap
 _M.normalize                          = normalize
 _M.strip_sql_comments                 = strip_sql_comments
+_M.strip_sql_comments_query           = strip_sql_comments_query
 _M.scan_str                           = scan_str
 _M.strip_data_uri                     = strip_data_uri
 _M.body_budget                        = body_budget

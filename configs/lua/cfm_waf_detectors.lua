@@ -1701,8 +1701,11 @@ local SQLI_LEXICAL_TOKENS = {
 -- the engine can compute it ONCE per scan surface (get_sqli_ua/get_sqli_ab,
 -- memoized) instead of each rule recomputing strip_sql_comments + the collapse
 -- on the same string — audit F30b. Exported for the engine's memoized getters.
-local function sqli_scan_strings(s)
-  local sc = strip_sql_comments(s or "")
+-- `query` = true for the path+query surface: its strip also reads each
+-- parameter alone and keeps `/*!…*/` content (util.strip_sql_comments_query);
+-- the args+body surface keeps the plain strip (see there why).
+local function sqli_scan_strings(s, query)
+  local sc = (query and util and util.strip_sql_comments_query or strip_sql_comments)(s or "")
   return sc, (sc:gsub("[+%s]+", " "))
 end
 _M.sqli_scan_strings = sqli_scan_strings
@@ -1785,6 +1788,46 @@ function _M.detect_sqli(sc, scw)
   -- the randomised operands; keep '+' literal so it matches `sc`.
   if has(sc, "=0+0+0+1") then return true end
 
+  return false
+end
+
+-- detect_sqli_probe: probe shapes seen passing on the fleet, rule 301, for the
+-- PATH + QUERY surface only (2026-11-18, 8 nodes x 8 days of access logs:
+-- attack traffic only, no legitimate request matched; docs/waf.md "SQLi
+-- gaps, 2026-11-18"). Not run on the body: these were measured on queries,
+-- and a body carries SQL consoles (Adminer) and code snippets.
+--   ' order by 3--     the column-count probe that precedes a UNION; the
+--                      closing comment (`--` reads ` --` after the query
+--                      strip, or `#`) is what makes it SQL, not a sort
+--                      parameter.
+--   procedure analyse( MySQL's error-based probe, usually wrapped in
+--                      /*!NNNNN…*/ (the query strip keeps that content); the
+--                      fleet read measured the wrapped form, so the bare
+--                      token is gated on a value break like the others.
+--   and 'x'='x         the same-word tautology, either quote, after a value
+--                      break: `') and ('x'='x`, `" and "a"="a`.
+--   1 and 1=1          the boolean probe, after a value break (digit,
+--                      quote, paren), ending its parameter or followed by
+--                      SQL punctuation (a quote, paren, `;`, a comment):
+--                      `1 and 1=1 is a basic operation` is prose (a
+--                      BlazeHTTP white sample).
+--   utl_inaddr.get_host_address(  Oracle's out-of-band / error-based probe.
+function _M.detect_sqli_probe(sc, scw)
+  if scw:find("[%d'\"%)] ?order by %d+ ?%-%-")
+     or scw:find("[%d'\"%)] ?order by %d+ ?#") then
+    return true
+  end
+  if scw:find("[%d'\"%)] ?procedure analyse ?%(") then return true end
+  if scw:find("[%d'\"%)] and 1=1 ?[&#'\";%)%-]")
+     or scw:find("[%d'\"%)] and 1=1 ?$") then
+    return true
+  end
+  -- (`and` / `or` as whole words: a frontier, so `brand 'x'='x'` is not one)
+  if scw:find("%f[%w]and ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]")
+     or scw:find("%f[%w]or ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]") then
+    return true
+  end
+  if has(scw, "utl_inaddr.get_host_address(") then return true end
   return false
 end
 
@@ -9041,6 +9084,11 @@ end
 
 -- One parameter (name=value, or a bare key) of the decoded query.
 local function php_code_param(p)
+  -- The scanners' probe for PHP code evaluation in a string (`${@var_dump(
+  -- md5(31337))};`): it prints a known hash when the value reaches eval or a
+  -- double-quoted string. No sink call, so php_code_context never sees it.
+  -- Only probes matched it on the fleet (2026-11-18, docs/waf.md "SQLi gaps").
+  if p:find("var_dump%s*%(%s*md5%s*%(%s*%d") then return "VAR_DUMP_MD5" end
   for i = 1, #PHP_ARG_SINKS do
     if php_global_call(p, PHP_ARG_SINKS[i]) then
       local ctx = php_code_context(p)
