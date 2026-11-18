@@ -2356,10 +2356,7 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		e.subnetLastChalEmit[pairKey] = now
 		e.emitMu.Unlock()
 
-		ttl := e.cfg.ChallengeSubnetTTL
-		if ttl <= 0 {
-			ttl = 30 * time.Minute
-		}
+		ttl := e.subnetChallengeTTL()
 
 		rule := "CHALLENGE_SUBNET"
 
@@ -2373,7 +2370,8 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 			// The pair cooldown above re-evaluates the subnet every 10s so a NEW
 			// member is challenged quickly; an IP already challenged is
 			// re-emitted only once its challenge is half spent.
-			if !e.subnetIPEmitDue(ip+"|"+a.host, now, ttl) {
+			emitKey := ip + "|" + a.host
+			if !e.subnetIPEmitDue(emitKey, now, ttl) {
 				continue
 			}
 
@@ -2408,6 +2406,10 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				Samples: samples,
 				Extra:   extra,
 			}:
+				// Stamped only once the alert is out: a drop on a full channel
+				// (the default below) leaves the member due, so the next pass
+				// retries it instead of waiting out ttl/2 unchallenged.
+				e.markSubnetIPEmit(emitKey, now)
 			default:
 			}
 		}
@@ -2427,17 +2429,33 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 // challenge), and the webdetector run timed out ~270 times a day: a run that
 // never finishes re-notes no auto-v2 source, so the vhost tier lapsed to v1
 // mid-challenge.
+//
+// It only reads; markSubnetIPEmit records an emit once its alert was sent.
 func (e *Engine) subnetIPEmitDue(key string, now time.Time, ttl time.Duration) bool {
 	e.emitMu.Lock()
 	defer e.emitMu.Unlock()
-	if last, ok := e.subnetIPLastChalEmit[key]; ok && now.Sub(last) < ttl/2 {
-		return false
-	}
+	last, ok := e.subnetIPLastChalEmit[key]
+	return !ok || now.Sub(last) >= ttl/2
+}
+
+// markSubnetIPEmit records that the subnet challenge for key (ip|host) went
+// out at now (subnetIPEmitDue).
+func (e *Engine) markSubnetIPEmit(key string, now time.Time) {
+	e.emitMu.Lock()
+	defer e.emitMu.Unlock()
 	if e.subnetIPLastChalEmit == nil {
 		e.subnetIPLastChalEmit = make(map[string]time.Time)
 	}
 	e.subnetIPLastChalEmit[key] = now
-	return true
+}
+
+// subnetChallengeTTL is CHALLENGE_SUBNET_TTL, 30m when unset: the one place
+// the emit loop and the gate's prune read it.
+func (e *Engine) subnetChallengeTTL() time.Duration {
+	if ttl := e.cfg.ChallengeSubnetTTL; ttl > 0 {
+		return ttl
+	}
+	return 30 * time.Minute
 }
 
 func minInt(a, b int) int {

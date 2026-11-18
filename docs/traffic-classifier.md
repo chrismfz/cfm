@@ -1145,6 +1145,12 @@ human-entry challenge is not in the snapshot, so every panel solve reads
 (abuse_shadow, two to three days, four nodes): 6 333 web-scope would_v2
 solves with `src=-`, 97% `c28caa00`/`95070673`, three GR/CY (two of them the
 farm's Cytanet profile, one a webdriver). Knob `CHALLENGE_V2_UNSOLICITED`.
+A withheld solve is a reject, so like every v2 reject it reaches none of the
+solve subscribers (`challenge_solver_farm`, `challenge_score`, the
+Under-Attack solve rate, `challenge_cookie_discard`): the farms' pre-solves,
+which used to count as solves there, now show up only as
+`challenge_v2_reject` rows with `v2=unsolicited`. Open question: whether the
+solver-farm detector should read them as evidence.
 
 **The note lapse.** An automatic source's note lived 2–10 minutes and was
 renewed by each webdetector run. A run that timed out renewed nothing, so a

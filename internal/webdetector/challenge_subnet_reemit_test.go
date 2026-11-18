@@ -102,6 +102,7 @@ func TestSubnetIPEmitDue_PerHostAndPrune(t *testing.T) {
 	if !e.subnetIPEmitDue("1.2.3.4|a.gr", now, ttl) {
 		t.Fatal("first emit not due")
 	}
+	e.markSubnetIPEmit("1.2.3.4|a.gr", now)
 	if e.subnetIPEmitDue("1.2.3.4|a.gr", now.Add(time.Minute), ttl) {
 		t.Fatal("re-emit due before ttl/2")
 	}
@@ -110,5 +111,21 @@ func TestSubnetIPEmitDue_PerHostAndPrune(t *testing.T) {
 	}
 	if !e.subnetIPEmitDue("1.2.3.4|a.gr", now.Add(ttl/2), ttl) {
 		t.Fatal("refresh at ttl/2 not due")
+	}
+}
+
+// An alert the full detector channel drops is not counted as emitted: the
+// member stays due and the next pass retries it, instead of sitting
+// unchallenged for ttl/2.
+func TestSubnetChallenge_DroppedAlertIsRetried(t *testing.T) {
+	e := subnetReemitEngine("202.46.62.1", "202.46.62.2", "202.46.62.3")
+	full := make(chan core.Alert) // unbuffered, no reader: every send drops
+	t0 := time.Unix(1_800_000_000, 0)
+	e.emitSubnetChallenges(t0, full)
+
+	out := make(chan core.Alert, 64)
+	e.emitSubnetChallenges(t0.Add(11*time.Second), out)
+	if got := drainSubnetAlerts(out); len(got) != 3 {
+		t.Fatalf("after a dropped pass: %d members re-sent, want all 3 (%v)", len(got), got)
 	}
 }

@@ -2269,10 +2269,7 @@ func (e *Engine) pruneEmitMaps(now time.Time) {
 	// once its TTL has passed (and on the shared cutoff), so the map holds only
 	// live challenges.
 	if e.subnetIPLastChalEmit != nil {
-		subTTL := e.cfg.ChallengeSubnetTTL
-		if subTTL <= 0 {
-			subTTL = 30 * time.Minute
-		}
+		subTTL := e.subnetChallengeTTL()
 		for key, t := range e.subnetIPLastChalEmit {
 			if t.Before(cutoff) || now.Sub(t) >= subTTL {
 				delete(e.subnetIPLastChalEmit, key)
