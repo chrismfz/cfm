@@ -865,16 +865,13 @@ A few intentional non-overlaps worth recording:
   ptrace-lockdown idea from cfm-lsm's original scope was dropped
   specifically because kernsec already covers that ground at a
   cheaper layer.
-- The `lsm=…,bpf` kernel command-line argument is **not yet
-  managed by kernsec**. cfm-lsm's preflight detects when `bpf` is
-  absent from `/sys/kernel/security/lsm` and prints the exact
-  remediation line for the operator's bootloader. A follow-up
-  proposal will add a new kernsec rule (`KSEC-LSM-bpf-001`,
-  Tier 2, default not forced) that appends `bpf` to the existing
-  `lsm=` value via the same backend that already manages
-  `unprivileged_bpf_disabled` and friends. Tracked in
-  [`docs/cfm-lsm.md`](./cfm-lsm.md) under "Phased roadmap → Future
-  kernsec integration."
+- The `lsm=…,bpf` kernel command-line argument is managed by the
+  opt-in rule `KSEC-LSM-bpf-001` (Tier 2, not forced by default;
+  `[rule "KSEC-LSM-bpf-001"] state = force` in `kernsec.conf`). It
+  merges `bpf` into the existing `lsm=` value without dropping the
+  other LSMs (`internal/kernsec/lsm_merge.go`); a reboot applies it.
+  cfm-lsm's preflight still prints the remediation when `bpf` is
+  missing from `/sys/kernel/security/lsm`.
 - `kernsec`'s module-load lockdown rules (and the broader
   CFML-SELF-002 idea from the original cfm-lsm draft) are
   deliberately excluded because they conflict with

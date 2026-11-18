@@ -2,1731 +2,958 @@
 
 ## Status
 
-**Seventeen policies shipping (10 listed in the Catalog below plus
-FS-007, FS-008, EXEC-007, EXEC-008, OBS-004, NET-002, CRED-004).
-Disabled by default in `lsm.conf`; monitor is the safe first enabled
-mode. Enforce is opt-in for EXEC-001 / EXEC-003 / EXEC-004 / EXEC-006 /
-FS-005 / FS-007 / FS-008 / NET-002. The full monitor-only set is
-EXEC-005, FS-006, CRED-002, CRED-003, BPF-001, EXEC-007, EXEC-008,
-OBS-004, CRED-004 — see `isEnforceCapable` in
-`internal/lsm/policy.go` for the canonical list (tracepoint hooks
-where the kernel ignores BPF return; credential / fd-mismatch hooks
-where -EPERM would break legitimate userspace).**
+Seventeen policies ship, all compiled into one BPF object
+(`internal/lsm/bpf/cfmlsm.bpf.c`) and listed in `AllPolicies()`
+(`internal/lsm/policy.go`). That list is the authoritative scope of
+cfm-lsm; anything beyond it needs a separate, named proposal.
 
-Catalog:
+- **Off unless configured.** The code defaults are `enabled = false`
+  and `mode = disabled` for every policy (`DefaultConf`). The packaged
+  `configs/lsm.conf` (installed as `/etc/cfm/lsm.conf`,
+  `%config(noreplace)`) currently ships `enabled = true` with every
+  policy at `mode = monitor`. A new install therefore attaches all
+  available policies in monitor mode.
+- **Monitor first.** `monitor` reports and never blocks. `enforce`
+  returns `-EPERM` from the hook on a match.
+- **Enforce-capable:** `CFML-EXEC-001`, `CFML-EXEC-003`,
+  `CFML-EXEC-004`, `CFML-EXEC-006`, `CFML-FS-005`, `CFML-FS-007`,
+  `CFML-FS-008`, `CFML-NET-002`.
+- **Monitor-only telemetry policies:** `CFML-EXEC-005`,
+  `CFML-EXEC-007`, `CFML-EXEC-008`, `CFML-BPF-001` (tracepoint hooks:
+  the kernel ignores the program's return value), `CFML-CRED-003`,
+  `CFML-CRED-004` (`fentry/commit_creds` is a trace probe, not a
+  decision point), `CFML-CRED-002`, `CFML-FS-006`, `CFML-OBS-004`
+  (LSM hooks where `-EPERM` would break legitimate userspace). The
+  single source of truth is `isEnforceCapable`. `cfm lsm enable` and
+  the daemon's auto-enable downgrade `mode = enforce` on these to
+  `monitor` with a warning.
 
-- `CFML-EXEC-001` — Block exec from memfd
-- `CFML-EXEC-003` — Reverse shell pattern
-- `CFML-EXEC-004` — Deleted-file exec by web user
-- `CFML-EXEC-005` — Suspicious interpreter network stdio *(monitor-only)*
-- `CFML-EXEC-006` — Web-user exec from ephemeral filesystem
-- `CFML-FS-005`   — Sensitive-file modification by web user
-- `CFML-FS-006`   — Sensitive read via root-owned fd from unprivileged task *(monitor-only)*
-- `CFML-CRED-002` — Privilege escalation without setuid path *(monitor-only)*
-- `CFML-CRED-003` — Direct root credential install *(monitor-only)*
-- `CFML-BPF-001`  — Unexpected BPF use *(monitor-only advanced-threat telemetry)*
+The enforce/monitor choice is a `volatile const` per policy, rewritten
+at load time (`rewriteConstants` in `loader.go`), so it is baked into
+the program and costs no runtime branch. Changing a mode needs
+`cfm lsm restart` (disable, then enable), which briefly detaches the
+programs. Recovery from a false-positive block is `cfm lsm disable`.
 
-Companion kernsec rule `KSEC-LSM-bpf-001` merges `bpf` into the
-operator's existing `lsm=` boot argument when forced in
-`/etc/cfm/kernsec.conf`, without disrupting other LSMs. Required
-on distros where `bpf` is not in the default LSM list (most non-EL10
-kernels). Opt-in.
+`enabled = true` in `lsm.conf` is the durable state. `/sys/fs/bpf` is
+RAM-only, so a reboot drops every pin; on start the daemon finds no
+pins and runs preflight, load, attach and pin itself. Detection lives
+in the kernel and survives daemon restarts and crashes within a boot;
+event collection needs the daemon.
 
-All BPF LSM policies are implemented, compiled, and verified to
-load on EL10 (kernel 6.12). The end-to-end flow:
-
-```
-operator: edit /etc/cfm/lsm.conf  →  enabled = true; pick per-policy mode
-operator: systemctl restart cfm   →  daemon auto-enables on startup
-cfm daemon: ApplyConfig           →  if pins absent (post-reboot or fresh):
-                                       preflight + load + attach + pin
-                                     if pins present (operator pre-enabled):
-                                       adopt them
-kernel  : detects events          →  BPF LSM hooks fire on matches
-cfm daemon: drain ringbuf         →  emit notify + log + dmesg DETECT lines
-operator: cfm lsm disable         →  unpin, kernel detaches (daemon stays up)
-```
-
-**Reboot semantics.** `/sys/fs/bpf` is a RAM-only kernel filesystem,
-so a reboot wipes every pinned BPF object. The daemon handles this:
-on every startup it inspects bpffs, and if no pins are found it
-re-runs the load + attach + pin work itself. From the operator's
-perspective, `enabled = true` in `lsm.conf` is the long-lived
-declarative state; everything else is plumbing.
-
-**`cfm lsm enable` is still useful.** Operators who want to
-activate cfm-lsm immediately without restarting the daemon — or
-who want the interactive enforce-mode confirmation prompt — can
-run it directly. The daemon's auto-enable picks the same path.
-
-Protection survives daemon restarts (the pins live in bpffs, not
-in the daemon process), daemon crashes, and `systemctl stop cfm`
-WITHIN the same kernel boot. After a reboot, the daemon's
-auto-enable re-establishes protection on the way back up. Event
-*collection* depends on the daemon (it drains the pinned ringbuf
-and forwards events into the notify pipeline); event *detection*
-does not.
-
-Every policy defaults to `mode = disabled` in the shipped
-`lsm.conf`; the operator opts in per policy by setting `monitor`
-or `enforce`. Enforce mode (return `-EPERM` on a match, failing the
-calling process's syscall) is **available** for `CFML-EXEC-001`,
-`CFML-EXEC-003`, `CFML-EXEC-004`, `CFML-EXEC-006`, `CFML-FS-005`,
-`CFML-FS-007`, `CFML-FS-008`, and `CFML-NET-002`. The monitor-only
-set — `CFML-EXEC-005`, `CFML-FS-006`, `CFML-CRED-002`,
-`CFML-CRED-003`, `CFML-BPF-001`, `CFML-EXEC-007`, `CFML-EXEC-008`,
-`CFML-OBS-004`, `CFML-CRED-004` — is the single source of truth in
-`isEnforceCapable` (`internal/lsm/policy.go`). The reasons fall into
-two buckets: tracepoint hooks where the kernel ignores BPF return
-(EXEC-005, BPF-001, EXEC-007, EXEC-008), and LSM hooks where -EPERM
-would deadlock systemd helpers, break pkexec mid-transition, or
-break legitimate setuid-helper fd handling (CRED-002, CRED-003,
-FS-006, OBS-004, CRED-004). `enable.go` and `lifecycle.go` downgrade
-an enforce setting on those nine to monitor with a warning. Set
-`mode = enforce` in `/etc/cfm/lsm.conf` and restart cfm (or run
-`cfm lsm disable` then re-enable). The mechanism is a
-`volatile const` global in the BPF program rewritten at load time
-via `cilium/ebpf`'s `spec.Variables[name].Set()`, so enforce/monitor
-is baked into the program's instruction stream — one byte-compare
-per match path, no runtime branching cost. `cfm lsm enable` prompts
-for confirmation when any policy is enforce; `--yes` skips the
-prompt for unattended scripts. Recovery from a false-positive
-enforce block is one command: `cfm lsm disable`.
-
-This document supersedes an earlier broader draft that proposed a
-fifteen-policy BPF LSM component spanning exec, credential, filesystem,
-network, rate-limit, self-protection, and observability rules. After
-evaluating that draft against the actual CFM tree and the production
-stacks CFM targets (cPanel + CloudLinux + KernelCare, DirectAdmin +
-CloudLinux + KernelCare, Proxmox Debian KVM ZFS), most of the proposed
-catalogue duplicated protections already provided by CageFS, LVE,
-Imunify360 Proactive Defense, `kernsec`, and `internal/outbound/`, and
-a few policies actively conflicted with the rest of the stack (notably
-KernelCare/Ksplice module reloads vs the proposed module-load lockdown,
-and Yama `ptrace_scope=1` already shipped by `kernsec` vs the proposed
-ptrace LSM rule).
-
-The scope here is intentionally narrow: ten shipping policies
-covering exec (CFML-EXEC-001 / CFML-EXEC-003 / CFML-EXEC-004 /
-CFML-EXEC-005 / CFML-EXEC-006), sensitive-file write (CFML-FS-005),
-sensitive-read fd-leak telemetry (CFML-FS-006), post-setuid credential
-transitions (CFML-CRED-002), direct root credential installs
-(CFML-CRED-003), and advanced-threat BPF-use telemetry (CFML-BPF-001).
-The MVP shipped with EXEC-001 + EXEC-003 only; FS-005 + CRED-002
-landed as the next-policies pass once the MVP's verifier and pinning
-behaviour proved stable on EL10. CRED-003 closes the documented direct
-`commit_creds()` gap as monitor-only telemetry, and BPF-001 adds
-monitor-only visibility into unexpected BPF map creation / program
-load attempts. EXEC-005 adds monitor-only weak stdio telemetry next to
-the strict reverse-shell rule. EXEC-006 covers the
-write-to-ephemeral-fs-then-exec pattern that the other exec detectors
-miss, complementing Imunify Proactive Defense's PHP-layer write block.
-Anything beyond these ten requires a separate, named proposal — not a
-TODO inside this doc.
-
-The implementation shape is also fixed: an in-binary subsystem of the
-existing CFM daemon at `internal/lsm/`, loading CO-RE BPF LSM programs
-via [`cilium/ebpf`](https://github.com/cilium/ebpf). No separate
-daemon, no kernel module, no DKMS, no clang on the customer host. CFM
-stays `CGO_ENABLED=0`. See the Architecture section for details.
+Companion kernsec rule `KSEC-LSM-bpf-001` (Tier 2, opt-in with
+`state = force` in `/etc/cfm/kernsec.conf`) merges `bpf` into the
+existing `lsm=` boot argument without dropping other LSMs. It is needed
+where `bpf` is not in the kernel's default LSM list (typically Debian /
+Ubuntu) and takes effect on the next reboot.
 
 ## Overview
 
-`cfm-lsm` is the CFM component that catches the post-exploit consequences
-of a successful userspace compromise: a webshell that drops a payload and
-tries to execute it from memory, or a hijacked process that pivots into a
-reverse shell. These behaviours are invisible to the other CFM layers —
-`webdetector` has already returned by the time exec happens, and
-`kernsec` operates on preemptive surface reduction (sysctls, boot
-arguments, module blacklists, mount audit) rather than runtime decisions.
+`cfm-lsm` catches the post-exploit consequences of a userspace
+compromise: a webshell that execs a payload from memory or from `/tmp`,
+a hijacked process that turns into a reverse shell, a web user writing
+`/etc/shadow` after a kernel privesc, a dropped setuid binary. These are
+invisible to the other CFM layers: `webdetector` has already returned by
+the time exec happens, and `kernsec` reduces the kernel surface ahead of
+time (sysctls, boot arguments, module blacklists, mount audit) rather
+than deciding at runtime.
 
-`cfm-lsm` deliberately is not a generic syscall observer (that is
-Tetragon's design space, not CFM's); not a replacement for CageFS, LVE,
-or Imunify360 (it sits alongside them); and not an outbound network
-policy engine — that work belongs in the existing per-uid NFLOG path
-in `internal/outbound/`, which is already designed for exactly that
-problem and works on EL8 without DKMS.
+`cfm-lsm` is not a generic syscall observer (Tetragon's space), not a
+replacement for CageFS, LVE or Imunify360 (it sits beside them), and not
+an outbound network policy engine (that is the per-uid NFLOG path in
+`internal/outbound/`).
 
 ## Position in the CFM stack
 
 ```
-HTTP layer        webdetector       (inbound request analysis, vhost policy,
-                                     challenge/block via nftables)
+HTTP layer        webdetector / WAF  (request analysis, challenge, block)
                        ↓
-Userspace layer   cfm-lsm           (process behaviour: memfd exec,
-                                     reverse shell pattern)
+Userspace layer   cfm-lsm            (process behaviour at the syscall boundary)
                        ↓
-Kernel layer      kernsec           (sysctls, boot args, modules, fstab —
-                                     preemptive surface reduction)
+Kernel layer      kernsec            (sysctls, boot args, modules, mounts —
+                                      preemptive surface reduction)
 ```
 
-Each layer detects what the others cannot. `cfm-lsm` occupies the
-narrow band between "the HTTP request that caused the compromise" and
-"the kernel-surface that the operator already removed" — specifically,
-the moment a compromised process tries to do the thing the attacker
-came for.
+`cfm-lsm` covers the band between the HTTP request that caused the
+compromise and the kernel surface the operator already removed: the
+moment a compromised process does what the attacker came for.
 
 ## Scope rationale
 
-The original draft listed fifteen policies; this design now ships ten narrowly scoped policies.
-Every other ID from that draft is excluded for a specific reason — not
-deferred, excluded — because some other layer in CFM's expected stack
-already covers it, or because the policy actively conflicts with
-something else CFM relies on.
+The first draft proposed fifteen policies across exec, credential,
+filesystem, network, rate-limit, self-protection and observability.
+Measured against the stacks CFM targets (cPanel + CloudLinux +
+KernelCare, DirectAdmin + CloudLinux + KernelCare, Proxmox Debian KVM
+ZFS), most duplicated CageFS, LVE, Imunify360 Proactive Defense,
+`kernsec` or `internal/outbound/`, and some conflicted with them
+(KernelCare / Ksplice module reloads vs a module-load lockdown). The
+shipped set keeps the policies no other layer covers; the rejected ones
+are recorded under [Out of scope](#out-of-scope-with-rationale).
 
-| Policy | Decision | Reason |
-|---|---|---|
-| `CFML-EXEC-001` (memfd exec) | **In** | High-signal, low-FP; Imunify PD cannot see past the PHP→child process boundary; no other CFM layer covers this. Enforce available. |
-| `CFML-EXEC-003` (reverse shell pattern) | **In** | Behavioural detection; covers ground Imunify PD blocks at *launch* but cannot catch *post-spawn*; no other CFM layer covers this. Enforce available. |
-| `CFML-EXEC-004` (deleted-file exec by web user) | **In** | Catches the upload-open-unlink-exec staging pattern by web-class uids. Enforce available after local telemetry confirms backup/deploy agents do not match. |
-| `CFML-EXEC-005` (suspicious interpreter network stdio) | **In, monitor-only** | Weak companion telemetry for one or two remote stdio fds on shell/interpreter/socket-helper execs; intentionally not a default block due to inetd/admin/debug FPs. |
-| `CFML-EXEC-006` (web-user exec from ephemeral filesystem) | **In** | Execution-phase companion to Imunify PD's write-phase guard. Catches a watched uid exec'ing a binary on tmpfs (/dev/shm, /run/user/, distro /tmp on tmpfs) or under /tmp/ or /var/tmp/ on EL9-style root-filesystem /tmp. Enforce available after monitor-mode telemetry confirms legitimate /tmp-based workflows (package installers, easyapache builds) are allowlisted. |
-| `CFML-FS-005` (sensitive-file write by web user) | **In** | High-signal post-exploit cash-in catch. CageFS hides the paths from caged users, so any FS-005 fire on a caged host is itself a compromise indicator. Enforce available for current-uid matches on the core auth set; persistence-path additions and origin-only matches stay monitor-only. |
-| `CFML-FS-006` (sensitive read via root-owned fd from unprivileged task) | **In, monitor-only** | Kernel-side fingerprint of the setuid-helper fd-leak class — `pidfd_getfd()` exit-window race against ssh-keysign / chage / unix_chkpwd (Qualys / Linus commit `31e62c2ebbfd`), plus older `CLONE_FILES` + setuid-exec and `/proc/<pid>/fd/<n>` variants. Kernsec `kernel.yama.ptrace_scope=2` kills the modern `pidfd_getfd()` primitive, but operators who `state = skip` that rule for same-uid debuggability lose the kernel-level block — FS-006 is their belt-and-braces layer. Monitor-only by design: passwd / pkexec / sudo / dovecot-auth / postfix workers legitimately read the FS-005 watched-inodes set after dropping privs. |
-| `CFML-CRED-002` (privesc without setuid path) | **In, monitor-only** | Canonical post-exploit fingerprint: non-root → root via a setuid syscall from a binary that does not carry the suid bit. The hook reads `exe_file`'s inode mode live (`i_mode & S_ISUID`) — self-maintaining across package upgrades — and falls back to the daemon's setuid-inode snapshot (which also holds operator `allow_exe` pins for non-suid daemons like directadmin/cpanel/lvestats). Enforce is unsafe (cred-install deadlocks systemd / pkexec mid-transition) so it is permanently monitor-only. |
-| `CFML-CRED-003` (direct root cred install) | **In, monitor-only** | Complements CRED-002 for kernel-exploit payloads that bypass the setuid syscall entirely via `commit_creds(prepare_kernel_cred(NULL))`. `fentry` tracing, not an LSM decision point — monitor-only by construction. |
-| `CFML-BPF-001` (unexpected BPF use) | **In, monitor-only** | Advanced-threat telemetry for `bpf()` `BPF_MAP_CREATE` / `BPF_PROG_LOAD` outside CFM + a small trusted-agent set, plus watched web/panel uids. Broad surface reduction belongs in `kernsec` sysctls (`unprivileged_bpf_disabled`, `bpf_jit_harden`); this rule is monitor-only by construction. |
-| `CFML-EXEC-002` (Trusted Path Execution) | **Out** | High FP from composer / npm / pip / wp-cli; CageFS + Imunify PD + `kernsec`'s `noexec` mount audit already cover the realistic vector. |
-| `CFML-OBS-001` (ptrace lockdown) | **Out — already covered by `kernsec`** | `kernel.yama.ptrace_scope=1` is shipped today by `kernsec` (see `internal/kernsec/profile.go:188`). If stricter is wanted, ship `=2` as a `kernsec` Tier 2 sysctl rule — no new code, no new LSM hook. |
-| `CFML-NET-001` (outbound per vhost) | **Out — wrong component** | `internal/outbound/analyzer.go` already does per-uid NFLOG-based outbound observation. Promoting that path to enforce + per-vhost policy is the right home for this; it works on EL8 with no DKMS and reuses an existing event pipeline. |
-| `CFML-FS-001`, `CFML-FS-002`, `CFML-FS-003`, `CFML-CRED-001`, `CFML-RATE-*`, `CFML-SELF-001`, `CFML-SELF-002` | **Out** | Each is covered by an existing layer: CageFS for FS-write vectors on caged users, LVE for fork/rate, `kernsec` for module surface (and `CFML-SELF-002` would actively conflict with KernelCare/Ksplice live-patch module reloads), webdetector for webshell-drop correlation. If any one of these later proves necessary it will be added in a separate, named proposal — not as an open TODO in this doc. |
+**Why BPF LSM, in the daemon.** CO-RE BPF loaded by the existing Go
+daemon through [`cilium/ebpf`](https://github.com/cilium/ebpf): no
+kernel module, no DKMS, no clang on the customer host, `CGO_ENABLED=0`
+stays true. A DKMS module across KernelCare-patched RHEL kernels would
+be a permanent maintenance tax, and a second daemon would invite version
+skew and IPC for no gain.
 
-## Stack-specific notes
+**Why PHP-function interception is out of scope.** Blocking dangerous
+PHP calls happens in the Zend VM, a different layer from kernel LSM
+hooks. For hosts without Imunify360 Proactive Defense, that layer is
+planned as CFM-managed Snuffleupagus
+([`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md));
+CFM writes no PHP extension of its own.
 
-**cPanel + CloudLinux + KernelCare.** All ten policies apply. Per-user
-CageFS already namespaces PHP-FPM workers away from the FS-write vectors
-the excluded `CFML-FS-*` policies aimed at, and lifts FS-005's
-false-positive floor to near zero: a caged web user reaching `/etc/shadow`
-or `/root/.ssh/` means caging itself was bypassed. KernelCare's live-patch
-module loads post-boot, but cfm-lsm does not constrain module loading at
-all, so there is nothing to whitelist.
+**Stack notes.**
 
-**DirectAdmin + CloudLinux + KernelCare.** Same as cPanel; FS-005's
-watched-uid set is sourced from `/etc/virtual/domainowners` instead.
-
-**Proxmox Debian KVM ZFS.** Hypervisor hosts run essentially no PHP
-workload, so the value of `cfm-lsm` is narrower: catch a reverse shell
-or memfd exec on the hypervisor itself, and catch sensitive-file writes
-or unexpected root credential installs. That is still worth doing on
-hosts with administrative SSH exposure. The host-profile signal in
-`internal/kernsec/profile.go` already records Proxmox as a context;
-operators on hypervisors typically restrict the active policy set to
-EXEC-001 + FS-005 + CRED-002/003 and leave EXEC-003 disabled because
-the legitimate baseline of remote-stdio shells (admin SSH consoles) is
-wider on a hypervisor than on a web host.
+- **cPanel / DirectAdmin + CloudLinux.** All policies apply. CageFS
+  hides the FS-005 paths from caged users, so an FS-005 event from a
+  caged user means caging was bypassed. The watched-uid set comes from
+  `/etc/userdomains` (cPanel) or `/etc/virtual/domainowners`
+  (DirectAdmin).
+- **Proxmox hypervisors.** Little PHP workload; the value is a reverse
+  shell, memfd exec, sensitive write or unexpected root credential on
+  the hypervisor itself. Admin SSH consoles widen the legitimate
+  remote-stdio baseline, so operators there often leave EXEC-003 /
+  EXEC-005 disabled.
 
 ## Allowlist semantics — read before enabling enforce on any rule
 
-cfm-lsm honours three operator-supplied allowlist primitives in
-`lsm.conf`:
+`lsm.conf` has three allowlist primitives:
 
-  - `allow_exe`   — basename match against the event's filename.
-  - `allow_comm`  — exact match against `task->comm` (kernel
-                    truncates to TASK_COMM_LEN-1 = 15 chars).
-  - `allow_path`  — directory-prefix match against any argv
-                    element of `/proc/<pid>/cmdline` at event time.
+- `allow_exe` — basename match against the event's filename
+  (`filepath.Base` of the bprm path or the exe dentry name).
+- `allow_comm` — exact match against `task->comm` (truncated to 15
+  characters by the kernel; list the truncated form).
+- `allow_path` — directory-prefix match against any argv element of
+  `/proc/<pid>/cmdline` at event time.
 
-**Semantic — what they actually gate.** With one exception
-(CFML-CRED-002, see below), allowlists are a **userspace
-post-filter only**. They consult `BuildEventFilter()` (see
-`internal/lsm/filter.go`) inside the daemon's drain goroutine,
-dropping matched events from the cfm.log + notify pipeline
-AFTER the BPF program has already emitted them. They DO NOT gate
-the kernel-side enforce decision: an enforce-capable BPF program
-returns `CFM_LSM_DENY` from inside the LSM hook before the
-userspace drain even sees the event, so an allowlisted binary is
-still denied by the kernel in enforce mode. The same allowlist
-entry that silences a noisy `easyapache` build under monitor
-mode will NOT prevent that build from being blocked in enforce
-mode — the kernel never consulted it.
+**Allowlists are a userspace post-filter.** `BuildEventFilter()`
+(`internal/lsm/filter.go`) drops matching events in the daemon's drain
+goroutine, before the log, notify and kmsg sinks. They do **not** gate
+the kernel decision: an enforce-capable program returns `-EPERM` inside
+the hook before userspace sees the event, so an allowlisted binary is
+still denied in enforce mode. An entry that silences a noisy build in
+monitor mode does not stop that build being blocked in enforce mode.
+The safe enforce rollout is monitor-mode telemetry that shows zero
+legitimate matches on the host, not "allowlist everything first".
 
-This is a real footgun if operators read older versions of these
-docs (or earlier per-policy `lsm.conf` comments) that framed
-allowlisting as a prerequisite for safe enforce rollout. It is
-not. Allowlisting is monitor-mode noise reduction; the safe
-enforce rollout is monitor-mode telemetry that confirms zero
-legitimate triggers on the host.
+**Where each primitive is accepted.** Per-policy sections take
+`allow_exe` and `allow_comm`; `allow_path` exists only in the global
+`[allow]` section. A global entry applies to every policy that accepts
+that primitive. Compiled-in defaults (`DefaultGlobalAllowExe`,
+`DefaultGlobalAllowComm`, `DefaultGlobalAllowPath`,
+`DefaultPolicyAllowComm` in `conf.go`) merge at lookup time, so an
+upgrade over an older `lsm.conf` still gets them. Coverage
+(`allowExePolicy` / `allowCommPolicy` / `allowPathPolicy`):
 
-**Per-policy coverage.** Each rule independently registers
-whether it accepts each allowlist primitive. The current
-registrations (from `internal/lsm/conf.go::allowExePolicy()` /
-`allowCommPolicy()` / `allowPathPolicy()`):
-
-| Rule | allow_exe | allow_comm | allow_path |
+| Rule | allow_exe | allow_comm | allow_path (global) |
 |---|:-:|:-:|:-:|
-| `CFML-EXEC-003`  (reverse shell) | ✓ | ✓ | — |
-| `CFML-EXEC-005`  (interpreter net stdio) | ✓ | ✓ | — |
-| `CFML-EXEC-006`  (ephemeral exec) | ✓ | ✓ | — |
-| `CFML-CRED-002`  (privesc no setuid) | ✓ | ✓ | ✓ |
-| `CFML-BPF-001`   (unexpected BPF) | — | ✓ | — |
-| `CFML-OBS-004`   (ptrace by web user) | — | ✓ ¹ | — |
-| `CFML-CRED-004`  (cap raise) | — | ✓ | — |
-| `CFML-FS-005`    (sensitive write) | — | ✓ | — |
+| `CFML-EXEC-003` (reverse shell) | ✓ | ✓ | ✓ |
+| `CFML-EXEC-005` (interpreter net stdio) | ✓ | ✓ | ✓ |
+| `CFML-EXEC-006` (ephemeral exec) | ✓ | ✓ | ✓ |
+| `CFML-CRED-002` (privesc without setuid) | ✓ | ✓ | ✓ |
+| `CFML-BPF-001` (unexpected BPF) | — | ✓ | — |
+| `CFML-OBS-004` (ptrace by web user) | — | ✓ ¹ | — |
+| `CFML-CRED-004` (cap raise) | — | ✓ | — |
+| `CFML-FS-005` (sensitive write) | — | ✓ | — |
 
-¹ OBS-004 also has a compiled-in, policy-scoped comm list
-(`DefaultPolicyAllowComm` in `internal/lsm/conf.go`: `ps`, `pgrep`,
-`pkill`, `pidof`, `killall`, the cPanel / CloudLinux API comms, `cloudlinux-stat`),
-merged at lookup like the global defaults, so an upgrade over an old
-`lsm.conf` still gets it. A comm match only ever hides a ptrace READ: an
-event carrying `PTRACE_MODE_ATTACH` (`ptrace=attach`/`attach+read`)
-always reports, because `task->comm` is spoofable and none of the listed
-tools attaches. That includes operator `allow_comm` lines: to silence a
-known attach (an operator gdb'ing a tenant's worker), use `exclude_user`
-for that account.
+¹ OBS-004 also has a compiled-in comm list (`DefaultPolicyAllowComm`:
+`ps`, `pgrep`, `pkill`, `pidof`, `killall`, the cPanel / CloudLinux API
+comms, `cloudlinux-stat`). A comm match only ever hides a ptrace READ:
+an event carrying `PTRACE_MODE_ATTACH` always reports, because
+`task->comm` is spoofable and none of the listed tools attaches. That
+includes operator `allow_comm` lines; to silence a known attach (an
+operator gdb'ing a tenant's worker), use `exclude_user` for that
+account.
 
-Rules absent from this table (`CFML-EXEC-001` / `004` / `007` /
-`008`, `CFML-FS-006` / `007` / `008`, `CFML-CRED-003`,
-`CFML-NET-002`) **do not consult the
-allowlist surface at all** — per-policy and global `[allow]`
-entries are ignored for those rules. NET-002 is the notable case
-because its filename payload is `proto=NN` (a stringified
-protocol integer) and would not match an `allow_exe = ping`
-basename even if PolicyRawSocket were added to the policy list.
+Rules absent from the table (`CFML-EXEC-001` / `004` / `007` / `008`,
+`CFML-FS-006` / `007` / `008`, `CFML-CRED-003`, `CFML-NET-002`) ignore
+every allowlist entry. A per-policy `allow_exe` / `allow_comm` under
+them is a parse error.
 
-**The CRED-002 exception.** `allow_exe` paths for CFML-CRED-002
-are ALSO stat()'d into the BPF-side `cfm_setuid_inodes` map at
-adoption time. For that rule, allowlisted paths gate the BPF
-decision (presence in the map is the trusted-setuid-binary
-signal the rule consults to skip legitimate setuid transitions).
-This is the one place where allow_exe actually does what
-operators naively expect.
-
-**Future direction.** BPF-side allow maps keyed on exe inode are
-the right fix for the enforce-mode coverage gap on EXEC-006,
-NET-002, and similar rules. The map population would mirror what
-CRED-002 already does. Until that lands, the safe enforce
-rollout is the monitor-mode-telemetry path described above.
+**The CRED-002 exception.** CRED-002's `allow_exe` paths are also
+`stat()`'d into the BPF map `cfm_setuid_inodes` at adoption. For that
+rule an allowlisted path does gate the kernel-side decision.
 
 ## Policy catalogue
 
+Every policy defaults to `disabled` in code. "Watched uid" means the
+calling task's real uid is in `cfm_watched_uids` (see
+[Watched-uid model](#watched-uid-model)). Every LSM-hook program returns
+early when an earlier LSM already denied (`ret != 0`).
+
 ### `CFML-EXEC-001` — Block exec from memfd
 
-| | |
-|---|---|
-| Hook | `bprm_check_security` |
-| Shipped default | `disabled` (operator opts in to `monitor` or `enforce`) |
-| Enforce | Available |
-| FP risk | Very low |
-| Perf impact | Negligible (exec is not a hot path) |
+**Hook** `bprm_check_security` · **Enforce** capable · **Gate** none (any uid, root included)
 
-**Description.** Refuse `execve` when the `bprm`'s backing file has no
-on-disk path — i.e. when it is anonymous shmem from `memfd_create` or
-equivalent. The mechanism in BPF is to inspect `bprm->file`, check that
-the superblock magic is `TMPFS_MAGIC`, and that the dentry has no
-linked path. If both hold, return `-EPERM`.
+**Catches** `execve` of a file on a tmpfs superblock whose dentry name
+starts with `memfd:`, i.e. a `memfd_create()` payload. This is the
+canonical fileless step after a webshell downloads a binary into memory.
+Legitimate uses on a hosting server are rare.
 
-**Rationale.** `memfd_create` + `execve` is the canonical fileless
-payload pattern. It is the next step after a webshell finishes
-downloading a binary into memory, and it is the technique most
-post-exploit kits reach for once they realise the disk is monitored.
-Legitimate uses on hosting servers are vanishingly rare. The
-signal-to-noise ratio of this single rule is higher than any other
-behaviour-detection rule in the original fifteen-policy draft.
-
-**Exemptions.** uid 0 with a TTY (interactive root); a configured
-parent-process whitelist for legitimate build tooling that genuinely
-needs it; an optional per-host opt-out for podman / systemd-nspawn on
-Proxmox hypervisors that legitimately exec from anonymous fds during
-container start.
-
-**Notes.** Exec is a cold path. Perf overhead is invisible. This is
-the rule to ship first, monitor briefly, and promote to enforce.
+**FP sources and knobs.** Container start-up on hypervisors (podman /
+systemd-nspawn) can exec from anonymous fds. No allowlist applies; the
+only knob is the mode. This is the rule to enable first and promote to
+enforce after a short monitor window.
 
 ### `CFML-EXEC-003` — Reverse shell pattern
 
-| | |
-|---|---|
-| Hook | `bprm_check_security` |
-| Shipped default | `disabled` (operator opts in to `monitor` or `enforce`) |
-| Enforce | Available |
-| FP risk | Low |
-| Perf impact | Negligible |
+**Hook** `bprm_check_security` · **Enforce** capable · **Gate** effective uid ≠ 0
 
-**Description.** At `bprm_check`, walk the task's fd table for fds
-0, 1, and 2. For each, check whether it is socket-backed and whether
-the socket is connected to a remote peer — not a pty, not a unix-domain
-socket to a local service, not a regular file. A process about to exec
-with all three of stdin / stdout / stderr dup'd to a connected remote
-socket is a reverse shell, regardless of which binary it is (`bash`,
-`nc`, `socat`, `python -c`, `perl -e`, obfuscated one-liners).
+**Catches** an exec where fds 0, 1 and 2 are all `AF_INET` / `AF_INET6`
+sockets in `TCP_ESTABLISHED`, whatever the binary (`bash`, `nc`,
+`socat`, `python -c`). Unix sockets and listening / connecting sockets
+are skipped. Event flag `CFM_LSM_F_REVSHELL_STRICT`. Imunify PD blocks
+the PHP call that launches `bash -i >& /dev/tcp/…`; this rule catches
+the resulting process, including launchers that never went through PHP.
 
-**Rationale.** Behavioural detection, not binary match. Imunify PD
-blocks the *call* that launches `bash -i >& /dev/tcp/x/y`; this rule
-catches the resulting `bash` process *being* a reverse shell. The two
-layers are complementary: PD covers the PHP-originating launch,
-`cfm-lsm` covers the spawned process. The combination is robust against
-the most common evasion of PD (using the launcher binary directly,
-without going through `exec`/`system`/`shell_exec` in PHP first).
-
-**Exemptions.** uid 0 (root reverse shells are an administrative
-choice, not an attack vector to enforce against). Implemented as a
-`current->cred->euid == 0` early-return BEFORE the fd walk — so for
-root callers (interactive SSH session running as root, inetd-style
-root daemon spawning a child with TCP stdio, incident-response
-rescue session) the program emits NO event and never blocks,
-regardless of mode. The watched-uid gate that other rules use does
-not apply here: any non-root caller reaching the rule with stdio on
-remote TCP is the threat we want to catch, watched-list membership
-or not. An explicit per-host list for any legitimate inetd-style
-services that genuinely dup socket fds onto 0/1/2 — these are rare
-on hosting boxes — can additionally suppress events on the
-non-root path via the Go-side `allow_exe` / `allow_comm` filter
-(monitor-mode event suppression only; not a BPF-side gate).
-
-**Notes.** The fd walk is the implementation cost driver and the
-verifier-complexity risk on older RHEL 9 kernels. The hot loop must be
-bounded (cap at fd ≤ 2) and the socket-state read must use existing CO-RE
-relocations rather than custom field offsets. Budget verifier complexity
-explicitly before committing the design to that hook layout.
+**Exemptions.** Effective uid 0 returns before the fd walk: root reverse
+shells (admin SSH `nc` sessions, inetd-style root services, rescue
+shells) emit nothing and are never blocked. There is no watched-uid
+gate: any non-root caller with all three fds on remote TCP is reported.
+Rare legitimate non-root inetd-style helpers (`spawn(8)` scripts) can be
+silenced with `allow_exe` / `allow_comm` / `allow_path`, monitor mode
+only.
 
 ### `CFML-EXEC-005` — Suspicious interpreter network stdio
 
-| | |
-|---|---|
-| Hook | `bprm_check_security` |
-| Default mode | `disabled` / monitor-only when enabled; never enforce by default |
-| FP risk | Medium; weak telemetry by design |
-| Perf impact | Negligible (exec-time fd 0/1/2 inspection only) |
+**Hook** `bprm_check_security` · **Enforce** monitor-only · **Gate** basename in a fixed set
 
-**Description.** This is a monitor-only companion to `CFML-EXEC-003`.
-It reuses the same fd inspection helper that identifies established
-remote TCP sockets on stdin/stdout/stderr, but it matches the weaker
-case where exactly one or two of fd 0/1/2 are remote TCP and the
-executable basename is one of a small static shell/interpreter/helper
-set: `sh`, `bash`, `dash`, `zsh`, `python`, `python3`, `perl`, `php`,
-`ruby`, `node`, `nc`, `ncat`, or `socat`. If all three stdio fds are
-remote TCP, the strict `CFML-EXEC-003` reverse-shell rule owns that
-event instead.
+**Catches** the weak case next to EXEC-003: exactly one or two of fds
+0/1/2 are established remote TCP and the exec basename is `sh`, `bash`,
+`dash`, `zsh`, `python`, `python3`, `perl`, `php`, `ruby`, `node`, `nc`,
+`ncat` or `socat`. All three remote is EXEC-003's event. Flags
+`CFM_LSM_F_INTERP_STDIO_WEAK` plus `CFM_LSM_F_STDIO_ONE_REMOTE` or
+`CFM_LSM_F_STDIO_TWO_REMOTE`.
 
-**Event flags.** Strict reverse-shell events set
-`CFM_LSM_F_REVSHELL_STRICT`. EXEC-005 events set
-`CFM_LSM_F_INTERP_STDIO_WEAK` plus either
-`CFM_LSM_F_STDIO_ONE_REMOTE` or `CFM_LSM_F_STDIO_TWO_REMOTE`, allowing
-the daemon and downstream analytics to separate weak telemetry from
-strict all-three-fd reverse-shell matches without changing the event
-wire layout.
-
-**Expected false positives.** This rule intentionally observes
-patterns that can be legitimate: inetd-style services and socket
-activators that hand a network socket to a child process, administrator
-one-liners that use `nc`, `socat`, or an interpreter over a socket, and
-live debugging / incident-response sessions where one side of stdio is
-redirected over TCP. Operators should start with `mode = monitor` (or
-leave it disabled) and use the event flags and executable path as
-triage context. Do not promote this companion rule to default enforce;
-blocking belongs to `CFML-EXEC-003` after its stricter all-three-fd
-telemetry has been validated locally.
+**Monitor-only because** the pattern is often legitimate: inetd-style
+socket activation, admin one-liners over `nc` / `socat`, live debugging.
+It is triage context, not a block. Silence known helpers with
+`allow_exe` / `allow_comm` / `allow_path`.
 
 ### `CFML-EXEC-004` — Deleted-file exec by web user
 
-| | |
-|---|---|
-| Hook | `bprm_check_security` |
-| Default mode | `monitor`; enforce is opt-in after telemetry |
-| FP risk | Unknown-low; intentionally monitor-first |
-| Perf impact | Negligible (exec is not a hot path) |
+**Hook** `bprm_check_security` · **Enforce** capable (current-uid matches only) · **Gate** watched uid, or web-origin task
 
-**Description.** At `bprm_check_security`, inspect
-`bprm->file->f_path.dentry` and the backing inode. A process that
-opens a payload, unlinks it, and then executes the still-open file
-typically leaves two kernel-side clues: the inode link count is zero
-and/or the dentry has been unhashed from the namespace. `CFML-EXEC-004`
-emits an event when either state is present and the calling uid is in
-`cfm_watched_uids` (the daemon-populated web-class uid set used by
-`CFML-FS-005`). The implementation also consumes the web-origin task
-state when that tracker is enabled, but origin-only matches remain
-monitor-only while telemetry is gathered.
+**Catches** a watched uid executing a file whose inode has link count
+zero or whose dentry is unhashed: stage a binary, open it, unlink it to
+evade scanners, exec the open file. Flags `CFM_LSM_F_UNLINKED_INODE` /
+`CFM_LSM_F_UNHASHED_DENTRY`.
 
-**Rationale.** Deleted-file exec is a common stealth step after web
-compromise: stage a binary on disk, open it, unlink it to evade simple
-path-based scanners and cleanup sweeps, then execute via the open file
-descriptor. The behaviour is more specific than “web user execs from
-/tmp” and complements `CFML-EXEC-001`: memfd/fileless payloads stay
-owned by EXEC-001, while EXEC-004 covers ordinary filesystem payloads
-that were subsequently unlinked.
+**Web origin.** The program also matches tasks marked web-origin by the
+FS-005 tracker (`origin_tracking`). Origin-only matches carry
+`CFM_LSM_F_WEB_ORIGIN` and are never blocked, even in enforce mode.
 
-**Enforcement.** The default and recommended production rollout is
-`mode = monitor`. `mode = enforce` is supported but should be enabled
-only after host-local telemetry confirms no legitimate panel helpers,
-backup tools, deployment systems, or AV/updater workflows execute
-unlinked files under web-class uids. Web-origin-only matches are
-reported but not blocked even when the policy is set to enforce.
-
-**Example config.**
-
-```ini
-[policy "CFML-EXEC-004"]
-mode = monitor   # start here; promote to enforce only after telemetry
-
-# Later, on hosts with a clean baseline:
-# mode = enforce
-```
+**FP sources.** Panel helpers, backup tools, deploy systems or AV /
+updater workflows that exec unlinked files under a watched uid. No
+allowlist applies, so confirm a clean monitor baseline before enforce.
 
 ### `CFML-EXEC-006` — Web-user exec from ephemeral filesystem
 
-| | |
-|---|---|
-| Hook | `bprm_check_security` |
-| Shipped default | `disabled` (operator opts in to `monitor` or `enforce`) |
-| Enforce | Available after monitor-mode telemetry confirms zero legitimate ephemeral-fs execs (allowlists do NOT gate enforce; see Allowlist semantics) |
-| FP risk | Medium on any host with legitimate ephemeral-fs execs (package installers, easyapache mid-build steps, distro ldconfig helpers) — those events surface in monitor mode but allowlists suppress events only, not enforce-mode denials |
-| Perf impact | Negligible (exec is not a hot path; a single super-block magic read plus a bounded dentry walk on the non-tmpfs branch) |
+**Hook** `bprm_check_security` · **Enforce** capable · **Gate** watched uid
 
-**Description.** At `bprm_check_security`, if the calling uid is in
-`cfm_watched_uids` (the daemon-populated web-class uid set used by
-FS-005 / EXEC-004), inspect the file being exec'd. Match when either:
+**Catches** a watched uid executing a binary that is either on a tmpfs
+superblock (`/dev/shm`, `/run/user/<uid>/`, `/tmp` on tmpfs; flag
+`CFM_LSM_F_TMPFS_BACKED`) or under `/tmp/` or `/var/tmp/` on a non-tmpfs
+root such as EL9 / CloudLinux 9 (flag `CFM_LSM_F_EPHEMERAL_DIR`). memfd
+payloads are skipped (EXEC-001). This is the execution-phase companion
+to Imunify PD's write-phase guard: PD blocks the PHP write to
+`/tmp/.<hidden>`, EXEC-006 sees the `execve` if the write got through.
+EXEC-004 misses a payload that was not unlinked; this rule does not.
 
-  1. the backing super-block magic is `TMPFS_MAGIC` — covering `/dev/shm`
-     (always tmpfs), `/run/user/<uid>/` (per-user systemd runtime), and
-     distro `/tmp` mounted as tmpfs (most modern Linux); or
-  2. the dentry walks up to `/tmp/...` or `/var/tmp/...` on a non-tmpfs
-     root filesystem (EL9 / CloudLinux 9 default).
+**Depth limit.** The `/tmp` dentry walk is unrolled to 16 levels. A
+deeper path fails closed (no match) rather than treating the deepest
+dentry reached as the top, which would misread a mid-path `tmp`
+directory. The tmpfs check does not depend on depth.
 
-The walk is bounded by `#pragma unroll` so the verifier accepts it on
-every supported kernel. The magic-check path is O(1); the dentry walk
-adds at most 16 `d_parent` reads. memfd payloads (which also have
-`TMPFS_MAGIC`) are deliberately skipped here — `CFML-EXEC-001` owns
-that telemetry.
-
-**Rationale.** This is the execution-phase companion to Imunify
-Proactive Defense's write-phase guard. Imunify catches `fopen` /
-`fwrite` from the PHP VM into `/tmp/.<hidden>`; `CFML-EXEC-006` catches
-the resulting `execve` from kernel space. On a representative
-production host (titan.myip.gr), Imunify blocked 275 staged PHP
-payloads against `/tmp/.<obfuscated>` paths in a single hour from one
-web user — every one of those payloads, if the write had succeeded
-past Imunify, would have produced an EXEC-006 event when the worker
-exec'd it. The two layers are complementary: PD covers the launch,
-`cfm-lsm` covers the kernel-side execve.
-
-Distinct from the other exec detectors:
-
-  - `EXEC-001` (memfd exec) — fires only on `memfd_create()`-backed
-    exec; not on real files in `/tmp`.
-  - `EXEC-003` (reverse shell) — fires on remote-socket stdio at
-    exec; not about the file's location.
-  - `EXEC-004` (deleted-file exec) — fires when the backing dentry is
-    unlinked at exec time; misses the "wrote a payload to /tmp and
-    exec'd it without unlinking" case that EXEC-006 catches.
-
-**Enforcement.** `mode = enforce` returns `-EPERM` from
-`bprm_check_security`, failing the calling task's `execve()`.
-Operators should run in monitor for at least a week on a
-representative host and review the resulting events:
-package-manager extractions, cPanel `easyapache` build steps, distro
-`ldconfig` re-runs, container runtime helpers, and similar legitimate
-ephemeral-fs execs surface here. **Read the Allowlist surface
-subsection immediately below before promoting** — allowlists
-suppress monitor-mode events but DO NOT prevent enforce-mode
-denials, so any legitimate ephemeral-fs exec observed during the
-monitor window will be blocked once enforce is enabled, regardless
-of whether it's allowlisted. The safe enforce path is "monitor
-confirmed zero legitimate triggers," not "allowlisted everything
-suspicious."
-
-**Allowlist surface — important semantic.** The policy honours
-per-policy `allow_exe`, `allow_comm`, and `allow_path` plus the
-global `[allow]` section, **but only as a userspace post-filter
-that drops events from the cfm.log + notify pipeline**. The
-allowlist is NOT consulted in the BPF program: in enforce mode,
-`cfm_ephemeral_exec` returns `CFM_LSM_DENY` from inside the LSM
-hook before the userspace drain even sees the event, so an
-allowlisted binary is still denied by the kernel. Treat the
-allowlist as a monitor-mode noise suppression mechanism, not a
-safe carve-out for legitimate workflows under enforce.
-
-For EXEC-006 specifically this matters: package installer
-extractions, `easyapache` build steps, distro `ldconfig` re-runs,
-and similar legitimate ephemeral-fs execs that are currently
-"allowlisted" will be **blocked by the kernel in enforce mode**
-even with the allowlist entry present. Before promoting EXEC-006
-to enforce, operators must either (a) confirm via monitor-mode
-telemetry that no legitimate ephemeral-fs execs happen on the
-host, or (b) accept that those workflows will break. A planned
-follow-up — a BPF-side allow map keyed on exe inode — would
-give EXEC-006 a real BPF-gated allowlist; until then,
-monitor-mode triage is the safe rollout.
-
-Match shape (userspace post-filter, monitor mode only):
-
-  - `allow_exe = /tmp/easyapache/build-helper` — basename match against
-    the event's emitted filename in the userspace filter.
-  - `allow_comm = my-installer` — `task->comm` match (kernel truncates
-    to 15 chars).
-  - `allow_path = /tmp/known-good-build-area/` — directory-prefix
-    match against any `argv` element in `/proc/<pid>/cmdline` at event
-    time. Useful when the operator can scope a trusted subtree under
-    an otherwise-ephemeral root.
-
-**Example config.**
-
-```ini
-[policy "CFML-EXEC-006"]
-mode = monitor   # start here; review FPs for ~1 week
-# allow_exe = /tmp/easyapache/build-helper   # monitor-noise suppression only
-
-# Later, on hosts where monitor confirms zero legitimate ephemeral-fs
-# execs (or operator accepts the blast radius for hosts that have some):
-# mode = enforce
-```
-
-**Out of scope for this slice.** Per-uid `/run/user/<uid>/` path
-narrowing (the super-block magic covers it; the dentry-walk branch
-deliberately does not match `/run/user/...` since tmpfs already
-catches it). RPM/dpkg-database signed-binary checking is left out by
-design — operators who want fmpath-style exception lists add them via
-`allow_exe` / `allow_path`.
-
-**Depth-walk failure mode.** The dentry-walk branch unrolls 16
-levels (BPF verifier complexity ceiling). On paths deeper than 16
-hops the walk runs out of budget before reaching the filesystem
-root and `cfm_walk_to_top` returns `reached_root=false`;
-`cfm_dentry_under_ephemeral_root` then fails closed (returns false)
-rather than treating the deepest reached dentry as top-of-path. The
-trade-off is **false-negative on >16-level execs from `/tmp`**
-(rare in practice — typical exec paths are well under that depth)
-in exchange for eliminating an entire false-positive class where a
-mid-path `tmp` directory at exactly the boundary would otherwise be
-mis-classified as exec-from-/tmp. The tmpfs-superblock-magic
-signal (`CFM_LSM_F_TMPFS_BACKED`) is independent of dentry depth
-and still matches anywhere on tmpfs, so the realistic
-/tmp-on-tmpfs / `/dev/shm` / `/run/user` execs that account for
-the bulk of legitimate rule hits still trip via that path.
+**FP sources and knobs.** Package-manager extractions, cPanel
+EasyApache build steps, `ldconfig` re-runs, container helpers. Run
+monitor for about a week on a representative host. `allow_exe` /
+`allow_comm` / `allow_path` silence those events in monitor mode but
+**do not** stop the kernel denying them in enforce mode (see Allowlist
+semantics). Promote only when monitor shows no legitimate ephemeral-fs
+exec, or when the operator accepts that those workflows break.
 
 ### `CFML-FS-005` — Sensitive-file modification by web user
 
-| | |
-|---|---|
-| Hook(s) | `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr`; origin markers on `bprm_check_security`, `task_fix_setuid`, and `task_alloc` |
-| Shipped default | `disabled` (operator opts in to `monitor` or `enforce`) |
-| Enforce | Available for current-uid matches; origin-only matches stay monitor-only |
-| FP risk | Very low on CageFS hosts; low–medium on plain hosts |
-| Perf impact | Negligible — only fires on rare write-class operations against a small inode set |
+**Hook** `inode_setattr`, `inode_create`, `inode_link`, `inode_unlink`, `inode_rename`, `inode_setxattr`; origin markers on `bprm_check_security`, `task_fix_setuid`, `task_alloc` · **Enforce** capable (current-uid matches on core paths only) · **Gate** watched uid, or web-origin task
 
-**Description.** Six write-class BPF LSM programs share one check helper.
-Historically, that helper matched only the task's **current uid**: on every
-write-class inode operation, it looks up the calling task's uid in the
-daemon-populated `cfm_watched_uids` hash (web-class names — apache, nginx,
-php-fpm, lsphp, alt-php-* — plus every cPanel and DirectAdmin account uid).
-If matched, it looks up the target filesystem+inode key in
-`cfm_watched_inodes` (the daemon stats the stable core list in
-`internal/lsm/maps.go::DefaultCoreSensitivePaths`, the persistence list in
-`DefaultPersistencePaths`, and any operator `persistence_path = ...` additions,
-then records `st_dev` + `st_ino`). Both hits → emit event. Enforce mode can
-return `-EPERM` only for entries marked as stable core paths; persistence-path
-entries are monitor-only by default even when `mode = enforce`.
+**Catches** a watched uid modifying a watched path. The daemon `stat()`s
+each path and stores `(fs, inode)` in `cfm_watched_inodes`; for
+directories the create / link / rename / unlink hooks match the parent
+directory, so `/etc/sudoers.d/backdoor` matches without BPF path walking.
+Globs are not supported; missing paths are skipped, so one config can be
+shared across cPanel, DirectAdmin, Debian / Ubuntu and EL hosts. This is
+the cash-in after any privesc, including kernel 0-days that bypass other
+hooks: the attacker still has to write `/etc/shadow`, `/etc/sudoers` or
+`authorized_keys` through the normal syscall path.
 
-**Web-origin matching.** FS-005 can also run an origin tracker gated by
-`origin_tracking = monitor` in `/etc/cfm/lsm.conf`. The tracker uses
-task-local BPF storage to mark tasks whose real/effective/fs uid matches
-`cfm_watched_uids`, refreshes that mark on exec and setuid-family transitions, and copies it to children on
-fork/clone through the `task_alloc` hook. A later sensitive write therefore
-still matches even if the process has become uid 0 by the time it touches the
-file. Origin-only events set the FS-005 web-origin flag and are
-**monitor-only** for now: they are reported even if `mode = enforce`, but they
-do not return `-EPERM` until telemetry shows the false-positive rate is safe.
+**Two path classes** (`internal/lsm/maps.go`):
 
-**Filesystem+inode matching avoids BPF-side path walking entirely.** For
-operations that create new files under a watched directory (e.g.
-`/etc/sudoers.d/backdoor`), the `inode_create` hook reads the parent
-dentry's filesystem+inode identity and matches that against the
-same set — the daemon includes the dir keys alongside the file keys.
-
-**Rationale.** This is the high-value catch for kernel 0-day cash-ins.
-A Dirty Pipe or pwnkit attacker that successfully escalated still has
-to *use* the privilege — typically by writing to `/etc/shadow`,
-`/etc/sudoers`, or `/root/.ssh/authorized_keys`. Those writes go
-through the standard syscall path even when the privesc primitive
-bypassed earlier LSM hooks, so cfm-lsm sees them.
-
-**Enforcement.** Available via `mode = enforce` in `lsm.conf` for
-current-uid matches on the stable core path set (`/etc/passwd`, `/etc/shadow`,
-`/etc/group`, `/etc/gshadow`, `/etc/sudoers`). Web-origin-only matches and all
-host-persistence path matches deliberately stay monitor-only while operators
-build a baseline. This keeps the new persistence coverage inside `CFML-FS-005`
-rather than creating `CFML-FS-006`, while preserving the original low-risk
-enforcement boundary.
-
-**Auth-helper enforce-mode exemption.** The watched-uid gate
-(`cfm_uid_watched`) keys on the REAL uid via
-`bpf_get_current_uid_gid()`, so a watched user running a setuid-root
-auth-database helper or admin wrapper — `sudo`, `sudoedit`, `visudo`,
-`vipw`, `vigr`, `passwd`, `chage`, `gpasswd`, `chsh`, `chfn`,
-`newgrp`, `pkexec`, `unix_chkpwd`, `usermod`, `useradd`, `userdel`,
-`groupadd`, `groupmod`, `groupdel`, `pwconv`, `grpconv`, `pwck`,
-`grpck` — still matches `current_uid_watched=true`. Without a further
-check, enforce mode would block ordinary password changes and
-`sudo visudo` workflows for every admin sshed in as a UID ≥
-`watched_uid_fallback_min` (default 1000). The BPF program therefore
-reads `current->cred->euid` and `bpf_get_current_comm`, and skips the
-enforce decision only when BOTH `euid == 0` AND the comm is in the
-fixed auth-helper allowlist (`cfm_comm_is_trusted_auth_helper` in
-`cfmlsm.bpf.c`). The audit event still fires (forensic record of who
-touched the sensitive file); only the `-EPERM` return is suppressed.
-A non-allowlisted comm under `euid == 0` (e.g. `php-fpm`, `bash`, a
-dropper) is denied.
-
-**Limitation — comm-based gating is spoofable.** `bpf_get_current_comm`
-reads `task->comm`, which any task can rewrite via
-`prctl(PR_SET_NAME, ...)` or `argv[0]` on `execve`. An attacker who
-has already reached `euid == 0` post-privesc (the canonical Dirty
-Pipe / pwnkit / `commit_creds()` cash-in state) can therefore set
-its comm to `"passwd"` with one syscall and bypass the deny. FS-005
-enforce raises the cost of in-kernel privesc cash-in from zero to
-"one extra syscall plus prior policy awareness"; it is defense in
-depth against opportunistic exploit code that targets the sensitive
-files directly, not a wall against a targeted attacker who knows
-about the policy. The audit emit fires unconditionally and is the
-real forensic signal. A future revision may move to an `exe_file`
-inode-identity check (see the plan file referenced in the
-`narrow-setuid-enforcement` branch history) for a stronger gate.
-
-**Host-persistence paths.** The default monitor-only persistence set includes
-common distro and panel locations used for durable post-exploit hooks:
-
-| Host class | Example paths |
-|---|---|
-| Debian / Ubuntu / EL10 | `/etc/systemd/system`, `/etc/systemd/user`, `/etc/cron.d`, `/etc/cron.daily`, `/etc/cron.hourly`, `/etc/cron.weekly`, `/etc/cron.monthly`, `/etc/crontab`, `/etc/sudoers.d`, `/etc/pam.d`, `/etc/ssh/sshd_config.d`, `/root/.ssh` |
-| cPanel / WHM | `/usr/local/cpanel/hooks`, `/var/cpanel/hooks`, `/usr/local/cpanel/scripts/postupcp`, `/usr/local/cpanel/scripts/preupcp`, `/var/cpanel/perl5/lib`, `/var/cpanel/easy/apache/profile/custom` |
-| DirectAdmin | `/usr/local/directadmin/scripts/custom`, `/usr/local/directadmin/data/templates/custom` |
-
-Operators can add site-specific persistence locations without widening the
-enforceable core set:
+- **Core, enforceable** (`DefaultCoreSensitivePaths`): `/etc/passwd`,
+  `/etc/shadow`, `/etc/group`, `/etc/gshadow`, `/etc/sudoers`.
+- **Persistence, monitor-only even in enforce mode**
+  (`DefaultPersistencePaths`, plus operator `persistence_path` lines):
+  systemd unit dirs, cron dirs and `crontab`, `cron.allow/deny`,
+  `at.allow/deny`, `/var/spool/cron{,/crontabs}`, `/etc/sudoers.d`,
+  `/etc/pam.d`, `sshd_config{,.d}`, `/root/.ssh`, root's
+  `.bashrc` / `.profile`, `/etc/ld.so.preload`, `ld.so.conf{,.d}`,
+  `/etc/profile{,.d}`, `/etc/bashrc`, `/etc/bash.bashrc`,
+  `/etc/environment`, the cPanel hook / include paths and the
+  DirectAdmin custom hook dirs.
 
 ```ini
 [policy "CFML-FS-005"]
 mode = monitor
-origin_tracking = monitor
-persistence_path = /etc/systemd/system
+origin_tracking = monitor           # disabled | monitor (default monitor)
 persistence_path = /opt/vendor-panel/hooks
 ```
 
-`persistence_path` values must be absolute concrete paths; glob expansion is not
-performed in the BPF path. Missing paths are skipped at map-population time so a
-single panel-specific entry can be present in a shared config across cPanel,
-DirectAdmin, Debian/Ubuntu, and EL10 hosts.
+**Web-origin tracking** (`origin_tracking`, default `monitor`) uses
+task-local storage to mark tasks whose real, effective or fs uid is
+watched, refreshes the mark on exec and setuid-family transitions, and
+copies it to children in `task_alloc`. A later sensitive write still
+matches after the process has become uid 0. Origin-only events carry
+`CFM_LSM_F_WEB_ORIGIN` and are never blocked. They are broader: root
+helpers or panel maintenance started from a panel account can show up.
 
-**False-positive profile.** Current-uid matches retain the original FS-005
-profile: very low on CageFS hosts and low–medium on plain hosts. Web-origin
-matching is intentionally broader. It can alert on legitimate root helpers,
-package hooks, or panel maintenance workers that were launched by a web/panel
-account and later acquired uid 0 before touching a watched path. Those are
-valuable forensic breadcrumbs during compromise response, but they need
-monitor-mode review before any blocking decision.
+**Auth-helper exemption in enforce mode.** The gate keys on the real
+uid, so a watched admin running `passwd` or `sudo visudo` still matches.
+When the task has euid 0 **and** its comm is in the fixed set in
+`cfm_comm_is_trusted_auth_helper` (`sudo`, `sudoedit`, `visudo`, `vipw`,
+`vigr`, `passwd`, `chage`, `gpasswd`, `chsh`, `chfn`, `newgrp`,
+`pkexec`, `unix_chkpwd`, `usermod`, `useradd`, `userdel`, `groupadd`,
+`groupmod`, `groupdel`, `pwconv`, `grpconv`, `pwck`, `grpck`), the event
+is still emitted but `-EPERM` is not returned. **This gate is
+spoofable**: a task at euid 0 can set its comm to `passwd` with one
+`prctl(PR_SET_NAME)`. FS-005 enforce stops opportunistic exploit code,
+not a targeted attacker who knows the policy. The event is the real
+forensic signal. An `exe_file` inode check would be the stronger gate
+(not built).
+
+**FP profile.** Very low on CageFS hosts, low to medium on plain hosts
+for current-uid matches. `allow_comm` (per-policy or global) silences
+known writers in monitor mode.
 
 ### `CFML-FS-006` — Sensitive read via root-owned fd from unprivileged task
 
-**Threat.** A setuid-root helper (`ssh-keysign`, `chage`, `unix_chkpwd`,
-`passwd`, …) opens a sensitive file as root and an unprivileged task obtains a
-reference to that already-opened `struct file` before the helper closes it.
-The unprivileged task then reads the file via the leaked fd — its own
-`current_cred()` stays at the original uid, but `file->f_cred->euid` is 0 and
-the fd grants whatever access root had at open time. Working primitives in
-this class include:
+**Hook** `file_permission` · **Enforce** monitor-only · **Gate** real uid ≠ 0, euid ≠ 0, `file->f_cred` euid 0, inode in `cfm_watched_inodes`
 
-- **`pidfd_getfd()` exit-window race** — the modern variant. Attacker
-  `fork+exec`s the setuid helper (so the attacker IS the parent, which Yama
-  `ptrace_scope=1` allows through), opens a pidfd to the helper, and races
-  `pidfd_getfd()` against the helper's exit window to clone the fd that
-  pointed at `/etc/shadow`. Reported by Qualys against `ssh-keysign`; kernel
-  fix at Linus commit `31e62c2ebbfd`. Reproducers like `chage_pwn` /
-  `sshkeysign_pwn` (the README "try=N" loop counts the race iterations)
-  succeed on stock RHEL/Alma/Rocky with `ptrace_scope=1`.
-- **`CLONE_FILES` + setuid-exec** — older variant; parent and child share an
-  fd table, child `execve`s the setuid helper, helper opens `/etc/shadow`,
-  parent reads it through the shared table. Largely closed by modern kernels
-  refusing setuid-exec across a shared `files_struct`, but worth blocking at
-  the LSM layer anyway.
-- **`/proc/<helper-pid>/fd/<n>`** — opportunistic; needs the
-  `dumpable`-relaxed window. Lower yield on modern kernels but still feasible
-  with `fs.suid_dumpable=1`.
+**Catches** an unprivileged task reading a FS-005 watched inode through
+a `struct file` opened by root: the setuid-helper fd-leak class. The
+modern variant is the `pidfd_getfd()` exit-window race against
+`ssh-keysign` / `chage` / `unix_chkpwd` (Qualys; kernel fix in Linus
+commit `31e62c2ebbfd`), which Yama `ptrace_scope=1` lets through because
+the attacker is the helper's parent. Older variants: `CLONE_FILES` +
+setuid exec, `/proc/<pid>/fd/<n>` with `fs.suid_dumpable=1`.
+`file_permission` is the only hook that sees both `current_cred()` and
+`file->f_cred`; it runs on every read and write, so the program returns
+on uid 0 before any map lookup.
 
-**Hook.** `lsm/file_permission` — fires on every read/write through any fd,
-which is the only point where the kernel knows both `current_cred()` (who is
-acting now) and `file->f_cred` (who opened the file). `file_open` is too
-early — the open happens in the privileged helper, not the attacker.
-`file_receive` only fires on SCM_RIGHTS, which misses every primitive in this
-class. The hook cost is paid on every `read(2)`/`write(2)` system-wide, so
-the program early-returns on the cheap path (current is uid 0) before doing
-any map lookup.
+**Relationship to kernsec.** kernsec ships
+`kernel.yama.ptrace_scope=2` (`KSEC-SCT-kspp.kernel-006`, Tier 1), which
+closes the `pidfd_getfd()` primitive. FS-006 is for hosts that
+`state = skip` that rule for same-uid `gdb` / `strace -p` / `py-spy`,
+and for future fd-leak variants that do not go through ptrace.
 
-**Mechanism.** The BPF program performs three checks in order, fastest
-first:
+**Monitor-only because** PAM chains do exactly this legitimately:
+`passwd`, `pkexec`, `sudo`, `unix_chkpwd`, dovecot-auth workers and
+postfix workers open the watched files as root and read them after
+dropping privileges. Denying would break authentication. The legitimate
+`(comm, exe inode)` set varies by distro, PAM stack, MTA and panel, so
+any enforce allowlist would have to be built from production telemetry.
+Expect mid-volume events on hosts with interactive `su`, `sshd` password
+auth or `crond` PAM sessions.
 
-1. `current_cred()->euid != 0` — skip uid-0 callers entirely (root reading
-   `/etc/shadow` is uninteresting and would dominate the event volume).
-2. `file->f_cred->euid == 0` — only fires when the fd was opened in a
-   privileged context. `BPF_CORE_READ(file, f_cred, euid.val)` keeps it
-   CO-RE-portable across kernel versions.
-3. `cfm_watched_inodes` lookup against the dentry's `(fs_id, ino)` — reuses
-   the same map FS-005 populates from the sensitive-path table
-   (`/etc/shadow`, `/etc/gshadow`, `/etc/sudoers`, `/etc/sudoers.d/*`,
-   `/root/.ssh/*`, `/etc/ssh/ssh_host_*_key`, host-persistence additions).
+### `CFML-FS-007` — Privilege-primitive install by web user
 
-All three pass → emit one `cfm_lsm_event` to the shared ringbuf with policy
-id `CFML-FS-006`. The hook does not block — see "Mode" below.
+**Hook** `inode_setattr`, `inode_setxattr` · **Enforce** capable · **Gate** watched uid
 
-**Mode.** Monitor-only by default and for the foreseeable future. Enforce is
-unsafe because several legitimate authentication chains open the watched
-files as root in one task and `read(2)` from a worker after dropping privs:
+**Catches** a watched uid setting the suid / sgid bit (`chmod 4755`) or
+writing `security.capability` (`setcap`) on any file. Flags
+`CFM_LSM_F_PRIV_SUID`, `_SGID`, `_FILECAP`. This is the persistence
+install step; CRED-002 catches the later use. There is no watched-inode
+gate: the primitive itself is the signal.
 
-- `passwd`, `pkexec`, `sudo` — open `/etc/shadow` as root, then drop to the
-  caller's uid for the readback compare.
-- `unix_chkpwd` — invoked by PAM with the caller's uid; opens
-  `/etc/shadow` via setuid root, reads it back from the same task after the
-  setuid bit has dropped via `setresuid()`.
-- `dovecot-auth` worker pool, `postfix smtpd_pickup`, some IMAP/SMTP MTAs
-  — preopen `/etc/shadow` in a privileged supervisor and hand the fd (or
-  the worker forks) to an unprivileged auth worker for the actual read.
+**Enforce** is safe in principle (no legitimate workflow has a web-class
+uid set suid or file caps); `chmod` / `setxattr` get `-EPERM` and the
+primitive never lands. No allowlist applies.
 
-Enforce would deny those reads and break authentication. Telemetry first; if
-an enforce mode ever lands, the allow-list of `(comm, exe_inode)` pairs
-permitted to do this has to be scrubbed against weeks of production data,
-not guessed.
+### `CFML-FS-008` — Write to a sensitive kernel knob
 
-**Relationship to kernsec.** `kernsec` ships `kernel.yama.ptrace_scope=2`
-(`KSEC-SCT-kspp.kernel-006`) in Tier 1, which closes the `pidfd_getfd()`
-primitive at the kernel layer — that is the cheapest, broadest mitigation
-for hosts that can accept it. FS-006 exists for hosts that cannot:
-debug-heavy workstations, CI runners, observability hosts that need
-`gdb --attach` / `strace -p` / `py-spy` without sudo. Those hosts
-`state = skip` `KSEC-SCT-kspp.kernel-006` in `kernsec.conf` and accept
-the residual exit-window race. FS-006 then gives them telemetry on any
-read of a watched inode through a leaked root fd, regardless of which
-primitive established the leak (pidfd_getfd, CLONE_FILES, /proc/fd, or a
-future variant). It is defence-in-depth, not a replacement for the
-sysctl.
+**Hook** `file_permission` (write / append only) · **Enforce** capable · **Gate** inode in `cfm_kernel_knob_inodes`; comm not trusted
 
-**Why not enforce on a curated allow-list day one.** The legitimate-helper
-set above varies by distro release, PAM stack, MTA choice, and panel
-vendor (DirectAdmin, cPanel, CloudLinux, mailcow each spawn workers with
-slightly different `comm` / exe-inode shapes). Enforce-by-allow-list
-would need a stable inventory of "every `(comm, exe_inode)` that may
-legitimately read a watched file through a root-opened fd," and that
-inventory is only knowable empirically — which is what the monitor
-telemetry window is for. The same reasoning applies as for CRED-002:
-returning `-EPERM` from this hook mid-PAM-stack would deadlock the auth
-session, not just block one read.
+**Catches** a write to `/proc/sys/kernel/core_pattern`,
+`/proc/sys/kernel/modprobe_path`, `/proc/sys/kernel/hotplug`,
+`/proc/sysrq-trigger`, `/sys/kernel/uevent_helper` or
+`/proc/sys/fs/binfmt_misc/register` (`DefaultKernelKnobPaths`): the
+pivots public kernel exploits use once they have a write primitive.
+Paths absent on the running kernel are skipped. There is **no**
+watched-uid gate: any writer, root included, is reported unless its comm
+is `cfm`, `sysctl`, `systemd-sysctl` or `systemd`.
 
-**False-positive profile.** Expected mid-volume during the monitor window
-on any host that exercises PAM (every interactive `su`, every `sshd`
-password auth, every `crond` PAM session). Operators are expected to
-review the captured `(comm, exe_inode)` distribution and either accept
-the noise as expected baseline or build an allow-list before any
-enforce conversation.
+**Enforce** is capable but needs a monitor window first: an unexpected
+legitimate writer would fail silently. No allowlist applies.
 
 ### `CFML-CRED-002` — Privilege escalation without setuid path
 
-| | |
-|---|---|
-| Hook | `task_fix_setuid` |
-| Shipped default | `disabled` (operator opts in to `monitor`) |
-| Enforce | Not available; enforce settings are downgraded to monitor with a warning |
-| FP risk | Low — daemon walks `/usr/bin`, `/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin` for setuid binaries and whitelists their filesystem+inode keys; operator can extend via `allow_exe` in `lsm.conf` |
-| Perf impact | Cold — fires only on setuid-family syscalls (setresuid / setuid / setreuid / setfsuid), bounded by a single map lookup |
+**Hook** `task_fix_setuid` · **Enforce** monitor-only · **Gate** euid non-root → root
 
-**Description.** One BPF program at `task_fix_setuid`. Reads the new
-and old credential structs after the setuid syscall has written them.
-Only continues when `new.euid == 0 && old.euid != 0` (non-root →
-root). Then resolves `current->mm->exe_file`'s filesystem+inode key
-and looks it up in `cfm_setuid_inodes`. If the key is NOT in the whitelist, the
-process is gaining root via a setuid syscall from a binary that does
-not carry the suid bit on disk — the canonical post-exploit
-fingerprint where a kernel exploit installed root creds and the
-attacker pivots through `setresuid(0,0,0)` from a webshell or
-similar. Emit event; never block.
+**Catches** a setuid-family syscall that takes euid from non-zero to 0
+in a process whose `mm->exe_file` does not carry the suid bit: the
+fingerprint of an exploit that installed root and pivots through
+`setresuid(0,0,0)`. The program checks the exe inode's live mode
+(`S_ISUID`), which stays correct across package upgrades, then falls
+back to `cfm_setuid_inodes`: the daemon's walk of `/usr/bin`,
+`/usr/sbin`, `/usr/libexec`, `/bin`, `/sbin` plus the operator's
+`allow_exe` paths, for daemons that reach euid 0 without a suid bit
+(`directadmin`, `cpanel`, `crond`, lvestats). No watched-uid gate.
 
-**Hook choice — task_fix_setuid, not cred_prepare.** The earlier
-draft attached to `cred_prepare`, but `cred_prepare` runs inside
-`prepare_creds()` *before* the caller has mutated `new->euid` —
-at that point `new` is a byte-for-byte copy of `old`, so a
-"non-root → root" gate is mathematically unsatisfiable and the
-program emits zero events. `task_fix_setuid` fires from the setuid
-syscall paths *after* the new cred's uid fields have been written,
-so the comparison is meaningful. The narrower hook does mean
-CRED-002 does not catch kernel exploits that install creds directly
-via `commit_creds(prepare_kernel_cred(NULL))` without going through
-a userspace setuid syscall; `CFML-CRED-003` is the complementary
-monitor-only rule for that direct install path.
+**Hook choice.** `cred_prepare` runs before the caller sets
+`new->euid`, so a non-root → root test there can never match;
+`task_fix_setuid` runs after. This hook does not see a direct
+`commit_creds()` install; that is CRED-003.
 
-**Monitor-only by design.** Returning `-EPERM` from the cred-install
-path can deadlock systemd helpers and pkexec mid-transition (kernel
-auth bugs, polkit weirdness, container runtime cred manipulation).
-The value is in the alert, not the block. `cfm lsm enable` silently
-downgrades a `mode = enforce` setting on this policy to `monitor`
-with a clear warning, so an operator who copies an enforce setting
-from a different policy still gets safe behaviour.
-
+**Monitor-only because** denying a credential transition can wedge
+systemd helpers and pkexec mid-transition. The packaged `lsm.conf`
+carries per-policy `allow_exe` / `allow_comm` entries for known panel
+and `sssd` paths.
 
 ### `CFML-CRED-003` — Direct root credential install
 
-| | |
-|---|---|
-| Hook | `fentry/commit_creds` (optional per-policy telemetry; skipped when unavailable) |
-| Shipped default | `disabled` (operator opts in to `monitor`) |
-| Enforce | Not available; `fentry` is tracing, not an LSM decision point. Enforce settings are downgraded to monitor with a warning |
-| FP risk | Low — emits only for non-root current credentials installing uid/euid 0 and suppresses transitions already observed by `task_fix_setuid` |
-| Perf impact | Cold — fires on credential commits only; event path is gated by simple uid comparisons |
+**Hook** `fentry/commit_creds` · **Enforce** monitor-only · **Gate** non-root → uid and euid 0
 
-**Description.** A tracing program attaches to `commit_creds` and compares
-the current task's active credential state with the credential pointer being
-installed. It emits only when a non-root task (`old.uid != 0` and
-`old.euid != 0`) installs root credentials (`new.uid == 0` and
-`new.euid == 0`). The BPF side marks credential pointers observed by
-`task_fix_setuid`; if `commit_creds` receives that exact pointer, CRED-003
-suppresses its event and leaves the transition to `CFML-CRED-002`. This
-keeps CRED-003 focused on direct credential installation paths that bypass
-`task_fix_setuid`, such as kernel exploit payloads that call
-`commit_creds(prepare_kernel_cred(NULL))`.
+**Catches** `commit_creds()` installing root credentials for a task
+whose current uid and euid are non-zero, when that cred pointer was not
+just seen by `task_fix_setuid` (CRED-002 owns those). This is the
+`commit_creds(prepare_kernel_cred(NULL))` kernel-exploit path. Flag
+`CFM_LSM_F_DIRECT_CRED_INSTALL`. Enable it together with CRED-002.
 
-**Relationship to CRED-002.** CRED-002 is the setuid-family syscall view:
-it has old/new credentials from the LSM hook and can apply the setuid-binary
-inode whitelist. CRED-003 is the direct install view: it sees the final
-`commit_creds` call even when no setuid syscall LSM hook fired. The rules are
-therefore complementary rather than replacements. Operators should enable both
-in monitor mode when investigating privilege-escalation attempts.
+**Monitor-only because** `fentry` is tracing, not a decision point. If
+`commit_creds` is not a usable tracing target, or the kernel lacks
+task-local storage, preflight reports only this policy (and CRED-002 for
+the latter) unavailable.
 
-**Monitor-only by design.** `fentry/commit_creds` is telemetry, not an LSM
-decision hook, so CRED-003 never blocks. If a kernel does not expose a usable
-`commit_creds` tracing target, preflight reports only `CFML-CRED-003` as
-unavailable; the rest of cfm-lsm remains usable and can still attach.
+### `CFML-CRED-004` — Capability-set raise by web user
 
-**Companion kernsec rule.** `KSEC-LSM-bpf-001` (in `internal/kernsec/`)
-appends `bpf` to the operator's existing `lsm=` boot argument when
-forced in `/etc/cfm/kernsec.conf`. Required on distros where `bpf` is
-not in the default LSM list (most non-EL10 kernels). Opt-in via
-`[rule "KSEC-LSM-bpf-001"] state = force`. Symmetric unmerge on disable.
+**Hook** `fentry/commit_creds` · **Enforce** monitor-only · **Gate** watched uid; new uid and euid ≠ 0
+
+**Catches** a watched uid gaining bits in `cap_ambient` or
+`cap_inheritable`: capability hoarding through
+`prctl(PR_CAP_AMBIENT_RAISE)`, after which the cap survives every
+`execve`. `cap_effective` is not compared (every setuid binary changes
+it). Transitions to uid 0 belong to CRED-002 / CRED-003. Flags
+`CFM_LSM_F_CAP_RAISE_AMBIENT` / `_INHERITABLE`; the filename field is
+`cap=NN`, the lowest newly raised bit (`cap=7` is `CAP_SETUID`).
+
+**FP sources.** The per-user `systemd --user` instance (comm
+`(systemd)`) raises ambient caps during session setup on every login
+uid; `bwrap` does similar. Silence with `allow_comm`; the packaged
+global `[allow]` lists both. Operator-side hygiene: audit
+`getcap -r /home /var` for unexpected file caps.
+
+### `CFML-EXEC-007` — Kernel module load by non-trusted comm
+
+**Hook** `tracepoint/syscalls/sys_enter_{init,finit}_module` · **Enforce** monitor-only · **Gate** comm not trusted, or watched uid
+
+**Catches** a module load whose comm is not `modprobe`, `insmod`,
+`kmod`, `systemd`, `systemd-modules` (truncated
+`systemd-modules-load`) or `systemd-udevd`, or any load from a watched
+uid (comm spoofing). Rootkit-installer telemetry.
+
+**Monitor-only because** the kernel ignores a tracepoint program's
+return value. kernsec does not manage `kernel.modules_disabled` (it
+needs a late unit after CFM loads its own modules, and live-patch agents
+load modules post-boot).
+
+### `CFML-EXEC-008` — kexec load by non-trusted comm
+
+**Hook** `tracepoint/syscalls/sys_enter_{kexec_load,kexec_file_load}` · **Enforce** monitor-only · **Gate** comm not `kexec` / `systemctl`, or watched uid
+
+**Catches** loading a replacement kernel post-boot, a persistence path
+that bypasses firmware and on-disk kernel audits.
+
+**Monitor-only because** it is a tracepoint. The block is kernsec's
+`kernel.kexec_load_disabled=1` (`KSEC-SCT-kspp.kexec-001`, Tier 1,
+skipped on kdump hosts). Preflight reports the policy unavailable when
+the kexec tracepoints are not exposed.
 
 ### `CFML-BPF-001` — Unexpected BPF use
 
-| | |
-|---|---|
-| Hook | `tracepoint/syscalls/sys_enter_bpf` |
-| Shipped default | `disabled` (operator opts in to `monitor`) |
-| Enforce | Not available; tracepoint is telemetry, not an LSM decision point. Enforce settings are downgraded to monitor with a warning |
-| FP risk | Medium on hosts running observability or security agents that themselves load BPF |
-| Perf impact | Negligible (only fires on `bpf()` syscall entry for map/program creation) |
+**Hook** `tracepoint/syscalls/sys_enter_bpf` · **Enforce** monitor-only · **Gate** `BPF_MAP_CREATE` / `BPF_PROG_LOAD`; comm not trusted, or watched uid
 
-**Description.** Reports `bpf()` syscall attempts for `BPF_MAP_CREATE`
-and `BPF_PROG_LOAD` when the caller is not CFM itself or a small
-allowlist of known distro/platform agents. Attempts by the
-daemon-populated web/panel uid set are always reported, even if the
-process name resembles a trusted helper. The event payload uses the
-shared cfm-lsm ringbuf: `op=bpf_map_create` or `op=bpf_prog_load`,
-`comm=<caller>`, and `path=<BPF command label>`.
+**Catches** BPF map creation or program loading outside CFM and a small
+trusted set (`cfm`, `systemd`, `systemd-udevd`, `systemd-network…`,
+`NetworkManager`, `bpftool`, `auditd`). Watched-uid callers are always
+reported (flag `CFM_LSM_F_WEB_ORIGIN`). The filename field is
+`BPF_MAP_CREATE` or `BPF_PROG_LOAD`. Advanced-threat telemetry: attackers
+use eBPF for stealth and credential capture once they have local
+execution.
 
-**Rationale.** Unexpected BPF program loading is an advanced-threat
-signal: successful attackers increasingly use eBPF for stealth,
-packet inspection, credential capture, or persistence after they
-already have meaningful local execution. Hosting web users and
-panel-managed uids should not be creating BPF maps or loading BPF
-programs during normal operation.
+**FP sources.** Observability and security agents and container
+runtimes that load BPF; the packaged global `[allow]` lists container
+runtime comms. Silence others with `allow_comm`. Broad unprivileged-BPF
+reduction is kernsec's job (`kernel.unprivileged_bpf_disabled`, JIT
+hardening).
 
-**Not baseline hardening.** This policy deliberately does not block.
-The tracepoint observes attempts before syscall completion and
-cannot provide a reliable LSM-style denial decision. Operators
-should rely on `kernsec` for broad unprivileged BPF surface
-reduction (`kernel.unprivileged_bpf_disabled`, BPF JIT hardening,
-and related sysctls), then enable `CFML-BPF-001` only where
-advanced-threat telemetry is desired.
+### `CFML-OBS-004` — ptrace from web-class user
 
+**Hook** `ptrace_access_check` · **Enforce** monitor-only · **Gate** watched uid; target ≠ self
+
+**Catches** a watched uid ptracing another task (`PTRACE_MODE_READ` or
+`_ATTACH`): a compromised vhost user reading or injecting into a sibling
+PHP-FPM worker or cron job. Flags `CFM_LSM_F_PTRACE_READ`, `_ATTACH`,
+`_SAMEUID` (cross-uid is the higher-severity case). The event carries
+the target's pid and euid (`target_pid=` / `target_uid=`).
+
+**Coverage depends on Yama.** BPF is last in the LSM chain (kernsec's
+`bpf` merge appends it). On `ptrace_scope ≤ 1` hosts OBS-004 sees every
+attempt. With kernsec's `ptrace_scope=2` applied, Yama denies first and
+OBS-004 never sees those attempts; the kernel block is the protection
+there.
+
+**FP sources.** Reading `/proc/<pid>/{stat,exe,status}` goes through
+`ptrace_may_access`, so every process lister trips the hook once per
+target. The compiled-in comm list covers them (see Allowlist
+semantics); a READ by a listed comm is hidden, an ATTACH never is. Notify
+mail for OBS-004 is keyed on caller identity, so one sweep is one mail
+(see [Event enrichment](#event-enrichment--making-an-alert-actionable)).
+
+**Monitor-only because** Yama is the block layer, and denying here
+would break operators debugging a tenant's worker with `gdb`.
+
+### `CFML-NET-002` — Raw / packet socket from web-class user
+
+**Hook** `socket_create` · **Enforce** capable · **Gate** user socket; `AF_PACKET`, or `AF_INET`/`AF_INET6` + `SOCK_RAW`; watched real uid; euid ≠ 0
+
+**Catches** a scanner, sniffer or spoofing tool dropped by a compromised
+vhost user. The filename field is `proto=NN`.
+
+**FP sources.** Unprivileged ping (`SOCK_DGRAM`) never matches, and
+legacy setuid-root `ping` is skipped by the euid 0 check. A
+file-capability `ping` / `traceroute` / `mtr` (`cap_net_raw+ep`, common
+on Debian / Ubuntu / EL9+) runs at the user's euid and **does** match.
+No allowlist applies. Keep the rule in monitor and triage those, or open
+`net.ipv4.ping_group_range` so iputils uses `SOCK_DGRAM`. Enforce only
+where vhost users do not run cap_net_raw binaries.
 
 ## Event enrichment — making an alert actionable
 
-The BPF ring-buffer event (`internal/lsm/events.go`) is deliberately
-tiny: pid/tgid/uid/gid, the 16-byte `comm`, and a 64-byte policy-specific
-`filename`. That is enough to know THAT something fired, but `comm` is
-spoofable (`prctl(PR_SET_NAME)` / `argv[0]`), so on its own an event
-cannot answer *who / what / where*. Worse, the offending process is
-frequently short-lived (an OBS-004 sweep's `pgrep`, an EXEC-006 dropper)
-and gone by the time an operator reads a 3am email.
+The ringbuf event (`internal/lsm/events.go`, 124 bytes) carries
+pid / tgid / uid / gid, the 16-byte `comm`, a 64-byte policy-specific
+`filename`, flags, and `ppid` / `aux_pid` / `aux_uid`. `comm` is
+spoofable and the process is often gone by the time someone reads the
+alert, so the daemon reads the caller's `/proc` within milliseconds of
+the event (`emitNotify` → `gatherEnrichment` in `procsnap.go`). All of
+it is best-effort and bounded, and controlled from `[events]` in
+`lsm.conf`; every knob defaults on, and an older `lsm.conf` inherits the
+defaults.
 
-The daemon closes that gap in the drain goroutine (`emitNotify` →
-`gatherEnrichment` in `internal/lsm/procsnap.go`), reading the caller's
-`/proc` within milliseconds of the event — far faster than a human, but
-still a best-effort race against process exit. Three layers, all
-best-effort, bounded, and controlled from `[events]` in `lsm.conf`
-(every knob defaults ON; an operator's pre-existing conf inherits the
-defaults on upgrade without editing, because `ParseConf` seeds
-`DefaultEventSinkConf()` and only overrides keys the file actually
-lists):
-
-| Knob | Default | What it adds |
+| Knob | Default | Adds |
 |---|---|---|
-| `enrich` | on | Caller `/proc` snapshot: `user` (uid→name), real `exe` (+ `(deleted)` flag), `cwd`, `cmdline`, `ppid`+parent `comm`/`exe`, `loginuid`. For an **alive** caller the `ppid` is read from its live `/proc` status (self-consistent with the exe/cwd just read from the same entry, and immune to a pid recycle). For a caller that has **already exited**, it comes from the BPF event (`current->real_parent->tgid`, captured in-kernel when the event fired) — which is what lets the launcher still resolve after the caller is gone (best-effort: if the parent *also* exited and its pid recycled, the resolved parent can be wrong). Applies to **every** policy, not just the examples. |
-| `enrich_hash` | on | SHA-256 of the caller's exe bytes (read through `/proc/<pid>/exe`, so it works even for an unlinked binary). VirusTotal / YARA-ready. |
-| `enrich_peers` | on | The **uid swarm roster**: every process sharing the caller's real uid, with pid/comm/real-exe. A compromised account typically runs many processes under one uid with spoofed comms all pointing at one dropped binary — this captures that roster while the pids still exist. Skipped for uid 0. |
-| `enrich_capture` | on | Copies the offending binary out of `/proc/<pid>/exe` into `capture_dir` (default `/var/lib/cfm/lsm/capture`) **before it can self-delete**. Only for suspicious images — already unlinked, or on an ephemeral fs (`/tmp`,`/var/tmp`,`/dev/shm`,`/run/user`); `/home` is deliberately excluded (on shared hosting every legitimate per-user binary lives there, and a homedir dropper that unlinks itself is still caught by the deleted flag). Saved `<sha256>.bin`, content-deduplicated, root-only `0600`, never executed, bounded per event and by a directory file cap (surfaced once in `cfm.log`+dmesg when hit). Captures the caller AND suspicious roster peers. |
+| `detect_rate_per_min` | 30 | Per-policy cap on log + notify emissions; drops are summarised (`lsm_detect_summary`). The decision is made before any `/proc` work. |
+| `enrich` | on | Caller snapshot: user, real `exe` (with `(deleted)`), `cwd`, `cmdline`, ppid with parent comm / exe, `loginuid`. For an exited caller the parent comes from the in-kernel `ppid`, so the launcher survives (best-effort if the parent's pid was recycled). |
+| `enrich_hash` | on | SHA-256 of the exe bytes via `/proc/<pid>/exe` (works for an unlinked binary). |
+| `enrich_peers` | on | Every process with the caller's real uid (pid, comm, real exe): the swarm a compromised account runs under spoofed comms. Skipped for uid 0. |
+| `enrich_capture` | on | Copies a suspicious exe (unlinked, or on `/tmp`, `/var/tmp`, `/dev/shm`, `/run/user`; not `/home`) to `capture_dir` (default `/var/lib/cfm/lsm/capture`) as `<sha256>.bin`, `0600`, deduplicated, capped per event and by a file count. Covers the caller and suspicious peers. |
 
-**Where the fields land.** The full per-event detail (caller snapshot +
-this specific target + swarm summary + captured paths) goes to the
-`cfm.log` line. For the **sweep-class policy `CFML-OBS-004`** — the one
-that fires once per (caller, target) pair as a `pgrep`-style tool walks
-`/proc` — the notify **email reason is caller-identity-stable** (title +
-uid + `comm` + `exe`/short-sha, but **not** the pid, the target, or the
-per-target `ptrace`/`sameuid` tags), so the notify deduper (keyed on
-`Reason`) collapses a whole sweep into a **single email** instead of
-one-per-target. This is what fixed the "thousands of emails from one
-OBS-004 sweep" report: the flood was structural — the old reason embedded
-the target and pid, so every target was a unique dedup key. Discrete-
-action policies (`FS-005` write, `CRED-002` escalation, `EXEC-*`) keep the
-full per-event reason, so distinct targets stay distinct emails and the
-notify JSONL audit keeps the target/pid — the collapse is scoped, not
-global (`collapsesToCallerIdentity` in `lifecycle.go`). The per-target
-line, the multi-line swarm roster, and captured-binary references ride in
-the email's **Sample lines** and the structured `Extra` map.
+**Where it lands.** The full per-event line goes to
+`/var/log/cfm/lsm.log` (`LSM_LOG_FILE` in `cfm.conf`). Notify events are
+`kind=lsm_detect`, `section=lsm`. For `CFML-OBS-004` only, the notify
+reason is caller-identity-stable (title, uid, comm, exe / short sha, no
+pid or target), so the deduper collapses a `/proc` sweep into one mail
+(`collapsesToCallerIdentity` in `lifecycle.go`). Other policies keep
+the per-event reason. `[kmsg]` (`state_transitions`, `detect_events`,
+`detect_rate_per_min`, default 10) writes ALIVE / ADOPT / STATE / ISSUE
+and DETECT lines to the kernel log, visible in `dmesg` and
+`journalctl -k`.
 
-**Injection-safe.** Every enriched field (exe path, cwd, comm, parent
-exe, roster peer paths) is attacker-controlled, and a Linux path may
-contain any byte but NUL and `/` — including newlines. The composed log
-and email strings are run through `stripCtl` before emission so a crafted
-path cannot forge a `cfm.log` line or break the email body.
+**Injection-safe.** Exe paths, cwd, comm and peer paths are
+attacker-controlled and may contain newlines; composed lines go through
+`stripCtl` so a crafted path cannot forge a log line or break the mail.
 
-**Cost control.** The rate decision is made **before** any `/proc` work,
-so a rate-dropped event pays no enrichment cost (the cap bounds a flood's
-work, not just its output). Snapshots are cached per caller pid (keyed
-also on process start time, so a recycled pid is never served a stale
-snapshot), rosters per uid, and captures per exe path, so a burst does the
-`/proc` work — including the exe hash and the full `/proc` scan — once.
-Hashing and capture read at most 32 MiB synchronously on the drain
-goroutine; the cap bounds how long the drain can block before the kernel
-ring buffer risks overflow. A fully-exited caller still yields `proc=gone`
-for its OWN fields, but its parent is resolved from the event's
-in-kernel-captured `ppid` — so the launcher (cron/script/controller),
-which is the actionable pointer, survives even when the caller does not.
+**Cost.** Snapshots are cached per pid (keyed with start time, so a
+recycled pid is never served stale data), rosters per uid, captures per
+exe path. Hashing and capture read at most 32 MiB synchronously on the
+drain goroutine.
 
-**OBS-004 target identity.** The event also carries the ptrace target's
-pid and euid (`aux_pid`/`aux_uid`, read in-kernel from the target task),
-rendered as `target_pid=` / `target_uid=` in the log line and email
-sample. With the target comm (`filename`) this tells the operator exactly
-which process was introspected, and whether a cross-uid target was root
-or another tenant. These are per-target values, so they stay out of the
-collapsed dedup key.
+**Wire-format guardrails.** The Go parser accepts the 112-byte base and
+reads the tail when present, so it can drain a ringbuf pinned by an
+older build until the version marker forces a re-pin.
+`TestBPFEventStructMatchesWireSize` checks the C struct size against
+`wireEventSize`; `TestBPFEmitSitesInitializeTail` checks that every
+reserve site calls `cfm_event_fill_kin()`. CI does not run the BPF
+verifier, so after deploying a build that changed BPF code, confirm it
+loads with `cfm lsm status`: a verifier rejection fails the whole object.
 
-**BPF wire format.** `ppid` / `aux_pid` / `aux_uid` were appended after
-`filename` (event 112 → 124 bytes); `common.bpf.h` and `events.go` carry
-the matching layout, and the `.o` objects are regenerated (`make bpf`).
-The Go parser accepts the 112-byte base as its floor and reads the tail
-only when present, so it stays correct even if it briefly drains a
-ringbuf pinned by an older build before the version-marker refresh
-re-pins. Two `go test` guardrails defend the contract that
-verify-bpf-bindings (name-only) cannot: `TestBPFEventStructMatchesWireSize`
-recomputes the C struct size from `common.bpf.h` and asserts it equals
-`wireEventSize`, and `TestBPFEmitSitesInitializeTail` asserts every
-`cfm_events` reserve site is paired with the `cfm_event_fill_kin()` that
-initialises the non-zeroed tail. CI does not run the BPF **verifier**
-(no BPF-LSM kernel in CI), so on the FIRST deploy of a build that changed
-the BPF programs, confirm the object still loads with `cfm lsm status`
-(a verifier rejection fails the whole cfmlsm object, not just the new
-fields).
-
-**Not a security boundary.** Enrichment is forensics. An attacker who
-controls the process can spoof `comm`/`argv`, but cannot fake the `exe`
-symlink's inode target or the SHA-256 of the bytes actually mapped as
-the program — which is exactly why `exe` + `sha256` + the captured image
-are the high-value fields.
+**Not a security boundary.** Enrichment is forensics. `comm` and argv
+can be faked; the `exe` inode, its SHA-256 and the captured image
+cannot, which is why they are the high-value fields.
 
 ## Out of scope (with rationale)
 
-For each excluded policy ID, one short paragraph on what already covers
-that ground. Reviewers and future maintainers will read this section
-first when they ask "why doesn't `cfm-lsm` do X." These are permanent
-decisions, not TODOs.
+These are standing decisions, not TODOs. A policy beyond the catalogue
+needs its own named proposal.
 
-- **`CFML-EXEC-002` (TPE).** Composer, npm, pip, yarn, wp-cli, drush,
-  and cPanel's own auto-installer all legitimately exec from per-user
-  writable directories. The FP surface is wide and the whitelist
-  becomes a permanent tuning treadmill. The realistic vector this rule
-  targets (PHP execs `/tmp/dropped-binary`) is already covered by
-  Imunify PD at the PHP layer, by CageFS at the FS layer on
-  CloudLinux, and by `kernsec`'s `/tmp`, `/var/tmp`, `/dev/shm`
-  `noexec` mount audit at the kernel layer. Adding a fourth layer for
-  the same vector is not worth the operational cost.
-
-- **`CFML-OBS-001` (ptrace lockdown).** `kernsec` already ships
-  `kernel.yama.ptrace_scope=1` in its default Tier 1 ruleset
-  (`internal/kernsec/profile.go:188`). Yama scope 1 already restricts
-  non-root processes to ptracing only their own children — which is
-  exactly the behaviour this LSM rule would have enforced. If a host
-  wants the stricter "non-root cannot ptrace at all" semantics, the
-  right answer is to add `kernel.yama.ptrace_scope=2` as a `kernsec`
-  Tier 2 sysctl rule. One line of config, no new kernel hook.
-
-- **`CFML-NET-001` (outbound per vhost).** `internal/outbound/`
-  already implements per-uid NFLOG-based outbound observation
-  (`internal/outbound/analyzer.go`) with sliding-window thresholds for
-  SMTP, scan, and HTTP, with forensic enrichment and deduplication.
-  The right way to deliver per-vhost outbound enforcement is to
-  promote that existing path from observe to enforce, not to bolt a
-  parallel BPF LSM implementation onto a different hook surface. As a
-  bonus the NFLOG path works on EL8 without DKMS.
-
-- **`CFML-FS-001` (SSH backdoor injection).** Genuinely valuable on
-  paper, but on the stacks CFM targets the realistic attacker (a
-  compromised PHP-FPM worker) is already inside CageFS on a CloudLinux
-  host and physically cannot see `~/.ssh/authorized_keys` for
-  arbitrary users. Non-caged users — rare on a typical cPanel /
-  DirectAdmin deployment — would benefit, but not enough to justify
-  the FS-hook implementation cost as a standalone CFM rule. If this
-  ever becomes necessary it deserves its own proposal.
-
-- **`CFML-FS-002` (cron persistence).** Same logic as `CFML-FS-001`.
-  CageFS already prevents the realistic attacker from writing to cron
+- **`CFML-EXEC-002` (Trusted Path Execution).** Composer, npm, pip,
+  yarn, wp-cli, drush and cPanel's installer exec from user-writable
+  directories; the allowlist would be a permanent treadmill. The
+  realistic vector (PHP execs a dropped binary) is covered by Imunify PD,
+  CageFS, kernsec's `noexec` mount audit and now EXEC-006.
+- **`CFML-OBS-001` (ptrace lockdown).** kernsec ships
+  `kernel.yama.ptrace_scope=2` (`KSEC-SCT-kspp.kernel-006`, Tier 1). A
+  sysctl does this without a new hook. OBS-004 is the telemetry beside
+  it.
+- **`CFML-NET-001` (outbound per vhost).** `internal/outbound/` already
+  observes outbound traffic per uid over NFLOG with thresholds and
+  forensics, and works without DKMS. Promoting that path is the right
+  home, not a parallel BPF implementation.
+- **`CFML-FS-001` (SSH backdoor injection), `CFML-FS-002` (cron
+  persistence).** A compromised PHP worker on CloudLinux is inside
+  CageFS and cannot reach other users' `~/.ssh` or cron. The host-level
+  part (`/root/.ssh`, cron dirs) is covered by FS-005's persistence
   paths.
-
-- **`CFML-FS-003` (web-root suspicious file creation).** The
-  correlation value (`.php` dropped within 30s of suspicious POST)
-  belongs in `webdetector`, not in an LSM hook. The LSM hook would
-  only generate the event; the decision logic is HTTP-layer
-  correlation. *(Revisited 2026-11-14 as a design proposal, not shipped:
-  [`lsm-php-drop-detection.md`](./lsm-php-drop-detection.md) proposes
-  `CFML-FS-009` on exactly that split. The hook only emits, and the daemon
-  scans, attributes and decides.)*
-
-- **`CFML-CRED-001` (capability watch).** LVE and CageFS already
-  constrain the realistic per-user capability surface on CloudLinux,
-  and the remaining ground (capability deltas without uid transition)
-  overlaps with what an LKRG-class kernel integrity tool would cover.
-  The post-exploit cash-in we *do* care about — the moment the
-  attacker uses an unexpected root credential — is now covered by
-  `CFML-CRED-002` (syscall-mediated setuid transitions) and
-  `CFML-CRED-003` (direct `commit_creds` installs).
-
-- **`CFML-RATE-001`, `CFML-RATE-002` (segfault / fork rate
-  throttling).** LVE owns per-user resource limits on CloudLinux. On
-  non-CloudLinux hosts these would have value, but not enough to
-  justify carrying the rate-limit machinery for two different host
-  classes.
-
-- **`CFML-SELF-001` (CFM self-protection).** Worth doing one day, but
-  not via a BPF LSM hook in this MVP. A `fanotify` watch on the CFM
-  binary / config tree is a much cheaper way to get the same signal,
-  and `cfm-lsm` does not yet exist on disk for there to be anything
-  to protect at the LSM layer.
-
-- **`CFML-SELF-002` (module load lockdown post-boot).** Actively
-  conflicts with KernelCare and Ksplice live-patch module loads,
-  which are a core part of the CFM target stack. Implementing this
-  rule would require maintaining a whitelist of every live-patch
-  module suffix in perpetuity, which is brittle. `kernsec` already
-  explicitly leaves `kernel.modules_disabled` unsupported for
-  related reasons.
-
-## Prior art — what to borrow (and what not to)
-
-
-### Falco
-
-What is reusable: Falco's **public rule corpus**. Their existing rules
-`Memfd Create Then Execute` and `Reverse Shell` cover exactly the two
-behaviours of this MVP. Their detection logic — memfd-backed exec via
-inode and dentry inspection, reverse-shell via fd 0/1/2 socket-dup
-walking — is the same shape this design lands on independently. The
-practical value is in the exemption sets Falco has accumulated over
-many production hosts: which build tools legitimately exec from memfd,
-which container runtimes dup socket fds. Read the rules, lift the
-exemption lists as a starting point, reimplement the detection
-clean-room against BPF LSM hooks.
-
-
-## Related future work
-
-The PHP-VM layer (dangerous PHP function calls, for hosts without
-Imunify360 Proactive Defense) is planned as CFM-managed
-**Snuffleupagus**: [`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md).
-CFM renders its rules and modes; it does not write its own PHP
-extension (an earlier `cfm-php` seed for one was dropped on 2026-11-18
-in favour of Snuffleupagus). It is out of scope for `cfm-lsm` because it
-operates at a different layer (PHP Zend VM, not kernel LSM hooks). It
-is recorded here only to answer the inevitable "why doesn't `cfm-lsm`
-block dangerous PHP functions directly?"
-
+- **`CFML-FS-003` (web-root suspicious file creation).** Correlating a
+  `.php` drop with a suspicious POST is HTTP-layer logic for
+  `webdetector`; an LSM hook would only emit. Revisited as a design
+  proposal, not shipped: [`lsm-php-drop-detection.md`](./lsm-php-drop-detection.md)
+  (`CFML-FS-009`), with the hook only emitting and the daemon scanning,
+  attributing and deciding.
+- **`CFML-CRED-001` (capability watch).** LVE and CageFS constrain the
+  per-user capability surface; the root-credential cash-in is CRED-002 /
+  CRED-003, and capability hoarding without a uid change is CRED-004.
+- **`CFML-RATE-001`, `CFML-RATE-002` (segfault / fork rate).** LVE owns
+  per-user resource limits on CloudLinux; carrying rate-limit machinery
+  for two host classes is not worth it.
+- **`CFML-SELF-001` (CFM self-protection).** A `fanotify` watch on the
+  CFM binary and config tree gives the same signal more cheaply than an
+  LSM hook.
+- **`CFML-SELF-002` (module-load lockdown).** Conflicts with KernelCare
+  and Ksplice live-patch module loads, a core part of the target stack;
+  the whitelist of live-patch module names would be brittle. EXEC-007
+  observes module loads without blocking them.
 
 ## Architecture
 
-The implementation details below are sketches, not commitments. They
-exist so a future implementer has a sane starting point, not so this
-doc becomes a blocker on choosing a different approach later.
-
-The shape is deliberately **not** "separate C daemon + DKMS module +
-log file that CFM tails." That model would be the only CFM component
-to work that way, would require running clang on every customer host,
-and would invite the version-skew and IPC problems that come with a
-second binary. Instead, `cfm-lsm` follows the same in-binary subsystem
-pattern as `internal/outbound/` and `internal/kernsec/`.
-
-### Backend
-
-BPF LSM via CO-RE, loaded by the existing CFM Go daemon using
-[`cilium/ebpf`](https://github.com/cilium/ebpf). No libbpf C
-dependency on the runtime side; no kernel module; no DKMS. EL8 is
-explicitly unsupported for `cfm-lsm`; EL8 hosts continue to rely on
-`kernsec`, the existing `internal/outbound/` sentinel, and Imunify
-(where licensed). Maintaining a DKMS LKM backend across
-KernelCare-patched RHEL 8 kernels would be a perpetual maintenance
-tax this MVP does not pay.
+`cfm-lsm` is an in-binary subsystem, like `internal/outbound/` and
+`internal/kernsec/`: no separate daemon, no log file another process
+tails.
 
 ### Build model — no CGO, no clang on the install target
 
-CFM builds with `CGO_ENABLED=0` (see `Makefile:53`). That stays true
-for `cfm-lsm`. The mechanics:
-
-- The BPF C sources live in-tree at `internal/lsm/bpf/*.bpf.c` with a
-  CO-RE `vmlinux.h`.
-- `go generate` invokes
-  [`bpf2go`](https://github.com/cilium/ebpf/tree/main/cmd/bpf2go) from
-  `cilium/ebpf`, which calls clang to produce the compiled BPF object
-  plus Go bindings that wrap it.
-- Release builders regenerate the compiled `.o` and Go bindings with
-  `make bpf` when BPF C sources change. Feature PRs should not ship
-  regenerated bytecode artifacts unless the release process explicitly
-  requests them; this keeps review focused on source changes.
-- `CGO_ENABLED=0` continues to work because `cilium/ebpf` is pure Go
-  — it talks to the kernel via `bpf(2)` syscalls through
-  `golang.org/x/sys/unix`, not via libbpf.
-- The Go runtime loads the embedded bytecode, CO-RE-relocates it for
-  the running kernel, and attaches it to LSM hooks. No clang on the
-  customer host. No kernel headers on the customer host.
-
-Build-time deps for **contributors who change the BPF programs**
-(documented in a `## Building` section, separate from runtime
-install): clang ≥ 11, libelf-dev, kernel headers ≥ 5.7 for
-`vmlinux.h` regeneration, optionally `bpftool` for debugging.
-
-Build-time deps for **everyone else** (downstream packagers,
-end-user installs, CI that doesn't touch `.bpf.c`): none beyond
-what CFM already needs.
+- BPF C lives in `internal/lsm/bpf/` (`cfmlsm.bpf.c`, `common.bpf.h`,
+  committed CO-RE `vmlinux.h`).
+- `bpf2go` (`bpf_generate.go`, run by `make bpf`) compiles it with clang
+  into `cfmlsm_{x86,arm64}_bpfel.{go,o}`, which are committed.
+- `cilium/ebpf` is pure Go and talks to the kernel through `bpf(2)`, so
+  `CGO_ENABLED=0` holds. At runtime it CO-RE-relocates the embedded
+  object for the running kernel. No clang or kernel headers on the host.
+- `make build` runs `verify-bpf-bindings`; `make release` regenerates
+  the objects. Do not bypass either: stale bytecode ships otherwise.
+- Contributors who change BPF C need clang and libbpf-dev (plus
+  `bpftool` for debugging). Everyone else needs nothing extra.
 
 ### In-tree layout
 
 ```
 internal/lsm/
-├── bpf/
-│   ├── cfmlsm.bpf.c           # all shipped BPF programs share this translation unit
-│   ├── common.bpf.h           # shared helpers, map definitions, event struct
-│   └── vmlinux.h              # CO-RE kernel type definitions (committed)
-├── cfmlsm_x86_bpfel.{go,o}    # bpf2go output for x86-64 (release artifact)
-├── cfmlsm_arm64_bpfel.{go,o}  # bpf2go output for arm64 (release artifact)
-├── bpf_generate.go            # `go:generate` directive for bpf2go
-├── policy.go                  # PolicyID constants, AllPolicies() catalogue
-├── conf.go                    # /etc/cfm/lsm.conf parser + writer
-├── loader.go                  # NewLoader / AdoptPinned / UnpinAll, pin layout
-├── maps.go                    # daemon-side map population (uids, inodes, suid set)
-├── enable.go                  # `cfm lsm enable` orchestration + pinning
-├── lifecycle.go               # daemon-side adoption + notify emission
-├── events.go                  # Go-side Event struct + wire-format parser
-├── preflight.go               # kernel-capability checks
-├── probe.go                   # `cfm lsm probe` (ephemeral attach)
-├── status.go / preview.go     # read-only diagnostics
-├── cli.go / init.go           # subcommand surface
-├── kmsg.go                    # dmesg / /dev/kmsg emission
-└── doc.go
+├── bpf/cfmlsm.bpf.c, common.bpf.h, vmlinux.h
+├── cfmlsm_{x86,arm64}_bpfel.{go,o}   # bpf2go output
+├── policy.go        # PolicyID constants, AllPolicies(), isEnforceCapable
+├── conf.go          # lsm.conf parser + FormatConf writer, compiled-in allowlists
+├── loader.go        # NewLoader / AdoptPinned / UnpinAll, programsFor, pin names
+├── btfprobe.go      # per-kernel program variant picks (BTF drift)
+├── perflink_probe.go# tracepoint policies vs kernels without perf links
+├── maps.go          # watched uids / inodes, setuid inodes, kernel knobs
+├── enable.go        # `cfm lsm enable`
+├── lifecycle.go     # daemon auto-enable / adopt, drain, notify
+├── events.go        # wire format parser
+├── filter.go        # userspace allowlist post-filter
+├── procsnap.go      # /proc enrichment and capture
+├── eventsink.go     # rate cap + log/notify emission
+├── kmsg.go          # /dev/kmsg lines
+├── preflight.go, probe.go, status.go, preview.go, cli.go, init.go
+└── version_marker.go
 ```
+
+End-to-end PoC scenarios for every policy live in `tests/lsm-poc/`
+(test hosts only; see its README).
 
 ### Runtime — single daemon, single unit, single config
 
-A subsystem inside the existing CFM daemon, not a separate
-`cfm-lsmd` process. The reasoning: BPF event delivery is in-process
-already (the ringbuf reader is a goroutine), LSM event processing
-is not crash-prone enough to justify a second daemon, and the
-host-profile detection code lives in the existing binary already
-(`internal/kernsec/profile.go`). Reuse, don't fork.
-
-There is no "cfm-lsmd writes a log file that cfm watches" seam.
-Events flow from the ringbuf reader goroutine onto the same
-in-process channel that `internal/outbound/` already feeds into the
-notify, JSON-log, and webdetector-correlation paths.
-
-A single systemd unit (the existing `cfm.service`). A single config
-file. A single log destination (`/var/log/cfm/lsm.jsonl`).
+The subsystem runs inside `cfm.service`. The ringbuf reader is a
+goroutine; events go to the LSM log, the notify pipeline and kmsg. One
+config file, `/etc/cfm/lsm.conf`.
 
 ### Privileges
 
-BPF LSM loading needs `CAP_BPF` + `CAP_PERFMON` + `CAP_SYS_ADMIN`.
-The CFM daemon already runs with the privileges it needs for
-nftables and NFLOG (see `configs/cfm.service` for the existing
-hardening profile); the additional caps required for BPF LSM
-attach are within the same envelope and do not require a privilege
-boundary split. If a future iteration of CFM ever drops the main
-daemon to a lower-cap user, the cleanest split is a small one-shot
-`cfm-lsm-loader` helper that attaches programs at start and exits
-— not a long-running second daemon. That is a refinement for later,
-not part of the MVP.
-
-### Host-profile reuse
-
-Consume the existing detection in `internal/kernsec/profile.go`
-(cPanel, DirectAdmin, CloudLinux / LVE, CageFS, Imunify360,
-KernelCare, Ksplice, Proxmox, ZFS, EFI). Do not reimplement
-detection.
-
-### Event shape
-
-Match the per-uid event shape that `internal/outbound/analyzer.go`
-already emits, so downstream pipeline code can consume both sources
-symmetrically. The BPF programs write a minimal fixed-size struct
-into a per-CPU ringbuf; the Go side enriches it (pid → cgroup → user
-→ vhost) before forwarding to the event bus.
+Loading needs `CAP_BPF` + `CAP_PERFMON`, or `CAP_SYS_ADMIN`. The daemon
+runs as root. If it ever drops privileges, the clean split is a one-shot
+loader helper that attaches and exits, not a second long-running daemon.
 
 ### Config
 
-`/etc/cfm/lsm.conf`, INI-style, same format as
-`/etc/cfm/kernsec.conf`. The earlier draft proposed TOML; align with
-the existing format in the rest of CFM instead. Three modes per
-policy: `disabled`, `monitor`, `enforce` — with the latter downgraded
-to `monitor` for `CFML-CRED-002`, `CFML-CRED-003`, `CFML-EXEC-005`,
-and `CFML-BPF-001` because those hooks are not safe LSM decision
-points. Per-vhost overrides are reserved for future use; none of the
-shipped policies is vhost-keyed.
+`/etc/cfm/lsm.conf`, INI-style like `kernsec.conf`. Keys
+(`ParseConf` in `conf.go`; unknown keys are parse errors):
 
-Example monitor-first rollout for deleted/unlinked executable telemetry:
+| Section | Keys |
+|---|---|
+| top level | `enabled`, `watched_uid_fallback_min`, `exclude_user`, `exclude_uid`, `exclude_gid` (the three exclude keys repeat) |
+| `[policy "<ID>"]` | `mode` (`disabled` / `monitor` / `enforce`); `allow_exe`, `allow_comm` where accepted; FS-005 only: `origin_tracking`, `persistence_path` |
+| `[allow]` | `allow_exe`, `allow_comm`, `allow_path` |
+| `[kmsg]` | `state_transitions`, `detect_events`, `detect_rate_per_min` |
+| `[events]` | `detect_rate_per_min`, `enrich`, `enrich_hash`, `enrich_peers`, `enrich_capture`, `capture_dir` |
 
-```ini
-[policy "CFML-EXEC-004"]
-mode = monitor
-```
-
-Promote only after reviewing local telemetry confirms backup agents,
-deployment systems, and panel helpers are not producing legitimate
-matches:
-
-```ini
-[policy "CFML-EXEC-004"]
-mode = enforce
-```
-
-The `enforce` vs `monitor` decision is **compiled into the BPF
-program at load time** via a `bpf2go` constant rewrite, so the hot
-path does not branch on the mode and runtime cost is identical in
-both modes.
+`FormatConf` renders the per-mode comment from `isEnforceCapable`. The
+file is `0600 root` because it shows which policies are active.
 
 ### Watched-uid model
 
-Several rules (`CFML-FS-005`, `CFML-FS-007`, `CFML-EXEC-004`,
-`CFML-EXEC-006`) gate on whether the calling task's uid is in the
-daemon-populated `cfm_watched_uids` BPF map. The set is built at
-adoption time from three additive layers:
+`CFML-FS-005`, `CFML-FS-007`, `CFML-EXEC-004`, `CFML-EXEC-006`,
+`CFML-NET-002`, `CFML-OBS-004` and `CFML-CRED-004` gate on
+`cfm_watched_uids`; `CFML-BPF-001`, `CFML-EXEC-007` and `CFML-EXEC-008`
+use it to override their trusted-comm lists. The set is built at
+adoption from three additive layers (`maps.go`):
 
-1. **Static `WebUserNames` + `WebUserNamePrefixes`.** Hardcoded list
-   of system user names that are structurally web-class on any host:
-   `apache`, `nginx`, `www-data`, `http`, `httpd`, `lighttpd`,
-   `caddy`, `tomcat`, `php`, `lsphp`, `proxy`, `nobody`, plus the
-   `alt-php-*` and `alt-php-fpm-*` prefix matches for CloudLinux
-   per-version FPM workers. Always applied.
+1. **Static names**, always applied: `apache`, `nginx`, `www-data`,
+   `http`, `httpd`, `lighttpd`, `caddy`, `tomcat`, `php`, `lsphp`,
+   `proxy`, `nobody`, plus the `alt-php-` / `alt-php-fpm-` prefixes.
+2. **Panel manifests**, best-effort: owners in `/etc/userdomains`
+   (cPanel) and `/etc/virtual/domainowners` (DirectAdmin).
+3. **`watched_uid_fallback_min`**: every `/etc/passwd` uid at or above
+   it. Default `1000` (the `UID_MIN` convention), which includes admin
+   accounts; `0` disables the layer. `-1` (the removed "auto" mode) is a
+   deprecated alias for `1000` with a one-time warning. Auto was removed
+   because an admin account created before the panel was missing from
+   the manifest and silently went unwatched.
 
-2. **Panel manifest contributions.** Every uid that owns a vhost in
-   `/etc/userdomains` (cPanel) or DirectAdmin's domain-owners file.
-   Always applied, best-effort — a missing manifest file is silently
-   skipped.
-
-3. **`watched_uid_fallback_min` uid-range sweep.** Every uid in
-   `/etc/passwd` at or above this threshold joins the watched set.
-   Configurable per host. The shipped default is `1000` — the
-   `/etc/login.defs` UID_MIN convention on every modern distro —
-   which watches every regular login account, including admins.
-   Set to `0` to disable this layer entirely.
-
-The historical `-1` "auto" sentinel (default = 1000 if no panel
-manifest is detected, else disabled) was removed in favour of the
-explicit default. The auto-detect created a silent coverage gap on
-panel hosts: a sysadmin account added via `adduser chris` before
-DirectAdmin was installed would not appear in the DA vhost-owner
-manifest, and the auto-fallback would skip the uid-range sweep that
-would otherwise have watched them. An attacker who compromised
-`chris` would then evade every watched-uid-gated rule. `-1` is still
-accepted as a deprecated alias for `1000`; the daemon emits a
-one-time warning at adoption when it sees the legacy value.
-
-**Migration notes — panel hosts upgrading from `-1`.** This is a
-**behaviour change** for hosts that previously ran with
-`watched_uid_fallback_min = -1` AND had a cPanel/DirectAdmin
-manifest. Under the old model the fallback was silently skipped, so
-only the static `WebUserNames` and the panel-manifest uids were
-watched. Under the new model the fallback applies at 1000, so
-admin / sysadmin accounts at uid >= 1000 join the watched set —
-which means previously-silent uids may start producing FS-005 /
-FS-007 / EXEC-004 / EXEC-006 events. Three migration paths:
-
-| Goal | Set in `/etc/cfm/lsm.conf` |
-|---|---|
-| Preserve the old behaviour exactly (panel-manifest + static names only) | `watched_uid_fallback_min = 0` |
-| Adopt the new coverage; opt-out your known-trusted admin accounts | `watched_uid_fallback_min = 1000` plus `exclude_user = <admin>` / `exclude_uid = N` / `exclude_gid = N` |
-| Adopt the new coverage broadly (default) | `watched_uid_fallback_min = 1000` (shipped default; no edits needed) |
-
-Then run `cfm lsm restart`. The daemon emits the one-time deprecation
-warning on adoption if it sees `-1`, with the same recipes inline.
-
-**Excluding known-trusted accounts.** Operators who want the broad
-coverage of `watched_uid_fallback_min = 1000` but need to silence
-specific accounts (the host's own sudoers, batch-job uids, build
-service accounts) declare exclusions in `lsm.conf`:
+Then the excludes apply, to every layer:
 
 ```ini
 watched_uid_fallback_min = 1000
-exclude_user = chris        # by name; resolved at adoption time
-exclude_user = devops
-exclude_uid  = 1001         # by numeric uid
-exclude_gid  = 10           # every uid in this primary group
+exclude_user = chris        # resolved at adoption; missing names skip
+exclude_uid  = 1001
+exclude_gid  = 10           # /etc/passwd PRIMARY gid only
 ```
 
-The exclude lists are applied **after** the three additive layers
-have built the watched set, so excluding an admin doesn't drop
-coverage of any other uid. Names that don't resolve at adoption
-time skip silently (operators commonly carry a single lsm.conf
-across heterogeneous hosts where not every admin account exists
-everywhere). The match dimensions are independent — a uid is
-excluded if ANY of the three lists matches.
-
-This model fails closed: newly-added user accounts are watched
-automatically; the operator opts out specific trusted accounts
-explicitly. The previous model required the operator to remember to
-update the watched set when adding new accounts; the new model
-mirrors the rest of cfm-lsm's allowlist-by-explicit-trust pattern.
+A uid is excluded if any list matches. `exclude_user = apache`, or an
+`exclude_gid` that catches apache's primary group, drops apache too.
+`exclude_gid` does not read supplementary groups in `/etc/group`. Check
+the result with
+`bpftool map dump pinned /sys/fs/bpf/cfm/maps/cfm_watched_uids` after
+`cfm lsm restart`. The model fails closed: new accounts are watched
+until explicitly excluded.
 
 ## How it works — lifecycle, CLI, and kernel preflight
 
-cfm-lsm separates **detection** (kernel-level, BPF programs attached
-to LSM hooks) from **event collection** (userspace, the cfm daemon
-drains the ringbuf). The split matters because protection has to be
-reliable across daemon restarts — block decisions happen inside the
-kernel, independent of whether userspace is alive.
+Detection (BPF programs on kernel hooks) is separate from collection
+(the daemon draining the ringbuf). Block decisions happen in the kernel
+whether or not userspace is alive.
 
 ### Default state — off
 
-cfm-lsm ships **disabled by default**. A fresh install does not
-attach any BPF programs. The operator opts in by running
-`cfm lsm enable` once. From then on the attachments survive cfm
-daemon restarts, crashes, and `systemctl stop cfm` — only an
-explicit `cfm lsm disable` detaches.
+With no `lsm.conf`, or `enabled = false`, nothing attaches. With
+`enabled = true` the daemon auto-enables on start and on each
+config-reload tick when no pins exist. Only `cfm lsm disable` detaches.
 
 ### Kernel preflight
 
-Before any load attempt, seven things must hold. `cfm lsm status`
-runs all seven and reports each one with a pass/fail/unknown verdict
-and a specific remediation hint:
+`RunPreflight` (`preflight.go`) runs seven component-wide checks.
+`cfm lsm status` shows each with PASS / FAIL / UNKNOWN and a remediation
+hint; `status --check` exits non-zero on a FAIL.
 
-1. **Kernel version (informational).** Read from `/proc/version`.
-   Reported but NOT a gate: RHEL-family vendor kernels backport BPF
-   LSM to 4.18 (verified on AlmaLinux 8.10), so a uname comparison
-   is the wrong proxy for capability. Capability is decided by the
-   bpf-lsm-program-type probe below.
-2. **`CONFIG_BPF_LSM=y` in the running kernel.** Verified via
-   `/proc/config.gz` or `/boot/config-$(uname -r)`. Shipped enabled
-   on AlmaLinux 8.6+ / 9+ / 10, CloudLinux 8 / 9+, RHEL 8.6+ / 9+,
-   Debian 12+, Ubuntu 22.04+. Useful diagnostic, but on its own
-   not sufficient — see (7).
-3. **`bpf` in `/sys/kernel/security/lsm`.** EL-family stock kernels
-   include `bpf` in the compile-time default LSM list. Debian /
-   Ubuntu typically need the operator to add `bpf` to the kernel
-   `lsm=` command line. The preflight prints the exact line to
-   write to GRUB / `/etc/default/grub` / `/etc/kernel/cmdline`
-   based on the detected bootloader.
-4. **`/sys/kernel/btf/vmlinux` exists.** Required for CO-RE
-   relocation. Present on AlmaLinux 8.6+, RHEL 9+, Debian 12+,
-   Ubuntu 22.04+, and newer.
-5. **The process has `CAP_BPF + CAP_PERFMON` or `CAP_SYS_ADMIN`.**
-   `cfm` runs as root in production, so this passes; running an
-   unprivileged `cfm lsm status` will see this check FAIL and
-   the remediation prints the systemd `AmbientCapabilities=` line.
-6. **`/sys/fs/bpf` mounted as type `bpf`.** bpffs is required for
-   the pin-to-disk path. Systemd has mounted bpffs by default
-   since v229 so this passes on every modern distro; the check
-   exists for the rare stripped-down host.
-7. **`BPF_PROG_TYPE_LSM` accepted by the bpf() syscall.** The
-   authoritative capability gate: attempts a tiny no-op LSM program
-   load via cilium/ebpf's `features.HaveProgramType(ebpf.LSM)`.
-   Returns PASS when the verifier engages, FAIL when the kernel
-   rejects the program type at dispatch (EINVAL). Required because
-   some vendor kernels (notably CloudLinux 8's lve kernel) set
-   `CONFIG_BPF_LSM=y` for the kernel-internal subsystem but do not
-   expose the program type to userspace; this probe is the only
-   way to tell those hosts apart from genuinely capable ones.
+1. **`kernel-version`** — informational only. RHEL-family vendor kernels
+   backport BPF LSM to 4.18, so a version compare is the wrong test.
+2. **`kernel-config`** — `CONFIG_BPF_LSM=y` from `/proc/config.gz` or
+   `/boot/config-$(uname -r)`. Necessary, not sufficient.
+3. **`bpf-in-lsm-list`** — `bpf` in `/sys/kernel/security/lsm`. EL
+   kernels include it by default; Debian / Ubuntu usually need it added
+   to `lsm=` (the remediation prints the line for the detected
+   bootloader; kernsec `KSEC-LSM-bpf-001` can do it).
+4. **`btf-available`** — `/sys/kernel/btf/vmlinux` (CO-RE).
+5. **`capabilities`** — `CAP_SYS_ADMIN`, or `CAP_BPF` + `CAP_PERFMON`.
+6. **`bpffs-mounted`** — `/sys/fs/bpf` is type `bpf`. The only FAIL the
+   daemon treats as transient.
+7. **`bpf-lsm-program-type`** — the authoritative gate: a tiny
+   `BPF_PROG_TYPE_LSM` load. Some CloudLinux 8 lve kernels set
+   `CONFIG_BPF_LSM=y` but reject the program type here.
 
-**Task-local storage — a per-policy degrade, not a component gate.**
-cfm-lsm's shared BPF object embeds **two** task-local storage maps
-(upstream **5.11**): `cfm_cred_transition_tasks` (used by
-CFML-CRED-002/003 to correlate a `task_fix_setuid` transition with the
-following `commit_creds`) and `cfm_web_origin_tasks` (CFML-FS-005's
-web-origin enrichment, gated by the `cfm_fs005_web_origin_monitor`
-constant). Because cilium/ebpf creates every map named by the object in
-one `LoadAndAssign`, a kernel that rejects this map type would fail the
-**whole** load with `map create: invalid argument`. Some partial
-backports (notably CloudLinux 8's lve 4.18 kernel) accept
-`BPF_PROG_TYPE_LSM` (passing (7)) but lack task-local storage. Rather
-than gate the whole component on it, `NewLoader` probes
-`features.HaveMapType(ebpf.TaskStorage)` and, when it is unsupported,
-**degrades** (`selectTaskStorageVariant`): it downgrades **both** maps to
-tiny HASH placeholders and removes every loaded reference to them —
-neutralising `cfm_cred002`/`cfm_cred003` (dropping CFML-CRED-002/003) and
-forcing `cfm_fs005_web_origin_monitor = 0` so the verifier
-dead-code-eliminates FS-005's `bpf_task_storage_get` calls. The object
-then loads and the remaining policies attach (minus the three tracepoint
-policies on a kernel without perf links — see the per-policy probes
-below), including
-FS-005's core inode hooks (only its web-origin enrichment tag is lost).
-CFML-CRED-002 and CFML-CRED-003 are reported **unavailable** as optional
-per-policy probes (see below), not as a component FAIL — the host runs
-cfm-lsm with those two credential-transition policies absent instead of
-no protection at all. (An *inconclusive* probe — EPERM without caps — is
-treated as supported; the loader makes the final call.)
+The remediation text names the accepting targets: AlmaLinux 8.6+ / 9+ /
+10, CloudLinux 9+, RHEL 9+, Debian 12+, Ubuntu 22.04+.
 
-When a fresh auto-enable attempt fails (preflight FAIL, or a load/attach
-error), the daemon backs off exponentially before retrying — 1 min,
-doubling to a 30 min cap — rather than re-running on every config-reload
-tick. This stops a permanently-incompatible kernel (like the CloudLinux 8
-case above) from repeating the same failure into the logs. The adopt path
-(picking up pins a CLI `cfm lsm enable` created) is never gated, so
-operator-driven enable still takes effect on the next tick.
+**Per-policy availability** is reported separately and never fails the
+component; the rest attaches:
 
-Preflight is read-only and can be run by anyone at any time —
-it does not touch the kernel. Optional per-policy probes are reported
-separately from component-wide preflight; if one is unavailable,
-`cfm lsm status` and `cfm lsm probe` report that policy as unavailable
-but do not mark the whole LSM component failed or prevent other enabled
-policies from attaching. Today they are:
-- **`CFML-CRED-003`** — whether `commit_creds` is visible as a tracing
-  target.
-- **`CFML-CRED-002` and `CFML-CRED-003`** — whether the kernel supports
-  task-local storage maps (`BPF_MAP_TYPE_TASK_STORAGE`, upstream 5.11);
-  both depend on `cfm_cred_transition_tasks` and are dropped on partial
-  backports that lack it (see "Task-local storage" above).
-- **`CFML-EXEC-008`** — whether the kexec syscall tracepoints are exposed.
-- **`CFML-BPF-001`, `CFML-EXEC-007`, `CFML-EXEC-008`** — whether the
-  kernel has BPF perf-event links (`BPF_LINK_TYPE_PERF_EVENT`, upstream
-  5.15; EL9's 5.14 backports them). These three attach to syscall
-  tracepoints, and without perf links cilium/ebpf falls back to the
-  `PERF_EVENT_IOC_SET_BPF` ioctl, whose attachment cannot be pinned to
-  bpffs. Every enable path pins, so on such a kernel the first
-  tracepoint pin (`perf event ioctl pin: not supported`) used to fail the
-  WHOLE load: CloudLinux 8's lve 4.18 hosts ran no cfm-lsm policy at all,
-  retrying every 30 minutes, until 2026-11-16. They are now reported
-  unavailable there (`internal/lsm/perflink_probe.go`) and the remaining
-  LSM-hook / fentry policies attach. Module loads stay covered by
-  `kernsec`.
+- **`CFML-CRED-002`, `CFML-CRED-003`** — need task-local storage maps
+  (`BPF_MAP_TYPE_TASK_STORAGE`, upstream 5.11). Without them the loader
+  swaps both task-storage maps for placeholders
+  (`selectTaskStorageVariant`), drops these two policies and turns off
+  FS-005 origin tracking; FS-005's inode hooks still attach.
+- **`CFML-CRED-003`** — `commit_creds` must be a usable tracing target.
+- **`CFML-EXEC-008`** — the kexec syscall tracepoints must exist.
+- **`CFML-BPF-001`, `CFML-EXEC-007`, `CFML-EXEC-008`** — need BPF
+  perf-event links (upstream 5.15; EL9's 5.14 backports them). Without
+  them the tracepoint attachment cannot be pinned, so these three are
+  reported unavailable (`perflink_probe.go`). This is the state of the
+  CloudLinux 8 lve 4.18 fleet hosts, which run the remaining policies.
+
+An inconclusive probe (for example EPERM without caps) counts as
+available; the loader makes the final call.
+
+After a failed fresh activation (preflight FAIL, load or attach error)
+the daemon backs off 1 minute, doubling to 30 minutes, instead of
+retrying every tick. Adopting pins created by `cfm lsm enable` is never
+gated.
 
 ### CLI surface
 
+`RunCLI` in `internal/lsm/cli.go`:
+
 | Command | Behaviour |
 |---|---|
-| `cfm lsm` | Alias for `cfm lsm status`. Read-only. |
-| `cfm lsm status [--json]` | Preflight + lsm.conf state + live pinned attach state. Read-only. |
-| `cfm lsm preview` | Predicts what `cfm lsm enable` would attach given the current conf + kernel. Read-only; never opens the kernel. |
-| `cfm lsm init` | One-shot bring-up: preflight + enable + status. Requires `/etc/cfm/lsm.conf` to exist already (install the rpm/deb or copy `configs/lsm.conf` from the source tree). Idempotent: skips enable when already pinned. |
-| `cfm lsm enable` | Loads, attaches, and pins the BPF programs + ringbuf map to `/sys/fs/bpf/cfm/`. Programs stay attached past daemon and CLI exit. Needs root. |
-| `cfm lsm disable` | Removes everything pinned under `/sys/fs/bpf/cfm/`. The kernel detaches the programs when the last reference drops. Needs root. |
+| `cfm lsm` | Alias for `status`. |
+| `cfm lsm status [--json] [--check]` | Preflight, `lsm.conf` state and live pinned state. Read-only. |
+| `cfm lsm preview` | What `enable` would attach for this conf and kernel. Read-only. |
+| `cfm lsm probe [-v]` | Attach briefly and detach, to verify the kernel accepts the programs. `-v` shows the BTF drift-variant picks. Needs root. |
+| `cfm lsm enable [--yes]` | Load, attach and pin under `/sys/fs/bpf/cfm/`. Prompts when any policy is `enforce`; `--yes` skips the prompt. Needs root. |
+| `cfm lsm disable` | Remove every pin; the kernel detaches the programs. Needs root. |
+| `cfm lsm restart [--yes]` | Disable (no-op if not enabled), then enable. Picks up mode, allowlist, `[events]` and `[kmsg]` changes. Needs root. |
+| `cfm lsm init` | Preflight, enable, status. Requires `/etc/cfm/lsm.conf`. Skips enable when already pinned. |
 | `cfm lsm help` | Usage. |
-
-Three planned subcommands not in this MVP — `cfm lsm test`
-(synthetic-trigger verification), `cfm lsm policy <id>` (detail
-view), `cfm lsm reload` (hot policy reload) — are explicitly out
-of scope for the first release and will land in subsequent
-proposals.
 
 ### Two-process model
 
-cfm-lsm runs across two cooperating processes:
+Either process can create the pins:
 
-**The CLI (`cfm lsm enable`)** loads the BPF programs and attaches
-each to its LSM hook (`bprm_check_security`, `task_fix_setuid`, the
-six `inode_*` write hooks, `task_alloc`, and `fentry/commit_creds`
-depending on the policy). It then *pins* the programs, the shared
-ringbuf, and the daemon-populated allow/watch maps to bpffs under
-`/sys/fs/bpf/cfm/`. After pinning, the CLI exits. The bpffs entries
-keep their own kernel references, so the programs stay attached even
-though no userspace process holds a fd on them. This is the standard
-kernel idiom for "BPF program that outlives the loader."
+**The CLI** (`cfm lsm enable` / `restart` / `init`) loads the object,
+attaches each enabled policy's programs, pins programs, the ringbuf and
+the daemon-populated maps under `/sys/fs/bpf/cfm/`, and exits. The bpffs
+entries hold their own kernel references, so the programs stay attached
+with no process holding an fd.
 
-**The cfm daemon** runs the
-`internal/lsm/lifecycle.go` adoption path. On every config-reload
-tick it checks two things: `enabled = true` in `/etc/cfm/lsm.conf`,
-AND the pinned state exists at `/sys/fs/bpf/cfm/`. If both, the
-daemon calls `AdoptPinned()` to open the pinned map, starts a
-goroutine that drains the ringbuf, and forwards every detection
-into the existing CFM notify pipeline (`notify.Event` with
-`kind=lsm_detect`, `section=lsm`). Daemon shutdown closes the
-userspace fds; the pinned programs stay attached at the kernel
-level.
+**The daemon** (`lifecycle.go`) checks on every config-reload tick that
+`enabled = true`. If pins exist it adopts them (`AdoptPinned`), refreshes
+the maps (new accounts, new setuid binaries), and starts the drain
+goroutine that feeds the log, notify and kmsg. If none exist it runs
+preflight and creates them itself. The build that pinned is recorded in
+`/var/lib/cfm/lsm-build-version`; after a package upgrade the daemon
+tears the old pins down and re-enables with the new BPF. Daemon shutdown
+closes its fds; the pinned programs stay attached.
 
 ### What survives daemon downtime
 
-| State change | Detection | Event collection |
+| State | Detection / enforce | Event collection |
 |---|---|---|
-| daemon running | works | events streamed live |
-| daemon stopped (`systemctl stop cfm`) | **still works** | events buffer in ringbuf, drop when full |
-| daemon crashed | **still works** | events buffer in ringbuf, drop when full |
-| `cfm lsm disable` | **stopped** | n/a |
+| daemon running | works | live |
+| daemon stopped or crashed | **still works** | events wait in the ringbuf, dropped when full |
+| `cfm lsm disable` | stopped | n/a |
+| reboot | restored by the daemon's auto-enable | from then on |
 
-Audit emission is best-effort: a full or unavailable ringbuf may drop
-the userspace event, but it does **not** change an established LSM
-verdict. In monitor mode, a matched `CFML-EXEC-001` or
-`CFML-EXEC-003` exec is still allowed if `bpf_ringbuf_reserve()`
-fails; in enforce mode, the same matched exec is still denied.
-
-Ringbuf size is 256 KiB; at the per-event size of 112 bytes that's
-about 2,300 events before drops. EXEC-001 is a rare event in
-practice (memfd exec is post-exploit only); EXEC-003 likewise.
-Operators who care about full event capture during daemon
-downtime can increase the ringbuf size in a follow-up.
+Event emission is best-effort and never changes a verdict: if
+`bpf_ringbuf_reserve()` fails, monitor mode still allows and enforce mode
+still denies. The ringbuf is 256 KiB, about 1 900 events at 124 bytes
+each plus the record header.
 
 ### Pin layout on disk
 
 ```
 /sys/fs/bpf/cfm/
 ├── maps/
-│   ├── cfm_events             # shared ringbuf map (BPF_MAP_TYPE_RINGBUF)
-│   ├── cfm_watched_uids       # FS-005 watched uids (web-class users)
-│   ├── cfm_watched_inodes     # FS-005 sensitive (dev, inode) pairs
-│   └── cfm_setuid_inodes      # CRED-002 setuid-binary (dev, inode) pairs
-└── links/
-    ├── cfm_memfd_exec               # CFML-EXEC-001 — bprm_check_security
-    ├── cfm_revshell                 # CFML-EXEC-003 — bprm_check_security
-    ├── cfm_fs005_setattr            # CFML-FS-005 — inode_setattr
-    ├── cfm_fs005_create             # CFML-FS-005 — inode_create
-    ├── cfm_fs005_unlink             # CFML-FS-005 — inode_unlink
-    ├── cfm_fs005_link               # CFML-FS-005 — inode_link
-    ├── cfm_fs005_rename             # CFML-FS-005 — inode_rename
-    ├── cfm_fs005_setxattr           # CFML-FS-005 — inode_setxattr
-    ├── cfm_fs005_mark_exec          # CFML-FS-005 origin marker — bprm_check_security
-    ├── cfm_fs005_mark_setuid        # CFML-FS-005 origin marker — task_fix_setuid
-    ├── cfm_fs005_mark_task_alloc    # CFML-FS-005 origin marker — task_alloc
-    ├── cfm_cred002                  # CFML-CRED-002 — task_fix_setuid
-    └── cfm_cred003                  # CFML-CRED-003 — fentry/commit_creds
+│   ├── cfm_events               # shared ringbuf
+│   ├── cfm_watched_uids         # watched uids
+│   ├── cfm_watched_inodes       # FS-005 / FS-006 (fs, inode) keys
+│   ├── cfm_setuid_inodes        # CRED-002 setuid + allow_exe inodes
+│   └── cfm_kernel_knob_inodes   # FS-008 knob inodes
+└── links/                       # one per attached program; per policy:
+    EXEC-001 cfm_memfd_exec     EXEC-003 cfm_revshell       EXEC-004 cfm_deleted_file_exec
+    EXEC-005 cfm_interp_net_stdio                           EXEC-006 cfm_ephemeral_exec
+    EXEC-007 cfm_exec007_{init,finit}                       EXEC-008 cfm_exec008_{kexec,kexec_file}
+    FS-005   cfm_fs005_{setattr,create,unlink,link,rename,setxattr},
+             cfm_fs005_mark_{exec,setuid,task_alloc}   (origin markers)
+    FS-006   cfm_fs006          FS-007 cfm_fs007_{setattr,setxattr}           FS-008 cfm_fs008
+    CRED-002 cfm_cred002        CRED-003 cfm_cred003        CRED-004 cfm_cred004
+    BPF-001  cfm_bpf001         OBS-004  cfm_obs004         NET-002  cfm_net002
 ```
 
-Each file is an actual bpffs file with its own kernel refcount.
-Removing a file via `rm` is equivalent to `cfm lsm disable` for
-that entry — the kernel detaches the program when the last
-reference drops. Operators can inspect the layout with `ls -la`
-or `bpftool prog show` / `bpftool link show`.
+Pin names are the `pinFile*` constants in `loader.go`. Removing a link
+file detaches that program once the last reference drops. Inspect with
+`ls -la`, `bpftool prog show`, `bpftool link show`.
 
 ### Failure modes and what happens
 
-| Condition | CFM behaviour |
+| Condition | Behaviour |
 |---|---|
-| Kernel rejects `BPF_PROG_TYPE_LSM` at bpf() syscall | Preflight fail on `bpf-lsm-program-type` (the authoritative gate); `cfm-lsm` unavailable; daemon runs normally. Observed on CloudLinux 8 lve kernels which set `CONFIG_BPF_LSM=y` for the internal subsystem only. |
-| `CONFIG_BPF_LSM` absent | Preflight fail with "kernel was built without BPF LSM support; use a distro kernel that ships CONFIG_BPF_LSM=y (AlmaLinux 8.6+ / 9+ / 10, CloudLinux 9+, RHEL 9+, Debian 12+, Ubuntu 22.04+) or rebuild with CONFIG_BPF_LSM=y." |
-| `bpf` not in `/sys/kernel/security/lsm` | Preflight fail with the exact remediation: which file to edit (`/etc/default/grub`, `/etc/kernel/cmdline`, or BLS entry), the `lsm=…` line to write, and the boot-args refresh command for the detected bootloader. |
-| `vmlinux` BTF missing | Preflight fail; CO-RE not possible on this kernel. |
-| Verifier rejects program | Log the verifier log at error level; mark that one policy as `failed`; other policies continue. |
-| One LSM hook attach fails | Log; that one policy becomes `unavailable`; others continue. |
-| Ringbuf full | Drop events with a counter increment; surfaced in `cfm lsm status`. |
+| Any component-wide preflight FAIL | cfm-lsm does not load; the daemon runs normally and backs off before retrying. |
+| Optional per-policy prerequisite missing | That policy is reported unavailable; the rest attach. |
+| Verifier rejects a program | The whole object fails to load (`LoadAndAssign`), so no policy attaches. Check `cfm lsm status` after deploying changed BPF. |
+| One policy's attach fails | That policy is marked failed; the others continue. |
+| Ringbuf full | The kernel drops the event; there is no counter. The verdict is unaffected. |
+| Rate cap hit | Excess log / notify lines are dropped and summarised. |
 
-The principle, lifted directly from `kernsec`'s posture: never break
-the host. A misconfigured or unsupported `cfm-lsm` reduces to a no-op
-plus a clear log message, never to a crashed daemon or a wedged
-machine.
+The principle, shared with kernsec: never break the host. An
+unsupported or misconfigured cfm-lsm is a no-op with a clear log line,
+never a crashed daemon.
 
 ## Coexistence
 
-**Imunify360 Proactive Defense.** Imunify PD is a Zend extension
-hooking `zend_execute_ex` / `zend_execute_internal`; it sees PHP VM
-calls only. `cfm-lsm` operates at LSM hooks one layer below; they are
-complementary, not redundant. PD blocks the call that launches a
-reverse shell; `cfm-lsm` blocks the resulting process if PD missed it
-or was not loaded into that SAPI. The forward-looking analogue of
-Imunify PD for non-Imunify hosts is CFM-managed Snuffleupagus — see
-[`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md).
+**Imunify360 Proactive Defense.** PD hooks the Zend VM and sees PHP
+calls only. cfm-lsm sits one layer below. PD blocks the call that
+launches a reverse shell or writes a payload; cfm-lsm sees the process
+or exec if PD missed it or was not loaded into that SAPI.
 
-**CageFS / LVE.** CageFS namespaces away most FS-write vectors for
-PHP-FPM workers on CloudLinux. `CFML-EXEC-001` / `CFML-EXEC-003` /
-`CFML-CRED-002` / `CFML-CRED-003` are CageFS-orthogonal and do not
-duplicate it. `CFML-FS-005` complements it: a caged user reaching a
-watched path means caging was bypassed, which is itself a compromise
-indicator. LVE's fork / PMEM / EP limits are not touched.
+**CageFS / LVE.** EXEC-001 / 003 and CRED-002 / 003 are orthogonal to
+CageFS. FS-005 complements it: a caged user reaching a watched path means
+caging was bypassed. LVE limits are untouched.
 
-**KernelCare / Ksplice.** Live-patch modules load post-boot. cfm-lsm
-does not constrain module loading at all, so there is nothing to
-whitelist. (This is one of the reasons `CFML-SELF-002` is out of
-scope.)
+**KernelCare / Ksplice.** cfm-lsm does not constrain module loading
+(EXEC-007 only reports), so live patching keeps working.
 
-**Stacked LSMs (SELinux / AppArmor / Yama / Lockdown).** The Linux LSM
-stack runs each LSM in sequence; any LSM can deny, all must permit.
-SELinux or AppArmor, where present, runs before `cfm-lsm`; their
-denials never reach this layer. Yama runs alongside;
-`kernel.yama.ptrace_scope=1` is already shipped by `kernsec`. Lockdown
-runs alongside and is recommended at `integrity` but not required.
-Tomoyo and Smack are untested and not on CFM's supported distros.
-
-## Phased roadmap
-
-All five policies are shipped and attached by the existing Loader
-and lifecycle code. The MVP pair (`CFML-EXEC-001`, `CFML-EXEC-003`)
-landed first, followed by FS-005 + CRED-002 once the MVP's verifier
-and pinning behaviour proved stable on EL10, and finally CRED-003 to
-close the documented direct-`commit_creds` gap. Each new policy is
-folded into the same `cfmlsm.bpf.c` translation unit and attached
-through the existing pinned-link / pinned-map model — no new
-component shape per policy.
-
-**Kernsec integration — KSEC-LSM-bpf-001.** Adding `bpf` to the
-kernel `lsm=` command line is owned by `kernsec` via rule
-`KSEC-LSM-bpf-001` (Tier 2, not forced by default). Forcing the
-rule in `/etc/cfm/kernsec.conf` makes `cfm kernsec apply` merge
-`bpf` into the operator's existing `lsm=` value without disrupting
-the other LSMs; takes effect on the next reboot. Required on
-distros where `bpf` is not in the compile-time default LSM list
-(most non-EL10 kernels).
+**Stacked LSMs.** Each LSM can deny and all must permit. SELinux /
+AppArmor denials happen before cfm-lsm and are honoured (`ret != 0`
+returns early). Yama runs before BPF on hosts where kernsec merged
+`bpf` into `lsm=` (see OBS-004). Lockdown is recommended at `integrity`
+but not required. Tomoyo and Smack are untested.
 
 ## Adding a new policy
 
-The shipped translation unit `internal/lsm/bpf/cfmlsm.bpf.c` holds
-every policy. Adding one is a single PR shaped like the existing
-ones (e.g. the CRED-003 PR that landed on top of CRED-002):
+One PR, shaped like the existing ones:
 
-1. Add the `PolicyID` constant and an `AllPolicies()` entry in
-   `internal/lsm/policy.go`. Default mode is `ModeDisabled`.
-2. Add the matching `CFM_LSM_POLICY_*` value to
-   `internal/lsm/bpf/common.bpf.h`. Values are stable across
-   releases — operators reference them in `lsm.conf` and audit
-   logs.
-3. Write the new BPF program in `cfmlsm.bpf.c`. Reuse the existing
-   ringbuf, helpers, and (if relevant) the `cfm_watched_uids` /
-   `cfm_watched_inodes` / `cfm_setuid_inodes` maps before adding
-   new ones.
-4. Wire the program into `loader.go::programFor` and
-   `loader.go::pinLinkFile`. Add the `pinFileLink*` constant.
-5. Regenerate the BPF artifacts: `make bpf`. Both per-arch
-   `cfmlsm_*_bpfel.{go,o}` files must update.
-6. Update `events.go` if the wire format changed. Keep
-   `TestPolicyByID_BPFConstantsMatchGoConstants` passing.
-7. Extend `configs/lsm.conf` with a stanza for the new ID — the
-   shipped template is the authoritative starting point operators
-   install at `/etc/cfm/lsm.conf`. The `FormatConf` round-trip in
-   the test suite also iterates `AllPolicies()`, so omitting the
-   new ID from the catalogue would surface as a test failure even
-   without a manual edit.
-8. If the new policy needs an LSM hook that the kernel may not
-   expose as a tracing target (as with CRED-003's
-   `fentry/commit_creds`), report it through preflight as a
-   per-policy `unavailable` rather than failing the whole
-   component.
+1. `PolicyID` constant and `AllPolicies()` entry in `policy.go`
+   (`DefaultMode: ModeDisabled`). If it cannot enforce, add it to
+   `isEnforceCapable`.
+2. `CFM_LSM_POLICY_*` value in `bpf/common.bpf.h` and the matching
+   mapping in `events.go` (`TestPolicyByID_BPFConstantsMatchGoConstants`).
+   Values are stable; operators see them in logs.
+3. The program in `cfmlsm.bpf.c`. Reuse the ringbuf, `cfm_event_fill_kin`
+   and the existing maps before adding new ones.
+4. Wire it in `loader.go` (`programsFor`, `pinLinkFiles`, a `pinFile*`
+   constant). A tracepoint program also goes in `tracepointPolicies`
+   (`perflink_probe.go`).
+5. `make bpf`; both per-arch `cfmlsm_*_bpfel.{go,o}` must change.
+6. A stanza in `configs/lsm.conf`. The `FormatConf` round-trip tests
+   iterate `AllPolicies()`.
+7. If the hook may be missing on some kernels, report it as a
+   per-policy availability in preflight, not a component FAIL.
+8. A PoC scenario in `tests/lsm-poc/scenarios/`.
+9. Budget a tuning pass: new LSM rules ship noisy (CLAUDE.md §6).
 
-`cfm lsm probe`, `cfm lsm enable`, `cfm lsm disable`, and the
-daemon's adoption path all iterate `AllPolicies()`, so they
-pick up the new policy with no further changes.
+`probe`, `enable`, `disable` and the daemon's adopt path iterate
+`AllPolicies()` and need no further change.
 
 ## Open questions
 
-1. **cgroup → vhost resolution under CloudLinux LVE.** LVE entities
-   are not stock cgroups v2. None of the shipped policies is
-   vhost-keyed, so this does not block anything today; it remains
-   open for any future policy that would need per-vhost attribution.
-
-2. **Policy hot-reload via dual-attach / atomic swap.** Today a
-   mode change requires `cfm lsm disable` + re-enable, which briefly
-   detaches the kernel-side programs. An atomic swap (load new
-   program, replace link, detach old) would close that window but
-   needs explicit design before being introduced.
+- **cgroup → vhost attribution under CloudLinux LVE.** LVE entities are
+  not stock cgroups v2. No shipped policy is vhost-keyed; this matters
+  only for a future policy that needs per-vhost attribution.
 
 ## References
 
-- [`docs/kernsec.md`](./kernsec.md) — preemptive kernel-surface
-  reduction (sibling component).
+- [`kernsec.md`](./kernsec.md) — kernel-surface reduction (sibling
+  component).
+- [`lsm-php-drop-detection.md`](./lsm-php-drop-detection.md) — the
+  `CFML-FS-009` proposal (PHP file written under a docroot).
 - [`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md)
   — the PHP-VM layer above this one (CFM-managed Snuffleupagus).
-- `internal/outbound/analyzer.go` — existing per-uid NFLOG outbound
-  observer; rightful owner of the network-policy problem space.
-- `internal/kernsec/profile.go` — host-profile detection reused by
-  `cfm-lsm`. See line 188 for the `kernel.yama.ptrace_scope=1`
-  default that subsumes the original draft's `CFML-OBS-001`.
-- BPF LSM kernel docs: `Documentation/bpf/prog_lsm.rst`.
+- `internal/outbound/` — owner of outbound network policy.
+- `tests/lsm-poc/` — PoC harness.
+- Kernel: `Documentation/bpf/prog_lsm.rst`.

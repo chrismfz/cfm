@@ -187,6 +187,22 @@ edge request so the IP can be banned.
   `php_drops` MCP aggregates. A fleet count gates every later phase; kernel
   deny is not planned.
 
+## 9b. cfm-lsm follow-ups
+
+Reference: `docs/cfm-lsm.md`.
+
+- **Allowlists that gate enforce** — [idea]. BPF-side allow maps keyed on
+  the exe inode, so `allow_exe` can exempt in enforce mode for EXEC-006 and
+  NET-002 (today the userspace allowlist only filters events).
+- **FS-005: an `exe_file` inode check** — [idea]. Replaces the auth-helper
+  comm gate, which a process can spoof with `prctl(PR_SET_NAME)`.
+- **FS-006 enforce allowlist** — [idea], built from its monitor telemetry.
+- **Ringbuf drop counter (or a larger ringbuf)** — [idea]. A full ringbuf
+  drops events with no count today.
+- **Hot policy reload without detaching** — [idea]. Mode changes go
+  through `cfm lsm restart` now.
+- **`kernel.modules_disabled` via a late unit in kernsec** — [idea].
+
 ## 10. PHP runtime defense (CFM-managed Snuffleupagus)
 
 Design: `docs/roadmaps/php-runtime-defense.md`. CFM renders Snuffleupagus
