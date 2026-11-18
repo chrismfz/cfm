@@ -35,12 +35,40 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
+// startConfigSync runs syncConfigs on its own goroutine, so a SpamAssassin lint
+// and spamd restart (seconds, minutes on a loaded box) never hold up the work
+// loop's unblocks and fingerprint-policy pulls. A tick that finds the previous
+// sync still running skips this one. Stop cancels it (the lint and the
+// post-update command run under its context).
+func (r *Runner) startConfigSync() {
+	if !r.fileSyncRunning.CompareAndSwap(false, true) {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		select {
+		case <-r.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	go func() {
+		defer r.fileSyncRunning.Store(false)
+		defer cancel()
+		r.syncConfigs(ctx)
+	}()
+}
+
 func (r *Runner) syncConfigs(ctx context.Context) {
 	cfg := r.cur()
 	if cfg.BaseURL == "" || cfg.Token == "" {
 		return
 	}
 	api := &APIClient{BaseURL: cfg.BaseURL, Token: cfg.Token, HTTP: r.client}
+
+	// A restart that failed on an earlier sync: the files already match, so
+	// nothing below would trigger it again.
+	r.files.retryPendingActions()
 
 	tracked, err := api.ListTrackedFiles()
 	if err != nil {
@@ -55,9 +83,16 @@ func (r *Runner) syncConfigs(ctx context.Context) {
 	// figure out diffs
 	var need []string
 	for path, remoteHash := range tracked {
-		if local := sha1File(path); !strings.EqualFold(local, remoteHash) {
-			need = append(need, path)
+		if local := sha1File(path); strings.EqualFold(local, remoteHash) {
+			continue
 		}
+		if r.files.isParked(path, remoteHash) {
+			continue // failed the SpamAssassin lint; not worth downloading again
+		}
+		if isSpamassassinFile(filepath.Clean(path)) && r.files.lintWaiting() {
+			continue // would only be deferred again until the lint backoff ends
+		}
+		need = append(need, path)
 	}
 	if len(need) == 0 {
 		return
@@ -69,44 +104,5 @@ func (r *Runner) syncConfigs(ctx context.Context) {
 		return
 	}
 
-	// apply updates
-
-	for _, u := range updates {
-		// only write if hash differs (double check)
-		if local := sha1File(u.TargetPath); strings.EqualFold(local, u.Hash) {
-			continue
-		}
-
-		// Validate path is under a known-safe directory before writing.
-		// Prevents an API compromise from writing to arbitrary system paths.
-		cleanPath := filepath.Clean(u.TargetPath)
-		allowedPrefixes := []string{
-			"/etc/cfm/",
-			"/usr/local/openresty/nginx/conf/",
-			"/usr/local/openresty/nginx/lua/",
-			"/etc/mail/spamassassin/",
-		}
-		pathAllowed := false
-		for _, pfx := range allowedPrefixes {
-			if strings.HasPrefix(cleanPath, pfx) {
-				pathAllowed = true
-				break
-			}
-		}
-		if !pathAllowed {
-			logging.LogfAPI("[files] REJECTED write to disallowed path: %s", u.TargetPath)
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(cleanPath), 0750); err != nil {
-			logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(cleanPath), err)
-			continue
-		}
-		if err := atomicWrite(cleanPath, []byte(u.Content), 0600); err != nil {
-			logging.LogfAPI("[files] write %s: %v", cleanPath, err)
-			continue
-		}
-
-		logging.LogfAPI("[files] updated %s", u.TargetPath)
-	}
+	r.files.applyUpdates(ctx, updates, syncAllowedPrefixes)
 }

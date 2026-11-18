@@ -56,6 +56,40 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   every match was a scanner.
 
 ### Fixed
+- **Config files cfm-web distributes now take effect without waiting for a
+  restart.** The agent wrote the files cfm-web pushes (Admin → Configs →
+  targets, e.g. the SpamAssassin `custom-keywords-rules.cf`,
+  `mailfromfilters.cf`, `myip.cf`) but never ran the target's
+  `post_update_command`, so spamd kept the old rules until its next restart.
+  The agent now runs it after the write, once per action, but only if it is
+  one of a fixed allowlist (`systemctl restart spamd`, `systemctl reload
+  spamd`, `/scripts/restartsrv_spamd`), with no shell: cfm-web holds every
+  node's token, and running any command it names would make a compromise of
+  it root on the whole fleet. Anything else is refused and logged
+  (`[files] REFUSED post_update_command`). Every action runs as a `systemctl`
+  job (cPanel's restartsrv too), so a cfm restart mid-command cannot leave
+  spamd stopped. For the same reason only `.cf` rule files are accepted under
+  `/etc/mail/spamassassin/`, with `loadplugin` by Perl package name only (a
+  plugin file path is Perl run as root; the distributed `myip.cf` loads SPF,
+  DKIM, DCC and HashBL by name and is unaffected) and `include` only inside
+  that dir; a refused version is logged once and not downloaded again. A change there is
+  linted first (`spamassassin --lint`, the cPanel copy or the system one): a
+  problem the new files introduced, one the lint before the write did not
+  report as often, rolls them back (old content and mode) and skips the
+  restart. When several files changed at once the set is halved until the
+  file at fault is found; only it is parked (not downloaded or applied again
+  until cfm-web sends a different version). Problems that were already there,
+  also when the update moves their line number (a `dcc_*` line with the DCC
+  plugin off, a missing Hashcash plugin), do not block it, and a lint that
+  cannot run (a timeout on a loaded box) defers the change, and the files
+  not judged yet, with a growing delay (1 min doubling to 1 h) instead of
+  judging it; they are not downloaded again meanwhile. After a spamd action
+  the agent checks that spamd is active again: if it is not and the sync
+  wrote SpamAssassin files, those are rolled back and parked and spamd is
+  restarted on the old ones; an action that still fails is retried on later
+  syncs (at most every 5 min) instead of being forgotten once the files
+  match. The sync now runs off
+  the work loop, so a lint and restart never delay unblocks or policy pulls.
 - **WAF rule overrides in `/etc/cfm/cfm_waf_config.lua` now apply.** The docs
   and several release notes (2026.09.22, 2026.10.09, 2026.11.14) told
   operators to set or revert a rule's mode there, but nothing read that file:

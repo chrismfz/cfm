@@ -39,8 +39,10 @@ type Runner struct {
 	heartbeatSuccesses uint64
 	fpPull             fpPolicyPullState
 	dnatProbe          dnatProbeState
-	workBusySince      atomic.Int64 // unix nanos a work-loop tick started; 0 when idle
-	workStuckLogAt     atomic.Int64 // unix nanos of the last "work loop busy" line
+	workBusySince      atomic.Int64  // unix nanos a work-loop tick started; 0 when idle
+	workStuckLogAt     atomic.Int64  // unix nanos of the last "work loop busy" line
+	files              fileSyncState // config-file sync state; touched only by the sync goroutine
+	fileSyncRunning    atomic.Bool   // a startConfigSync goroutine is running
 }
 
 func New(cfg Config) *Runner {
@@ -212,7 +214,7 @@ func (r *Runner) checkWorkLoopStuck(now time.Time) {
 		return
 	}
 	r.workStuckLogAt.Store(now.UnixNano())
-	logging.LogfAPI("[agent] work loop tick busy for %s (unblocks / config sync / policy pull); heartbeats continue",
+	logging.LogfAPI("[agent] work loop tick busy for %s (unblocks / policy pull); heartbeats continue",
 		busy.Round(time.Second))
 }
 
@@ -234,7 +236,7 @@ func (r *Runner) loop() {
 			tickStart := time.Now()
 			r.workBusySince.Store(tickStart.UnixNano())
 			r.fetchPendingUnblocks(context.Background())
-			r.syncConfigs(context.Background())
+			r.startConfigSync()
 			r.fetchFPPolicies(context.Background())
 			r.workBusySince.Store(0)
 			// Close out a "work loop tick busy" report with how long it took.
