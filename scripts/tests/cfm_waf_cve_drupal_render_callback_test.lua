@@ -68,6 +68,19 @@ fires(get("/", "a%5B%23pre_render%5D%5B%5D=passthru"), "WAF_CVE:CVE_2018_7600:DR
 fires(get("/", "a%5B%23lazy_builder%5D%5B0%5D=system"), "WAF_CVE:CVE_2018_7600:DRUPAL:LAZY_BUILDER", "#lazy_builder key")
 fires(get("/", "a%5B%23access_callback%5D=system"), "WAF_CVE:CVE_2018_7600:DRUPAL:ACCESS_CALLBACK", "#access_callback key")
 fires(get("/", "a%255B%2523post_render%255D%255B0%255D=exec"), "WAF_CVE:CVE_2018_7600:DRUPAL:POST_RENDER", "double-encoded key")
+-- json_decode reads any letter as \uXXXX, and a raw form or multipart value
+-- may carry the escape with no `#` or `%` in it (final review, 2026-11-18)
+fires(post("/x", '{"r":{"\\u0023\\u0072egion\\u005fcallback":"system"}}', "application/json"),
+      "WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK", "JSON key with escaped letters")
+fires(post("/x", 'rows={"r1":{"\\u0023region_callback":["system"]}}'),
+      "WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK", "raw urlencoded JSON value, \\u0023 only")
+fires(post("/x", table.concat({ "--b", 'Content-Disposition: form-data; name="rows"', "",
+      '{"r1":{"\\u0023region_callback":["system"]}}', "--b--", "" }, "\r\n"), "multipart/form-data; boundary=b"),
+      "WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK", "multipart JSON value, \\u0023 only")
+fires(post("/x", string.rep("a=b&", 1100) .. "rows=" .. '{"r1":{"\\u0023\\u0072egion_callback":1}}'),
+      "WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK", "escaped letters past the large-source prefilter")
+fires(post("/x", '{"t":"a\\\\","#pre_render":["x"]}', "application/json"),
+      "WAF_CVE:CVE_2018_7600:DRUPAL:PRE_RENDER", "a key after an escaped backslash")
 
 -- ── Negatives ───────────────────────────────────────────────────────────────
 clean(get("/search", "q=how+to+use+%23post_render+in+drupal"), "the word in a search")
@@ -107,6 +120,8 @@ clean(post("/admin/structure/block/manage/x", "body%5Bvalue%5D=" .. enc('{{ cont
 clean(post("/node/1/edit", "body%5B0%5D%5Bvalue%5D=" .. enc('const el = {"#post_render": fn};'), U), "a JS object literal in prose")
 clean(post("/wp-admin/admin-ajax.php", "action=elementor_ajax&actions=" .. enc('{"save":{"code":"$b[\\"#pre_render\\"]"}}'), U),
       "an escaped key inside a JSON field value")
+clean(post("/api", '{"t":"a\\\\\\"#pre_render\\": 1"}', "application/json"), "an escaped quote after an escaped backslash")
+clean(post("/api", '{"#header":{"color":"red"},"#footer":{}}', "application/json"), "CSS-selector keys")
 
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " check(s) failed in cfm_waf_cve_drupal_render_callback_test.lua\n")

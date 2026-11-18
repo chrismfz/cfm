@@ -856,26 +856,6 @@ function _M.detect_cve_wp_pagename_traversal(uri, method, args, body, headers, _
   return nil
 end
 
--- Rule 10029 — CVE-2026-67282, Fabrik (Joomla) 1.0.0–4.6.7 unauth RCE. Source:
--- the operator's incident report for dmkomotinis.gr (earth, 2026-11-12) and
--- that site's edge log: the list filter takes `<table>___<element>[value]`
--- and, when the same element carries `[eval]` set, runs the value as PHP. The
--- attacker sent `…___aiton[value]=1;&…___aiton[eval]=1` probes, then the
--- file-writing payloads rule 332 reads. 7 days of edge access.log on all 8
--- edge nodes (2026-11-17, ~17 800 Fabrik requests): `[eval]` came only from
--- that attacker, `=0` included, so the legitimate list filter never sends it.
---
--- Fires on a request field (query, urlencoded or multipart POST: Fabrik
--- reads $_REQUEST) whose key has an `[eval]` index, on a Fabrik request: an
--- `option` field `com_fabrik`, `fabrik` in the path (the SEF
--- /component/fabrik/ route) or the element name's `___` (a menu-alias route
--- carries neither of the others). Tags: EVAL_ARG / EVAL_BODY for a set value
--- (not empty, not "0"), EVAL_ZERO for `=0` (the caller keeps that one
--- logonly whatever the rule's mode: it runs nothing).
---
--- It walks each_request_field (the reader under php_request_fields) itself,
--- not php_request_fields: that one registers `x[eval]` under `x`
--- (php_var_name), and the `[eval]` index is the whole signal here.
 -- Rule 10030 — a Drupal render-array callback key sent as request data
 -- (WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK,
 --  WAF_CVE:CVE_2018_7600:DRUPAL:<KEY>)
@@ -914,23 +894,40 @@ local function drupal_render_key_in_name(name)
   return nil
 end
 
--- the key, when JSON text `j` holds `"#key"` (or `"\u0023key"`) as an object
--- key: an unescaped opening quote, the closing quote, then `:`
+-- JSON text as json_decode reads its strings: a `\uXXXX` below 0x80 becomes
+-- its character (`"\u0023\u0072egion_callback"` is `#region_callback`), and
+-- every other escape, a `\"` or a `\u0022` included, becomes \1, so no escaped
+-- quote can open or close a key and no backslash is left.
+local function json_unescape(j)
+  if not j:find("\\", 1, true) then return j end
+  return (j:gsub("\\(.)(%x?%x?%x?%x?)", function(c, hex)
+    if c == "u" and #hex == 4 then
+      local cp = tonumber(hex, 16)
+      if cp < 0x80 and cp ~= 0x22 and cp ~= 0x5c then return string.char(cp) end
+      return "\1"
+    end
+    return "\1" .. hex
+  end))
+end
+
+-- the key, when JSON text `j` holds `"#key"` as an object key: the quoted
+-- key, its opening quote not escaped, then `:`. Only text that writes a `#`,
+-- a letter or `_` as `\u00XX` pays the unescape (WordPress and page builders
+-- escape `<`, `>`, `&`, `'` and accents, never those).
 local function drupal_render_key_in_json(j)
-  if not (j:find("#", 1, true) or j:find("\\u0023", 1, true)) then return nil end
-  j = lower(j)
+  if not (j:find("#", 1, true) or j:find("\\u", 1, true)) then return nil end
+  local raw = not (j:find("\\u0023") or j:find("\\u00[4-7]%x"))
+  j = lower(raw and j or json_unescape(j))
+  if not j:find("#", 1, true) then return nil end
   local keys = _M._DRUPAL_RENDER_KEYS
   for i = 1, #keys do
-    for _, lit in ipairs({ '"#' .. keys[i] .. '"', '"\\u0023' .. keys[i] .. '"' }) do
-      local init = 1
-      while true do
-        local a, e = j:find(lit, init, true)
-        if not a then break end
-        if (a == 1 or j:sub(a - 1, a - 1) ~= "\\") and j:find("^%s*:", e + 1) then
-          return keys[i]
-        end
-        init = e + 1
-      end
+    local lit = '"#' .. keys[i] .. '"'
+    local init = 1
+    while true do
+      local a, e = j:find(lit, init, true)
+      if not a then break end
+      if (a == 1 or j:byte(a - 1) ~= 92) and j:find("^%s*:", e + 1) then return keys[i] end
+      init = e + 1
     end
   end
   return nil
@@ -942,12 +939,20 @@ end
 
 -- a large urlencoded source (query or body) is split only when its decoded
 -- text holds the pieces of some key (`region` + `callback`, ...): the same
--- prefilter the other field-keyed rules use
+-- prefilter the other field-keyed rules use, except that a JSON escape that
+-- can hide a key's `#`, letters or `_` (`\u0072egion`, also double-encoded)
+-- always has it split
 local drupal_render_skip
 do
   local want = {}
   for _, k in ipairs(_M._DRUPAL_RENDER_KEYS) do want[k] = true end
-  drupal_render_skip = source_lacks(want_hints(want))
+  local hints = want_hints(want)
+  drupal_render_skip = function(s)
+    if #s < SOURCE_PREFILTER_MIN then return false end
+    local d = lower(s:find("[%%+]") and _form_unescape(s) or s)
+    if d:find("\\u0023") or d:find("\\u00[4-7]%x") or d:find("%%5cu00[2-7]%x") then return false end
+    return not holds_hint(d, hints)
+  end
 end
 
 function _M.detect_cve_drupal_render_callback(method, args, body, headers)
@@ -956,7 +961,7 @@ function _M.detect_cve_drupal_render_callback(method, args, body, headers)
     if hit then return end
     hit = drupal_render_key_in_name(k)
     if hit then return end
-    if v and (v:find("#", 1, true) or v:find("%", 1, true)) then
+    if v and v:find("[#%%\\]") then
       if enc and v:find("[%%+]") then v = _form_unescape(v) end
       if v:find("%", 1, true) then v = _form_unescape(v) end   -- double-encoded
       if json_doc(v) then hit = drupal_render_key_in_json(v) end
@@ -973,6 +978,26 @@ function _M.detect_cve_drupal_render_callback(method, args, body, headers)
 end
 end
 
+-- Rule 10029 — CVE-2026-67282, Fabrik (Joomla) 1.0.0–4.6.7 unauth RCE. Source:
+-- the operator's incident report for dmkomotinis.gr (earth, 2026-11-12) and
+-- that site's edge log: the list filter takes `<table>___<element>[value]`
+-- and, when the same element carries `[eval]` set, runs the value as PHP. The
+-- attacker sent `…___aiton[value]=1;&…___aiton[eval]=1` probes, then the
+-- file-writing payloads rule 332 reads. 7 days of edge access.log on all 8
+-- edge nodes (2026-11-17, ~17 800 Fabrik requests): `[eval]` came only from
+-- that attacker, `=0` included, so the legitimate list filter never sends it.
+--
+-- Fires on a request field (query, urlencoded or multipart POST: Fabrik
+-- reads $_REQUEST) whose key has an `[eval]` index, on a Fabrik request: an
+-- `option` field `com_fabrik`, `fabrik` in the path (the SEF
+-- /component/fabrik/ route) or the element name's `___` (a menu-alias route
+-- carries neither of the others). Tags: EVAL_ARG / EVAL_BODY for a set value
+-- (not empty, not "0"), EVAL_ZERO for `=0` (the caller keeps that one
+-- logonly whatever the rule's mode: it runs nothing).
+--
+-- It walks each_request_field (the reader under php_request_fields) itself,
+-- not php_request_fields: that one registers `x[eval]` under `x`
+-- (php_var_name), and the `[eval]` index is the whole signal here.
 function _M.detect_cve_fabrik_listfilter_eval(uri, method, args, body, headers, _nab)
   -- value_word = true: a multipart field name is not url-encoded, so `eval`
   -- shows in _nab there too, and a multipart POST is not parsed blind.
