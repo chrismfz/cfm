@@ -27,6 +27,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **Scoped traffic-rule views name only the caller's own sites.** A rule the
   operator shares across several tenants' sites is listed and simulated for
   each tenant with that tenant's sites only, as the rules export already did.
+  The Challenge Access-Control list does the same.
+- **The admin SSO cookie gets the same-origin check the session cookie gets**
+  on state-changing requests.
+- **`/api/v1/cpanel/user-info` adds failure detail only when asked**
+  (`X-CFM-Debug: 1`, which the plugin sends in its debug mode).
 
 ### Changed
 - **The MCP server's instructions name every tool.** The guidance an MCP

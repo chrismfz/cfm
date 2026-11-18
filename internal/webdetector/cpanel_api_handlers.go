@@ -2,7 +2,8 @@
 //
 // GET /api/v1/cpanel/user-info?user=X
 //
-// Admin-only endpoint used by the cPanel plugin (bootstrap.php) to
+// Assertion-only endpoint (X-CFM-Actor-Assertion; admin and scoped tokens
+// cannot use it) used by the cPanel plugin (bootstrap.php) to
 // discover the domains and DB users belonging to a cPanel account. The
 // domains it returns become the scoped token's vhosts: each domain plus its
 // www. name and cPanel ServerAlias names (panelmap.WithWebAliases).
@@ -422,16 +423,18 @@ func isReplayNonce(nonce string, expUnix, nowUnix int64) bool {
 	return false
 }
 
+// cfmDebugEnabledForRequest reports whether failure detail is added to the
+// response: only when the caller asks for it (the plugin sends X-CFM-Debug: 1).
+// The route answers unauthenticated callers, so the default is off.
 func cfmDebugEnabledForRequest(r *http.Request) bool {
 	if r == nil {
-		return true
-	}
-	raw := strings.ToLower(strings.TrimSpace(r.Header.Get("X-CFM-Debug")))
-	switch raw {
-	case "0", "false", "no", "off":
 		return false
-	default:
+	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-CFM-Debug"))) {
+	case "1", "true", "yes", "on":
 		return true
+	default:
+		return false
 	}
 }
 
