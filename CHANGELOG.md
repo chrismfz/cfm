@@ -21,6 +21,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **Config files cfm-web distributes now take effect without waiting for a
+  restart.** The agent wrote the files cfm-web pushes (Admin → Configs →
+  targets, e.g. the SpamAssassin `custom-keywords-rules.cf`,
+  `mailfromfilters.cf`, `myip.cf`) but never ran the target's
+  `post_update_command`, so spamd kept the old rules until its next restart.
+  The agent now runs it after the write, once per distinct command, but only
+  if it is one of a fixed allowlist (`systemctl restart spamd`,
+  `systemctl reload spamd`, `/scripts/restartsrv_spamd`), as a fixed argv
+  with no shell: cfm-web holds every node's token, and running any command it
+  names would make a compromise of it root on the whole fleet. Anything else
+  is refused and logged (`[files] REFUSED post_update_command`). A change
+  under `/etc/mail/spamassassin/` is linted first (`spamassassin --lint`, the
+  cPanel copy or the system one): a problem the new files introduced, one the
+  lint before the write did not report, rolls those files back, skips the
+  restart and leaves that version alone until cfm-web sends a different one.
+  Problems that were already there (a `dcc_*` line with the DCC plugin off, a
+  missing Hashcash plugin) do not block the update.
 - **WAF rule overrides in `/etc/cfm/cfm_waf_config.lua` now apply.** The docs
   and several release notes (2026.09.22, 2026.10.09, 2026.11.14) told
   operators to set or revert a rule's mode there, but nothing read that file:

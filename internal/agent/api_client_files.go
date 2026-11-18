@@ -15,6 +15,9 @@ type ConfigUpdate struct {
 	TargetPath string `json:"target_path"`
 	Content    string `json:"content"`
 	Hash       string `json:"hash"`
+	// PostUpdateCommand is run after the file is written, only if it is one of
+	// postUpdateActions (file_sync_apply.go).
+	PostUpdateCommand string `json:"post_update_command"`
 }
 
 func (c *APIClient) GetUpdates(paths []string) ([]ConfigUpdate, error) {

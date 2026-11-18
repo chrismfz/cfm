@@ -39,8 +39,9 @@ type Runner struct {
 	heartbeatSuccesses uint64
 	fpPull             fpPolicyPullState
 	dnatProbe          dnatProbeState
-	workBusySince      atomic.Int64 // unix nanos a work-loop tick started; 0 when idle
-	workStuckLogAt     atomic.Int64 // unix nanos of the last "work loop busy" line
+	workBusySince      atomic.Int64  // unix nanos a work-loop tick started; 0 when idle
+	workStuckLogAt     atomic.Int64  // unix nanos of the last "work loop busy" line
+	files              fileSyncState // config-file sync; touched only from the work loop
 }
 
 func New(cfg Config) *Runner {
