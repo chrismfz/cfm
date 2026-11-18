@@ -28,10 +28,12 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
   code carve-outs.
 - **WAF CVE detectors (`WAF_CVE`)** — [track]. Per-CVE rules in the `10000+`
   band. Never write a signature from memory.
-- **libinjection SQLi / XSS tokenizer** — [next]. LuaJIT FFI binding
-  (`lua-resty-libinjection`-style) as a new detector beside 301 / 302,
-  shipping `logonly`. Measured with `make waf-corpus` before merge and with
-  `cfm webtop waf hit-rates` on the fleet before any promotion.
+- **libinjection SQLi / XSS tokenizer** — [decided] not adopted
+  (2026-11-18). Run over ~8 days of query strings on all 8 nodes it caught
+  ~200 attacks CFM let through, and would have broken ~170 legitimate
+  requests (Jetpack, WooCommerce filters, search boxes). The attacks fell
+  into a few shapes, now rules 301 / 332 (`docs/waf.md` "SQLi gaps,
+  2026-11-18"). A shape that passes gets its own measured rule.
 - **Decoding / normalization transforms** — [next]. `cmdLine`-style
   normalization for the RCE rules, unicode / fullwidth folding and
   `normalizePath` in `cfm_waf_util.lua` (today: `url_decode_once` × 2 + lower,

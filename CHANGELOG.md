@@ -20,6 +20,22 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Security
+- **A `--` in one query parameter no longer hides the next ones from the
+  SQLi rules.** `?x=--&id=1'+union+select+1,2,3` read as clean, because the
+  SQL-comment strip removed everything after the `--`, other parameters
+  included. A comment now ends at its parameter's `&` (and a `--` in the path
+  at the `?`). Path and query only: request bodies are read as before.
+- **MySQL executable comments in the query are read as SQL.**
+  `/*!11110extractvalue*/(` is run by MySQL, but the WAF deleted it with the
+  comment, and scanners' `procedure analyse` probes using it reached sites on
+  several nodes. Its content is now kept, so rules 301 and 309 see it.
+- **More SQLi and PHP probes blocked in the query** (rules 301 and 332,
+  already armed for autoblock): `' order by 3--`, `procedure analyse(`,
+  `') and ('x'='x`, `1 and 1=1`, Oracle's `utl_inaddr.get_host_address(`,
+  and `${@var_dump(md5(N))}`. Measured over 8 days of every node's logs:
+  every match was a scanner.
+
 ### Fixed
 - **WAF rule overrides in `/etc/cfm/cfm_waf_config.lua` now apply.** The docs
   and several release notes (2026.09.22, 2026.10.09, 2026.11.14) told

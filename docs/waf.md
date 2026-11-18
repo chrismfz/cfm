@@ -1541,8 +1541,9 @@ and all 33 219 benign ones.
   JSON `\u`-escaped and `\x`-escaped JS payloads, base64-wrapped template
   injection.
 
-These are the numbers the ROADMAP's libinjection and normalization items are
-measured against: re-run with `--baseline` and read the changed samples.
+These are the numbers a rule change is measured against: re-run with
+`--baseline` and read the changed samples. After the 2026-11-18 SQLi fixes:
+block 114 (17.4%), block + challenge tiers 212 (32.3%), benign unchanged.
 
 ---
 
@@ -1923,13 +1924,112 @@ tutorial or DBA-forum content about the keyword; relational-algebra notation
 select …`). If they show up, drop the empty- / `all`- / `distinct`-collapsed
 camelCase branches (the FP-prone ones) rather than living with the noise.
 
-**Not covered:** a MySQL executable comment `/*!50000union*/select` (stripped
-whole; also bypasses 301, a shared `strip_sql_comments` follow-up); a
-backtick identifier break (`` `col`union all select ``, `` ` `` is not in the
+**Not covered:** a backtick identifier break (`` `col`union all select ``, `` ` `` is not in the
 shared terminator class); asymmetric single-side comments (`union/**/all
 select`) and `union all(select`; a value-leading `?p=union all select…` (only
 `=` before `union`), a deliberate miss to avoid noun-phrase FPs, as in 301.
 None is a new block-path hole: 301 still blocks the adjacent form.
+
+### SQLi gaps, 2026-11-18 (rules 301, 309, 319, 332)
+
+**Why.** libinjection 4.0.2 was run over the query strings of ~8 days of
+edge access logs on all 8 nodes (~96 M requests with a query): of its 2 057
+hits, ~1 590 CFM already blocked or challenged; of the 463 that reached the
+origin, ~200 were attacks and ~170 legitimate traffic it would have broken
+(Jetpack's `token`, WooCommerce `;` filters, customers' search boxes). So
+libinjection was not adopted (`docs/ROADMAP.md` §1); the attacks it caught
+fell into a few shapes, each measured on its own over the same logs (8 nodes,
+8 days): every match was an attack, none a legitimate request.
+
+**Path and query only.** Every change below applies to the path + query
+surface; the args+body surface is read exactly as before. A JSON or
+minified-code body is one line, and its first `--` (`var(--wp--preset…)` in
+every Gutenberg save) hides the rest of it from 301/309/319. Reading that
+rest would put whole posts in front of block-tier, autoblock-armed rules,
+and bodies are not in the access logs, so it cannot be measured. A `--` in a
+body therefore still hides what follows it there (a known residual).
+
+**What changed:**
+- **`strip_sql_comments_query`** (`cfm_waf_util.lua`, the path + query strip
+  of 301 / 309 / 319; the body keeps `strip_sql_comments`):
+  - A comment ends at its parameter's `&`, and a `--` in the path at the `?`.
+    A `--` used to strip to the end of the whole scan string, so
+    `?x=--&id=1'+union+select+1,2,3` and `/index.php/--?id=1' union…` (PHP's
+    PATH_INFO) read as clean (a bypass of the 301 block; the same for a `/*`
+    in one parameter and its `*/` in a later one).
+  - The scan string is decoded, so a delimiter may sit inside one parameter
+    (`id=1'/*%26*/union select`): with a comment and a delimiter, the strip
+    returns the per-part reading AND the whole-string one.
+  - A MySQL / MariaDB executable comment `/*!NNNNN…*/` (`/*M!…*/`) keeps its
+    content, which the server runs: `catid=0' /*!11110procedure*/
+    /*!11110analyse*/ (/*!11110extractvalue*/(…` lost the very
+    `extractvalue(` 309 looks for (several sites per node in the 8 days).
+  - A `--` comment that ends a part leaves ` --` behind, so a detector can
+    see that a comment closed the value; one the next line continues after
+    (`1'--\nunion select`) is dropped whole, as before.
+- **301 shapes, query only** (`detect_sqli_probe`): `' order by 3--` / `#`
+  (after a value break: digit, quote, paren); `procedure analyse(` after a
+  value break; the same-word tautology `') and ('x'='x`, `" or "a"="a`
+  (`and` / `or` as whole words); `1 and 1=1` ending its parameter or
+  followed by SQL punctuation; `utl_inaddr.get_host_address(` (Oracle).
+- **332 tag `VAR_DUMP_MD5`** (332 reads the query only): the scanners'
+  PHP-eval probe `${@var_dump(md5(631881373))};`, which calls no sink.
+
+All ride families already armed at block (`WAF_SQLI`, `WAF_SQLI_LEXICAL`,
+`WAF_RCE`), so they ban at threshold 1. That is deliberate: the fleet read
+found only scanners.
+
+**Fleet replay (before merge):** the deployed Lua and this change were run
+side by side, with luajit on each node, over every request of the last 8
+days whose path or query held a comment, a quote or one of the new shapes:
+~2.96 M requests on the 8 nodes. 712 got a different 301 / 309 / 319 answer
+(earth 161, titan 165, orion 204, virgo 95, qualityweb 76, mars 5, speedhost
+5, rigel 1), and every one was an attack: the Joomla `com_streetguess`
+`/*!11110procedure analyse*/` sweep, sqlmap campaigns (`') AND ('x'='x'
+AND EXTRACTVALUE(…`, `ORDER BY 1-- -`, `UNION ALL SELECT`), Oracle
+`utl_inaddr.get_host_address(` probes, a PhocaCart blind probe. No
+legitimate request changed. Check of the replay itself: wherever it said the
+deployed Lua blocks at 301, the log says `cfm_block`.
+
+**Second replay, after the review fixes:** the same run over ~2.97 M
+requests, now also timing every request on both versions. The same 712
+requests changed, all attacks. No regression (no request the deployed Lua
+caught at 301/309/319 that this change misses), no error. CPU: the SQLi part
+cost ~2.3x the deployed one on average (tens of µs), from the new probe
+patterns running on every query. Each now runs only once a plain find has
+seen its keyword, which brings it back to the deployed cost (WooCommerce
+filter URLs: 17 µs deployed, 17 µs now). The slowest requests were attack
+payloads at 1-2 ms on both versions.
+
+**Corpus** (`make waf-corpus --baseline`): 2 more attacks blocked at 301, no
+benign sample changed. (A draft that also changed the body caught 11; the
+other 9 were DVWA SQLi in POST bodies, given up with the body change.) One
+white sample made the first `and 1=1` draft fire (`msg=1 and 1=1 is a very
+basic mathematical operation`), hence the "ends the parameter" condition.
+
+**Adversarial review (before merge).** An independent review replayed
+~100 hand-picked query strings against main and this branch and found:
+- **A CPU DoS, fixed:** the first `--` strip was a `%-%-[^\n]*\n` gsub, O(n²)
+  on a run of dashes with no newline (8 KB of `-` cost ~0.5 s of worker CPU,
+  1.6 s with the path). It is now a single pass of plain finds (7.5 ms, as on
+  main), with a 64 KB guard in the strip test.
+- **Bypasses, fixed:** a space added after the `/*!…*/` content split
+  `union/*!all*/select` and `extractvalue/*!*/(`, which main caught. An empty
+  executable comment is removed again, and a non-empty one gets two readings
+  (with a space on each side, and glued).
+- **The tautology** had no value-break gate, although its comment said so. It
+  has one now. **332** needs 5+ digits (the scanners' random number), so a PHP
+  forum search for `var_dump(md5(123))` passes.
+
+**Residual:** SQL typed into a search box can still trip the new shapes
+(`?s=top 10 order by 2--`, `?q=… where 1 and 1=1;`, `?s=SQL "procedure
+analyse()"`). The 8-day replay found no such request on the fleet. A `--` in
+a body still hides what follows it there; `' and 1=1
+or …` followed by more words (it reads like that prose); `'nvOpzp; AND 1=1 OR
+(<'">…` (a `;` before `and` is not a value break here). Tests:
+`scripts/tests/cfm_waf_sqli_gaps_test.lua`,
+`scripts/tests/cfm_waf_sqlcomment_query_strip_test.lua` (the body strip
+stays pinned by `cfm_waf_sqlcomment_strip_test.lua`).
 
 ### FP review — rule 101 (`WAF_TRAVERSAL`), 2026-09-05
 
@@ -1974,9 +2074,10 @@ only on a clean window.
 
 ## Known gaps
 
-- **Tokenizer-level SQLi / XSS evasions** (`UN/**/ION SE/**/LECT`, HTML5
-  mutation XSS) slip past the substring detectors; libinjection is the
-  [next] item in `docs/ROADMAP.md` §1.
+- **Tokenizer-level SQLi / XSS evasions** (HTML5 mutation XSS, SQLi with no
+  fixed token) slip past the substring detectors. libinjection was measured
+  on the fleet and not adopted ("SQLi gaps, 2026-11-18"); a shape that
+  passes gets its own measured rule.
 - **IPv6 CIDRs in `IGNORE_NETS`** are skipped by the Lua self-bypass (exact
   IPv6 addresses in `IGNORE_IPS` work).
 - **A rule after a short-circuiting `block`** is never evaluated on that

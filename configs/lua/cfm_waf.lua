@@ -1024,7 +1024,7 @@ local function check_impl(ctx, st)
   -- per request. Called via the `det` table so it stays interceptable in tests.
   local function get_sqli_ua()
     if not _sqli_ua_sc then
-      _sqli_ua_sc, _sqli_ua_scw = det.sqli_scan_strings(get_scan_ua())
+      _sqli_ua_sc, _sqli_ua_scw = det.sqli_scan_strings(get_scan_ua(), true)
     end
     return _sqli_ua_sc, _sqli_ua_scw
   end
@@ -1774,6 +1774,9 @@ local function check_impl(ctx, st)
     if mode ~= "disabled" then
       -- URI + query args (cheap, every request).
       local hit = det.detect_sqli(get_sqli_ua())
+      -- The probe shapes measured on the fleet's queries (2026-11-18):
+      -- path + query only, never the body.
+        or det.detect_sqli_probe(get_sqli_ua())
       -- Plus the POST body: form-field SQLi (e.g. a WHMCS ticket subject/
       -- message submitted as application/x-www-form-urlencoded) lands in
       -- the body, which uri+args does not cover. get_sqli_ab reuses the
