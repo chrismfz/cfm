@@ -21,7 +21,7 @@ the direct cause of wrong rules.
 
 | # | Fact | Where | Why it bites |
 |---|---|---|---|
-| F1 | **`allow` only means "stop evaluating traffic rules".** It does **not** bypass a per-IP block, a vhost-wide challenge, the WAF, or the good-bot logic. In `cfm.lua` block/challenge are OR'd across `ip_action`, `vhost_action`, `rule_action`; `rule_action == "allow"` is never consulted. | `cfm.lua` ~L1474-1500; `nginx_bridge.go` appends `rule_action` after ip/vhost actions are final | The screenshot rule (`allow` POST `/ws_vtrack/json_v2.php`) was almost certainly meant to *exempt* an integration from a challenge. It cannot. The right tools are the **Challenge excludes** page or `isChallengeExemptEndpoint`. README §15 says `allow` is "enforced" — misleading. |
+| F1 | **`allow` only means "stop evaluating traffic rules".** It does **not** bypass a per-IP block, a vhost-wide challenge, the WAF, or the good-bot logic. In `cfm.lua` block/challenge are OR'd across `ip_action`, `vhost_action`, `rule_action`; `rule_action == "allow"` is never consulted. | `cfm.lua` ~L1474-1500; `nginx_bridge.go` appends `rule_action` after ip/vhost actions are final | The screenshot rule (`allow` POST `/ws_vtrack/json_v2.php`) was almost certainly meant to *exempt* an integration from a challenge. It cannot. The right tools are the **Challenge excludes** page or `isChallengeExemptEndpoint`. The old README said `allow` was "enforced" — misleading (fixed; now `docs/traffic-rules.md`). |
 | F2 | **Rules are skipped for clients holding a valid clearance cookie.** Step 2b (`clearance_allow`) returns to origin *before* Step 3 (bridge decision, where rules run). | `cfm.lua` Step 2b vs Step 3 | A country/UA `block` rule does not apply to a browser that solved a challenge on that host within the clearance TTL. Operators test with their own browser and conclude "the rule doesn't work". |
 | F3 | **Rules are in-path-edge only** (OpenResty/Angie bridge RPC). Nothing evaluates them in DNAT mode. | only caller is `handleDecision` in `nginx_bridge.go` | A rule saved for a DNAT-mode vhost silently does nothing. |
 | F4 | **First match wins, ordered by `priority` ascending, then id.** Within a rule all set fields are AND'd; within a list field values are OR'd. Empty field = match everything. | `trafficRuleStore.Simulate`, `ruleMatchFilters` | The only hint is a tooltip on the Priority field. There is no view of "which rule wins for this request", nor of shadowed rules. |
@@ -183,7 +183,7 @@ Each group shows its glob expansion and a "UA is spoofable — prefer
 ## 3. Engine additions the proposal depends on (small, backward-compatible)
 
 All additive JSON fields; absent = current behaviour. Each ships with
-`traffic_rules_test.go` coverage, a README §15 update and a CHANGELOG entry.
+`traffic_rules_test.go` coverage, a `docs/traffic-rules.md` update and a CHANGELOG entry.
 
 | Addition | Why | Notes |
 |---|---|---|
@@ -278,7 +278,7 @@ Out of scope here: making a traffic-rule `allow` bypass the WAF or an IP block
    recipes that create the correctly-ordered rules (geo-fence uses the
    UA-based good-bot allow *with* a spoofability warning until
    `verified_bot` lands); simulator pre-fill from draft/row; plain-language
-   match column; README §15 `allow` note corrected. Fixes the screenshot
+   match column; the README `allow` note (now `docs/traffic-rules.md`) corrected. Fixes the screenshot
    class of mistake outright.
 2. **Phase 2 — engine additions** from §3 in single-concern PRs:
    `country_not_in` + `ip_any` **landed**, `verified_bot` **landed** (editor

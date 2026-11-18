@@ -1567,7 +1567,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   payload is unchanged.
   `challenge_solved` is the highest-volume row type, so these keys add ~50-80
   bytes each and the history DB grows accordingly at unchanged retention (it
-  is bounded by row count, not bytes) — see the CHANGELOG storage note.
+  is bounded by row count, not bytes; release 2026.09.22).
   Every humanity key is gated on the scorer having actually run, so an
   unscored solve carries none of them rather than a default-looking `hs:0`. Every humanity key is omitted
   entirely when the rung is off: there is no `-1` sentinel to look for, so the

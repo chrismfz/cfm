@@ -37,7 +37,12 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
   `normalizePath` in `cfm_waf_util.lua` (today: `url_decode_once` × 2 + lower,
   no unicode normalization). Scope each to the variables it belongs to: the
   strict UTF-8 walker applied to the whole args+body buffer flagged legacy
-  ISO-8859-7 Greek forms (`docs/waf.md`).
+  ISO-8859-7 Greek forms (`docs/waf.md`). Never as one more pass in the
+  shared `normalize()`: that changes the input of every rule, block ones
+  included, so it cannot ship `logonly`, and decoding `\uXXXX` / HTML
+  entities there turns every JSON body and CMS post into an XSS/SQLi false
+  positive (decided 2026-06-27). Each transform goes behind the one rule that
+  needs it.
 - **Login brute-force signals in the web detector** — [next]. The edge counts
   login *submissions* (rule 501: 8 per IP in 20 s), so a slow or distributed
   attack never trips it (vol2.gr, 2026-11-04: 2 787 failed `wp-login.php`
@@ -67,6 +72,14 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
   the edge already (the `modsec` detector reads it). UUSEC WAF, SafeLine and
   BunkerWeb were reviewed the same day: closed engines or CRS itself, so no
   rules to borrow; their usable ideas are the items above.
+- **No plain loopback-IP / `DOCUMENT_ROOT`-in-params rule** — [decided
+  2026-06-27]. The SSRF forms attackers use (non-http schemes, obfuscated
+  IPs) are caught already; plain `127.0.0.1` in a parameter is heavy
+  legitimate traffic, and the edge does not know a vhost's `DOCUMENT_ROOT`.
+  If the fleet ever runs on cloud VMs, add a sharp `169.254.169.254`-only rule.
+- **Payment-webhook IP allowlists (PayPal IPN, Stripe) only on demand** —
+  [decided 2026-06-27]. Shipped only after a real gateway-callback false
+  positive is seen.
 - **Edge Lua residuals** — [idea, low]. `cfm_purge.lua` `purge_ip` scans the
   whole `cfm_decisions` dict under lock on a force-unblock (perf); `[...]`
   bracket-class globs in excludes match literally in Lua but as a class in Go

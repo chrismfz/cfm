@@ -1074,6 +1074,11 @@ because of that. Hard-won points:
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
 `docs/waf-analysis-2026-05-08.md` (FP corpus → `docs/waf.md`) · `WAF_CVE_PLAN.md` (backlog → `WAF_CVE.md`).
 
+Comments citing "audit Fnn" (Lua, confs, tests) refer to the closed
+2026-07 edge-Lua audit, deleted 2026-11-18: `git log --diff-filter=D --
+docs/edge-lua-audit-2026-07-08.md` finds the commit; read it at that
+commit's parent. Its two open items are in `docs/ROADMAP.md` §1.
+
 **Docs policy.** A doc earns its place by being current or by holding a
 decision that would otherwise be reopened. Finished audits, closed plans and
 "as-built" notes the code now states are deleted, not archived: git history
