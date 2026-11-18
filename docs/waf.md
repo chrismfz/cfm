@@ -978,12 +978,17 @@ was the only such hit in seven days on the 8 edge nodes: a client upgrades to
 websocket and polls only before that, or when websocket is blocked, so the
 batched POST is rare, but every Socket.IO app can send it.
 
-**Fix (2026-11-18):** on a path ending in `/socket.io` (any prefix, for
-Socket.IO's `path` option) whose query carries `EIO=4` and
-`transport=polling`, `0x1E` is left out of the body scan. Every other control
-byte still counts, and so does the query. Engine.IO v3 frames by length and
-sends no `0x1E`, so `EIO=3` is not exempt.
-Test: `scripts/tests/cfm_waf_ctrl_chars_socketio_test.lua`.
+**Fix (2026-11-18):** `0x1E` left 601's byte set altogether, in the body and
+the query. It is framing in more than Socket.IO: Engine.IO v4 under any mount
+path (Socket.IO's `path` option), ASP.NET SignalR's JSON protocol (every
+message ends with it, the handshake POSTed over long-polling / SSE included)
+and RFC 7464 json-seq. A carve-out keyed on `/socket.io` + `EIO=4` +
+`transport=polling` was the first version; review rejected it, because it
+missed those and a custom path, and a lone `0x1E` has no attack use anyway.
+Every other control byte still counts. The query leg reads the raw query: a
+percent-encoded control byte (`%01`) is not decoded by 601 (it was not before
+either; decoding it is a behaviour change to measure on the fleet first).
+Test: `scripts/tests/cfm_waf_ctrl_chars_record_separator_test.lua`.
 
 **Rest of 601 on the fleet** (same 7 days, 56 hits): 8 were the Optimization
 Detective beacon under a language prefix (`/en/wp-json/…`), fixed on
