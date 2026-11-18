@@ -65,7 +65,7 @@ CGO_ENABLED ?= 0
 # -------------------------------
 # Phony targets
 # -------------------------------
-.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua test-js verify-bpf-bindings
+.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua test-js waf-corpus verify-bpf-bindings
 
 # -------------------------------
 # Help
@@ -125,6 +125,9 @@ test-lua: ## Run Lua unit tests under scripts/tests/*_test.lua
 	else \
 		echo "✅ Lua tests passed."; \
 	fi
+
+waf-corpus: ## Run BlazeHTTP's labelled corpus through the in-path WAF (fetches it; ARGS="--out f.tsv --baseline g.tsv")
+	@scripts/waf_corpus/blazehttp.sh $(ARGS)
 
 update: ## Update all dependencies
 	@echo "🔍 Checking for module updates..."
