@@ -71,7 +71,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   programs are GPL-2.0-only, now stated explicitly. The packages ship
   `LICENSE`, `NOTICE` and the GPL text (`/usr/share/doc/cfm/` in the .deb,
   `/usr/share/licenses/cfm/` in the .rpm), and the rpm's `License:` field,
-  which wrongly said MIT, now names both licenses. See `NOTICE` and README §9.
+  which wrongly said MIT, now names both licenses (the .rpm drops the .deb's
+  `/usr/share/doc/cfm/` copy, which `make release` used to leave in the shared
+  staging tree and which failed the rpm build). See `NOTICE` and README §9.
 - **`SSLCOLLECTOR_SOCK_PATH` is fixed at `/var/run/sslcollector.sock`.** The
   edge has only ever connected to that path, so a node that set another one
   silently stopped delivering certificates to the edge. The daemon now ignores
