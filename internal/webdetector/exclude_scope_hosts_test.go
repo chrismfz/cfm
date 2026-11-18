@@ -73,3 +73,18 @@ func TestHostExcludeAnyScopeRemoveKeepsRuleIDs(t *testing.T) {
 		t.Fatalf("left %+v, want only the whole-WAF entry", s.List())
 	}
 }
+
+// An entry the operator wrote (no scope_hosts) is not removed by a tenant's
+// scope: on the ClamAV stores it turns scanning on for that host.
+func TestHostExcludeAnyScopeRemoveSparesOperatorEntries(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	if !s.Add("host", "d.com", nil) {
+		t.Fatal("add")
+	}
+	if s.Remove("host", "d.com", scopeSet("d.com", "x.com")) {
+		t.Fatal("a tenant scope removed the operator's host entry")
+	}
+	if !s.Remove("host", "d.com", nil) {
+		t.Fatal("the operator could not remove its own entry")
+	}
+}

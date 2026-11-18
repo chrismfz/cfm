@@ -152,6 +152,12 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if !IsAdminRequest(r) {
+		// The node's log file names are the operator's, not the tenant's.
+		res.LogFile = ""
+		res.FilesScanned = nil
+	}
+
 	out := map[string]any{
 		"ok":              true,
 		"schema":          "webdet.host_access_history.v1",

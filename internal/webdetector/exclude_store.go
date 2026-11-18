@@ -179,8 +179,11 @@ func (s *excludeStore) RemoveWithRuleIDs(t, v string, scope map[string]struct{},
 	return true
 }
 
-// removeHostAnyScopeLocked removes every host exclude on (value, ruleIDs),
-// whatever scope_hosts it was written with. A host exclude acts on its own
+// removeHostAnyScopeLocked removes every TENANT-written host exclude on
+// (value, ruleIDs), whatever scope_hosts it was written with. An entry the
+// operator wrote (no scope_hosts) is never removed this way: on the ClamAV
+// stores a host entry turns scanning on for that host, which its owner must
+// not be able to undo. A host exclude acts on its own
 // host only, and its scope_hosts is the writer's vhost set at the time, so an
 // exact-scope match fails once that set changes (a domain moved to another
 // account, or the writer's account gained one): the entry kept applying and
@@ -194,7 +197,7 @@ func (s *excludeStore) removeHostAnyScopeLocked(t, v string, ruleIDs []int) bool
 	want := ruleIDsKey(ruleIDs)
 	removed := false
 	for k, e := range s.entries {
-		if e.Type == "host" && e.Value == v && ruleIDsKey(e.RuleIDs) == want {
+		if e.Type == "host" && e.Value == v && len(e.ScopeHosts) > 0 && ruleIDsKey(e.RuleIDs) == want {
 			delete(s.entries, k)
 			removed = true
 		}

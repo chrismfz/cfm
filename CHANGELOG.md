@@ -41,14 +41,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ### Fixed
 - **A tenant can remove a host exclude on its own site that another account
-  wrote** (a domain that moved between accounts). Such an exclude used to keep
+  wrote** (a domain that moved between accounts); entries the operator wrote
+  stay the operator's to remove. Such an exclude used to keep
   applying with nobody able to remove it, the operator included, through the
   challenge and ClamAV endpoints.
 - **Scoped top lists (top-short, suspicious, long-top) return up to the
   requested number of the tenant's own rows**, instead of filtering a list
   already cut to that number across all sites.
 - **A tenant's archival host scan can no longer take both scan slots**, and
-  its errors no longer list the node's log files.
+  its answers no longer name the node's log files.
 
 ### Removed
 - The web detector's unused standalone HTTP server (`ServeHTTP` /
