@@ -1553,6 +1553,8 @@ func runDaemon(args []string) {
 	})
 	done()
 
+	startWAFConfigSync(ctx, cfgDir)
+
 	if cfgOK {
 		done = step("initial:applyCFMConfigRemaining")
 		applyCFMConfigRemaining(cfg)

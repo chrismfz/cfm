@@ -347,7 +347,11 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`, the per-host
     CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN store; via `SetDirForTest`, which also
     clears the per-process token caches, from the `TestMain` of a package whose
-    tests reach the probe, or per test before resolving a token).
+    tests reach the probe, or per test before resolving a token);
+  - the `wafconfig` `SourcePath` / `LuaPath` (`/etc/cfm/cfm_waf_config.lua` →
+    `/var/lib/cfm/lua/cfm_waf_config.lua`; set per test). The sync is started
+    by the daemon (`cmd/cfm`), never by the detectors manager, so its tests
+    cannot reach the live copy.
 
   The detectors' init-time states no longer create `detectors.state.d`
   (`core.DefaultState`). A new default path goes through the same kind of
