@@ -959,9 +959,14 @@ func init() {
 		}
 
 		// CHALLENGE_PATHS_FILE (one entry per line; supports comments with #).
-		// A config that still names the retired list reads the malpath list.
-		if p, redirected := webdet.ResolveChallengePathsFile(cfg.ChallengePathsFile); redirected {
-			logging.Logf("[webdetector] CHALLENGE_PATHS_FILE %s is retired; reading %s instead (point the key there, or drop it)", cfg.ChallengePathsFile, p)
+		// Always resolved, so a value that cleans to "" (`= "" ; note`) gets
+		// the default here too, not only later in FillDefaults (after the list
+		// would already have been skipped). A config that still names the
+		// retired list reads the malpath list.
+		if p, redirected := webdet.ResolveChallengePathsFile(cfg.ChallengePathsFile); p != cfg.ChallengePathsFile {
+			if redirected && cfg.ChallengePathsEnabled {
+				logging.Logf("[webdetector] CHALLENGE_PATHS_FILE %s is retired; reading %s instead (point the key there, or drop it)", cfg.ChallengePathsFile, p)
+			}
 			cfg.ChallengePathsFile = p
 		}
 		if cfg.ChallengePathsEnabled && cfg.ChallengePathsFile != "" {

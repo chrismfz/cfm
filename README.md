@@ -459,7 +459,7 @@ CFM ships **reference configs** under `configs/` (packaged to `/usr/share/cfm/co
   trusted_proxies.conf      # real_ip / trusted proxy include for Cloudflare/LB setups
   openresty.conf            # full OpenResty "in-path WAF/challenge" config
   angie.conf                # Angie equivalent of openresty.conf (for boxes where Angie is used instead)
-  webdetector_*.txt         # webdetector path lists: challenge_paths, malpaths, exclude, etc.
+  webdetector_*.txt         # webdetector path lists: malpaths (CHALLENGE_PATHS + MALPATH), challenge_exclude
   
   internal/webui/embed.go   # embeds admin UI assets into the Go binary
   internal/webui/static/    # embedded /cfm-admin UI pages and assets

@@ -1,10 +1,14 @@
 package webdetector
 
-// DefaultMalPathFile is the path list both the malpath challenge
-// (CHALLENGE_PATHS) and the MALPATH flood ban read. It is the one default for
-// CHALLENGE_PATHS_FILE: the detectors register and FillDefaults both use it,
-// so the two can no longer drift apart (the old default named a second file
-// for months after the config had moved to this one).
+import "path/filepath"
+
+// DefaultMalPathFile is the packaged path list. It is the one default for
+// CHALLENGE_PATHS_FILE (the malpath challenge): the detectors register and
+// FillDefaults both use it, so the two can no longer drift apart (the old
+// default named a second file for months after the config had moved to this
+// one). The reference detectors.conf points MALPATH_FILE (the MALPATH flood
+// ban) at it too; MALPATH_FILE itself has no default, so a config without
+// that key runs the flood ban with no list.
 const DefaultMalPathFile = "/etc/cfm/webdetector_malpaths.txt"
 
 // RetiredChallengePathsFile is the list CHALLENGE_PATHS read until
@@ -18,11 +22,13 @@ const RetiredChallengePathsFile = "/etc/cfm/webdetector_challenge_paths.txt"
 // the redirect a config that kept the old name would arm the check with no
 // rules once the upgrade removed the file, with only an "open failed" line to
 // show for it.
+// The comparison is on the cleaned path, so /etc/cfm//… or /etc/cfm/./…
+// spellings of the retired file are redirected too.
 func ResolveChallengePathsFile(configured string) (path string, redirected bool) {
-	switch configured {
-	case "":
+	if configured == "" {
 		return DefaultMalPathFile, false
-	case RetiredChallengePathsFile:
+	}
+	if filepath.Clean(configured) == RetiredChallengePathsFile {
 		return DefaultMalPathFile, true
 	}
 	return configured, false

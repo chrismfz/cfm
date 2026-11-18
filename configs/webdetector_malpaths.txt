@@ -1,20 +1,8 @@
+# One substring per line, matched case-insensitively against the request path
+# (query cut off); the first matching line wins. A line that contains another
+# line is dead weight, so /.env covers every /.env.* variant and /c99.php any
+# directory's c99.php. Read by CHALLENGE_PATHS and MALPATH (detectors.conf).
 /.env
-/.env.
-/.env.bak
-/.env.old
-/.env.local
-/.env.prod
-/.env.dev
-/.env.example
-/.env.save
-/.env.backup
-/.env.copy
-/.env.orig
-/.env.original
-/.env.staging
-/.env.testing
-/.env.uat
-/.env.swp
 /config.yml
 /config.yaml
 /secrets.yml
@@ -22,7 +10,6 @@
 /.gitignore
 /.htpasswd
 /web.config
-/web.config.bak
 /database.yml
 /database.yaml
 /storage.yml
@@ -42,14 +29,8 @@
 /wp-config.php.save
 /wp-config.bak
 /wp-config.old
-/wp-content/uploads/shell.php
-/wp-content/uploads/cmd.php
-/wp-content/uploads/wso.php
-/wp-content/uploads/c99.php
-/wp-content/uploads/r57.php
 /wp-content/uploads/upload.php
 /wp-content/uploads/up.php
-/wp-content/uploads/bypass.php
 /wp-content/themes/twentytwentyone/index.php
 /wp-content/themes/twentytwenty/index.php
 /wp-content/themes/twentynineteen/index.php
@@ -60,8 +41,6 @@
 /wp-admin/maint/repair.php
 /wp-includes/js/jquery/jquery.php
 /wp-includes/Requests/about.php
-/wp-content/plugins/hellopress/wp_filemanager.php
-/wp-content/plugins/wp_filemanager/wp_filemanager.php
 /wp_filemanager.php
 
 # hidden stash
@@ -73,8 +52,6 @@
 /c99shell.php
 /r57shell.php
 /indoxploit.php
-/Indoxploit.php
-/IndoXploit.php
 /locus7shell.php
 /b374k.php
 /priv8.php
@@ -94,10 +71,8 @@
 /alfa2.php
 /alfa-rex.php
 /alfanew.php
-/Alfa.php
 /galex.php
 /NIX.php
-/nix.php
 /symlink.php
 /bypass.php
 /bypass403.php
