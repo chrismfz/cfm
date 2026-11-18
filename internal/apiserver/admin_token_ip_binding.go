@@ -20,9 +20,10 @@ import (
 //
 // NOTE: this closes direct-API use and SSO-code minting from a foreign IP. The
 // admin SSO cookie is signed with a random per-node key (embed_admin_cookie_key.go),
-// so a leaked AUTH_TOKEN cannot forge it. Not covered: /mcp also accepts
-// AUTH_TOKEN (read-only), and the SCOPED embed cookie key is still derived from
-// AUTH_TOKEN (embed_bootstrap.go), so a leak can forge a scoped viewer cookie.
+// so a leaked AUTH_TOKEN cannot forge it. /mcp, which also accepts AUTH_TOKEN
+// (read-only), applies the same binding (mcpStaticBearer). Not covered: the
+// SCOPED embed cookie key is still derived from AUTH_TOKEN (embed_bootstrap.go),
+// so a leak can forge a scoped viewer cookie.
 
 const (
 	adminIPModeOff     = "off"     // default — no source-IP check (behaviour unchanged)
@@ -72,10 +73,18 @@ type TokenMiddlewareOption func(*tokenMiddlewareConfig)
 // off|logonly|enforce (see ADMIN_TOKEN_IP_BINDING); cfgDir and apiURL feed the
 // allowlist (cfm.allow / cfm.dyndns / the API_URL host).
 func WithAdminTokenIPBinding(mode, cfgDir, apiURL string) TokenMiddlewareOption {
-	m, _ := normalizeAdminIPMode(mode)
+	p := newAdminIPPolicy(mode, cfgDir, apiURL)
 	return func(c *tokenMiddlewareConfig) {
-		c.adminIP = adminIPPolicy{mode: m, cfgDir: cfgDir, apiURL: apiURL}
+		c.adminIP = p
 	}
+}
+
+// newAdminIPPolicy resolves the binding policy. The /mcp static bearer uses the
+// same one as TokenMiddleware (mcp_wire.go), so the admin token is bound the
+// same way at both doors.
+func newAdminIPPolicy(mode, cfgDir, apiURL string) adminIPPolicy {
+	m, _ := normalizeAdminIPMode(mode)
+	return adminIPPolicy{mode: m, cfgDir: cfgDir, apiURL: apiURL}
 }
 
 // adminTokenSourceAllowed reports whether r's source IP is within the admin

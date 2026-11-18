@@ -87,7 +87,7 @@ func newTestServerWithAudit(t *testing.T, fd *fakeDispatch, audit func(*http.Req
 		BaseURL:       func(r *http.Request) string { return "https://" + r.Host + "/cfm-admin" },
 		Authenticate:  func(cred string) (string, bool) { return "", cred == testAdminToken },
 		SigningSecret: testAdminToken,
-		StaticBearer:  func(tok string) (string, bool) { return "mcp_static", tok == testAdminToken },
+		StaticBearer:  staticBearerFor(testAdminToken),
 		AuditAuth:     audit,
 	})
 	mux := http.NewServeMux()
@@ -117,7 +117,7 @@ func TestMCPBearerAuditIsExactOnceAndSecretFree(t *testing.T) {
 		BaseURL:       func(r *http.Request) string { return "https://" + r.Host + "/cfm-admin" },
 		Authenticate:  func(cred string) (string, bool) { return "", cred == valid },
 		SigningSecret: valid,
-		StaticBearer:  func(tok string) (string, bool) { return "mcp_static", tok == valid },
+		StaticBearer:  staticBearerFor(valid),
 		AuditAuth:     func(_ *http.Request, event AuthAuditEvent) { events = append(events, event) },
 	})
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
@@ -822,4 +822,14 @@ func TestToolCallMissingRequiredArg(t *testing.T) {
 func hostOf(ts *httptest.Server) string {
 	u, _ := url.Parse(ts.URL)
 	return u.Host
+}
+
+// staticBearerFor is a StaticBearer hook accepting exactly one token.
+func staticBearerFor(valid string) func(*http.Request, string) (string, StaticBearerVerdict) {
+	return func(_ *http.Request, tok string) (string, StaticBearerVerdict) {
+		if tok == valid {
+			return "mcp_static", StaticBearerAccepted
+		}
+		return "", StaticBearerNoMatch
+	}
 }

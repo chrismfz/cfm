@@ -45,7 +45,7 @@ certificate matches (`tls_fallback.go`), so a fresh or by-IP box is reachable.
 | **`cfm-embed-admin` cookie** | operator browser after SSO | anywhere | HMAC with a **random per-node key** (`/var/lib/cfm/embed-admin-cookie.key`, 0600, never sent to cfm-web), host + UA bound, 10 min with renewal at half-life, `SameSite=Lax`, honoured only under `/cfm-admin` and only without a bearer header |
 | **Scoped viewer token / `cfm-embed-scope` cookie** | cPanel user's browser (iframe) | anywhere | viewer role, vhost/db scope, out of scope → 403. Cookie is `SameSite=None` (cross-site iframe) |
 | **goauth session `cfm-sid`** | username/password login + MFA | anywhere | always `Secure`; see §5 |
-| **`MCP_TOKEN`** | MCP clients (cfm-web) | cfm-web | auto-generated, ≥ 24 chars. `/mcp` bypasses `TokenMiddleware` and **also accepts `AUTH_TOKEN`** (`mcp_wire.go`), read-only |
+| **`MCP_TOKEN`** | MCP clients (cfm-web) | cfm-web | auto-generated, ≥ 24 chars. `/mcp` bypasses `TokenMiddleware` and **also accepts `AUTH_TOKEN`** (`mcp_wire.go`), read-only, under the same source-IP binding (§4). Scoped tokens and cookies are not accepted there |
 
 **Admin SSO flow** (`embed_admin_bootstrap.go`). The controller calls
 `GET /api/v1/embed/admin-code?next=/cfm-admin/` with the admin bearer (any
@@ -79,11 +79,23 @@ Both listeners serve this same stack. Order that matters:
 `SessionCookieTransport` wraps goauth from outside; `RateLimit` runs inside
 `TokenMiddleware` so it keys on the authenticated identity.
 
+**Paths.** `TokenMiddleware` decides on the decoded path with every leading
+`/cfm-admin` segment stripped (`authMiddlewarePath`); public paths are exact
+matches, never prefixes. The mux routes on the escaped path, and
+`cfmAdminPrefixHandler` strips one `/cfm-admin` and 404s a path that still
+carries one. The two layers read a path differently only where it carries an
+encoded separator, so `TokenMiddleware` first answers 404 to any request whose
+escaped path holds `%2F` or `%5C` (any case) or a raw `\`
+(`hasEncodedPathSeparator`), whatever the credential. No client sends one: the
+only route with a path parameter is `/api/v1/debug/capture/<timestamp>`;
+everything else takes its arguments in the query.
+
 ## 4. Admin-token source-IP binding
 
 `ADMIN_TOKEN_IP_BINDING = off | logonly | enforce` (default `off`,
-`admin_token_ip_binding.go`). Applies **only** to the `token_admin` branch of
-`TokenMiddleware`: the presented admin token must come from loopback ∪ this
+`admin_token_ip_binding.go`). Applies **only** to the admin token: the
+`token_admin` branch of `TokenMiddleware` and the `/mcp` bearer gate
+(`mcpStaticBearer`): the presented admin token must come from loopback ∪ this
 host's IPs ∪ `cfm.allow` / `cfm.dyndns` ∪ the `API_URL` host, keyed on the
 forwarded client IP, never `RemoteAddr`. `enforce` → 403, an audit line and an
 `ADMIN_TOKEN_FOREIGN_IP` anomaly; `logonly` logs `would_block`.

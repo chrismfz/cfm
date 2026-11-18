@@ -295,7 +295,7 @@ func Start(
 
 	// ── Embedded read-only MCP server (mounted at /mcp; edge: /cfm-admin/mcp) ──
 	// Registered last so its in-process dispatch can reach every /api/v1 route.
-	registerMCPServer(m, cfg, store)
+	registerMCPServer(m, cfg, store, newAdminIPPolicy(cfg.API.AdminTokenIPBinding, cfgDir, cfg.API.URL))
 
 	// Record the actual listener ports so requestPeer's Entry classification (and
 	// thus AdminTransportRedirect) tracks a non-default PORT/TLS_PORT instead of

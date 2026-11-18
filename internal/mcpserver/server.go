@@ -83,9 +83,26 @@ type Deps struct {
 	// AUTH_TOKEN, so a fleet gateway that already holds AUTH_TOKEN can reach /mcp
 	// without a separate MCP_TOKEN. This gate never grants /api/v1 access; the MCP
 	// tool surface is read-only regardless of which token authenticated.
-	// authMech is a safe classifier such as mcp_static or token_admin.
-	StaticBearer func(string) (authMech string, ok bool)
+	// authMech is a safe classifier such as mcp_static or token_admin. The
+	// request is passed so the wiring can apply per-credential source rules
+	// (the admin token's source-IP binding); StaticBearerRefused ends the
+	// request with 403, and the wiring has already audited it.
+	StaticBearer func(r *http.Request, tok string) (authMech string, verdict StaticBearerVerdict)
 }
+
+// StaticBearerVerdict is the StaticBearer hook's decision on a presented token.
+type StaticBearerVerdict int
+
+const (
+	// StaticBearerNoMatch: not a static credential (an OAuth token may still match).
+	StaticBearerNoMatch StaticBearerVerdict = iota
+	// StaticBearerAccepted: a valid static credential, allowed from this request.
+	StaticBearerAccepted
+	// StaticBearerRefused: a valid static credential this request may not use
+	// (e.g. the admin token from a source its binding refuses). Never falls
+	// through to OAuth.
+	StaticBearerRefused
+)
 
 // Handler is the mounted MCP surface: the OAuth authorization server plus the
 // bearer-gated streamable MCP endpoint.
@@ -165,9 +182,14 @@ func (h *Handler) requireMCPBearer(next http.Handler) http.Handler {
 		tok := extractBearer(r)
 		if tok != "" {
 			if h.deps.StaticBearer != nil {
-				if authMech, ok := h.deps.StaticBearer(tok); ok {
+				switch authMech, verdict := h.deps.StaticBearer(r, tok); verdict {
+				case StaticBearerAccepted:
 					h.auditAuth(r, AuthAuditEvent{Kind: "mcp_token", Result: "success", AuthMech: authMech, Status: http.StatusOK})
 					next.ServeHTTP(w, r)
+					return
+				case StaticBearerRefused:
+					// Opaque body: never confirm which credential was presented.
+					oauthWriteErr(w, http.StatusForbidden, "access_denied", "")
 					return
 				}
 			}

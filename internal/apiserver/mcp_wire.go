@@ -43,9 +43,8 @@ func mcpTokenUsable(tok string) bool {
 	return len(strings.TrimSpace(tok)) >= minMCPTokenLen
 }
 
-// mcpStaticBearer reports whether a bearer presented directly at /mcp is an
-// accepted static credential: the client-facing MCP_TOKEN OR the admin
-// AUTH_TOKEN.
+// mcpStaticBearer decides a bearer presented directly at /mcp: the
+// client-facing MCP_TOKEN or the admin AUTH_TOKEN.
 //
 // Accepting AUTH_TOKEN is what lets a FLEET GATEWAY (e.g. the Laravel cfm-web,
 // which already stores each node's AUTH_TOKEN to reach /api/v1) speak MCP to a
@@ -53,14 +52,34 @@ func mcpTokenUsable(tok string) bool {
 // does NOT widen the MCP↔API boundary: MCP_TOKEN still cannot touch /api/v1, and
 // the /mcp tool surface is read-only no matter which token authenticated — an
 // AUTH_TOKEN holder can already do everything through /api/v1, so exposing the
-// read-only subset to the same credential adds no privilege. An empty bearer
-// never matches (the caller also guards, but ConstantTimeCompare("","") is true,
-// so guard here too).
-func mcpStaticBearer(tok, mcpTok, adminTok string) bool {
+// read-only subset to the same credential adds no privilege. It does carry the
+// admin token's source-IP binding (ADMIN_TOKEN_IP_BINDING) exactly as
+// TokenMiddleware applies it, or a leaked AUTH_TOKEN refused at /api/v1 would
+// still read every tool from anywhere. The admin token is checked first so the
+// binding also holds on a misconfigured node whose MCP_TOKEN equals it. An empty
+// bearer never matches (ConstantTimeCompare("","") is true).
+func mcpStaticBearer(r *http.Request, tok, mcpTok, adminTok string, adminIP adminIPPolicy) (string, mcpserver.StaticBearerVerdict) {
 	if tok == "" {
-		return false
+		return "", mcpserver.StaticBearerNoMatch
 	}
-	return tokenMatch(tok, mcpTok) || tokenMatch(tok, adminTok)
+	if adminTok != "" && tokenMatch(tok, adminTok) {
+		if adminIP.active() && !adminTokenSourceAllowed(r, adminIP) {
+			if adminIP.mode == adminIPModeEnforce {
+				auditAuthAttempt(r, authAttemptAudit{Kind: "mcp_token", Result: "blocked_source_ip", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusForbidden})
+				publishRequestAnomaly(r, "ADMIN_TOKEN_FOREIGN_IP", http.StatusForbidden)
+				logging.LogfAPI("[apiserver] event=api_audit reason=admin_token_source_ip src_ip=%s method=%s path=%q status=%d",
+					realIPFromRequest(r), r.Method, r.URL.Path, http.StatusForbidden)
+				return string(authnMechanismTokenAdmin), mcpserver.StaticBearerRefused
+			}
+			logging.LogfAPI("[apiserver] admin_token_source_ip logonly=would_block src_ip=%s method=%s path=%q",
+				realIPFromRequest(r), r.Method, r.URL.Path)
+		}
+		return string(authnMechanismTokenAdmin), mcpserver.StaticBearerAccepted
+	}
+	if mcpTok != "" && tokenMatch(tok, mcpTok) {
+		return "mcp_static", mcpserver.StaticBearerAccepted
+	}
+	return "", mcpserver.StaticBearerNoMatch
 }
 
 // mcpTokenStatePath is where an auto-generated MCP_TOKEN is persisted when the
@@ -150,7 +169,7 @@ func loadOrCreateMCPToken(path string) (string, error) {
 // in-process read dispatch) AND a strong MCP_TOKEN is configured or generated
 // (the client-facing credential). The admin token is never exposed by CFM;
 // trusted fleet gateways may still present the admin token directly at /mcp.
-func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) {
+func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore, adminIP adminIPPolicy) {
 	adminTok := strings.TrimSpace(cfg.API.AuthToken)
 
 	// Default-ON arming: with AUTH_TOKEN present and no explicit MCP=off, the
@@ -227,15 +246,8 @@ func registerMCPServer(m *http.ServeMux, cfg *cfgpkg.Config, store *TokenStore) 
 		},
 		Authenticate:  func(cred string) (string, bool) { return "", tokenMatch(cred, mcpTok) },
 		SigningSecret: mcpTok,
-		StaticBearer: func(tok string) (string, bool) {
-			switch {
-			case tokenMatch(tok, mcpTok):
-				return "mcp_static", true
-			case tokenMatch(tok, adminTok):
-				return string(authnMechanismTokenAdmin), true
-			default:
-				return "", false
-			}
+		StaticBearer: func(r *http.Request, tok string) (string, mcpserver.StaticBearerVerdict) {
+			return mcpStaticBearer(r, tok, mcpTok, adminTok, adminIP)
 		},
 	})
 	h.Register(m)

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	cfgpkg "cfm/internal/config"
+	"cfm/internal/mcpserver"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -111,7 +112,8 @@ func TestMCPStaticBearer(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := mcpStaticBearer(c.tok, c.m, c.a); got != c.want {
+			_, verdict := mcpStaticBearer(httptest.NewRequest("POST", "/mcp", nil), c.tok, c.m, c.a, adminIPPolicy{mode: adminIPModeOff})
+			if got := verdict == mcpserver.StaticBearerAccepted; got != c.want {
 				t.Errorf("mcpStaticBearer(%q, m, a) = %v, want %v", c.tok, got, c.want)
 			}
 		})

@@ -426,6 +426,14 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Every decision below reads the DECODED path; the mux routes on
+			// the ESCAPED one. An encoded separator is the one place they
+			// split ("/a%2fb" is one segment to the mux, two to us), so it
+			// is refused before any of them.
+			if hasEncodedPathSeparator(r) {
+				http.NotFound(w, r)
+				return
+			}
 			embedded := isCpanelEmbeddedRequest(r)
 
 			// MCP owns its bearer/OAuth namespace. Its gate performs the canonical
@@ -614,6 +622,32 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 			http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
 		})
 	}
+}
+
+// hasEncodedPathSeparator reports whether the request path carries an encoded
+// "/" (%2F) or "\" (%5C), or a raw backslash (which EscapedPath reports as
+// %5C), in any letter case. No CFM client (UI, cPanel plugin, cfm-web, CLI,
+// MCP) puts one in a path: their parameters travel in the query. The edge
+// passes the client's encoding through or decodes it; it never adds one.
+func hasEncodedPathSeparator(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	for _, p := range []string{r.URL.EscapedPath(), r.URL.RawPath, requestURIPath(r.RequestURI)} {
+		lp := strings.ToLower(p)
+		if strings.Contains(lp, "%2f") || strings.Contains(lp, "%5c") {
+			return true
+		}
+	}
+	return false
+}
+
+// requestURIPath is the path part of a raw request target (no query).
+func requestURIPath(uri string) string {
+	if i := strings.IndexByte(uri, '?'); i >= 0 {
+		return uri[:i]
+	}
+	return uri
 }
 
 func tokenMatch(a, b string) bool {
