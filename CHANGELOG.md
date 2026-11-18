@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.18
+
 ### Added
 - **The malpath list catches the dev-tool and credential probes it missed.**
   `webdetector_malpaths.txt` gains 189 entries, all measured on the fleet's
