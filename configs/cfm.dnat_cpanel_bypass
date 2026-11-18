@@ -6,13 +6,12 @@
 # DNAT redirect and reach cpsrvd / DirectAdmin directly, bypassing CFM's
 # panel-side challenge + WAF + tunnel logic.
 #
-# Primary use case: cPanel-to-cPanel WHM Transfer Tool source hosts. The
-# transport that whm_xfer_download-ssl uses for live rsync streams is a
-# non-standard HTTP variant that breaks when wrapped by ANY HTTP-aware
-# proxy. Adding the source server's IP here makes its inbound 2087 (etc.)
-# connections land on cpsrvd directly, exactly as they would with
-# `cfm dnat cpanel off`, while leaving panel filtering on for everyone
-# else.
+# Use case: the WHM Transfer Tool when the panel tunnel still fails it.
+# whm_xfer_download-ssl runs on the transfer DESTINATION and opens HTTPS to
+# the SOURCE's 2087, so on the source node list the DESTINATION server's IP
+# (the peer that opens the connection). Its 2087 (etc.) connections then
+# land on cpsrvd directly, exactly as with `cfm dnat cpanel off`, while
+# panel filtering stays on for everyone else. See docs/dnat-bypass.md.
 #
 # Format (same as cfm.allow / cfm.deny):
 #   - one IP or CIDR per line
@@ -30,5 +29,5 @@
 # otherwise they apply on the next `cfm dnat cpanel on`.
 
 # Examples (uncomment to use):
-#84.54.49.205         # peer-cpanel-01 (transfer source)
+#84.54.49.205         # peer-cpanel-01 (transfer destination)
 #192.0.2.0/24         # cluster management subnet

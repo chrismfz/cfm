@@ -159,7 +159,7 @@ func (c *Collector) Refresh(ctx context.Context) error {
 // cannot or do not (empty, cut mid-write), getPEM skips it and the payload is
 // incomplete, which the edge merges. A pair still failing after this long (a
 // key that became a dangling symlink) leaves the index at the first Refresh
-// past it, which can be the 15-minute discovery tick: up to ~25 minutes.
+// past it.
 const buildFailCarry = 10 * time.Minute
 
 // pairKey identifies a cert/key pair across Refreshes.

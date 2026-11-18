@@ -22,12 +22,11 @@ import (
 //                           12082-12222) that gets installed by
 //                           `cfm dnat cpanel on`.
 //
-// Use case: cluster peers / partner servers / migration source hosts whose
+// Use case: cluster peers / partner servers / migration peers whose
 // traffic must reach cpsrvd or Apache directly without going through CFM's
-// nginx/openresty challenge+filter layer. Typical example is a cPanel-to-
-// cPanel WHM Transfer Tool source, whose `whm_xfer_download-ssl` rsync
-// stream uses a custom non-standard HTTP variant that breaks when wrapped
-// by any HTTP-aware proxy.
+// nginx/openresty challenge+filter layer. Typical example is a WHM Transfer
+// Tool peer: `whm_xfer_download-ssl` runs on the transfer destination and
+// connects to the source's 2087, so the source lists the destination's IP.
 // These are vars rather than consts so tests can point them at a tempdir.
 // In production they are never reassigned; the value is the canonical path.
 var (
@@ -162,7 +161,7 @@ const DNATBypassComment = "cfm_dnat_bypass"
 // any NAT translation happens.
 //
 // Family / tableName / chainName let the same helper serve both the web
-// DNAT chain ("inet cfm-dnat-web" / "prerouting") and the cPanel panel
+// DNAT chain ("inet cfm_redirect" / "prerouting") and the cPanel panel
 // DNAT chain ("inet cfm_panel_redirect" / "prerouting").
 func DNATBypassRuleExprs(entries []DNATBypassEntry, family, tableName, chainName string) []string {
 	if len(entries) == 0 {
