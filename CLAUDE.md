@@ -1053,7 +1053,7 @@ because of that. Hard-won points:
 | sslcollector (cert discovery + socket API) | `docs/ssl-collector.md` |
 | WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
 | WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + "CVE hunting" recipe) · `WAF_CVE_PLAN.md` (design + backlog) |
-| Admin/WebUI API | `docs/webui-api-curl-recipes.md`, `docs/webui-api-sample-responses.md` |
+| Admin/WebUI API | `docs/webui-api-curl-recipes.md` (recipes + sample responses) |
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |

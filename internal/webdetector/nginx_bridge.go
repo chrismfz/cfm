@@ -2127,7 +2127,7 @@ func decisionConcurrencyCap() int {
 // get their own, separately rolled-out check.
 //
 // listed: the client is on one of nft's block lists (internal/proxyipfilter)
-// but not answered block (log mode, or an allow cancelled it). The caller
+// and no allow cancels it, but it is not answered block (log mode). The caller
 // then marks its own answer rule_action=observe, which the edge treats as an
 // allow it must not cache (cfm_decision.lua caches only a clean allow with no
 // rule_action; cfm.lua acts on block / challenge / throttle only), so every

@@ -26,8 +26,11 @@ package apiserver
 //      bounced back to the challenge page through a trusted proxy for a page,
 //      per host (the challenge server's in-memory count; direct and download
 //      bounces only listed; webdetector/challenge_cdn_cache.go).
-// See docs/edge-health.md for the design and the Tier-2/3 follow-ups (live
-// config-invariant, Apache AH02032 correlation, latency split).
+//   G. origin real IP: whether the origin logs the visitor or the edge's
+//      loopback (internal/originrealip).
+//   H. web DNAT order: another nat chain (Imunify360's WebShield) rewriting web
+//      traffic ahead of CFM's redirect (edge_health_webshield.go).
+// See docs/edge-health.md for every check and what is not checked yet.
 //
 // Check E was added after a 2026-09 incident on an Angie→Apache node where
 // mod_brotli segfaulted the Apache workers: ~900 requests/day across dozens of

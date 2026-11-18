@@ -3,7 +3,7 @@
 -- - Background poll /stats (version change) and fetches /dumpall over unix socket
 -- - Parses each PEM to DER cdata ONCE at ingest, stores the cdata in a worker-local
 --   table (not shared dict — see note below); the PEM text is not retained
--- - Writes disk snapshot atomically; loads it on startup so restarts survive CFM downtime
+-- - Loads the daemon's disk snapshot on startup so restarts survive CFM downtime
 -- - ssl_certificate_by_lua_block ONLY does dict lookup + set_cert on the cached cdata
 --   (no PEM parse, no I/O, no yield)
 --
