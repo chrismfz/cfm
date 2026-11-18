@@ -41,8 +41,14 @@ if [ -z "$dir" ]; then
       rm -rf "$tmp"
       exit 1
     fi
-    rm -rf "$dir"
-    mv "$tmp" "$dir"
+    # Another run may have finished the same fetch meanwhile, and may be
+    # reading it: keep that copy, never delete a complete corpus.
+    if [ -d "$dir/testcases" ]; then
+      rm -rf "$tmp"
+    else
+      rm -rf "$dir"
+      mv "$tmp" "$dir"
+    fi
     trap - EXIT
   fi
 fi

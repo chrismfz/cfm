@@ -67,6 +67,11 @@ local r3 = M.parse("GET /q HTTP/1.1\r\nHost: x\r\n")
 check(r3 and r3.raw_path == "/q" and r3.headers.host == "x", "CRLF request saved without the final blank line parses")
 local r4 = M.parse("GET /q HTTP/1.1\r\nHost: x")
 check(r4 and r4.headers.host == "x", "CRLF request with no line ending after the last header parses")
+local r6 = M.parse("\r\n\r\nGET /lead HTTP/1.1\r\nHost: x\r\n\r\n")
+check(r6 and r6.raw_path == "/lead" and r6.headers.host == "x", "leading CRLFs before the request line are skipped, as nginx does")
+local r7 = assert(M.parse("GET http://Abs.Example:81/p?q=1 HTTP/1.1\r\nHost: other\r\n\r\n"))
+eq(r7.authority, "Abs.Example:81", "absolute-form authority kept")
+eq(r7.raw_path, "/p", "absolute-form path")
 local r5 = assert(M.parse("POST /p HTTP/1.1\nHost: x\n\nbody\r\n"))
 eq(r5.body, "body\r\n", "LF head, body kept byte for byte")
 
@@ -124,6 +129,16 @@ M.evaluate(spy, assert(M.parse("GET / HTTP/1.1\r\nHost: WWW.Example.COM:8080\r\n
 eq(seen_host, "www.example.com", "--keep-host: ctx.host is the Host header")
 M.evaluate(spy, assert(M.parse("GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n")), opts, 1)
 eq(seen_host, "waf-corpus.example", "default: ctx.host is the neutral host")
+M.evaluate(spy, assert(M.parse("GET http://Abs.Example:81/p HTTP/1.1\r\nHost: other\r\n\r\n")),
+           { max_body = 32768, keep_host = true }, 1)
+eq(seen_host, "abs.example", "--keep-host: an absolute-form target's host wins over Host")
+
+-- The body-less recheck drops Content-Length too, and puts it back after.
+local cls = {}
+local spy2 = { check = function(ctx) cls[#cls + 1] = tostring(ctx.headers["content-length"]); return #ctx.body > 0, "R", 1, "block", {}, 1 end }
+local rb = M.evaluate(spy2, assert(M.parse("POST /p HTTP/1.1\r\nHost: x\r\n\r\nabc")), opts, 1)
+eq(cls[1] .. "," .. tostring(cls[2]), "3,nil", "recheck runs without Content-Length")
+check(rb.body_dep == true, "a body-only verdict is tagged body-dependent")
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")

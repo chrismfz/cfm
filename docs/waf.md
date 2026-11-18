@@ -2240,9 +2240,10 @@ without a body), every POST/PUT/PATCH body given to the WAF up to
 so the per-IP counting rules (501, 512) cannot fire. The `Host` header, and the
 host the WAF is told about, are `waf-corpus.example` (`--keep-host` uses the
 sample's): the corpus's attacks name an IP literal and its benign samples a
-hostname, so rule 602 would otherwise "detect" the layout (31.9% → 85.6%). A
-file that is not an HTTP/1.x request is `parse_error`, its own row, never a
-miss.
+hostname, so rule 602 would otherwise "detect" the layout (32.0% → 85.7%). A
+request with an absolute-form target (`GET http://host/…`) takes its host
+from the target, as nginx does. A file that is not an HTTP/1.x request is
+`parse_error`; leading empty lines are skipped, as nginx skips them.
 
 **What it does not model** (`cfm.lua` is not run): the bypass lists, per-vhost
 exclusions, clearance, traffic rules, IP / vhost decisions, and the body read
@@ -2252,18 +2253,24 @@ dynamic-endpoint list. The report tags each benign enforcing hit that needs the
 body: `ct` (read on any path) or `list` (read only on a listed path).
 
 **Outcome** per sample: `block`, `challenge`, `challenge_v2`, `logonly`, `clean`,
-`nginx_400`, `error` (the WAF raised). "Detected" is an enforcing outcome
-(block or a challenge tier); the report also gives block-only and
-any-incl.-logonly rows. The per-rule table counts every hit of a sample, not
+`nginx_400`, `parse_error`, `error` (the WAF raised). "Detected" is an
+enforcing outcome (block or a challenge tier); the report also gives
+block-only and any-incl.-logonly rows. Rates are over the samples the WAF
+saw: `nginx_400` and `parse_error` have their own rows and are neither a
+detection nor a miss. When a hit is tagged as needing the body, the recheck
+ran the request without its body and without its Content-Length. The per-rule table counts every hit of a sample, not
 only the headline, so a rule that only fires behind a stronger one shows.
 
 ### Baseline — 2026-11-18, BlazeHTTP `afc88a94`
 
-| | attack (658) | benign (33 219) |
+Over the samples the WAF saw: 657 of the 658 attacks (one is nginx's 400)
+and all 33 219 benign ones.
+
+| | attack (657) | benign (33 219) |
 |---|---|---|
 | block | 112 (17.0%) | 2 (0.01%) |
-| block + challenge tiers | 210 (31.9%) | 199 (0.60%) |
-| any, incl. logonly | 214 (32.5%) | 204 (0.61%) |
+| block + challenge tiers | 210 (32.0%) | 199 (0.60%) |
+| any, incl. logonly | 214 (32.6%) | 204 (0.61%) |
 
 - **False positives** are almost all rule 601 (`rule_ctrl_chars`,
   challenge_v2): 178 of 199, all analytics / telemetry POST bodies carrying

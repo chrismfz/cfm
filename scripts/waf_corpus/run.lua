@@ -24,7 +24,8 @@
 -- header names nginx drops by default (ignore_invalid_headers on,
 -- underscores_in_headers off). Content-Length is what BlazeHTTP sends: the
 -- body's length when there is one, absent otherwise. A sample that is not an
--- HTTP/1.x request is `parse_error`, shown on its own row and never a miss.
+-- HTTP/1.x request is `parse_error`. Both are shown on their own rows and left
+-- out of the detection / FP rates, which are over the samples the WAF saw.
 --
 -- Options:
 --   --out FILE        per-sample TSV: path label outcome action headline_rule rule_ids
@@ -143,6 +144,8 @@ end
 
 -- Parse one raw request. Returns a table or nil, err.
 function M.parse(raw)
+  -- nginx skips CR / LF bytes before the request line (sw_start).
+  raw = raw:gsub("^[\r\n]+", "")
   -- The head ends at the first empty line (CRLF or LF); with none, the whole
   -- sample is the head (a bodiless request saved without its final CRLF).
   local head_end, body_start = raw:find("\r?\n\r?\n")
@@ -176,12 +179,14 @@ function M.parse(raw)
       end
     end
   end
-  -- absolute-form request target: drop scheme and authority
-  local t = target:gsub("^[hH][tT][tT][pP][sS]?://[^/?]*", "")
+  -- absolute-form request target: nginx takes the host from it (over the
+  -- Host header) and the path after it
+  local authority
+  local t = target:gsub("^[hH][tT][tT][pP][sS]?://([^/?]*)", function(a) authority = a; return "" end)
   if t == "" then t = "/" end
   local raw_path, args = t:match("^([^?]*)%??(.*)$")
   return { method = method, raw_uri = t, raw_path = raw_path, args = args or "",
-           headers = headers, body = body }
+           authority = authority, headers = headers, body = body }
 end
 
 -- In-memory stand-in for an ngx.shared dict (one per sample: the burst rules
@@ -211,8 +216,10 @@ function M.evaluate(waf, req, opts, seq)
   local headers = req.headers
   local host = "waf-corpus.example"
   if opts.keep_host then
-    -- ngx.var.host: the Host header, lowercased, without the port.
-    local h = headers.host
+    -- ngx.var.host: the absolute-form target's host, else the Host header,
+    -- lowercased, without the port.
+    local h = req.authority
+    if h == nil or h == "" then h = headers.host end
     if type(h) == "table" then h = h[1] end
     h = tostring(h or ""):lower():gsub(":%d*$", "")
     if h ~= "" then host = h end
@@ -246,8 +253,14 @@ function M.evaluate(waf, req, opts, seq)
   -- function), the list is not copied here.
   local body_dep, body_ct_ok
   if hit and body ~= "" then
-    ctx.body, ctx.shdict, ctx.headers = "", newdict(), headers
+    -- Without the body, as a bodiless request: no Content-Length either, or
+    -- a rule reading the declared length against the body could fire here
+    -- only and hide the dependence.
+    local cl = headers["content-length"]
+    headers["content-length"] = nil
+    ctx.body, ctx.shdict = "", newdict()
     local ok2, hit2, _, _, action2 = pcall(waf.check, ctx)
+    headers["content-length"] = cl
     if ok2 and (not hit2 or action2 ~= action) then
       body_dep = true
       local ct = headers["content-type"]
@@ -296,8 +309,16 @@ end
 
 local function pct(a, b) if b == 0 then return "  -  " end return ("%5.2f%%"):format(100 * a / b) end
 
+local function val(v, name)
+  if v == nil or v:sub(1, 2) == "--" then
+    io.stderr:write(name .. " needs a value\n")
+    os.exit(2)
+  end
+  return v
+end
+
 local function num(v, name)
-  local n = tonumber(v)
+  local n = tonumber(val(v, name))
   if not n or n < 0 then
     io.stderr:write(name .. " needs a number, got " .. tostring(v) .. "\n")
     os.exit(2)
@@ -311,8 +332,8 @@ local function main(argv)
   local i = 1
   while i <= #argv do
     local a = argv[i]
-    if a == "--out" then opts.out = argv[i + 1]; i = i + 1
-    elseif a == "--baseline" then opts.baseline = argv[i + 1]; i = i + 1
+    if a == "--out" then opts.out = val(argv[i + 1], a); i = i + 1
+    elseif a == "--baseline" then opts.baseline = val(argv[i + 1], a); i = i + 1
     elseif a == "--keep-host" then opts.keep_host = true
     elseif a == "--max-body" then opts.max_body = num(argv[i + 1], a); i = i + 1
     elseif a == "--limit" then opts.limit = num(argv[i + 1], a); i = i + 1
@@ -391,13 +412,18 @@ local function main(argv)
   local function any(t) return enf(t) + (t.logonly or 0) end
   local b, w = tot.black, tot.white
   b.n, w.n = b.n or 0, w.n or 0
+  -- Rates are over the samples the WAF saw: an nginx 400 or an unparseable
+  -- file never reached it, so it is neither a detection nor a miss.
+  local function seen(t) return t.n - (t.nginx_400 or 0) - (t.parse_error or 0) end
+  local bs, ws = seen(b), seen(w)
   line("CFM WAF corpus run: %s", dir)
   line("samples: %d attack (.black), %d benign (.white); %.1f s CPU", b.n, w.n, secs)
+  line("rates over the samples the WAF saw: %d attack, %d benign", bs, ws)
   line("")
   line("%-22s %16s %16s", "", "attack (detect)", "benign (FP)")
-  line("%-22s %7d %8s %7d %8s", "block", b.block or 0, pct(b.block or 0, b.n), w.block or 0, pct(w.block or 0, w.n))
-  line("%-22s %7d %8s %7d %8s", "block+challenge(_v2)", enf(b), pct(enf(b), b.n), enf(w), pct(enf(w), w.n))
-  line("%-22s %7d %8s %7d %8s", "any (incl. logonly)", any(b), pct(any(b), b.n), any(w), pct(any(w), w.n))
+  line("%-22s %7d %8s %7d %8s", "block", b.block or 0, pct(b.block or 0, bs), w.block or 0, pct(w.block or 0, ws))
+  line("%-22s %7d %8s %7d %8s", "block+challenge(_v2)", enf(b), pct(enf(b), bs), enf(w), pct(enf(w), ws))
+  line("%-22s %7d %8s %7d %8s", "any (incl. logonly)", any(b), pct(any(b), bs), any(w), pct(any(w), ws))
   line("%-22s %7d %8s %7d %8s", "nginx 400 (no WAF)", b.nginx_400 or 0, pct(b.nginx_400 or 0, b.n), w.nginx_400 or 0, pct(w.nginx_400 or 0, w.n))
   line("%-22s %7d %8s %7d %8s", "WAF raised", b.error or 0, "", w.error or 0, "")
   if parse_errors > 0 then
