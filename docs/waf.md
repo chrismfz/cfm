@@ -1991,6 +1991,16 @@ AND EXTRACTVALUE(…`, `ORDER BY 1-- -`, `UNION ALL SELECT`), Oracle
 legitimate request changed. Check of the replay itself: wherever it said the
 deployed Lua blocks at 301, the log says `cfm_block`.
 
+**Second replay, after the review fixes:** the same run over ~2.97 M
+requests, now also timing every request on both versions. The same 712
+requests changed, all attacks. No regression (no request the deployed Lua
+caught at 301/309/319 that this change misses), no error. CPU: the SQLi part
+cost ~2.3x the deployed one on average (tens of µs), from the new probe
+patterns running on every query. Each now runs only once a plain find has
+seen its keyword, which brings it back to the deployed cost (WooCommerce
+filter URLs: 17 µs deployed, 17 µs now). The slowest requests were attack
+payloads at 1-2 ms on both versions.
+
 **Corpus** (`make waf-corpus --baseline`): 2 more attacks blocked at 301, no
 benign sample changed. (A draft that also changed the body caught 11; the
 other 9 were DVWA SQLi in POST bodies, given up with the body change.) One

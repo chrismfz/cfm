@@ -1813,18 +1813,29 @@ end
 --                      BlazeHTTP white sample).
 --   utl_inaddr.get_host_address(  Oracle's out-of-band / error-based probe.
 function _M.detect_sqli_probe(sc, scw)
-  if scw:find("[%d'\"%)] ?order by %d+ ?%-%-")
-     or scw:find("[%d'\"%)] ?order by %d+ ?#") then
+  -- each pattern runs only once a plain find has seen its keyword: most
+  -- queries hold none of them, and the plain finds cost a fraction of the
+  -- patterns (the result is the same)
+  if has(scw, "order by") then
+    if scw:find("[%d'\"%)] ?order by %d+ ?%-%-")
+       or scw:find("[%d'\"%)] ?order by %d+ ?#") then
+      return true
+    end
+  end
+  if has(scw, "procedure analyse") and scw:find("[%d'\"%)] ?procedure analyse ?%(") then
     return true
   end
-  if scw:find("[%d'\"%)] ?procedure analyse ?%(") then return true end
-  if scw:find("[%d'\"%)] and 1=1 ?[&#'\";%)%-]")
-     or scw:find("[%d'\"%)] and 1=1 ?$") then
-    return true
+  if has(scw, "and 1=1") then
+    if scw:find("[%d'\"%)] and 1=1 ?[&#'\";%)%-]")
+       or scw:find("[%d'\"%)] and 1=1 ?$") then
+      return true
+    end
   end
-  if scw:find("[%d'\"%)] ?and ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]")
-     or scw:find("[%d'\"%)] ?or ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]") then
-    return true
+  if has(scw, "=") and scw:find("['\"]") then
+    if (has(scw, "and") and scw:find("[%d'\"%)] ?and ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]"))
+       or (has(scw, "or") and scw:find("[%d'\"%)] ?or ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]")) then
+      return true
+    end
   end
   if has(scw, "utl_inaddr.get_host_address(") then return true end
   return false
