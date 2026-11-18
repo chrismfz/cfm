@@ -13,11 +13,9 @@ import (
 
 )
 
-// chalRule supports "N:substring" overrides like MALPATH.
-type chalRule struct {
-	sub   string // lowercased
-	count int
-}
+// chalRule supports "N:substring" overrides like MALPATH: the same rule
+// shape, so both lists share ruleSubs and one pathMatcher.
+type chalRule = malRule
 
 type chalCtx struct {
     Host   string
@@ -400,7 +398,7 @@ func boolFlag(b bool) string {
 
 // trackChallengePaths increments per-IP counters if path matches any challenge rule.
 // Called from ingest() while engine lock is already held.
-func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
+func (e *Engine) trackChallengePaths(rec LogRec, pm *pathMatchOnce, b *bucketSW) {
 	if !e.cfg.ChallengePathsEnabled {
 		return
 	}
@@ -408,38 +406,37 @@ func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
 		return
 	}
 
+	path := pm.p
 	if isCpanelSessionPath(path) {
 		return
 	}
-	pl := strings.ToLower(path)
 
-	for ridx, r := range e.chalRules {
-		if r.sub == "" {
-			continue
-		}
-		if !strings.Contains(pl, r.sub) {
-			continue
-		}
+	// count only the first matching rule per request (avoid inflation)
+	ridx := pm.first(e.chalMatch)
+	if ridx < 0 || ridx >= len(e.chalRules) {
+		return
+	}
+	r := e.chalRules[ridx]
 
-		// total challenge-path hits
-		if b.ipsChalPath == nil {
-			b.ipsChalPath = make(map[string]int)
-		}
-		b.ipsChalPath[rec.IP]++
+	// total challenge-path hits
+	if b.ipsChalPath == nil {
+		b.ipsChalPath = make(map[string]int)
+	}
+	b.ipsChalPath[rec.IP]++
 
-		// per-rule counters
-		if b.ipsChalRule == nil {
-			b.ipsChalRule = make(map[string]map[int]int)
-		}
-		m := b.ipsChalRule[rec.IP]
-		if m == nil {
-			m = make(map[int]int)
-			b.ipsChalRule[rec.IP] = m
-		}
-		m[ridx]++
+	// per-rule counters
+	if b.ipsChalRule == nil {
+		b.ipsChalRule = make(map[string]map[int]int)
+	}
+	m := b.ipsChalRule[rec.IP]
+	if m == nil {
+		m = make(map[int]int)
+		b.ipsChalRule[rec.IP] = m
+	}
+	m[ridx]++
 
-		// store last context so we can include host/uri in alert extra
-		e.chalLast[rec.IP] = chalCtx{
+	// store last context so we can include host/uri in alert extra
+	e.chalLast[rec.IP] = chalCtx{
             Host:   rec.Host,
             URI:    path,
             Method: rec.Method,
@@ -447,10 +444,6 @@ func (e *Engine) trackChallengePaths(rec LogRec, path string, b *bucketSW) {
             Sub:    r.sub,
             TS:     rec.TS,
             UA:     rec.UA,
-		}
-
-		// count only first matching rule per request (avoid inflation)
-		return
 	}
 }
 

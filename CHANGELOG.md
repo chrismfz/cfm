@@ -61,6 +61,21 @@ back-filled here — see the git/PR history for that period.
   unmodified copy and keeps an edited one as `.rpmsave`; the deb does the same
   through `dpkg-maintscript-helper rm_conffile` (an edited copy is kept as
   `.dpkg-bak`).
+- **The web detector's malpath matching no longer slows down as the list
+  grows.** Every ingested access-log line was checked against the malpath
+  list (`configs/webdetector_malpaths.txt`) twice, once for the
+  `CHALLENGE_PATHS` challenge and once for the `MALPATH` flood counter, each a
+  linear substring scan under the engine lock. Both now use one Aho-Corasick
+  matcher built when the config loads, shared when the two read the same list
+  (the default): one pass over the path per line. Same answers as before: a
+  substring of the lower-cased path without its query, the first matching
+  entry in file order (so `N:pattern` thresholds count the same rule), cPanel
+  session paths skipped. Measured on a typical path: 3.1 µs → 0.1 µs per line
+  at 152 entries, 6.4 µs → 0.1 µs at the 306 the list now holds.
+  The list file is also read once per config load instead of twice when
+  both keys name it. A list so large that the matcher's table would pass
+  16 MB (an operator's own, tens of thousands of entries) keeps the linear
+  scan.
 
 ## 2026.11.17
 
