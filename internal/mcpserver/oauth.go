@@ -521,9 +521,12 @@ func clientBinding(clientID string) string {
 
 // clientMatches reports whether a token request's client_id may redeem c. A
 // public client sends its client_id (OAuth 2.1 §4.1.3; the MCP SDKs do); one
-// that names a different client is refused. A request that names none is
-// still bound by the code's redirect_uri and PKCE verifier, which only the
-// client that started the flow holds, so it is not refused for the omission.
+// that names a different client is refused. A request that names none is not
+// refused: a code is still bound by its redirect_uri and PKCE verifier, which
+// only the client that started the flow holds; a refresh token relies on its
+// single use and rotation (requiring client_id there would first need every
+// connector to send it on refresh). Tokens minted before the binding carry no
+// client and are accepted.
 func clientMatches(c oauthClaims, presented string) bool {
 	presented = strings.TrimSpace(presented)
 	if presented == "" || c.Client == "" {

@@ -354,7 +354,9 @@ WHERE event_type IN ('waf_observe', 'waf_trigger') AND ts_unix >= ?`, fromUnix).
 // maxHistoryQueryLimit caps one events query. The query holds s.mu, which
 // every history write also takes, and the limit comes from the request (any
 // caller the endpoint admits, scoped tenants included): unbounded, one call
-// could stall the node's history writes. Callers ask for 500 at most.
+// could stall the node's history writes. It applies to every caller, admin
+// included (the UI asks for 500 at most; the CLI's --limit and the MCP tool
+// are cut here too, without a marker in the response).
 const maxHistoryQueryLimit = 5000
 
 func clampHistoryQueryLimit(limit int) int {

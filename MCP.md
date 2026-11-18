@@ -261,9 +261,12 @@ is `docs/security/control-plane.md`. This section covers what is specific to MCP
 - **OAuth.** PKCE `S256` is mandatory: a missing `code_challenge` or another
   method is refused. A `resource` whose host differs from the request host is
   refused (`invalid_target`). A code, and every refresh token descended from
-  it, is bound to the `client_id` it was issued to: a token request naming
-  another `client_id` gets `invalid_grant` (one naming none is still bound by
-  the code's `redirect_uri` and PKCE verifier). Access tokens are checked against the exact
+  it, records the `client_id` it was issued to, and a token request that
+  names another `client_id` gets `invalid_grant`. A request that names none
+  is not refused: a code is still bound by its `redirect_uri` and PKCE
+  verifier, while a refresh token's protection is its single use and rotation
+  (a stolen refresh token stays usable until rotated or `MCP_TOKEN` changes).
+  Refresh tokens minted before this check carry no client. Access tokens are checked against the exact
   `https://<host>/cfm-admin/mcp` audience. The authorize endpoint validates the
   `client_id` + `redirect_uri` pair before any redirect (open-redirect guard). The
   consent page is never framed (`X-Frame-Options: DENY`,

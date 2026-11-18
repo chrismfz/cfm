@@ -26,17 +26,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   endpoint only from the sources it opens the API from; elsewhere it gets
   `403`, the same audit line and the same `ADMIN_TOKEN_FOREIGN_IP` alert.
   `MCP_TOKEN` and OAuth tokens are unaffected.
-- **Stricter MCP OAuth.** A code and its refresh tokens are bound to the
-  client they were issued to, and dynamic registration accepts only redirect
-  URIs with a host and no user part.
+- **Stricter MCP OAuth.** A token request that names a different client than
+  the one a code or refresh token was issued to is refused, and dynamic
+  registration accepts only redirect URIs with a host and no user part.
 - **The control plane answers `404` to a path carrying an encoded `/` or `\`**
   (`%2F`, `%5C`), before any auth decision. No CFM client sends one.
 - **A tenant's MySQL lock graph shows only its own connections.** The scoped
   `mysql/user-summary` view listed other accounts' waiting connections (user,
   client host, state; never query text) under a lock group whose blocker was
   the tenant's.
-- **`history/events` returns at most 5000 rows per call**, so one request
-  can no longer hold the history store for an unbounded query.
+- **`history/events` returns at most 5000 rows per call**, for every caller
+  (CLI `--limit` and the MCP `detection_history` tool included), so one
+  request can no longer hold the history store for an unbounded query.
 
 ### Fixed
 - **A tenant's history summary no longer counts the server's mail and backup
