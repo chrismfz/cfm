@@ -1543,7 +1543,7 @@ and all 33 219 benign ones.
 
 These are the numbers a rule change is measured against: re-run with
 `--baseline` and read the changed samples. After the 2026-11-18 SQLi fixes:
-block 120 (18.3%), block + challenge tiers 221 (33.6%), benign unchanged.
+block 114 (17.4%), block + challenge tiers 212 (32.3%), benign unchanged.
 
 ---
 
@@ -1941,46 +1941,68 @@ libinjection was not adopted (`docs/ROADMAP.md` §1); the attacks it caught
 fell into a few shapes, each measured on its own over the same logs (8 nodes,
 8 days): every match was an attack, none a legitimate request.
 
+**Path and query only.** Every change below applies to the path + query
+surface; the args+body surface is read exactly as before. A JSON or
+minified-code body is one line, and its first `--` (`var(--wp--preset…)` in
+every Gutenberg save) hides the rest of it from 301/309/319. Reading that
+rest would put whole posts in front of block-tier, autoblock-armed rules,
+and bodies are not in the access logs, so it cannot be measured. A `--` in a
+body therefore still hides what follows it there (a known residual).
+
 **What changed:**
-- **`strip_sql_comments`** (`cfm_waf_util.lua`, used by 301 / 309 / 319):
-  - A comment ends at its parameter's `&`. A `--` used to strip to the end of
-    the whole scan string, so `?x=--&id=1'+union+select+1,2,3` read as clean
-    (a bypass of the 301 block; the same for a `/*` in one parameter and its
-    `*/` in a later one).
+- **`strip_sql_comments_query`** (`cfm_waf_util.lua`, the path + query strip
+  of 301 / 309 / 319; the body keeps `strip_sql_comments`):
+  - A comment ends at its parameter's `&`, and a `--` in the path at the `?`.
+    A `--` used to strip to the end of the whole scan string, so
+    `?x=--&id=1'+union+select+1,2,3` and `/index.php/--?id=1' union…` (PHP's
+    PATH_INFO) read as clean (a bypass of the 301 block; the same for a `/*`
+    in one parameter and its `*/` in a later one).
+  - The scan string is decoded, so a delimiter may sit inside one parameter
+    (`id=1'/*%26*/union select`): with a comment and a delimiter, the strip
+    returns the per-part reading AND the whole-string one.
   - A MySQL / MariaDB executable comment `/*!NNNNN…*/` (`/*M!…*/`) keeps its
     content, which the server runs: `catid=0' /*!11110procedure*/
     /*!11110analyse*/ (/*!11110extractvalue*/(…` lost the very
     `extractvalue(` 309 looks for (several sites per node in the 8 days).
-  - The same for a `--` in the path (`/index.php/--?id=1' union…`, PHP's
-    PATH_INFO) and in a JSON string before the next key: the parts end at
-    `&`, `?` and `"`.
-  - The scan string is decoded, so such a delimiter may sit inside one
-    parameter (`id=1'/*%26*/union select`): with a comment and a delimiter,
-    the strip returns the per-part reading AND the whole-string one.
-  - A `--` comment that ends a parameter leaves ` --` behind, so a detector
-    can see that a comment closed the value; one the next line continues
-    after (`1'--\nunion select`) is dropped whole, as before.
-- **301 shapes:** `' order by 3--` / `#` (after a value break: digit, quote,
-  paren); `procedure analyse(` after a value break; the same-word tautology `') and ('x'='x`,
-  `" or "a"="a` (`and` / `or` as whole words); `1 and 1=1` ending its
-  parameter or followed by SQL punctuation; the token
-  `utl_inaddr.get_host_address(` (Oracle).
-- **332 tag `VAR_DUMP_MD5`:** the scanners' PHP-eval probe
-  `${@var_dump(md5(631881373))};`, which calls no sink.
+  - A `--` comment that ends a part leaves ` --` behind, so a detector can
+    see that a comment closed the value; one the next line continues after
+    (`1'--\nunion select`) is dropped whole, as before.
+- **301 shapes, query only** (`detect_sqli_probe`): `' order by 3--` / `#`
+  (after a value break: digit, quote, paren); `procedure analyse(` after a
+  value break; the same-word tautology `') and ('x'='x`, `" or "a"="a`
+  (`and` / `or` as whole words); `1 and 1=1` ending its parameter or
+  followed by SQL punctuation; `utl_inaddr.get_host_address(` (Oracle).
+- **332 tag `VAR_DUMP_MD5`** (332 reads the query only): the scanners'
+  PHP-eval probe `${@var_dump(md5(631881373))};`, which calls no sink.
 
 All ride families already armed at block (`WAF_SQLI`, `WAF_SQLI_LEXICAL`,
 `WAF_RCE`), so they ban at threshold 1. That is deliberate: the fleet read
 found only scanners.
 
-**Corpus** (`make waf-corpus --baseline`): 11 more attacks caught (8 at 301,
-3 at 319), no benign sample changed. One white sample made the first
-`and 1=1` draft fire (`msg=1 and 1=1 is a very basic mathematical
-operation`), hence the "ends the parameter" condition.
+**Fleet replay (before merge):** the deployed Lua and this change were run
+side by side, with luajit on each node, over every request of the last 8
+days whose path or query held a comment, a quote or one of the new shapes:
+~2.96 M requests on the 8 nodes. 712 got a different 301 / 309 / 319 answer
+(earth 161, titan 165, orion 204, virgo 95, qualityweb 76, mars 5, speedhost
+5, rigel 1), and every one was an attack: the Joomla `com_streetguess`
+`/*!11110procedure analyse*/` sweep, sqlmap campaigns (`') AND ('x'='x'
+AND EXTRACTVALUE(…`, `ORDER BY 1-- -`, `UNION ALL SELECT`), Oracle
+`utl_inaddr.get_host_address(` probes, a PhocaCart blind probe. No
+legitimate request changed. Check of the replay itself: wherever it said the
+deployed Lua blocks at 301, the log says `cfm_block`.
 
-**Residual:** `' and 1=1 or …` followed by more words (it reads like that
-prose); `'nvOpzp; AND 1=1 OR (<'">…` (a `;` before `and` is not a value
-break here). Tests: `scripts/tests/cfm_waf_sqli_gaps_test.lua`,
-`scripts/tests/cfm_waf_sqlcomment_strip_test.lua`.
+**Corpus** (`make waf-corpus --baseline`): 2 more attacks blocked at 301, no
+benign sample changed. (A draft that also changed the body caught 11; the
+other 9 were DVWA SQLi in POST bodies, given up with the body change.) One
+white sample made the first `and 1=1` draft fire (`msg=1 and 1=1 is a very
+basic mathematical operation`), hence the "ends the parameter" condition.
+
+**Residual:** a `--` in a body still hides what follows it there; `' and 1=1
+or …` followed by more words (it reads like that prose); `'nvOpzp; AND 1=1 OR
+(<'">…` (a `;` before `and` is not a value break here). Tests:
+`scripts/tests/cfm_waf_sqli_gaps_test.lua`,
+`scripts/tests/cfm_waf_sqlcomment_query_strip_test.lua` (the body strip
+stays pinned by `cfm_waf_sqlcomment_strip_test.lua`).
 
 ### FP review — rule 101 (`WAF_TRAVERSAL`), 2026-09-05
 
