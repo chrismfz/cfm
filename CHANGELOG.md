@@ -19,48 +19,44 @@ back-filled here — see the git/PR history for that period.
 
 ### Added
 - **The malpath list catches the dev-tool and credential probes it missed.**
-  `webdetector_malpaths.txt` gains 51 entries from a first read: VCS directories as a whole
-  (`/.git/`, `/.svn/`, `/.hg/`, `/.bzr/`; only `/.git/config` and `/.git/HEAD`
-  were listed), `/.github/`, cloud/dev credential stores (`/.aws/`, `/.ssh/`,
-  `/.docker/`, `/.kube/`, `/.azure/`, `/.terraform/`, `/.config/`, `.npmrc`,
-  `.pypirc`, `.netrc`, `.pgpass`, `.my.cnf`, `.s3cfg`, `.git-credentials`, …),
-  AI-tool key directories (`/.claude/`, `/.cursor/`, `/.openai/`, …), CI files
-  (`.travis.yml`, `.gitlab-ci.yml`, `docker-compose.*`, …), Spring
-  `/actuator/`, `laravel.log`, `parameters.yml`, `.DS_Store`, private keys and
-  a few config backups (one day of titan's edge log: 55-145 distinct IPs each).
-  A second read of 9 days on rigel and speedhost (~35 M requests) adds 74
-  more: cloud service-account key files (`/key.json`, `/gcp-key.json`,
-  `/google-credentials.json`, … — 275-420 IPs each), the cPanel `error_log`
-  PHP writes into the docroot, WordPress backups / logs / install screens
-  (`/ai1wm-backups/`, `/wp-content/updraft/`, `wc-logs/`,
-  `/wp-admin/install.php`), whole-site archives (`/backup.zip`, `/www.zip`, …),
-  composer manifests, `.NET`/Java probes, `/_ignition/`, `adminer`, shell
-  history and a `/.well-knownold/` webshell stash. A third read (earth, mars,
-  titan, virgo: ~107 M requests) adds 45 seen on all four at 100-300 IPs each:
-  more service-account / `.env`-style files, CI build specs, shell and git
-  dotfiles, private keys, monorepo manifests and build-tool directories
-  (`/.vercel/`, `/.netlify/`, `/.turbo/`, `/.output/`, …). A fourth read (orion,
-  qualityweb: ~104 M requests) adds 25: more key / token / mail-relay files,
-  editor backups of `index.php`, and the `/.bod/` and `/.trash…/` webshell
-  stashes. 194 new entries in all (346 lines);
-  every 200 on them was a site's catch-all page. Generic names a site may
-  really serve (`/config.json`, `/settings.json`, `/phpmyadmin`,
-  `/server-status`, `/cgi-bin/`) stay out, and so do Duplicator's
-  `/installer.php` and `/dup-installer/`: a site migration runs them, and the
-  challenge would cut its AJAX calls off half-way. They feed both
-  the per-IP malpath challenge and the MALPATH flood ban. An unmodified list
-  is refreshed by the upgrade; a locally edited one is not (rpm writes
-  `.rpmnew`).
+  `webdetector_malpaths.txt` grows from 152 to 335 entries, all measured on
+  the fleet's edge logs (9 days, ~300 M requests over the 8 edge nodes). Every
+  200 on them was a site's catch-all page. They feed both the per-IP malpath
+  challenge and the MALPATH flood ban.
+  - VCS directories as a whole (`/.git/`, `/.svn/`, `/.hg/`, `/.bzr/`; only
+    `/.git/config` and `/.git/HEAD` were listed), `/.github/`, IDE folders.
+  - Cloud service-account / API key files (`/key.json`, `/gcp-key.json`,
+    `/google-credentials.json`, `/sa.json`, `/firebase-*.json`, … — up to
+    1 500 distinct IPs a node), credential directories (`/.aws/`, `/.ssh/`,
+    `/.docker/`, `/.kube/`, `/.azure/`, `/.config/`), `.env`-style and token
+    files, private keys, shell / git dotfiles and mail-relay configs.
+  - AI-tool key stores (`/.claude/`, `/.cursor/`, `/.openai/`, `/.gemini/`,
+    `litellm.yaml`, …), CI / build / monorepo files and directories.
+  - The cPanel `error_log` PHP writes into the docroot, `/_ignition/`,
+    composer manifests, `.NET` / Java probes, WooCommerce logs, UpdraftPlus
+    backups, whole-site archives (`/backup.zip`, `/www.zip`, …), editor
+    backups of `index.php`, and the `/.well-knownold/`, `/.bod/` and
+    `/.trash…/` webshell stashes.
+  Kept out on purpose, with the reason in the file: names a site may really
+  serve (`/config.json`, `/settings.json`, `/phpmyadmin`, `/server-status`,
+  `/cgi-bin/`, …) and the owner's own workflows, which the challenge and its
+  cookie revoke would cut off after the first logged hit (Duplicator's
+  `/installer.php` and `/dup-installer/`, All-in-One WP Migration's
+  `/ai1wm-backups/` download link, `/wp-admin/install.php` and
+  `setup-config.php` of a fresh install, `/adminer`). Six old entries that a
+  broader new one covers were folded into it. An unmodified list is refreshed
+  by the upgrade; a locally edited one is not (rpm writes `.rpmnew`).
 
 ### Removed
 - **`/etc/cfm/webdetector_challenge_paths.txt` is gone.** `CHALLENGE_PATHS`
   has read `webdetector_malpaths.txt` since 2026-03-12, so the file was read by
   nothing, yet it still shipped and was still the code default: a
   `detectors.conf` without `CHALLENGE_PATHS_FILE` armed the check with no
-  rules. The default is now `webdetector_malpaths.txt`. On upgrade rpm removes
-  an unmodified copy and keeps an edited one as `.rpmsave`; the deb postinst
-  does the same (`.dpkg-old`), and leaves it alone if a live config still
-  names it.
+  rules. The default is now `webdetector_malpaths.txt` (one constant for the
+  daemon and the config reader), and a config that still names the old file
+  reads the malpath list instead, with a log line. On upgrade rpm removes an
+  unmodified copy and keeps an edited one as `.rpmsave`; the deb postinst does
+  the same (`.dpkg-old`).
 
 ## 2026.11.17
 

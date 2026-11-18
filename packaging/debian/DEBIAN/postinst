@@ -49,11 +49,12 @@ chmod 0700 /etc/cfm/detectors.d
 
 # webdetector_challenge_paths.txt is retired (2026-11-18): CHALLENGE_PATHS has
 # read webdetector_malpaths.txt since 2026-03-12, and the package no longer
-# ships it. dpkg leaves a dropped conffile behind, so clean it up here — unless
-# a live config still points at it. One with entries is kept as .dpkg-old
-# (rpm's .rpmsave equivalent) instead of being deleted.
+# ships it. dpkg leaves a dropped conffile behind, so clean it up here. A config
+# that still names it is redirected to the malpath list by the daemon
+# (webdetector.ResolveChallengePathsFile), so nothing reads it any more. One
+# with entries is kept as .dpkg-old (rpm's .rpmsave equivalent).
 retired=/etc/cfm/webdetector_challenge_paths.txt
-if [ -f "$retired" ] && ! grep -qs 'webdetector_challenge_paths' /etc/cfm/detectors.conf /etc/cfm/detectors.d/*.conf; then
+if [ -f "$retired" ]; then
     if grep -qvE '^[[:space:]]*(#|$)' "$retired"; then
         mv -f "$retired" "$retired.dpkg-old" 2>/dev/null || true
     else

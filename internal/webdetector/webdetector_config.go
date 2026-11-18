@@ -517,9 +517,7 @@ func (c *Config) FillDefaults() {
 		c.OpenRestyOkIPTTL = 0
 	}
 
-	if c.ChallengePathsFile == "" {
-		c.ChallengePathsFile = "/etc/cfm/webdetector_malpaths.txt"
-	}
+	c.ChallengePathsFile, _ = ResolveChallengePathsFile(c.ChallengePathsFile)
 	if c.ChallengePathsCount <= 0 {
 		c.ChallengePathsCount = 1 // challenge on first hit by default
 	}
