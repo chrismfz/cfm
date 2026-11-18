@@ -185,31 +185,48 @@ func normalizePathPrefix(raw string) string {
 	return p
 }
 
+// publicPaths are the exact routes that need no CFM credential: the login
+// flow, and the one-time-code embed bootstraps. Exact paths, not prefixes, so
+// a path beneath one of them is never public by accident.
+var publicPaths = map[string]struct{}{
+	"/login":                        {},
+	"/login/":                       {}, // edge alias of the login page
+	"/login/verify":                 {},
+	"/login/webauthn/begin":         {},
+	"/login/webauthn/finish":        {},
+	"/logout":                       {},
+	"/api/v1/embed/bootstrap":       {},
+	"/api/v1/embed/admin-bootstrap": {},
+}
+
+// mcpPublicPaths are the MCP surface: the /mcp endpoint, its OAuth endpoints
+// and the OAuth discovery documents. They are self-authenticating (mcpserver's
+// own bearer / OAuth gate), so they bypass session/token auth here. See
+// internal/mcpserver.
+var mcpPublicPaths = map[string]struct{}{
+	"/mcp":                                    {},
+	"/mcp/oauth/register":                     {},
+	"/mcp/oauth/authorize":                    {},
+	"/mcp/oauth/token":                        {},
+	"/.well-known/oauth-protected-resource":   {},
+	"/.well-known/oauth-authorization-server": {},
+	"/.well-known/openid-configuration":       {},
+}
+
 func isPublicPath(r *http.Request) bool {
 	path := authMiddlewarePath(r)
 	if isPublicAssetPath(r, path) {
 		return true
 	}
-	for _, p := range []string{"/login", "/logout", "/api/v1/embed/bootstrap", "/api/v1/embed/admin-bootstrap"} {
-		if path == p || strings.HasPrefix(path, p+"/") {
-			return true
-		}
-	}
-	// MCP surface: the /mcp endpoint, its OAuth endpoints (/mcp/oauth/*) and the
-	// OAuth discovery documents are self-authenticating (mcpserver's own bearer /
-	// OAuth gate), so they bypass session/token auth here. See internal/mcpserver.
-	if isMCPPublicPath(r) {
+	if _, ok := publicPaths[path]; ok {
 		return true
 	}
-	return false
+	return isMCPPublicPath(r)
 }
 
 func isMCPPublicPath(r *http.Request) bool {
-	path := authMiddlewarePath(r)
-	return path == "/mcp" || strings.HasPrefix(path, "/mcp/") ||
-		path == "/.well-known/oauth-protected-resource" ||
-		path == "/.well-known/oauth-authorization-server" ||
-		path == "/.well-known/openid-configuration"
+	_, ok := mcpPublicPaths[authMiddlewarePath(r)]
+	return ok
 }
 
 func authMiddlewarePath(r *http.Request) string {
