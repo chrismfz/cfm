@@ -1,20 +1,9 @@
 # SSL Collector
 
-The SSL Collector (`sslcollector`) is the subsystem that distributes TLS
-certificate and private-key material from the cfm daemon to OpenResty/Angie
-nginx workers so they can perform dynamic SNI-based certificate selection at
-TLS handshake time.
-
----
-
-## Why it exists
-
-OpenResty and Angie support `ssl_certificate_by_lua_block`, a hook that runs
-on every incoming TLS handshake.  The hook can inspect the SNI hostname and
-set an arbitrary certificate+key pair from Lua code.  This lets cfm act as a
-dynamic certificate distributor: the web server serves whatever certificate
-cfm knows about for a given domain without requiring a static nginx config
-reload.
+The SSL Collector (`internal/sslcollector`) finds the TLS certificates and
+keys on the host and hands them to the OpenResty/Angie workers over a unix
+socket, so the edge selects a certificate per SNI at handshake time with no
+per-domain nginx config and no reload.
 
 ---
 
@@ -23,291 +12,219 @@ reload.
 ```
 cfm daemon (root)
   │
-  │  unix socket 0660 root:cfm
-  │  /var/run/sslcollector.sock
+  │  unix socket 0660 root:cfm, /var/run/sslcollector.sock
   │
   ▼
 OpenResty/Angie worker (cfm user)
   │
   │  init_worker_by_lua_block  ← can yield / do I/O
   │    start_background()
-  │      load_from_snapshot()  ← warms store from disk (if offline cache enabled)
+  │      load_from_snapshot()  ← warms the store from dump.json (if offline cache on)
   │      do_dumpall()          ← fetches ALL cert+key pairs via /dumpall
-  │      poll_stats()          ← starts background poll loop
+  │      poll_stats()          ← background poll loop
   │
   │  ssl_certificate_by_lua_block  ← NO yield, NO I/O
   │    M.set_cert()
-  │      _store["e:" .. sni]   ← worker-local table lookup only
-  │      ssl.set_cert(der)
-  │      ssl.set_priv_key(der)
+  │      _store["e:" .. sni], then "w:" suffixes  ← worker-local table lookup only
+  │      ssl.set_cert / ssl.set_priv_key on the pre-parsed DER
   ▼
-TLS handshake completes with the domain-specific certificate
+TLS handshake completes with the domain's certificate
 ```
 
-### Key constraint: no I/O in the TLS handshake path
+### No I/O in the handshake path
 
-The `ssl_certificate_by_lua_block` handler (`M.set_cert()`) is explicitly
-**QUIC-safe**: it performs no socket I/O and never yields.  This is required
-for HTTP/3 over QUIC, where the TLS handshake runs in a tight UDP path.  All
-cert+key pairs must be pre-loaded into the worker-local `_store` table before
-the first handshake for each domain.  The background timer (`do_dumpall()`)
-handles this loading; the handshake path only reads from `_store`.
+`M.set_cert()` performs no socket I/O and never yields, which is what makes
+it safe for HTTP/3 (QUIC). Every pair must already be in the worker's store
+before a handshake for that name; the background timers load it, the
+handshake only reads it. That is why `/dumpall` returns every `cert_pem` and
+`key_pem` in one payload. A name not in the store gets the static fallback
+`ssl_certificate` of the server block.
 
-This is why the `/dumpall` endpoint exists and why it returns both `cert_pem`
-and `key_pem` in bulk: the entire certificate inventory must be atomically
-available in each worker before any handshake can be served.
+### Worker-local store, not a shared dict
 
-### Worker-local store (not shared dict)
-
-Cert+key pairs are stored in a worker-local Lua table (`_store`), not in
-`ngx.shared.sslcache`.  Shared dicts are accessible to any Lua code in the
-same OpenResty process via `dict:get_keys()` + `dict:get()`.  A worker-local
-table is only reachable by code that holds a reference to this module, which
-is a significantly smaller blast radius for key material enumeration.
-
-### An ingest replaces the store
-
-Each `/dumpall` (or snapshot) ingest builds a new table. When it can, it swaps
-that table in whole, so a name the daemon dropped stops being served.
-
-Ingest used to only add. When AutoSSL replaced a cPanel self-signed
-placeholder (`dom` + `www.dom`) with a wildcard (`*.dom` + `dom`), the stale
-exact `www.dom` entry stayed in every worker. Because an exact match
-outranks a wildcard, `www.dom` kept serving the self-signed cert until the
-edge was reloaded (spoolbox.gr on rigel, 2026-11-17).
-
-A replace strips every name the payload does not carry, and a store missing a
-site's cert takes that site down. So a payload replaces only when both of
-these hold:
-
-- **It says `"complete": true`.** If the daemon cannot read a name's PEM (a
-  file mid-rewrite), it leaves the name out of the payload. It does not send
-  the name empty. Only this flag tells the edge that something was left out.
-  - The snapshot and the per-version build carry the flag.
-  - The last-resort stream (used when there is no room for a temp file) and
-    daemons older than the flag never do.
-  - Every incomplete payload is merged, like the old additive ingest.
-- **It is not a sudden shrink.** A payload under two thirds of the last
-  payload taken is merged while the shrink is younger than an hour. Two thirds
-  is the same threshold as the daemon's own snapshot guard. This stops a scan
-  that lost a mount from stripping the edge.
-  - A shrink that lasts (accounts moved away) is taken after the hour, at the
-    next version change or the hourly forced refresh.
-  - The baseline is the last payload taken. It is not the store, which a merge
-    never shrinks. It is not the last payload seen either, because then a
-    second degraded payload would strip the store. A worker that has only
-    merged so far (booted from an incomplete snapshot) uses its store size,
-    or its first complete payload would replace it however small.
-  - The hold is timed on the monotonic clock (`resty.core.time`, OpenResty
-    1.19.9+), so an NTP step at boot neither ends nor stretches it. Without
-    that module the wall clock is used, and a step back restarts the hold.
-  - Stores of fewer than 3 names are not guarded.
-
-The daemon refuses to index a pair whose key file is missing, empty or a
-dangling symlink (`buildEntry`). Such an entry used to be indexed (the
-Virtualmin scanners glob for the key and check only the cert) and then left
-out of every payload, so every payload said `complete: false` and the node
-never replaced its stores.
-
-A pair that was indexed and drops out for a moment keeps its entry for 10
-minutes (`buildFailCarry`, `Refresh`). This covers a cert or key caught
-mid-rewrite, and an indexed cert file the scanners skip because it is empty
-for a moment. Without the carry, the payload is still complete without that
-pair, the edge replaces its store, and the site serves the default cert
-until the next Refresh. While carried, the entry's files are read again at
-payload time. When they can be read and hold a PEM block, they are sent.
-When they cannot, or hold none (empty, cut mid-write), the entry is left out,
-the payload is incomplete, and the edge merges it. A cert file that is gone,
-or a cert symlink that dangles (the account or domain was removed), drops the
-entry at once. A pair that stays broken leaves at the first Refresh after the
-10 minutes, which can be the 15-minute discovery tick: up to about 25
-minutes in all.
-
-On top of that:
-
-- A payload entry whose PEM is missing or does not parse keeps the worker's
-  current pair for that name.
-- A held shrink logs `merged, not replaced` and sets `meta:last_error`.
-- The snapshot load is wrapped in `pcall`. Before, an error there ended the
-  boot timer, and the worker never fetched or polled again.
-
-The `ingest src=…` log line carries
-`mode=replace|merge_shrink|merge_incomplete|none`.
+Pairs live in a worker-local Lua table (`_store`), parsed to DER once at
+ingest. A shared dict (`ngx.shared.sslcache`, which this module uses only for
+`meta:*` health keys and locks) is enumerable by any Lua code in the process
+via `get_keys()`; a worker-local table is reachable only through this module.
 
 ---
 
-## Socket authentication
+## Discovery and freshness
 
-The socket is authenticated with a bearer token carried in the
-`X-SSLCollector-Token` HTTP header.  The token is:
-
-- Kept in `/var/lib/cfm/secrets/sslcollector_sock_token` (root, `0600`),
-  created once per host by `internal/hostsecrets`: copied from a
-  `SSLCOLLECTOR_SOCK_TOKEN` still set in `cfm.conf`, else generated. After
-  that `cfm.conf` is not consulted, and the daemon never writes it. To
-  rotate: set the `cfm.conf` line to `placeholder`, delete the file,
-  restart.
-- Written atomically to `/var/lib/cfm/lua/cfm_token.lua` at mode `0640`
-  (owner `root`, group `cfm`).
-- Compared in constant time (`crypto/subtle.ConstantTimeCompare`) on every
-  request to prevent timing side-channels.
-
----
-
-## Discovery & freshness (how fast a new cert goes live)
-
-The daemon discovers certificates from disk and the workers pull them over
-the socket. End-to-end latency for a freshly-issued certificate is bounded
-by two stages:
-
-**1. Daemon picks up the cert (`internal/sslcollector`):**
+**1. The daemon picks up the cert** (`internal/sslcollector`, configured in
+`cmd/cfm/main.go`):
 
 | Mechanism | Cadence | Catches |
 |-----------|---------|---------|
-| fsnotify watcher (`watcher.go`) | ~2s debounce | New domains/users + renewals under any watched tree (event-driven, primary path) |
-| Stat loop (`StatEvery`) | 60s | mtime/size changes to **already-known** cert files |
-| Discovery rescan (`DiscoveryEvery`) | 1h | Full filesystem re-glob — safety net for anything the watcher missed |
+| fsnotify watcher (`watcher.go`) | 2s debounce | New domains/users and renewals under any watched tree (primary path) |
+| Stat loop (`StatEvery`) | 60s | mtime/size changes to already-known cert files |
+| Discovery rescan (`DiscoveryEvery`) | 1h | Full re-scan; safety net for anything the watcher missed |
 
-The watcher is the primary path. On a `Create` event for a **directory**
-(`watcher.go:handleNewDir`) it watches the new tree and schedules a rescan
-*before* the cert/key filename filter runs — panels create per-domain and
-per-user directories named after the domain/user (`/etc/letsencrypt/live/
-<domain>`, `/var/cpanel/ssl/apache_tls/<domain>`, `/home/<user>`), none of
-which contain `cert`/`key`/`pem` in their path. Without this, a brand-new
-domain stayed invisible to fsnotify until the next `DiscoveryEvery` rescan.
+On a `Create` event for a directory (`handleNewDir`) the watcher watches the
+new tree and schedules a rescan before its cert/key filename filter runs:
+panels create per-domain and per-user directories (`/etc/letsencrypt/live/<domain>`,
+`/var/cpanel/ssl/apache_tls/<domain>`, `/home/<user>`) whose names match no
+cert/key pattern.
 
-Home trees are watched **shallowly** (one level) at the `/home*` mount
-tops, per-user dirs, and each user's `domains/` container — backing exactly
-the home layout the scanner reads (Virtualmin
-`<home>/<user>/domains/<domain>/ssl.{key,cert}`). This detects a new
-reseller account in seconds without adding an inotify watch per file across
-every customer site. Per-user `~/ssl`/`~/certs`/`~/letsencrypt` dirs are
-deliberately **not** watched: no scanner reads them, so watching would only
-burn watches and fire no-op rescans.
+Home trees are watched shallowly (one level): the `/home[0-9]*` mount tops,
+the per-user dirs and each user's `domains/` dir, which is exactly the layout
+the home scanner reads (Virtualmin `<home>/<user>/domains/<domain>/ssl.{cert,key}`).
+The watcher and the scanner share one list of home mounts (`homeMounts()`,
+every `/home[0-9]*`), so `/home2`, `/home3`, … are both watched and scanned.
 
-### Watch set == scan set (all home mounts)
+Scanned sources (`sources.go` `discoverPairs`):
 
-The watcher and the scanner share one source of truth for which home mounts
-exist (`homeMounts()` → every `/home[0-9]*`). This matters on hosts that add
-`/home2`, `/home3`, … as `/home` fills: previously the scan hardcoded
-`/home`, so a cert under `/home2/<user>/domains/<domain>/` was watched but
-**never scanned** — discovered neither by the event nor by the rescan
-fallback, serving the self-signed fallback indefinitely. Both sides now
-cover all mounts. The Virtualmin scanner also attaches the intermediate
-chain (`ssl.ca` / `ssl.combined`) so workers ship a complete chain.
+- Let's Encrypt: `/etc/letsencrypt/live`
+- Mailcow: `/opt/mailcow-dockerized/data/assets/ssl`, the root pair plus its
+  immediate SNI host directories; `acme/` and `backups/` are never read
+- cPanel: `/var/cpanel/ssl/apache_tls`, `/var/cpanel/ssl/installed/hosts`,
+  `/var/cpanel/ssl/cpanel` (service bundles)
+- DirectAdmin: `/usr/local/directadmin/data/users`, `/usr/local/directadmin/data/admin`
+- Virtualmin/Webmin: `/etc/ssl/virtualmin`, every `/home[0-9]*` (with the
+  `ssl.ca` / `ssl.combined` chain), `/etc/webmin/miniserv.pem`
+- Exim hostname certs under `/etc` (`exim.crt`/`exim.cert`/`exim.pem` + `exim.key`)
 
-Non-home cert sources are unchanged and fully covered: Let's Encrypt
-(`/etc/letsencrypt`), cPanel (`/var/cpanel/ssl`, incl. hostname/service
-bundles), DirectAdmin (`/usr/local/directadmin`), Virtualmin/Webmin
-(`/etc/ssl/virtualmin`, `/etc/webmin/miniserv.pem`), Mailcow's active store
-(`/opt/mailcow-dockerized/data/assets/ssl`, root pair plus immediate SNI host
-directories; `acme/` and `backups/` are never scanned), and system/service
-hostname certs such as Exim (`/etc/exim.*`).
+A pair whose key file is missing, empty or a dangling symlink is not indexed
+(`buildEntry`). A pair that was indexed and fails to build for a moment (a
+cert or key caught mid-rewrite) keeps its entry for 10 minutes
+(`buildFailCarry`); while carried its files are re-read at payload time and
+sent if they hold a PEM block, else left out (the payload is then
+incomplete, see below). A cert file that is gone, or a cert symlink that
+dangles, drops the entry at once. A pair that stays broken leaves at the
+first Refresh after the 10 minutes (a watcher event, a stat-loop change or
+the hourly rescan).
 
-**2. Workers pull the new cert (`configs/lua/sslcollector.lua`):**
+**2. The workers pull it** (`configs/lua/sslcollector.lua`):
 
-Workers poll `/stats` every `POLL_SECS_MIN` (10s). When the daemon's
-`Version` hash changes (any fingerprint/mtime change, or a name moving to
-another pair), each worker fetches `/dumpall` after `worker_id × 2s`
-(`DUMPALL_STAGGER_SECS`, shrunk so the last worker starts within 20s —
-`DUMPALL_STAGGER_WINDOW`: decoding the list blocks a worker's event loop
-for about a second on a large node, and the workers must not all stall at
-once).
-A version-triggered fetch does not take the shared `lock:dumpall`; the
-startup and age-forced fetches do. A `FORCE_DUMPALL_AFTER` (1h) safety net
-re-pulls even if a version change was missed.
-A worker makes at most one version-triggered fetch per
-`DUMPALL_MIN_GAP_SECS` (30s), and none while one is running or once it
-already holds the newest version. AutoSSL renews in a burst and the daemon
-publishes a version per refresh: on earth (2026-10-11, 01:03-01:06) every
-worker re-fetched the whole 110 MB list every ~10s, ~20 times each, and the
-daemon peaked at 1.2 GB serving them. The first change of a burst still goes
-out on the stagger alone; later ones fold into one fetch per gap. Before
-that fix the last worker also fetched every version twice (its 10s stagger
-equals the poll interval, and the poll in the same second, before the
-ingest, scheduled another).
+- Each worker polls `/stats` every 10s (`POLL_SECS_MIN`). Until the first
+  success it retries every 5s; after that failures back off by doubling up
+  to 10 minutes (`POLL_SECS_MAX`).
+- When the daemon's `Version` differs from the worker's, the worker fetches
+  `/dumpall` after `worker_id × step`, where step is
+  `min(2s, 20s / worker_count)` (`DUMPALL_STAGGER_SECS`,
+  `DUMPALL_STAGGER_WINDOW`): decoding a large list blocks a worker's event
+  loop for about a second, so the workers must not all stall at once.
+- A worker makes at most one version-triggered fetch per 30s
+  (`DUMPALL_MIN_GAP_SECS`) and none while one is scheduled or running or
+  once it holds the newest version. AutoSSL renews in bursts and the daemon
+  publishes a version per Refresh; the first change of a burst goes out on
+  the stagger alone, later ones fold into one fetch per gap.
+- The startup fetch and the age-forced fetch (a worker whose store is older
+  than 1h, `FORCE_DUMPALL_AFTER`, retried at most every 10 minutes across
+  workers) take the shared `lock:dumpall`; a version-triggered fetch does not.
+- A worker that has never ingested anything retries the snapshot on every poll.
 
-**Net result:** a new domain is live on every worker within ~30s (≈2s
-watcher debounce + ≤10s poll + the ≤20s stagger; ~10–25s with six workers;
-a change inside a burst waits up to the 30s gap); the 1h fallbacks bound the
-worst case if the event-driven path ever misses. Until 2026-10-10 the poll
-was 60s and a version-triggered fetch took the shared lock, so the workers
-fetched one per poll: on a six-worker node the last one served a new cert
-4.5 min after the daemon saw it.
+A new domain is live on every worker within about 30s (2s watcher debounce +
+≤10s poll + ≤20s stagger; longer for a change inside a burst, up to the 30s
+gap). The 1h fallbacks bound the worst case.
 
-**`/dumpall` is served from the snapshot.** The daemon writes the snapshot
-after a Refresh that changed the index (an unchanged version is not
-rewritten: that was ~110 MB and ~18s on a 7 800-host node, every discovery
-tick), and `/dumpall` streams that file when it is the current version
-instead of rebuilding the payload for each worker. When it is not (the
-window between a Refresh's swap and its WriteSnapshot, which is when the
-workers fetch; a snapshot the regression guard holds back or one marked
-`complete: false`; an empty index; a failed write), `/dumpall` builds the
-payload once per version into an unlinked temp file next to the snapshot,
-serves it to every concurrent request and reuses it for 30s (only when
-complete, so an entry whose PEM could not be read is retried on the next
-request). It never writes the snapshot itself. With no room for the temp
-file (a full `/var`), it streams the payload to the worker as it is written.
-
-**The payload is never whole in memory.** It is written entry by entry,
-straight to a temp file next to the snapshot (`dump.json.tmp-*`, created
-with O_EXCL); the header's `exact_n`, `wild_n` and
-`complete` are written as padded placeholders and filled in once the entries
-are out. Building it whole (a map per entry, the JSON buffer, the encoder's
-copy of it) took about four times its size in heap: on earth (110 MB
-snapshot) the daemon reached 1.2 GB during an AutoSSL run (2026-10-10) and
-during a simulated one with nine cert changes in three minutes
-(2026-10-11). The heap now holds the index copy, one PEM pair per
-certificate and a 256 KB write buffer (a 60 MB synthetic snapshot: +28 MB
-peak, was +235 MB; a version change with six workers fetching while the
-snapshot is written: +57 MB, was +351 MB).
-
-A skipped (unchanged) write re-stamps the file's mtime, which the regression
-guard's 1h staleness release reads as "last confirmed current". A
-version-triggered fetch no longer holds `lock:dumpall`, so cfm_stats'
-`ingest_lock` shows only the startup / forced fetches. The snapshot carries `exact_n` /
-`wild_n` ahead of the entries, so the regression guard reads them off the
-front instead of decoding the whole file.
-
-## Socket endpoints
-
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/dumpall` | GET | Returns all cert+key pairs (exact + wildcard). Used by workers at init and on version change. Streamed from the snapshot file when it is the current version. |
-| `/cert?host=X` | GET | Returns cert+key for a single hostname. |
-| `/stats` | GET | Returns version string and health metadata. Polled every 10s per worker (backs off to 10 min on failures). |
-| `/refresh` | POST | Forces an immediate re-scan of the certificate store. |
-| `/dump?host=X` | GET | Returns raw `Entry` metadata for a host (no PEM). |
+On a cold boot the edge usually starts before the daemon's socket is ready.
+Once the socket is bound and the index holds at least one entry, the daemon
+issues one `systemctl reload` of `angie`/`openresty` if that service started
+before that moment (`reload_edge.go`, `NudgeEdgeOnFirstReady`), so the
+workers re-run their init against a ready socket and snapshot. The
+`CFM_SSLCOLLECTOR_RELOAD_EDGE_ON_READY=0` environment variable (daemon
+environment) disables it.
 
 ---
 
-## Offline snapshot (SSLCOLLECTOR_OFFLINE_CACHE)
+## How an ingest updates the worker store
 
-When a worker starts, it first tries to warm its `_store` from a disk snapshot
-before calling `/dumpall` over the live socket.  This means nginx can serve
-all previously known certificates even if cfm is temporarily unavailable
-(e.g. during a cfm upgrade or crash recovery).
+Each `/dumpall` or snapshot ingest builds a new table and, when it may,
+swaps it in whole, so a name the daemon dropped stops being served (an
+exact entry outranks a wildcard, so a stale exact entry would otherwise keep
+serving an old cert next to a new wildcard). Because a replace also strips
+every name the payload lacks, a payload replaces the store only when both
+hold:
 
-The daemon writes the snapshot to `/var/lib/cfm/sslcollector/dump.json` at
-mode `0640` (root:cfm) atomically via a write-tmp + rename sequence after a
-Refresh that changed the index (workers only read it).
+- **It says `"complete": true`.** The daemon leaves out a name whose PEM it
+  cannot read rather than send it empty; only this flag tells the edge that
+  something was left out. The snapshot and the per-version `/dumpall` build
+  carry it; the last-resort streamed `/dumpall` (no room for a temp file)
+  never does. Every incomplete payload is merged into the store.
+- **It is not a sudden shrink.** A payload under two thirds of the last
+  payload taken is merged while the shrink is younger than an hour
+  (`SHRINK_HOLD_SECS`); a shrink that lasts is taken after that, at the next
+  version change or forced refresh. The baseline is the last payload taken
+  (a worker that has only merged so far uses its store size). The hold is
+  timed on the monotonic clock when `resty.core.time` provides it
+  (lua-resty-core 0.1.22+), else on the wall clock. Stores of fewer than 3
+  names are not guarded.
 
-**To disable the offline snapshot:**
+A payload entry whose PEM is missing or does not parse keeps the worker's
+current pair for that name. A held shrink logs `merged, not replaced` and
+sets `meta:last_error`. Every ingest logs one line,
+`ingest src=… mode=replace|merge_shrink|merge_incomplete|none`.
 
-```ini
-# cfm.conf
-SSLCOLLECTOR_OFFLINE_CACHE = 0
-```
+---
 
-When disabled:
-- Workers do not write the snapshot file after `/dumpall`.
-- Workers do not read the snapshot file at startup.
-- If cfm is unreachable at nginx startup, workers serve the fallback cert
-  (the static `ssl_certificate` directive in openresty.conf / angie.conf)
-  until the first successful `/dumpall` completes.
+## The snapshot and `/dumpall`
 
-The cfm systemd service has `Restart=always`, so the window of fallback-cert
-usage is typically a few seconds after any cfm crash.
+The daemon writes `/var/lib/cfm/sslcollector/dump.json` (mode `0640`,
+`root:cfm`) after a Refresh, through a randomly named temp file
+(`dump.json.tmp-*`, O_EXCL) renamed into place. Workers only read it. The
+write:
+
+- is skipped when the file on disk is already this version and complete
+  (its mtime is re-stamped instead);
+- is refused for an empty index;
+- is refused when it would shrink the file by more than a third, unless the
+  file is over an hour old or the daemon runs with
+  `CFM_SSLCOLLECTOR_FORCE_SNAPSHOT=1`.
+
+`/dumpall` streams the snapshot when it is the current version. Otherwise
+(between a Refresh's swap and its snapshot write, a write the guard
+refused, a failed write) it builds the payload once per version into an
+unlinked temp file next to the snapshot, serves it to every concurrent
+request and reuses it for 30s when complete. With no room for a temp file it
+streams the payload to the worker as it is written (never `complete`). The
+payload is written entry by entry and is never whole in the daemon's memory;
+its header carries `version`, `generated_at`, `exact_n`, `wild_n` and
+`complete` ahead of the entries.
+
+---
+
+## Socket endpoints
+
+Every endpoint requires the `X-SSLCollector-Token` header (403 without it);
+the server refuses to start without a token.
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/dumpall` | GET | All cert+key pairs (exact + wildcard). Used by workers at startup, on a version change and on the age-forced refresh. |
+| `/cert?host=X` | GET | Cert+key (and metadata) for one hostname. Uses the in-process PEM cache (`SSLCOLLECTOR_SOCK_PEM_TTL` / `_MAX`). |
+| `/stats` | GET | Collector stats, including `Version`. Polled by every worker. |
+| `/refresh` | POST | Runs a Refresh now (204). |
+| `/dump?host=X` | GET | The index entry for a host (paths, source, names, expiry; no PEM). |
+
+### Authentication
+
+- The token is kept in `/var/lib/cfm/secrets/sslcollector_sock_token` (dir
+  `0700`, file `0600`, root), created once per host by `internal/hostsecrets`:
+  copied from `SSLCOLLECTOR_SOCK_TOKEN` in `cfm.conf` when that holds a
+  strong token, else generated. After that `cfm.conf` is not consulted, and
+  the daemon never writes it. To rotate: set the `cfm.conf` line to
+  `placeholder`, delete the file, restart.
+- It is mirrored atomically to `/var/lib/cfm/lua/cfm_token.lua`
+  (`0640 root:cfm`) for the edge.
+- It is compared in constant time (`crypto/subtle.ConstantTimeCompare`).
+
+---
+
+## Offline snapshot (`SSLCOLLECTOR_OFFLINE_CACHE`)
+
+With the offline cache on (the default), a worker loads `dump.json` before
+its first `/dumpall`, so the edge serves every known certificate even when
+the daemon is down at edge start (upgrade, crash; `cfm.service` has
+`Restart=always`).
+
+`SSLCOLLECTOR_OFFLINE_CACHE = 0` only stops the **workers reading** the
+snapshot (the daemon passes it to them in
+`/var/lib/cfm/lua/cfm_sslcollector_config.lua`). Workers then serve the
+fallback cert until their first successful `/dumpall`. **The daemon still
+writes `dump.json`** (`Refresh` → `WriteSnapshot` does not read the knob) and
+`/dumpall` is served from it, so the knob does not keep key material off the
+disk.
 
 ---
 
@@ -315,147 +232,104 @@ usage is typically a few seconds after any cfm crash.
 
 ### Trust boundary
 
-The `cfm` OS group is the trust boundary.  The group contains exactly:
-
-- The cfm daemon process (running as `root`) — writes tokens and sockets.
-- OpenResty/Angie nginx worker processes (running as `cfm` user, `nologin`
-  shell) — read the token and connect to the socket.
-
-No other service, user, or process should be in the `cfm` group.  This is
-enforced by `install-openresty.sh` and `install-angie.sh`, which create the
-`cfm` system user with `/sbin/nologin`.
-
-### Realistic attack paths
+The `cfm` OS group is the trust boundary. The cfm daemon runs as root and
+writes the token and the socket; the OpenResty/Angie workers run as the `cfm`
+user (`user cfm;` in the shipped confs; the packages and
+`install-openresty.sh` create it as a system user with `/sbin/nologin`) and
+read the token and connect to the socket. Nothing enforces that no other
+account joins the group; keep it that way.
 
 | Scenario | Can reach socket? | Incremental risk from socket |
 |----------|------------------|------------------------------|
-| Remote attacker, unauthenticated | No — socket is local-only | None |
-| Remote attacker, authenticated API user | No — API does not expose the socket | None |
-| Local attacker with root | Yes — root can do anything | None — root can read cert files directly |
-| Local attacker who joins cfm group | Yes — can read token + connect | Gains cert+key API access |
-| nginx RCE exploit | Yes — code runs inside nginx worker | None incremental — worker already holds all keys in `_store` memory; SO_PEERCRED would still pass |
-
-The practical conclusion: the socket does not materially expand the blast
-radius of any realistic attack class given the current group membership policy.
+| Remote attacker | No: the socket is local-only and no API exposes it | None |
+| Local root | Yes | None: root reads the cert files directly |
+| Local account that joins the `cfm` group | Yes: can read the token and connect | Gains cert+key access |
+| nginx worker RCE | Yes | None: the worker already holds every pair in `_store` |
 
 ### The snapshot file
 
-The on-disk snapshot (`/var/lib/cfm/sslcollector/dump.json`, mode `0640`)
-contains cert+key pairs for all hosted domains.  Unlike the socket (which
-requires an active token+connection), the file is a passive persistent
-artifact.  If something with cfm-group access can exfiltrate a file (e.g. a
-file-read vulnerability in a future service added to the group), the snapshot
-exposes all keys without requiring any socket interaction.
+`dump.json` (`0640 root:cfm`) holds the cert+key pairs of every hosted
+domain. Unlike the socket it needs no token or live daemon: anything that can
+read a file as the `cfm` group gets every key. As above,
+`SSLCOLLECTOR_OFFLINE_CACHE = 0` does not remove it.
 
-This is the primary reason `SSLCOLLECTOR_OFFLINE_CACHE = 0` exists as an
-option for operators who prefer availability-on-demand over warm-restart
-availability.
+### Hardening options (not implemented)
 
----
+Referenced from `socketapi.go` and `sslcollector.lua`:
 
-## Future hardening options
-
-### 1. SO_PEERCRED verification
-
-Replace the group-readable bearer token with kernel-verified process
-credentials.  On Linux, `getsockopt(SO_PEERCRED)` on a unix socket returns
-the UID, GID, and PID of the connecting process.  The socket server could
-verify that `uid == <nginx worker uid>` before serving any response, without
-needing a token file at all.
-
-**What this improves:** eliminates the "another cfm-group process obtains the
-token file and calls the socket" vector.
-
-**What this does NOT improve:** a compromised nginx worker process already
-holds all cert+key pairs in its `_store` memory.  SO_PEERCRED would pass for
-a request originating inside that process, so it provides no protection
-against a nginx RCE exploit.
-
-**Implementation note:** requires changes to `internal/sslcollector/socketapi.go`
-(`ServeSock` / `authOK`) to extract peer credentials from the `net.UnixConn`
-via `syscall.GetsockoptUcred`.
-
-### 2. Encrypted offline snapshot
-
-Encrypt the snapshot file with a key that only the running cfm daemon holds
-(e.g. an ephemeral key generated at startup and held only in memory, or a
-key stored at `0600` root-only).  Workers would request the decryption key
-from the cfm daemon socket at startup, decrypt the file locally, then discard
-the key.
-
-**What this improves:** the on-disk file becomes useless without the running
-daemon.  Exfiltrating `dump.json` alone yields nothing.
-
-**What this does NOT improve:** if the daemon is down, workers cannot get the
-decryption key, so the fallback behavior is the same as `OFFLINE_CACHE = 0`.
-The availability benefit of the snapshot is only preserved if the daemon is
-available anyway.
-
-**Implementation note:** this option is most useful in combination with
-`OFFLINE_CACHE = 1` for operators who want both warm-restart availability and
-protection against snapshot exfiltration.  A symmetric key (e.g. AES-256-GCM)
-generated fresh on each cfm start and written to a `/run/cfm/snapshot.key`
-tmpfs path (root-only, lost on reboot) would achieve this.
+1. **SO_PEERCRED.** Verify the connecting process's UID with
+   `getsockopt(SO_PEERCRED)` (in `ServeSock` / `authOK`) instead of a
+   group-readable token. Removes the "another cfm-group process reads the
+   token" vector; does nothing against a compromised worker, which already
+   holds the keys.
+2. **Encrypted snapshot.** Encrypt `dump.json` with a key only the running
+   daemon holds (e.g. generated per start under `/run`), handed to workers
+   over the socket. The file alone becomes useless; but with the daemon down
+   the workers cannot decrypt it, so the warm-restart benefit is lost exactly
+   when it matters.
 
 ---
 
-## Configuration reference
+## Configuration reference (`cfm.conf`)
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `SSLCOLLECTOR_SOCK_ENABLE` | `1` | Enable the unix socket server |
-| `SSLCOLLECTOR_SOCK_PATH` | `/var/run/sslcollector.sock` | Socket path |
-| `SSLCOLLECTOR_SOCK_TOKEN` | `placeholder` | Read once, to create `/var/lib/cfm/secrets/sslcollector_sock_token` (the token in use) when that file is missing |
-| `SSLCOLLECTOR_SOCK_PEM_TTL` | `10m` | In-process PEM cache TTL per entry |
-| `SSLCOLLECTOR_SOCK_PEM_MAX` | `50000` | Maximum PEM cache entries before eviction |
-| `SSLCOLLECTOR_OFFLINE_CACHE` | `1` | Write/read on-disk snapshot for warm restart; set to `0` to disable |
+| `SSLCOLLECTOR_SOCK_ENABLE` | off when absent; the shipped `cfm.conf` sets `1` | Run the unix socket server. Without it the edge gets no certs from CFM. |
+| `SSLCOLLECTOR_SOCK_PATH` | `/var/run/sslcollector.sock` | Socket path for the daemon and the `cfm ssl` CLI. The edge Lua has the default path hardcoded (`SOCKS` in `sslcollector.lua`), so do not change it. |
+| `SSLCOLLECTOR_SOCK_TOKEN` | `placeholder` | Read only to create `/var/lib/cfm/secrets/sslcollector_sock_token` when that file is missing. Keep the line with `placeholder`. |
+| `SSLCOLLECTOR_SOCK_PEM_TTL` | `10m` | `/cert` PEM cache TTL per entry. |
+| `SSLCOLLECTOR_SOCK_PEM_MAX` | `50000` | `/cert` PEM cache size; when full the whole cache is cleared. |
+| `SSLCOLLECTOR_OFFLINE_CACHE` | `1` | Workers load `dump.json` at startup. `0` stops that only (see above). |
+| `SSLCOLLECTOR_LUA_TOKEN_PATH` | — | Parsed but ignored: the token mirror is always `/var/lib/cfm/lua/cfm_token.lua`. |
+
+Daemon environment variables: `CFM_SSLCOLLECTOR_FORCE_SNAPSHOT=1` (bypass the
+snapshot shrink guard), `CFM_SSLCOLLECTOR_RELOAD_EDGE_ON_READY=0` (no edge
+reload on first ready).
+
+## Diagnostics
+
+```bash
+cfm ssl stats [--json]          # pairs, exact hosts, wildcards, sources
+cfm ssl dump <host> [--json]    # what the disk scan and the daemon index hold for a host
+cfm ssl refresh                 # ask the daemon to Refresh (POST /refresh)
+```
+
+Each first asks the daemon to Refresh (skip with `--no-daemon-refresh`) and
+runs its own scan in the CLI process. On the edge, the `meta:*` keys in the
+`sslcache` shared dict (listed at the top of `sslcollector.lua`) and the
+`[sslcollector]` lines in the edge error log show each worker's state.
 
 ## Related files
 
 | Path | Purpose |
 |------|---------|
 | `internal/sslcollector/socketapi.go` | Unix socket HTTP server, endpoint handlers |
-| `internal/sslcollector/token.go` | Token validation, generation, Lua file writers |
-| `internal/sslcollector/lifecycle.go` | Start/stop/restart lifecycle wired to config |
-| `configs/lua/sslcollector.lua` | OpenResty/Angie Lua module (background poll + handshake hook) |
-| `configs/openresty.conf` | `init_worker_by_lua_block` + `ssl_certificate_by_lua_block` wiring |
-| `configs/angie.conf` | Same for Angie |
-| `/var/lib/cfm/lua/cfm_token.lua` | Auto-generated bearer token (0640 root:cfm) |
-| `/var/lib/cfm/lua/cfm_sslcollector_config.lua` | Auto-generated runtime flags (0640 root:cfm) |
-| `/var/lib/cfm/sslcollector/dump.json` | Offline snapshot (0640 root:cfm, contains key material) |
+| `internal/sslcollector/lifecycle.go` | Socket start/stop wired to config; token and Lua config mirrors |
+| `internal/sslcollector/token.go` | Lua file writers (`0640 root:cfm`) |
+| `internal/sslcollector/scan.go`, `sources.go`, `watcher.go` | Refresh, scanners, fsnotify watcher |
+| `internal/sslcollector/dumpall.go`, `snapshot.go` | Payload writer, `/dumpall` build, snapshot write and guard |
+| `internal/sslcollector/reload_edge.go` | One edge reload on first ready |
+| `configs/lua/sslcollector.lua` | Edge module (background poll + handshake hook) |
+| `configs/openresty.conf`, `configs/angie.conf` | `init_worker_by_lua_block` bootstrap + `ssl_certificate_by_lua_block` wiring |
+| `/var/lib/cfm/lua/cfm_token.lua` | Token mirror (`0640 root:cfm`) |
+| `/var/lib/cfm/lua/cfm_sslcollector_config.lua` | Runtime flags for the workers (`offline_cache`; `0640 root:cfm`) |
+| `/var/lib/cfm/sslcollector/dump.json` | Snapshot (`0640 root:cfm`, contains key material) |
 
 ---
 
-## Panel listeners (Angie + OpenResty, 12083 / 12087 / 12096)
+## Panel listeners
 
-The HTTPS panel listeners in both
-`configs/cfm-panel-listeners.conf.in` (rendered for Angie/OpenResty at install time) are wired with both:
+The HTTPS panel listeners in `configs/cfm-panel-listeners.conf.in` (12083,
+12087, 12096 and the DirectAdmin 12222; rendered for Angie or OpenResty by
+the installers and the package's proxy-config deploy) each carry:
 
-- Static fallback cert directives:
-  - `ssl_certificate /var/lib/cfm/certs/selfsigned/fullchain.pem;`
-  - `ssl_certificate_key /var/lib/cfm/certs/selfsigned/privkey.pem;`
-- Dynamic certificate hook:
-  - `ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }`
+- the static fallback cert `ssl_certificate /var/lib/cfm/certs/selfsigned/fullchain.pem;`
+  + `ssl_certificate_key /var/lib/cfm/certs/selfsigned/privkey.pem;`
+- the dynamic hook `ssl_certificate_by_lua_block { local sc = require "sslcollector"; sc.set_cert() }`
+- `ssl_protocols TLSv1.2 TLSv1.3`, as on the main HTTPS listener.
 
-They also explicitly use `ssl_protocols TLSv1.2 TLSv1.3` to stay compatible with
-main HTTPS listener TLS policy in `configs/angie.conf`.
-
-### Expected behavior
-
-- **Warmup / cache miss window:** on startup or when cert inventory is not yet
-  loaded for a hostname, the first handshake can briefly present the fallback
-  self-signed certificate.
-- **Steady state:** once sslcollector has loaded certs, SNI host-based
-  selection should present the tenant/domain certificate, not the localhost
-  self-signed fallback.
-
-### Config validation
-
-Use this repo check to enforce panel HTTPS server wiring for the canonical panel listener template:
-
-```bash
-scripts/tests/check_angie_panel_ssl_hooks.sh
-```
-
-The check fails if any `listen ... ssl` panel server block is missing either
-fallback cert directive or the sslcollector Lua hook.
+Until a worker has loaded the certs (startup) a handshake gets the
+self-signed fallback; after that SNI selects the domain's certificate.
+`scripts/tests/check_angie_panel_ssl_hooks.sh` fails if a `listen … ssl`
+panel server block lacks either fallback directive or the hook (it is not in
+the CI gate list; run it after editing the template).

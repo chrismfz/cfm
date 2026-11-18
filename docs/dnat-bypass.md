@@ -1,71 +1,56 @@
 # DNAT Source-IP Bypass
 
-Source-IP bypass lets trusted peers reach the underlying service
-(`cpsrvd`, Apache, DirectAdmin) **directly**, skipping CFM's DNAT
-redirect to openresty / angie. CFM otherwise sits in the prerouting
-chain rewriting destination ports so all incoming traffic flows through
-the challenge / WAF layer first. The bypass lifts that interception for
-a curated source-IP allowlist.
+CFM's DNAT redirects (`cfm dnat on` for the web ports, `cfm dnat cpanel on`
+for the panel ports, `docs/panel-dnat.md`) send incoming connections to the
+edge listeners, so they pass the challenge and WAF layer first. The bypass
+lists exempt chosen source addresses from that redirect: their connections
+reach the service on the original port (Apache/LiteSpeed, `cpsrvd`,
+DirectAdmin) directly. It is the effect of `cfm dnat off` /
+`cfm dnat cpanel off`, for those sources only.
 
-This is the same effect as running `cfm dnat off` or
-`cfm dnat cpanel off`, but **per-source-IP** instead of globally.
+A listed source loses everything the edge does on those ports: challenge,
+WAF, edge bans, panel guard, per-vhost policy. Use it only for peers you
+control; never for "skip the WAF for this customer".
 
 ## When to use it
 
-- **cPanel-to-cPanel WHM Transfer Tool source hosts.** The Transfer
-  Tool's `whm_xfer_download-ssl` rsync stream on port 2087 uses a
-  custom non-standard HTTP variant (`GET /acctxferrsync/<acct>?...`
-  with the rsync protocol streamed bidirectionally over the same
-  request) that breaks when wrapped by any HTTP-aware proxy. Listing
-  the source server's IP in the cPanel bypass file makes the WHM
-  transfer source connection hit `cpsrvd` natively — exactly as it
-  does with cpanel DNAT off — while panel filtering stays in place
-  for everyone else.
-
-- **Cluster peers.** Two or more nodes that talk to each other on
-  panel / web ports without needing the challenge layer.
-
-- **Migration sources from partner companies.** Trusted external
-  providers handing customer data over and using protocols (rsync
-  over HTTPS, dovecot dsync, raw socket pass-through) that don't
-  survive HTTP-aware intermediation.
-
-- **Anything where you control the source IP and prefer raw upstream
-  access over the CFM-mediated path.**
-
-Don't use it for "I want to skip the WAF for my customer" scenarios —
-listed IPs lose ALL of CFM's L4–L7 protection on the matching ports.
+- **cPanel WHM Transfer Tool.** `whm_xfer_download-ssl` on the destination
+  server opens one HTTPS connection to the source server's `:2087` and runs
+  rsync over it (`GET /acctxferrsync/…`), which no HTTP proxy handles. The
+  panel listeners hand `/acctxfer(rsync|dsync)` to a raw byte tunnel
+  (`configs/lua/cfm_panel_tunnel.lua`), so transfers normally work through
+  CFM. When one still hangs, list the **destination** server's IP in the
+  cPanel bypass on the **source** server: its connection then reaches
+  `cpsrvd` directly, as with panel DNAT off. The bypass matches the
+  connecting address, so always list the peer that opens the connection to
+  this node.
+- **Cluster peers** that talk to each other on web or panel ports.
+- **Migration sources** whose transport does not survive an HTTP-aware
+  intermediary.
 
 ## Two scopes, two files
 
-| Scope | File | nft table | Affects |
+| Scope | File | nft table | Exempts from |
 |---|---|---|---|
-| **Web** | `/etc/cfm/cfm.dnat_bypass` | `inet cfm_redirect` | `cfm dnat on`: 80 / 443 → openresty/angie |
-| **cPanel** | `/etc/cfm/cfm.dnat_cpanel_bypass` | `inet cfm_panel_redirect` | `cfm dnat cpanel on`: 2082 / 2083 / 2086 / 2087 / 2095 / 2096 / 2222 → 12082-12222 |
+| Web | `/etc/cfm/cfm.dnat_bypass` | `inet cfm_redirect` | `cfm dnat on`: tcp/80 → `:9080`, tcp+udp/443 → `:9043` (default listener ports) |
+| Panel | `/etc/cfm/cfm.dnat_cpanel_bypass` | `inet cfm_panel_redirect` | `cfm dnat cpanel on`: 2082/2083/2086/2087/2095/2096/2222 → 12082-12222 |
 
-The two scopes are independent. An IP listed in the cPanel file does
-*not* bypass the web DNAT, and vice versa. Add to both if you want
-both — common for a peer node that serves both web and panel traffic.
+The scopes are independent: an address in one file is still redirected by
+the other chain. List a peer in both when it uses both.
 
 ## File format
 
-Same as `cfm.allow` / `cfm.deny`:
-
-- one IP or CIDR per line
-- IPv4 and IPv6 both supported (single addresses and CIDR networks)
-- blank lines ignored
-- lines starting with `#` ignored
-- trailing `# comment` on a data line also ignored
-- entries are mask-normalised on add (`84.54.49.5/24` becomes
-  `84.54.49.0/24`) so `add` is idempotent against existing entries
-
-Example:
+- one IP or CIDR per line, IPv4 or IPv6
+- blank lines, `#` lines and anything after the first token (a trailing
+  `# comment`) are ignored
+- a CIDR is normalised to its network (`84.54.49.5/24` reads as
+  `84.54.49.0/24`)
+- an unparseable line is skipped (no rule)
+- packaged and CLI-created files are `0600 root:root`; keep them so
 
 ```text
 # /etc/cfm/cfm.dnat_cpanel_bypass
-
-84.54.49.205            # peer-cpanel-01 (transfer source)
-84.54.49.206            # peer-cpanel-02
+84.54.49.205            # peer-cpanel-01 (transfer destination)
 192.0.2.0/24            # internal management subnet
 2001:db8:cafe::/56      # ipv6 management range
 ```
@@ -73,270 +58,157 @@ Example:
 ## CLI
 
 ```bash
-# web scope
-cfm dnat bypass list
-cfm dnat bypass add    <IP|CIDR>
-cfm dnat bypass remove <IP|CIDR>
-cfm dnat bypass help
-
-# cPanel scope
-cfm dnat cpanel bypass list
-cfm dnat cpanel bypass add    <IP|CIDR>
-cfm dnat cpanel bypass remove <IP|CIDR>
-cfm dnat cpanel bypass help
+cfm dnat bypass list | add <IP|CIDR> | remove <IP|CIDR>          # web scope
+cfm dnat cpanel bypass list | add <IP|CIDR> | remove <IP|CIDR>   # panel scope
 ```
 
-`add` is dedup-safe: a duplicate add is a no-op (exit 0). `remove` of
-a non-present entry is also a no-op (exit 0) so the commands are safe
-to script.
-
-When DNAT is **on**, add / remove triggers an immediate re-render of
-the matching nftables table and the bypass takes effect for the next
-packet. When DNAT is **off**, the file is still persisted and the
-bypass applies on the next `cfm dnat on` / `cfm dnat cpanel on`.
-
-The help text is also reachable via `cfm dnat help`, `cfm dnat cpanel
-help`, `cfm dnat bypass help`, and `cfm dnat cpanel bypass help`.
+- `add` stores the normalised value; a duplicate is a no-op (exit 0).
+  `remove` (aliases `rm`, `del`, `delete`) of an absent entry is a no-op
+  (exit 0). `list` prints skipped lines on stderr and exits 1 when there
+  are any.
+- When the scope's DNAT is on, `add`/`remove` re-render its table at once
+  (web: at the live listener ports and priority; panel: at the saved panel
+  priority, `docs/panel-dnat.md`). If that fails, the old
+  rules stay in force, the file already has the change, and the command
+  exits 1. When the DNAT is off, the file is updated and applies on the next
+  `cfm dnat on` / `cfm dnat cpanel on`.
+- A hand edit of the file is not picked up by itself (a daemon restart
+  leaves a live table as it is): re-run `cfm dnat on` /
+  `cfm dnat cpanel on` with the options in use.
 
 ## How it renders in nftables
 
-Each bypass entry becomes one `accept` rule in the prerouting chain,
-inserted **between** the existing `iif "lo" accept` and the dport DNAT
-rules. nftables evaluates the chain top-to-bottom and the first
-matching rule wins — so a bypass match short-circuits before any NAT
-translation runs.
-
-Example chain after `cfm dnat cpanel on` with two bypass entries:
+Each entry becomes one `accept` rule placed after `iif "lo" accept` and
+before the port redirects, so a match leaves CFM's chain before any DNAT
+rule runs. Panel chain on the `nft` engine, with two entries:
 
 ```nft
 table inet cfm_panel_redirect {
     chain prerouting {
         type nat hook prerouting priority -101; policy accept;
-
-        iif "lo" accept                                                    # always-first loopback exemption
-        ip  saddr 84.54.49.205    accept comment "cfm_dnat_bypass"         # bypass
-        ip6 saddr 2001:db8::1     accept comment "cfm_dnat_bypass"         # bypass (ipv6)
+        iif "lo" accept
+        ip saddr 84.54.49.205 accept comment "cfm_dnat_bypass"
+        ip6 saddr 2001:db8::1 accept comment "cfm_dnat_bypass"
         tcp dport 2082 dnat to :12082
-        tcp dport 2083 dnat to :12083
-        tcp dport 2086 dnat to :12086
-        tcp dport 2087 dnat to :12087
-        tcp dport 2095 dnat to :12095
-        tcp dport 2096 dnat to :12096
+        ...
         tcp dport 2222 dnat to :12222
     }
 }
 ```
 
-A packet from `84.54.49.205` to `earth:2087` hits the second rule and
-is accepted as-is. The dport 2087 rule never fires, so the packet
-reaches the kernel socket on port 2087, i.e. `cpsrvd`. A packet from
-any other source to `earth:2087` falls through to the dport rule and
-gets DNAT'd to port 12087, i.e. the CFM panel listener.
+The web chain has the same shape with `tcp dport 80`, `tcp dport 443` and
+`udp dport 443` redirects.
 
-The web DNAT chain (`inet cfm_redirect`) follows the same pattern with
-`tcp dport 80 dnat to :HTTP_PORT` / `tcp dport 443 dnat to
-:HTTPS_PORT` rules instead of the panel ports.
+Both engines rewrite CFM's rules in the chain in one transaction (one
+`nft -f` / one netlink batch) on every `on` and every bypass change, so the
+order above always holds:
 
-## Backend implementations
+- `nft` engine: the entries go into the generated script
+  (`internal/firewall/nft/dnat.go` `dnatScript`, `panel_dnat.go`
+  `panelDNATScript`) with `comment "cfm_dnat_bypass"`. A skipped line is
+  only a `# WARNING` comment in that script.
+- `nftlib` engine: `internal/firewall/nftlib/dnat_bypass.go`
+  `dnatBypassRuleExprs` builds `meta nfproto ipv4|ipv6` + source-address
+  match (masked for a CIDR) + `accept`; the nfproto guard is needed because
+  the inet chain sees both families. The rules are tagged with the userdata
+  `cfm_dnat_bypass:v1:<value>` rather than an nft comment. A skipped line
+  is logged as a `bypass entry:` warning.
 
-CFM ships two firewall backends. Both implement bypass identically at
-the rule level; the difference is *how* the rules get into nftables:
+## What still applies to a bypassed source
 
-- **`nft` (shell-out, default).** The backend renders a complete `nft`
-  script as text and pipes it to the `nft` CLI. Bypass entries are
-  injected as `add rule ...` lines in the script between the loopback
-  accept and the dport DNAT lines. See
-  `internal/firewall/nft/dnat.go::dnatScript` and
-  `internal/firewall/nft/panel_dnat.go::panelDNATScript`.
+- **The input chain.** The bypass only skips the redirect. The connection
+  then reaches `inet cfm input` for the ORIGINAL port, where `cfm.deny`,
+  the block sets and the default drop still apply: the port must be open in
+  `TCP_IN`/`UDP_IN` (or the source allowed). The scoped `ct status dnat`
+  accepts that open the listener ports match only redirected connections,
+  so they do nothing for it.
+- **Other NAT chains.** A connection is NAT'd by the first nat chain that
+  rewrites it; CFM's `accept` rewrites nothing, so a later nat chain on the
+  same hook still runs. On an Imunify360 node whose WebShield redirect
+  covers these ports (Imunify's chain at -100, CFM's ahead of it), a
+  bypassed source goes to WebShield, not to the service directly.
 
-- **`nftlib` (netlink-direct, opt-in via `CFM_FIREWALL_ENGINE=nftlib`).**
-  The backend talks directly to the kernel via netlink using
-  `github.com/google/nftables`. Bypass entries are built as
-  `[]expr.Any` lists by
-  `internal/firewall/nftlib/dnat_bypass.go::dnatBypassRuleExprs`. The
-  emitted expressions are:
-  1. `meta load nfproto => reg1`
-  2. `cmp eq reg1 == ipv4|ipv6`
-  3. `payload @network base, offset 12/8, len 4/16 => reg1`
-  4. *(CIDR only)* `bitwise reg1 = reg1 & mask ^ 0`
-  5. `cmp eq reg1 == <network bytes>`
-  6. `verdict accept`
-
-  The leading `nfproto` check is required for inet-family chains: the
-  same chain sees both IPv4 and IPv6 packets, and reading source-IP
-  bytes from an IPv6 packet at an IPv4 payload offset would yield
-  garbage. The nfproto guard short-circuits to "rule doesn't match"
-  for packets of the wrong family.
-
-Both backends store bypass rules with a distinct `comment`
-("cfm_dnat_bypass") / UserData prefix (`cfm_dnat_bypass:v1:`) so they
-are easy to identify in `nft list table inet cfm_panel_redirect` and
-the nftlib reconciler doesn't accidentally treat them as DNAT rules to
-delete.
-
-## Failure modes and diagnostics
-
-### Verifying the rules landed
+## Verifying
 
 ```bash
-# Full table inspection — bypass rules will show up between iif lo and
-# the dport DNAT rules with the cfm_dnat_bypass comment.
-nft list table inet cfm_panel_redirect
-nft list table inet cfm_redirect
+cfm dnat cpanel bypass list
+nft list table inet cfm_panel_redirect     # or inet cfm_redirect for the web scope
 ```
 
-If you see your bypass entry in `cfm dnat cpanel bypass list` but NOT
-in the nftables output, either DNAT is off (the rule is queued for the
-next `on`) or you forgot to reload after manually editing the file
-instead of using the CLI. Re-run `cfm dnat cpanel on` to force a
-re-render.
+On the `nftlib` engine, `cfm dnat` / `cfm dnat cpanel status` print a
+rendering that leaves the bypass rules out; `nft list table` shows them on
+either engine. If an entry is in the file but
+not in the table, the DNAT is off or the file was hand-edited (see CLI
+above).
 
-### Verifying a packet is actually being bypassed
-
-The simplest end-to-end check is to look at the upstream service's
-access log. For cPanel, `tail /usr/local/cpanel/logs/access_log` on
-the **source** server during a transfer from a bypassed peer: requests
-should arrive with the actual client IP (not 127.0.0.1) and without
-the `X-Forwarded-For` header that the CFM panel listener would
-otherwise inject.
-
-For finer-grained tracing, drop in a counter rule (manually, won't
-survive a reload):
+End to end: during a transfer from a bypassed peer, `cpsrvd` on this node
+logs the peer's own address (`/usr/local/cpanel/logs/access_log`); through
+the panel listener it sees the proxy's local address instead. For a packet count, insert a counter
+rule by hand (it is gone at the next rebuild):
 
 ```bash
 nft 'insert rule inet cfm_panel_redirect prerouting ip saddr 84.54.49.205 counter accept'
-nft list table inet cfm_panel_redirect    # watch packets/bytes increment
+nft list table inet cfm_panel_redirect
 ```
 
 ### cPanel transfer still stuck at ~20% even with tunnel changes
 
-If `/acctxferrsync` still hangs after long-running tunnel fixes, the
-most common miss is not request buffering but **close propagation** on
-the return path:
+A transfer through the tunnel that sits at "20% Homedir" is usually close
+propagation, not buffering: `cpsrvd` finishes and sends FIN, the FIN does
+not reach `whm_xfer_download-ssl` promptly, and it keeps waiting on an
+established socket.
 
-1. `cpsrvd` finishes streaming and sends FIN.
-2. proxy path does not propagate FIN/RST promptly to the WHM transfer
-   client.
-3. `whm_xfer_download-ssl` keeps polling an ESTAB socket waiting for
-   the terminal close marker, and WHM UI sits at "20% Homedir".
+- Confirm which path the peer takes (bypassed direct `:2087` or tunnelled
+  `:12087`) with a counter rule or the logs.
+- Capture both ends while reproducing:
 
-Quick checks:
+  ```bash
+  tcpdump -ni any host <peer_ip> and tcp port 2087
+  tcpdump -ni any host <peer_ip> and tcp port 12087
+  ```
 
-- Confirm the source IP really hits the intended path (bypassed direct
-  `:2087` *or* tunneled `:12087`) with packet counters/logs.
-- Capture both ends during reproduction:
+  The upstream FIN should be mirrored to the client side quickly.
+  `scripts/debug/cpanel-transfer-capture.sh` runs a synchronised capture on
+  both servers, with and without the bypass.
+- The shipped tunnel locations already set `lingering_close off`; check a
+  local edit has not removed it.
+- An L4 device in the path (cloud LB, NAT gateway, IDS) can swallow a
+  half-close on a long-lived flow.
 
-```bash
-tcpdump -ni any host <peer_ip> and tcp port 2087
-tcpdump -ni any host <peer_ip> and tcp port 12087
-```
-
-You should see upstream FIN mirrored to the client side quickly. If
-not, the data pump can be correct while the session still appears hung.
-
-- Check for lingering-close behavior on the tunnel location. For these
-  transfer endpoints use `lingering_close off` so nginx/OpenResty
-  doesn't hold the connection open waiting for additional client bytes
-  after response completion.
-- If your environment has intermediate L4 devices (cloud LB, NAT GW,
-  IDS middleboxes), verify they are not normalizing away half-close
-  behavior on long-lived flows.
-
-When time-to-recovery matters, a source-IP DNAT bypass is a safe
-operational fallback for trusted transfer peers because it restores the
-exact direct-to-cpsrvd behavior while keeping mediation for all other
-sources.
-
-### Skipped (unparseable) entries
-
-If the CLI's `add` won't accept an entry it's not in the file. If you
-hand-edited the file with a malformed line, you'll see:
-
-- in `cfm dnat bypass list`, a stderr block listing the skipped lines
-- in the rendered nftables (when the `nft` backend is in use), a
-  `# WARNING: cfm.dnat_*_bypass skipped entry: …` comment in the
-  generated script
-
-Fix the malformed line and re-run `cfm dnat [cpanel] on` to reload.
-
-## Interaction with the rest of CFM
-
-- **Allow / deny lists (`cfm.allow`, `cfm.deny`).** Bypass operates on
-  the prerouting chain; allow / deny operate on the input chain.
-  They're orthogonal. A bypassed IP that's also in `cfm.deny` will
-  still be blocked at the input chain.
-- **Challenge engine.** A bypassed IP never reaches the openresty /
-  angie listener for the matching ports, so challenge pages and WAF
-  inspection don't apply to it. The challenge engine continues to
-  protect every other source.
-- **Imunify360 / WebShield.** Bypass rules run before any Imunify
-  chain CFM may delegate to. If you bypass an IP, Imunify also won't
-  see its panel traffic on those ports.
-- **`EnsureDNATAccepts` / `PanelDNATAcceptState`.** These maintain
-  scoped `ct status dnat` accepts in the input chain so DNAT'd
-  traffic from the prerouting chain can actually reach the local
-  listener. Bypass rules accept BEFORE the dnat redirect runs, so
-  `ct status dnat` never gets set for them — and these accept rules
-  don't apply to bypassed traffic. That's fine because bypassed
-  packets land directly on the original port (cpsrvd, Apache) whose
-  listening socket accepts them without needing the DNAT-tagged
-  accept.
+To recover quickly, bypass the destination's IP on the source server
+(`cfm dnat cpanel bypass add <dest_ip>`).
 
 ## Do the DNAT listener ports need to be in `TCP_IN`?
 
-**No.** `cfm dnat on` DNATs `tcp/80 → :9080` and `tcp+udp/443 → :9043`
-in prerouting, then installs scoped `ct status dnat` accepts in
-`inet cfm/input` so the translated traffic reaches the edge listener.
-These accepts match on the *original* destination port
-(`ct original proto-dst 80/443`), so they open `9080/9043` **only** for
-packets CFM itself redirected — you do not (and should not) add
-`9080/9043` to `TCP_IN`. `cfm dnat cpanel on` does the same for the
-panel listener ports (`12082..`, `12222`).
+No. `cfm dnat on` (tcp/80 → `:9080`, tcp+udp/443 → `:9043` by default) and
+`cfm dnat cpanel on` install scoped accepts in `inet cfm input` that match
+`ct status dnat` and the original destination port, so they open the
+listener ports only for connections CFM redirected. Do not add the listener
+ports to `TCP_IN`.
 
-Because the install happens inside `DNATOn`, it used to be invisible.
-`cfm dnat on` now prints one `Firewall: opened scoped 80->9080 tcp
-(nft cfm/input)` line per mapping (mirroring `cfm dnat cpanel on`), and
-`cfm dnat` status prints a **Scoped DNAT accepts** block reporting each
-mapping as:
+`cfm dnat on` prints one `Firewall: opened scoped 80->9080 tcp (nft cfm/input)`
+line per mapping, and `cfm dnat` (status) lists each mapping under
+**Scoped DNAT accepts** as:
 
-- `open` — accept present and effective;
-- `BLOCKED` — accept present but sitting *after* the default drop (run
-  `cfm dnat off` then `cfm dnat on` to reinstall it before the drop);
-- `ABSENT` — no accept found.
+- `open`: present and ahead of the default drop;
+- `BLOCKED`: present but after the default drop (`cfm dnat off` then
+  `cfm dnat on` reinstalls it);
+- `ABSENT`: not installed.
 
-If every mapping reads `open` but a non-allowlisted client still can't
-reach the site, the drop is **upstream of CFM**, not a missing CFM
-rule — check for an external firewall filtering the listener ports
-(CSF/Imunify `INPUT` at priority `filter`/`0` runs *after* CFM's input
-chain and does not know about `9080/9043`), or an edge proxy that only
-listens on `127.0.0.1` instead of the public address DNAT preserves.
-
-## Security considerations
-
-- A bypassed IP completely opts out of CFM's panel / web mediation on
-  the matching ports. The challenge layer, the WAF, the open-redirect
-  guard, the panel-token transport, and any per-vhost policy do not
-  apply to it. Treat the bypass file as a security-critical asset.
-- File permissions are `0600 root:root` (both CLI-created files and the
-  packaged templates). Don't loosen them.
-- Each entry should be a specific IP or a small CIDR. Avoid catch-all
-  ranges like `0.0.0.0/0` or `::/0`; those would defeat the entire
-  DNAT.
-- Audit periodically. `cfm dnat bypass list` and
-  `cfm dnat cpanel bypass list` show every entry; pipe through
-  configuration management to track drift.
+If every mapping is `open` and a client still cannot connect, the drop is
+outside CFM: an external firewall filtering the listener ports (a CSF or
+Imunify `INPUT` chain runs after CFM's input chain and knows nothing of
+them), or an edge proxy listening only on `127.0.0.1`.
 
 ## Implementation map
 
 | File | Role |
 |---|---|
-| `configs/cfm.dnat_bypass` | Sample / packaged config for the web scope |
-| `configs/cfm.dnat_cpanel_bypass` | Sample / packaged config for the cPanel scope |
-| `internal/firewall/dnat_bypass.go` | Shared: file parsing, validation, scope types |
-| `internal/firewall/nft/dnat.go` | `nft` backend: web DNAT script with bypass injection |
-| `internal/firewall/nft/panel_dnat.go` | `nft` backend: cPanel DNAT script with bypass injection |
-| `internal/firewall/nftlib/dnat_bypass.go` | `nftlib` backend: bypass `expr.Any` builders |
-| `internal/firewall/nftlib/challenge.go` (`installDNATRules`) | `nftlib` backend: web DNAT bypass reconciler |
-| `internal/firewall/nftlib/panel_dnat.go` (`PanelDNATOn`) | `nftlib` backend: cPanel DNAT bypass placement |
-| `internal/dnat/bypass.go` | CLI handler: add / remove / list, reload trigger |
+| `configs/cfm.dnat_bypass`, `configs/cfm.dnat_cpanel_bypass` | Packaged files (`/etc/cfm/`, conffiles, `0600 root:root`) |
+| `internal/firewall/dnat_bypass.go` | Paths, parsing, scopes, `nft` rule text |
+| `internal/firewall/nft/dnat.go`, `nft/panel_dnat.go` | `nft` engine: web / panel table scripts |
+| `internal/firewall/nftlib/dnat_bypass.go` | `nftlib` engine: bypass expressions |
+| `internal/firewall/nftlib/challenge.go` (`installDNATRules`, `installEdgeDNATRules`) | `nftlib` engine: web chain rebuild |
+| `internal/firewall/nftlib/panel_dnat.go` (`PanelDNATOn`) | `nftlib` engine: panel table rebuild |
+| `internal/dnat/bypass.go` | CLI: list / add / remove, re-render |
 | `internal/dnat/cli.go` | Dispatch: `cfm dnat bypass`, `cfm dnat cpanel bypass` |
