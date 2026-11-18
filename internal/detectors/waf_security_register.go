@@ -167,10 +167,10 @@ func init() {
 		// Phase 1: only edge-BLOCK hits feed the counter ("block at WAF → nft
 		// candidate"). This scopes autoblock to what the edge itself already
 		// blocks — the high-confidence, rule-accurate set — rather than every
-		// rule in a family: a family like WAF_RCE spans block rule 320 AND
-		// logonly 322-327, and WAF_BACKDOOR block rule 440 with the logonly /
-		// challenge 430-439, so family-only keying would pull in logonly /
-		// challenge recon. Phase 2 will
+		// rule in a family: a family like WAF_RCE spans block rules 320/329/332
+		// AND challenge_v2 322-327, and WAF_BACKDOOR block rules 438/440 with
+		// the logonly / challenge_v2 430-439, so family-only keying would pull
+		// in logonly / challenge recon. Phase 2 will
 		// relax this to also feed challenge-tier families (bot-persistence).
 		webdetector.SubscribeWAFHitEvents(func(ev webdetector.WAFHitEvent) {
 			if ev.Action != "block" {

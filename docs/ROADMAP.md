@@ -20,7 +20,7 @@ Last full review: 2026-11-18.
 
 Behaviour + FP runbooks: **`docs/waf.md`**, `docs/challenge-waf-release-checklist.md`.
 WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
-(backlog: `WAF_CVE_PLAN.md`). Pre-merge numbers: `make waf-corpus` (BlazeHTTP).
+(as-built, backlog, "CVE hunting" recipe). Pre-merge numbers: `make waf-corpus` (BlazeHTTP).
 
 - **WAF false-positive tuning** — [track, never "done"]. Against real apps
   (Joomla K2/elFinder, `/.well-known/`, WP migration/backup imports). Promote
@@ -92,7 +92,7 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
 
 ## 2. Panel enforcement (edge unification follow-up)
 
-Edge unification is done (as-built: `docs/edge-unification-plan.md`): panel
+Edge unification is done (decisions + open items: `docs/edge-unification-plan.md`): panel
 WAF + bridge decision enforce by default (`PANEL_WAF_MODE` /
 `PANEL_DECISION_MODE`), the blanket panel challenge is kept on purpose.
 
@@ -166,8 +166,9 @@ per-ability tokens.
 Design: `docs/detectors-config-unification.md`. Shipped: `srcresolve` (auto
 source detection) and `detectors.d` overlays (`detconf` layering).
 
-- **Global `[leniency]` fallback + persisted auto-tokens** — [next] (doc §9 PR 6).
-- **Stock `detectors.conf` converged defaults** — [next] (doc §9 PR 7). A
+- **Global `[leniency]` fallback** — [next] (doc §8 PR 6; the persisted tokens
+  shipped, `internal/hostsecrets`).
+- **Stock `detectors.conf` converged defaults** — [next] (doc §8 PR 7). A
   behaviour change on hosts that inherit defaults: ships alone.
 - **Fleet migration** — [track, operator]. Move each node's deltas to an
   overlay; `config_drift` reports a clean base.

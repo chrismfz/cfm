@@ -175,7 +175,7 @@ func webDNATOrderFinding(ctx context.Context, sev *severityTracker) map[string]a
 	// Imunify's filter accepts its graylist / captcha sets only on WebShield's
 	// own ports and drops them on every other (9080/9043 included): with CFM
 	// first, a graylisted direct visitor is dropped, not challenged
-	// (docs/imunify-webshield-parity.md, P3).
+	// (docs/imunify360-gap-analysis.md, W3).
 	next := "set NFT_DNAT_PRIORITY = " + itoa(want) + " in /etc/cfm/cfm.conf and run `cfm dnat on --priority " + itoa(want) +
 		"` (one transaction; the redirect never lapses). Clients on Imunify's graylist then get no WebShield captcha: " +
 		"Imunify's own filter drops their new connections to the edge's ports"

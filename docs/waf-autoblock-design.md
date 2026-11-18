@@ -1,275 +1,225 @@
 # WAF → autoblock via the detector framework — design
 
-> **Status: PHASE 1 IMPLEMENTED.** The `waf_security` detector, the
-> `SubscribeWAFHitEvents` hook (published from `Engine.RecordWAFTrigger`), and
-> the `[waf_security]` + `[waf_security.leniency]` config all exist. Phase 1 is
-> scoped to **edge-`block` hits only** — the subscribe callback drops any hit
-> whose edge action isn't `block`, so only what the WAF already blocked feeds
-> the counter ("block at WAF → nft candidate"). Among those, the opted-in
-> families `SQLI`/`RCE`/`BACKDOOR`/`UPLOAD_EXPLOIT` are ON at threshold 1; all
-> challenge-tier families ship at `0`. It ships enforcing a **soft TTL block**
-> (`BLOCK = "6h"`, self-healing) rather than `permanent`; `DRY_RUN = 1` remains
-> available for a pure watch-first burn-in, and GR/CY get a 15m lenient tier.
-> Phase 2 (relax the action gate + turn on challenge-tier families from live
-> data) and Phase 3 (per-/24 escalation) are still design-only, as is the
-> Phase-2 edge-ban-dict retirement below.
+**Status.** Phase 1 is built: the `waf_security` detector
+(`internal/detectors/wafsec/`, registered in
+`internal/detectors/waf_security_register.go`), the per-hit hook
+`webdetector.SubscribeWAFHitEvents` (published from
+`Engine.RecordWAFTrigger`), and the `[waf_security]` +
+`[waf_security.leniency]` sections of `configs/detectors.conf`. Only
+**edge-`block` hits** feed it, and it ships a **soft TTL block**
+(`BLOCK = "6h"`) with a GR/CY 15 min lenient tier. Phase 2 (feed
+challenge-tier hits) and Phase 3 (per-/24 / per-ASN escalation) are not
+built. Which families and rules can ban: "Arming" below; the code registry
+is the source.
 
 ## Motivation
 
-Two things came together:
+A 6-server `cfm.waf.log` review (2026-07) found the SQLi families 100%
+precise (24/24 `WAF_SQLI`, 188/188 `WAF_SQLI_LEXICAL`, 0 FP) and dominated by
+**distributed** campaigns (one error-based sqlmap sweep used ~180 rotating
+proxy IPs against one host). A per-request `block` stops each request, but
+the same IPs keep coming: there was no persistent, cross-request L3/L4 ban.
+The ban should live where every other detector ban lives: nftables
+(`cfm which` / `cfm search`), `cfm.detectors.log`, the cfm-web unblock API
+(who / where / why / which rule) and the notifier.
 
-1. A 6-server `cfm.waf.log` review (2026-07) showed the SQLi families are
-   **100% precise** (24/24 `WAF_SQLI` TP, 188/188 `WAF_SQLI_LEXICAL` TP, 0 FP),
-   dominated by **distributed** campaigns (one error-based sqlmap sweep used
-   ~180 rotating proxy IPs against a single host). Per-request `block` stops
-   each request, but the same IPs keep coming — there is no persistent,
-   L3/L4, cross-request ban.
-2. The edge currently tracks bans in an **in-RAM shared-dict** that is hard to
-   inspect ("is this customer IP blocked, and why?"). We want a **single
-   source of truth**: the block lives in **nftables** (queryable via
-   `cfm which <ip>` / `cfm search`), is logged to **`cfm.detectors.log`**,
-   flows to the **cfm-web unblock API** (who/where/why/which-rule), and is
-   **emailed** like every other detector block (filterable by country/ASN in
-   the operator's inbox).
-
-The insight: **this is not a new mechanism.** CFM already has a detector that
-does exactly "subscribe to a webdetector event stream → score per IP → block
-via the shared framework (with leniency, allow-lists, blocklist, API, email)":
-`internal/detectors/api_abuse_register.go`. The WAF-block detector is the same
-shape with a new signal source.
+This is not a new mechanism. `internal/detectors/api_abuse_register.go`
+already did "subscribe to a webdetector event stream → count per IP → block
+through the shared framework (leniency, allow-lists, blocklist, API,
+email)". `waf_security` is the same shape with a new signal source.
 
 ## Principle
 
-> **The WAF *detects* (in-path, per-request). The detector framework
+> **The WAF *detects* (in-path, per request). The detector framework
 > *decides the persistent block* (cross-request, stateful, geo-aware).**
 
-The Lua WAF is stateless per request and must not own ban-state, geo logic, or
-leniency. Those already live in the detector framework. So we feed WAF hits
-into a new detector and reuse everything downstream. This matches the layering
-in `CLAUDE.md` (WAF detects in-path; web-detector does behavioural scoring →
-block).
+The Lua WAF is stateless per request and must not own ban state, geo logic
+or leniency. The detector only emits `core.Alert`; blocking, leniency, API
+reporting, the edge ban store and email are the section sink's job
+(`internal/detectors/autoblock_sink.go`).
 
 ## Two orthogonal decisions (read this first)
 
-There are **two independent knobs**, and conflating them is the easy mistake:
+There are two independent knobs, and conflating them is the easy mistake:
 
-1. **Edge WAF action** — what happens to *this* request, right now (in Lua):
-   `logonly` (log) / `challenge` (interstitial) / `block` (**403 now**).
-2. **`[waf_security]` threshold** — how fast this **IP** accrues toward a
-   **persistent nft block** (in the detector). This is fed by **every WAF hit
-   whose family threshold is > 0**, *independent of the edge action*.
+1. **Edge WAF action** — what happens to *this* request, in Lua:
+   `logonly` / `challenge` / `challenge_v2` / `block` (403 now).
+2. **`[waf_security]` threshold** — how many hits in `WINDOW` move this
+   **IP** to a **persistent nft ban**, per reason family (`0` = never).
 
-They are orthogonal, and often diverge:
+The detector itself scores by family threshold and ignores the edge action
+(`WAFHitEvent.InputEvent()` does not carry it). **Phase 1 adds one gate in
+front of it:** the subscribe callback in `waf_security_register.go` drops
+every hit whose action is not `block`. So today:
 
-| Family | Edge action (now) | `[waf_security]` | Result |
+| Family (example) | Edge action | `[waf_security]` | Result |
 |---|---|---|---|
-| `WAF_SQLI` | `block` = 403 now | `SQLI=1` | 403 now **+** instant nft ban |
-| `WAF_BAD_UA` | `challenge` now | `BAD_UA=40` | challenge now **+** nft after 40 in WINDOW |
-| `WAF_AUTH_BURST` | `challenge` now | `AUTH_BURST=0` | challenge now **+** NEVER nft |
-| `WAF_SUPERGLOBAL` | `logonly` | `=0` | log only, nothing else |
+| `WAF_SQLI` (301) | `block` | `SQLI = 1` | 403 now **+** nft ban on the first hit |
+| `WAF_TRAVERSAL` (101) | `block` | `TRAVERSAL = 0` | 403 now, no ban |
+| `WAF_BAD_UA` (201) | `challenge_v2` (score ≥ 99: `block`) | `BAD_UA = 0` | edge only, no ban |
+| `WAF_SUPERGLOBAL` (318) | `challenge_v2` | `SUPERGLOBAL = 0` | edge only |
 
-The counter is **not** "only fed by `block` hits": a `challenge`-mode family
-(`WAF_BAD_UA`) still accumulates toward nft — otherwise a forever-challenged
-scanner flood would never get an L3/L4 ban. Once the nft ban lands, the IP is
-dropped **before** it reaches the edge; during the ≤`EVERY` window before that,
-the edge action (403 / challenge) covers the requests.
+A family with no block-tier rule is inert in Phase 1 **whatever its
+threshold**: setting `BAD_UA = 40` does nothing until the gate is relaxed.
+The family split is still needed inside one family, because families mix
+tiers (`WAF_RCE`: block 320 / 329 / 332, challenge_v2 322-327, logonly
+331; `WAF_BACKDOOR`: block 438 / 440, challenge_v2 437, logonly the rest of
+430-439): keying on family alone would ban logonly recon. The Lua side keeps
+the tiers apart as well (`should_push`, "Flow").
 
-**Why feeding the counter from `challenge` hits is safe — clearance self-cleans
-it.** A `challenge` isn't only a gate; passing it mints a **clearance** for a
-TTL (~1h). During that window the WAF's challenge-tier rules don't re-fire for
-that IP, so **a human who solves the challenge emits zero further challenge
-events** and never approaches the threshold — while also getting a reassuring
-"you're protected" interstitial and ~1h of frictionless browsing. The only IPs
-that keep generating `challenge`-tier hits are the ones that *never clear it*,
-i.e. bots ignoring the interstitial. So the nft counter, when fed by a
-challenge-tier family, is effectively a **bot-persistence** counter: it rises
-for clients that repeatedly trip the rule *without* proving human, and stays
-flat for anyone who solved it once. That is the whole point of the split —
-"show the challenge" and "count it as an nft candidate" are different acts, and
-clearance is what keeps the second from ever touching a real customer.
+**Why feeding challenge-tier hits would be safe (the Phase 2 design).**
+Passing a challenge mints a clearance (~1 h), and while it holds the
+challenge-tier rules do not re-fire for that client. A human who solves the
+challenge once emits no further challenge-tier hits and never nears a
+threshold; the clients that keep generating them are the ones that never
+clear it. Fed by a challenge-tier family, the nft counter is a
+**bot-persistence** counter. "Show the challenge" and "count it as an nft
+candidate" are different acts, and clearance keeps the second off real
+visitors. That is why the emit path publishes every hit and the gate sits
+in the subscribe callback: Phase 2 is a change to that one gate plus
+per-family thresholds, not to the emit path.
 
 ## Flow
 
 ```
- Lua WAF rule fires (record())            configs/lua/cfm_waf.lua
-        │  per-hit event
+ Lua WAF rule fires, record()                 configs/lua/cfm_waf.lua
+        │  cfm.lua pushes the HEADLINE hit only (ip_push),
+        │  de-duped by should_push (below)
         ▼
- webdetector.SubscribeWAFHitEvents(...)   NEW hook (Phase 1)
+ Engine.RecordWAFTrigger → publishWAFHitEvent  internal/webdetector/waf_hit_events.go
+        │  WAFHitEvent (every tier)
+        ▼
+ subscribe callback: Action != "block" → drop   waf_security_register.go
         │  core.InputEvent
         ▼
- wafsec.Detector  (copy of apiabuse)      internal/detectors/wafsec/
-        │  per-IP counters per reason-family, thresholds, allow-lists
-        ▼  core.Alert{Kind:"WAF/SQLI", Key:ip, Extra:{rule_id,host,uri,…}}
- shared detector framework
-        ├── leniency (GR/CY → temp ban, lenient blocklist)   [waf_security.leniency]
-        ├── nftables block (permanent / TTL)                 cfm which / cfm search
-        ├── cfm.detectors.log                                one line per block
-        ├── cfm-web unblock API (who/where/why/rule)
-        └── email notification                               filter by country/ASN
+ wafsec.Detector                               internal/detectors/wafsec/
+        │  allow-lists, per-(ip, family) sliding counter, threshold
+        ▼  core.Alert{Kind:"WAF/<family>", Key:ip, Extra:{rule_id, host, uri, …}}
+ section sink                                  internal/detectors/autoblock_sink.go
+        ├── leniency ([waf_security.leniency])
+        ├── nft block (BLOCK: TTL / permanent / dryrun / no)
+        ├── edge ban store, for proxied clients (internal/edgeban, below)
+        ├── cfm.detectors.log
+        ├── cfm-web API (fleet blocklist, or lenient-only)
+        └── notifier (Slack / mail)
 ```
+
+**Edge push de-dup.** `cfm_waf.lua` `should_push` keys its
+`push_cooldown_sec` (60 s) window on `(ip, reason family, action tier)`,
+plus the rule id for the `block` tier: a family can mix armed and held block
+rules, and a held rule's push must not swallow an armed one's. At threshold
+1 this is harmless (the first block hit is what counts); an accumulating
+threshold counts cooldown windows, not raw hits.
+
+**Headline only.** `record()` gives the headline to the first block-tier hit
+and `goto done` ends evaluation; `cfm.lua` pushes only the headline. So the
+family `wafsec` sees on a request that trips two block rules is whichever
+ran first. Held rules therefore run late ("Decision record" below).
 
 ## Event → Alert contract
 
-The existing `core.InputEvent` (in `internal/detectors/core/input_event.go`)
-already carries everything we need — no struct change:
+`core.InputEvent` (`internal/detectors/core/input_event.go`) carries the
+hit, with no WAF-specific struct:
 
 | `core.InputEvent` field | WAF value |
 |---|---|
 | `Source` | `"waf"` |
-| `Reason` | reason family, e.g. `"WAF_SQLI"` (drives per-family thresholds) |
-| `Signal` | the specific `rule_id`, e.g. `"301"` / `"309"` (drill-down attribution) |
-| `Scope` | the vhost / `host` |
-| `SrcIP` | client IP (the block/counter key) |
-| `Path` | request URI · `Method` / `Status` / `UserAgent` from the request |
-| `When` | hit timestamp |
+| `Reason` | the raw reason, e.g. `WAF_SQLI:UNION_SELECT`; the family is the part before the first `:` |
+| `Signal` | the rule id as a string (`"301"`); `""` when the edge sent none |
+| `Scope` | the host |
+| `SrcIP` | the client IP (counter and block key) |
+| `Path` / `Method` / `UserAgent` | from the request |
+| `When` | hit time |
 
-Note: **country/ASN are NOT carried in the event** — the framework's leniency
-layer geo-resolves the IP at block-decision time (that's how
-`[exim_security.leniency] MATCH_COUNTRY` already works). One less thing for the
-WAF to plumb.
+Country / ASN are not in the event: the sink's leniency resolves the IP at
+block time, as for every other section. The TLS fingerprint is not in it
+either, by design (`CLAUDE.md` §6, traffic classifier: no signal keys
+enforcement on a fingerprint automatically).
 
-The detector emits `core.Alert` (in `internal/detectors/core/types.go`),
-mapping family → `Kind` and specifics → `Extra`:
+The detector emits (`wafsec/detector.go`):
 
 ```go
 core.Alert{
-    Kind: core.AlertKind("WAF/SQLI"),      // family: grouping, thresholds, inbox filter
-    Key:  ev.SrcIP,                        // the IP
+    Kind:  "WAF/" + strings.TrimPrefix(family, "WAF_"), // WAF/SQLI, WAF/UPLOAD_FNAME, …
+    Key:   ev.SrcIP,
+    Count: count,                                       // hits in WINDOW
     Extra: map[string]string{
-        "rule_id": ev.Signal,              // 301 / 309 — per-rule drill-down
-        "reason":  ev.Reason,              // WAF_SQLI / WAF_SQLI_LEXICAL
-        "host":    ev.Scope,               // where
-        "uri":     ev.Path,                // where
-        "action":  "block", "ttl": "...",  // set by the enforcement tier
+        "ip", "source", "reason", "family", "rule_id", "host", "uri", "method",
+        // WAF_CVE with a CVE_* reason tag: Kind = "WAF/CVE-2025-34085", plus "cve"
+        // DRY_RUN = 1: "enforcement": "dryrun" (the sink logs "would block")
     },
 }
 ```
 
-### Per-rule visibility (the "who is blocked, and by which rule" requirement)
+### Per-rule visibility
 
-Attribution lives at **two levels at once**, so both queries work:
+Attribution lives at two levels:
 
-- **By family** — `Kind = WAF/SQLI` vs `WAF/RCE` vs `WAF/UPLOAD`: grouping,
-  per-family thresholds, and inbox rules by country/ASN.
-- **By specific rule** — `Extra["rule_id"]`: e.g. `grep 'rule=309'
-  cfm.detectors.log` shows exactly who was blocked by the lexical rule vs 301.
+- **By family** — `Kind` (`WAF/SQLI`, `WAF/RCE`, `WAF/UPLOAD_FNAME`, …):
+  one counter and threshold per family, notifier grouping.
+- **By rule** — `Extra["rule_id"]`, so `cfm.detectors.log` shows whether
+  301 or 309 banned an IP. For `WAF_CVE` the `Kind` itself names the
+  vulnerability (`WAF/CVE-YYYY-NNNN`, `cveFromReason`).
 
-Example block line (log / email / API):
+## Arming — which families and rules can ban
 
-```
-WAF/SQLI  ip=185.199.197.32  rule=301 reason=WAF_SQLI  host=alexandras.gr
-          uri=/wp-admin/admin-ajax.php?action=ays_sccp…SLEEP(6)…
-          action=block(permanent) count=1
-```
+The default threshold of a family is `1` iff it has an edge-`block` rule
+(`webdetector.WAFFamilyHasBlockRule`: some `DefaultMode: "block"` in
+`internal/webdetector/waf_rule_ids.go`), except a family in
+`heldAutoblockFamilies`, which defaults to `0`. A rule with
+`HoldAutoblock: true` defaults its `RULE_<id>` to `0` while its family stays
+armed. An operator's family key or `RULE_<id>` in `detectors.conf` wins over
+both (`RULE_<id>` also wins over the family).
 
-`Kind` is a free string; if per-rule grouping is ever wanted at the top level,
-it can be `WAF/SQLI/309`. Default recommendation: **family in `Kind`
-(one counter/threshold per family), `rule_id` in `Extra`** (full per-hit
-attribution) — the same split `cfm_endpoints` uses for its stages.
+The registry today:
 
-## Config schema — mirrors `exim_security`
+| Family (config key) | Block rules | Held in code | Default |
+|---|---|---|---|
+| `SQLI` | 301 | — | 1 |
+| `SQLI_LEXICAL` | 309 | — | 1 |
+| `RCE` | 320, 329, 332 | — | 1 |
+| `UPLOAD_FNAME` | 401, 414 | — | 1 |
+| `UPLOAD_CONTENT` | 402 | — | 1 |
+| `WEBSHELL` | 413 | — | 1 |
+| `BACKDOOR` | 438, 440 | `RULE_440` | 1 |
+| `PHP_WRAPPER` | 305 | — | 1 |
+| `AUTH_BURST` | 510, 511, 512 | `RULE_511` | 1 |
+| `CVE` | every 10xxx rule (10001-10030) | `RULE_10020`, `RULE_10022`, `RULE_10026`, `RULE_10028` | 1 |
+| `JS_PROTO` | 303 | `RULE_303` | 1 |
+| `XXE` | 307 | `RULE_307` | 1 |
+| `PHP_WEBSHELL_BODY` | 416 | `RULE_416` | 1 |
+| `TRAVERSAL` | 101, 103 | the family (`heldAutoblockFamilies`) | **0** |
 
-```ini
-[waf_security]
-ENABLED = 1
-EVERY   = "20s"          ; evaluation cadence
-WINDOW  = "30m"          ; rolling per-IP counter window
-SAMPLE_LIMIT = 10
-COOLDOWN = "20m"
+Every other family has no block rule, defaults to `0` and is inert in
+Phase 1. Every family is a knob (key = family minus `WAF_`), and
+`TestWAFSecurityFamilyCoverage` asserts the whole registry is covered and
+the armed / held defaults. The per-rule and per-family rationale (why each
+hold, the volumes) is in the comments of `configs/detectors.conf`
+`[waf_security]` and `waf_security_register.go`; it is not repeated here.
 
-; Per-IP thresholds by WAF reason FAMILY (hits in WINDOW → block).
-; Confirmed-malicious families = instant (1); noisy/probe = accumulate;
-; 0 = never autoblock (family stays edge-only: logonly/challenge as configured).
-; Defaults justified by the 6-server 2026-07 review (0 FP on the injection set).
-;
-; --- PHASE 1 (SHIPPED ON): only edge-`block` HITS feed the counter. ---
-; AS IMPLEMENTED: the subscribe callback drops any hit whose edge action isn't
-; `block`, and the config key for a family is its name minus WAF_ (so the
-; grouped `UPLOAD_EXPLOIT` below is really two keys, UPLOAD_FNAME + UPLOAD_
-; CONTENT). Because only edge-`block` hits feed, only families that HAVE a
-; block-tier rule can ever fire in Phase 1 — as of 2026-09-05 (source: the Go
-; registry, DefaultMode "block"): WAF_SQLI (301), WAF_SQLI_LEXICAL (309),
-; WAF_RCE (320, 329), WAF_UPLOAD_FNAME (401, 414), WAF_UPLOAD_CONTENT (402),
-; WAF_WEBSHELL (413, the proper-noun drop-path subset, added 2026-07-03),
-; WAF_CVE (10001+), WAF_PHP_WRAPPER (305), WAF_AUTH_BURST (510-512) and
-; WAF_TRAVERSAL (101, promoted 2026-09-05; 103, raw-path, added 2026-09-22). All default to 1 except WAF_TRAVERSAL, held at 0 through its
-; burn-in (volume: ~2 300 scanner IPs/week fleet-wide); its step runs after every
-; armed block family in cfm_waf.lua so it cannot shadow their bans. WAF_WEBSHELL was HELD at 0 through burn-in — a webshell
-; GET-probe (`/c99.php`) is also what benign scanners (Shodan/Censys/monitors)
-; do — but as of 2026-07-18 the operator runs it armed fleet-wide and confirms it
-; cleanly bans malicious scanners/scrapers/bots, so it now arms to 1 by default
-; like the rest. BACKDOOR was armed to 1 before it had a block rule; its first,
-; 440 (the fake-plugin dropper's command call), landed 2026-11-04 with its own
-; ban held per rule (RULE_440 = 0) through a burn-in.
-; Every family is a knob and the full registry is covered automatically
-; (TestWAFSecurityFamilyCoverage).
-SQLI            = 1      ; WAF_SQLI (301, block). Separate key SQLI_LEXICAL (309)
-                        ;   is challenge-tier → inert in Phase 1.
-RCE             = 1      ; WAF_RCE (has block rule 320)
-BACKDOOR        = 1      ; WAF_BACKDOOR (block rule 440, ban held: RULE_440 = 0)
-UPLOAD_EXPLOIT  = 1      ; = UPLOAD_FNAME (401) + UPLOAD_CONTENT (402), both block
-WEBSHELL        = 1      ; WAF_WEBSHELL (413, block) — armed by default (2026-07-18).
-                        ;   Exempt a benign scanner with ALLOW_UA_CONTAINS/ALLOW_NETS
-                        ;   or hold the rule with RULE_413 = 0 if needed.
-;
-; --- PHASE 2 (SHIP AT 0; raise per-family once live data confirms): ---
-; edge-`challenge` families. They keep triaging humans vs bots at the edge; we
-; only start feeding the persistent counter after observing real accrual rates.
-; Intended (not-yet-active) values kept here as guidance:
-XXE             = 0      ; (intended 2) WAF_XXE (307)
-SSRF            = 0      ; (intended 2) WAF_SSRF (7xx)
-BAD_UA          = 0      ; (intended 40) WAF_BAD_UA (201) — scanner floods
-IP_HOST         = 0      ; (intended 25) WAF_IP_HOST (602) — bare-IP-Host scanners
-;
-; --- NEVER feed autoblock (stay 0 permanently): ---
-; AUTH_BURST: a legitimate admin/dev doing bulk WordPress logins across many
-; sites once tripped an auth-burst *block* (real incident). It stays
-; edge-`challenge` (rule 501, a human solves it in the browser); it must never
-; become a persistent nft ban here.
-AUTH_BURST      = 0      ; WAF_AUTH_BURST (501/502/510-512) — edge-challenge only
-SUPERGLOBAL     = 0      ; WAF_SUPERGLOBAL (318, challenge_v2) — edge-challenge only
-BAD_UTF8        = 0      ; WAF_BAD_UTF8 (611, disabled) — off (FP-only, 2026-09-23)
+**Promoting a rule to `block` silently arms its family** on every node whose
+`detectors.conf` does not list it. Decide the autoblock intent in the same
+change: arm, hold the rule (`HoldAutoblock`), or hold the family
+(`heldAutoblockFamilies`). A held block rule must also run late in
+`cfm_waf.lua` (next section).
 
-; Per-RULE overrides (by numeric rule id) win over the family default above.
-; For rules that behave differently from their family — tighten the ones that
-; are almost-always-attack, loosen the noisy ones — same idea as
-; exim_security's core-rule + per-signal "specials".
-;RULE_511 = 1           ; xmlrpc pingback: re-arm (held in code since 2026-10-15)
-;RULE_501 = 25          ; generic auth-burst: extra-lenient (bulk-admin devs)
-;RULE_411 = 1           ; webshell-ping fingerprint: instant
+**Config keys** (`[waf_security]`): `ENABLED`, `EVERY` (20 s), `WINDOW`
+(30 m), `SAMPLE_LIMIT` (10), `DRY_RUN`, one key per family, `RULE_<id>`,
+`ALLOW_IPS` / `ALLOW_NETS` / `ALLOW_UA_CONTAINS` / `PATH_EXCEPTIONS` (on top
+of `[global]` `IGNORE_IPS` / `IGNORE_NETS`), and the sink's `BLOCK` (`6h`
+shipped) / `BLOCK_COOLDOWN`. An alert fires once per `(ip, family)` until
+that pair's window drains. `[waf_security.leniency]` (its presence turns it
+on, `internal/detectors/manager.go`): `MATCH_COUNTRY = "GR,CY"`,
+`BLOCK = "15m"`, `BLOCK_COOLDOWN = "15m"`, `SEND_TO_API = YES`,
+`SEND_TO_BLOCKLIST = lenient` (recorded centrally, never served to the
+fleet).
 
-; False-positive escape hatch (same keys cfm_endpoints uses). For a KNOWN legit
-; source (e.g. that bulk-update developer's box) this is the sharpest tool —
-; allow the IP and skip scoring entirely.
-ALLOW_IPS  = ""         ; never block these IPs (+ the GLOBAL NET/IP ignore list)
-ALLOW_NETS = ""
+### Leniency: geo-only, a temp ban, never a skip (decided 2026-07)
 
-BLOCK = permanent
-BLOCK_COOLDOWN = 30m
-
-[waf_security.leniency]
-; Trusted geographies: a GR/CY IP sending SQLi is likelier a compromised local
-; machine / legit customer scan / rare FP → soft tier + surface for review,
-; not a permanent farm-wide ban.
-MATCH_COUNTRY  = "GR,CY"
-;MATCH_ASN     = "..."          ; the big GR/CY ISP ASNs, if desired
-BLOCK          = "15m"          ; temp ban, not permanent
-BLOCK_COOLDOWN = "15m"
-SEND_TO_API       = YES         ; report → support/unblock lookup
-SEND_TO_BLOCKLIST = lenient     ; local-only, NEVER served to the farm
-```
-
-### Challenge is the human/bot filter — leniency only ever meets block-tier hits
-
-An important consequence of the *two orthogonal decisions* above: **challenge
-already does the "is this a human or a bot?" triage at the edge**, per request,
-for free. A leniency tier only has to worry about hits that would feed a
-persistent nft ban — i.e. families with a threshold `> 0` — and in practice
-those are the unambiguous block-tier ones (`SQLI`/`RCE`/`BACKDOOR`/…), not the
-ambiguous challenge-tier ones.
-
-This is not a hypothesis; it is what the fleet actually does. Re-scanning the
-six production `cfm.waf.log` files (85,797 WAF events, 2026-06/07):
+Challenge already does the human-or-bot triage at the edge, per request. A
+leniency tier only meets hits that can feed an nft ban, and in Phase 1
+those are block-tier only. Re-scanning the six production `cfm.waf.log`
+files (85 797 WAF events, 2026-06/07) at that time:
 
 | bucket | count | families seen |
 |---|---|---|
@@ -279,451 +229,334 @@ six production `cfm.waf.log` files (85,797 WAF events, 2026-06/07):
 | CY — challenge | 19 | `BAD_UA` (19) |
 | GR — logonly | 108 | `BAD_UTF8` (108) |
 
-**Not one GR or CY IP hit a block-tier rule.** Every GR/CY hit landed in a
-challenge- or logonly-tier family, and every one, on inspection, is either
-benign infra (`IP_HOST` = someone reaching a farm box by bare IP; `AUTH_BURST`
-= a farm-local host and Jetpack/pingback hammering `xmlrpc.php`) or the exact
-"human-or-bot?" grey zone (`BAD_UA`, `XSS`-looking crawler URLs) where the
-challenge is the correct discriminator — a human solves it, a bot doesn't.
+No GR or CY IP hit a block-tier rule; every GR/CY hit was benign infra or
+the human-or-bot grey zone the challenge decides. (`AUTH_BURST` was
+challenge-tier rule 501 then; its block rules 510-512 came later.) So:
 
-So the leniency design lands as:
+1. The GR/CY tier is `15m + API + lenient blocklist`: it costs nothing on
+   real Greek customers and still surfaces the rare compromised local host.
+2. Leniency stays a **temp ban, never a skip**, because GeoIP is game-able:
+   a GR-geolocated reseller VPS range was brute-forcing `xmlrpc.php` in the
+   same sample. A skip for "GR" would hand attackers a bypass for the price
+   of GR-geolocated space.
 
-1. **Challenge-tier families never feed the nft counter for GR/CY** anyway,
-   because the challenge already exonerated the humans among them. (They accrue
-   for *other* countries via their family threshold; for GR/CY the family
-   threshold path simply doesn't get exercised, because those hits stay at
-   challenge and never escalate.) Nothing special to code — it falls out of
-   "challenge is edge-only unless the family threshold is crossed", and GR/CY
-   traffic doesn't cross it.
-2. **Only a block-tier hit from GR/CY reaches the leniency tier at all** — and
-   that population is empirically *empty*, so the conservative
-   `15m + API + lenient-blocklist` tier costs us nothing on real Greek
-   customers while still catching the rare compromised-.gr-host case.
-3. Leniency is **geo-only, and must stay conservative**, because GeoIP is
-   game-able: `148.135.200.x` in the sample geolocates to Greece but is a cheap
-   reseller VPS range brute-forcing `xmlrpc.php`. A permanent-skip for "GR" would
-   hand attackers a bypass by renting GR-geolocated space; a temp-ban + surface
-   does not.
+## Resolved design questions
 
-`meta.Register(... LeniencySupported: true)` (as `cfm_endpoints` does) is what
-activates the `[waf_security.leniency]` section — no extra code.
+- **Detector name:** a standalone `waf_security` section (sibling of
+  `exim_security`), not part of `[webdetector]`: clean per-family config,
+  and it is a distinct signal source.
+- **Counter granularity:** per-IP per-family thresholds, with `RULE_<id>`
+  overrides for rules that behave unlike their family. A rule override
+  replaces the threshold for that rule's hits; the counter stays per
+  `(ip, family)`. Known legit sources are handled by `ALLOW_IPS` /
+  `ALLOW_NETS` / `ALLOW_UA_CONTAINS`.
+- **`Kind` granularity:** `WAF/<family>` (one counter and threshold per
+  family), `rule_id` in `Extra`; `WAF_CVE` names the CVE in `Kind`.
+- **Soft TTL block, not `permanent`:** `BLOCK = "6h"` self-heals a surprise;
+  `DRY_RUN = 1` is the watch-first option.
 
-## What already exists vs. what to build
+## Not built
 
-**Reused, no new code:** leniency (`[.leniency]`), `ALLOW_IPS`/`ALLOW_NETS` +
-global ignore, nft block, `cfm.detectors.log`, cfm-web unblock API + "where &
-why" findings, email notifications, per-IP counters/windows, the periodic
-`RunOnce → core.Alert` pipeline.
+**Phase 2:** relax the subscribe gate so challenge-tier hits feed the
+counter, and turn challenge-tier families on one at a time (`BAD_UA`,
+`IP_HOST`, `SSRF`, …) with thresholds tuned from live data (does
+`BAD_UA = 40` over 30 min ban real scanners without catching a busy legit
+crawler?). The push de-dup counts windows, not hits, so an accumulating
+threshold needs retuning then. `AUTH_BURST`'s challenge-tier rules
+(501 / 502) must never feed a persistent ban: a legitimate admin doing bulk
+WordPress logins across many sites once tripped an auth-burst block, and a
+human solves the challenge in the browser. The family itself is armed today
+for its block rules 510-512, so relaxing the gate must not let 501 / 502
+in through the family threshold.
 
-**Phase 1 (new) — block-tier only, the conservative first slice.** The hook and
-detector are built once and handle every family, but the *shipped default
-config* only turns on the edge-`block` (0-FP) families; every challenge-tier
-family ships at `0` (edge-only, exactly as today). So Phase 1 changes behaviour
-for `SQLI`/`RCE`/`BACKDOOR`/`UPLOAD_EXPLOIT` and nothing else — no risk to the
-challenge-tier FP-prone families (auth-burst, bad-UA) until we have live data.
-1. `webdetector.SubscribeWAFHitEvents(func(WAFHitEvent))` — the WAF engine
-   already calls `record()` on every hit; emit a per-hit event carrying
-   `ip / reason / rule_id / host / uri / method / status / ua`. (Today only
-   per-host hit-rate *counters* cross to Go; this adds the per-IP event.)
-   The hook emits all hits; the *detector* is what discards families whose
-   threshold is `0`, so Phase 2 is pure config — no change to the emit path.
-2. `internal/detectors/wafsec/` — a near-copy of `internal/detectors/apiabuse`
-   (per-IP counters keyed by reason-family, thresholds, allow-lists,
-   `RunOnce → core.Alert`).
-3. `internal/detectors/waf_security_register.go` — a near-copy of
-   `api_abuse_register.go` (`meta.Register` + `Register("waf_security", …)` +
-   `SubscribeWAFHitEvents`).
-4. `[waf_security]` + `[waf_security.leniency]` in `configs/detectors.conf`,
-   with challenge-tier families at `0` (see the config schema above).
-
-**Phase 2:** turn on challenge-tier families one at a time (`BAD_UA`, `IP_HOST`,
-…) by raising their threshold above `0`, tuned from live `cfm.detectors.log`
-data (e.g. does `BAD_UA=40` over `WINDOW=30m` block real scanners without
-catching a busy legit crawler?). Pure config — no code change. **Also here:**
-retire the edge in-RAM ban shared-dict for block-state (keep it for hit-rate
-counting) once the nft path is trusted; until then the two coexist harmlessly
-(edge 403 *and* nft ban is redundant defence, no coverage gap).
-
-**Phase 3:** distributed-campaign escalation — per-`/24` or per-ASN counters,
-so a rotating swarm (the lexima.de pattern: ~180 IPs, each 1-2 hits) escalates
-to a range/ASN block instead of whack-a-mole per IP. Per-IP instant block
-already handles each swarm IP on its first hit; this is an optimisation.
+**Phase 3:** distributed-campaign escalation — per-/24 or per-ASN counters,
+so a rotating swarm (~180 IPs, 1-2 hits each) escalates to a range / ASN
+block. Per-IP instant blocking already bans each swarm IP on its first hit;
+this is an optimisation.
 
 ## Decision record — held block families and evaluation order (2026-09-05)
 
-`record()` gives the headline to the FIRST block-tier hit and `goto done` ends
-evaluation; `cfm.lua` pushes only that headline, so the family `wafsec` sees on
-a request that trips two block families is whichever ran first. That was
-harmless while every block family was armed. Rule 101 (`WAF_TRAVERSAL`) is the
-first block family HELD at 0, and a held family evaluated first would have
-shadowed `WAF_RCE` / `WAF_PHP_WRAPPER` / … on wrapper-LFI and LFI→RCE requests
-and cost them their ban. The fix is ORDER: the traversal step runs after every
-armed block family in `cfm_waf.lua` (pinned by `cfm_waf_traversal_test.lua`
-and severity test 15b).
+`record()` gives the headline to the FIRST block-tier hit and `goto done`
+ends evaluation; `cfm.lua` pushes only that headline, so the family `wafsec`
+sees on a request that trips two block families is whichever ran first.
+That was harmless while every block family was armed. Rule 101
+(`WAF_TRAVERSAL`) was the first block family held at 0, and evaluated first
+it would have shadowed `WAF_RCE` / `WAF_PHP_WRAPPER` / … on wrapper-LFI and
+LFI→RCE requests and cost them their ban. The fix is ORDER: the traversal
+steps (101, then 103) run after every armed block family in `cfm_waf.lua`
+(pinned by `scripts/tests/cfm_waf_traversal_test.lua` and
+`cfm_waf_severity_test.lua` test 15b).
 
-**"Push every block-tier hit" was considered and deliberately rejected**
-(2026-09-05). It would require removing the block short-circuit (86 `goto
-done` sites), i.e. running the heavy body/upload/base64 scanners on every
-request that is already blocked at a cheap step — the short-circuit is the
-cheap-rules-first design of the pipeline, and the requests it saves are
-exactly the scanner floods. Plus a new `ip_push` field, a Go ingest change and
-four tests changing semantics, all for a case that does not occur: the only
-held family runs last, and the "mirror image" (an operator arms `TRAVERSAL`
-and un-arms an earlier family) is a misconfiguration, documented in CLAUDE.md
-§6. Known cost of the order fix: a traversal-only scanner request runs the
-remaining detectors before blocking (~11.5k such requests/week fleet-wide, a
-few string scans each).
+**"Push every block-tier hit" was considered and deliberately rejected.** It
+would require removing the block short-circuit (every block `goto done`),
+i.e. running the heavy body / upload / base64 scanners on every request
+already blocked at a cheap step. The short-circuit is the cheap-rules-first
+design of the pipeline, and the requests it saves are exactly the scanner
+floods. It also needed a new `ip_push` field, a Go ingest change and four
+tests changing semantics, all for a case that does not occur at the shipped
+arming. The "mirror image" (an operator arms `TRAVERSAL` and un-arms an
+earlier family) is a misconfiguration, documented in `CLAUDE.md` §6. Known
+cost of the order fix: a traversal-only scanner request runs the remaining
+detectors before blocking (~11.5k such requests a week fleet-wide in 2026-09,
+a few string scans each).
 
-**Revisit only if a second held family appears** — two held families cannot
-both run last. Even then the cheap fix is not to drop the short-circuit but to
-let `record()` keep evaluating only when the block hit belongs to a held
-family (a small Lua-side set mirroring `heldAutoblockFamilies`), so armed
-families still short-circuit as today.
+**Revisit only if a second held FAMILY appears** — two held families cannot
+both run last. Even then the cheap fix is not to drop the short-circuit but
+to let `record()` keep evaluating only past a block hit of a held family (a
+small Lua-side set mirroring `heldAutoblockFamilies`), so armed families
+still short-circuit as today. Held RULES (below) do not trigger this: they
+are placed in the late group like traversal.
+
+The late group, in evaluation order: the TranslatePress / PHP multipart /
+Magento PolyShell / PixelYourSite CVE legs (10018-10020, 10022, 10028,
+10026), then 511, 201, 440, 303, 307, 416, then traversal 101 / 103. A held
+block rule must go there; an armed rule there is merely late.
 
 **Rule 201's block joins the late group (2026-10-09).** `WAF_BAD_UA` has no
-block-tier rule (its default is `challenge_v2`), so it is not armed, yet a
-score >= 99 scanner identity (sqlmap, nikto, nuclei, zgrab, the fake legacy
-MSIE / Windows UAs) or an operator `block` mode blocks. Recorded at step 1 it
-was the first block hit on every such request: sqlmap's own SQLi payload, a
-nuclei CVE probe, never reached autoblock or the CVE alert. The block is now
-recorded after every armed block family and before traversal (step 1 keeps
-the challenge/logonly tiers; `cfm_waf_bad_ua_shadow_test.lua`), and at
-`::done::` when an earlier block ended evaluation, so the 201 hit stays in
-`hits`. Same order fix, same cost shape as traversal: a fleet read of
-2026-10-02..09 showed ~14.5k score-99 events a week (sampled, one per IP /
-family / tier a minute; mostly `UA_FAKE_LEGACY_MSIE`, 76 `UA_SQLMAP`), which
-now run the remaining budget-capped detectors before blocking. Side effects: those requests now
-feed the per-IP burst counters (rules 510-512, armed, can ban them), cost what
-a browser-UA request costs (~45 µs a GET, ~4 ms a 30 KB form POST), and the
-challenge / logonly hits behind 201 now show in `also_rule_ids`, so burn-in
-"also" counts include scanner traffic from this date. Mirror image, as for
-traversal: an operator who arms `BAD_UA = 1` loses the 201 ban on a request
-where an earlier held or un-armed block rule (10019/10020, a family set to
-0) also matched; at the shipped arming neither side bans. Authorised scanners (Nessus,
-Acunetix/AWVS, AppScan are score 99) that send an armed payload are now banned
-too; `ALLOW_NETS` / `ALLOW_UA_CONTAINS` exempt them. A rule that raises behind
-the deferred block no longer lets the scanner through under `fail_open`
-(cfm.lua's `waf_error` path): `_M.check` runs the pipeline under `xpcall`
-and, when a 201 block is pending, blocks as 201 and logs `[cfm_waf] rule
-raised behind a deferred rule-201 block`.
+block-tier rule (default `challenge_v2`), so it is not armed, yet a
+score ≥ 99 scanner identity (sqlmap, nikto, nuclei, zgrab, the fake legacy
+MSIE / Windows UAs) or an operator `block` mode blocks. Recorded at step 1
+it was the first block hit on every such request: sqlmap's own SQLi payload
+or a nuclei CVE probe never reached autoblock or the CVE alert. The block is
+now recorded after every armed block family and before traversal (step 1
+keeps the challenge / logonly tiers; `cfm_waf_bad_ua_shadow_test.lua`), and
+at `::done::` when an earlier block ended evaluation, so the 201 hit stays
+in `hits`. Side effects, accepted: those requests run the remaining
+budget-capped detectors before blocking (~14.5k score-99 events a week in
+2026-10), feed the per-IP burst counters (510-512, armed), and the challenge
+/ logonly hits behind 201 show in `also_rule_ids`. Authorised scanners
+(Nessus, Acunetix, AppScan are score 99) that send an armed payload are
+banned; `ALLOW_NETS` / `ALLOW_UA_CONTAINS` exempt them. A rule that raises
+behind the deferred block does not let the scanner through under
+`fail_open`: `_M.check` runs the pipeline under `xpcall` and, with a 201
+block pending, blocks as 201 and logs `[cfm_waf] rule raised behind a
+deferred rule-201 block`. Mirror image: an operator who arms `BAD_UA = 1`
+loses the 201 ban where an earlier held or un-armed block rule also
+matched.
 
 **Rule 511 is held per rule and joins the late group (2026-10-15).** Every
-`pingback.ping` still gets a 403, but `HoldAutoblock` holds its ban
-(`RULE_511 = 0`): WordPress's own pingback client (UA `The Incutio XML-RPC PHP
-Library -- WordPress/x`) sends one when a post links to one of our sites, and
-at threshold 1 the ban (the section `BLOCK`, 7 d on orion/titan, reported to the
-fleet list) landed on the sender's shared hosting server, every port. Fleet
-read of the WAF logs that day: 35 such pingbacks among ~680 rule-511 hits,
-three of the senders still on the fleet list; the rest were `PHP/6.x` botnet
-UAs. A UA carve-out was rejected (a one-line spoof; `ALLOW_UA_CONTAINS`
-exempts every family). As a held block rule it would shadow armed rules, so
-it is recorded with the late group (`st.xmlrpc_pingback`), after 10019/10020
-and before 201, at `::done::`, and on a raise (`_M.check`, the 201 pattern).
-What counts as a real pingback: the method IXR dispatches, the LAST
-`methodName`, is `pingback.ping`, in a body the edge saw whole
-(`body_was_cut`, the same test 501 uses: shorter than `waf_body_max_len`
-and no shorter than its Content-Length; IXR reads the whole body, so a decoy
-padded past the cut or read short hides the call it runs). The detector also fires on the words anywhere in
-the first 2 KB; such a request is still a 511 block but keeps the 30 min IP
-block and counts toward 512, or adding the words to a `wp.getUsersBlogs` guess
-would buy a sprayer out of 512 and every ban. A real pingback that 511 STOPS
-(`block`, `challenge`, `challenge_v2`: a server never solves a challenge)
-skips 512 (it never reaches PHP, and a block used to end evaluation before
-512 counted) and its IP decision is `block_ttl_sec` (10 s): the 30 min
-ipState decision 403'd / challenged every request from the sender's server on
-every vhost of the node. A pingback 511 lets through (`logonly`, excluded)
-reaches WordPress and counts toward 512 exactly as before this change, ttl
-included. Two review rounds disagreed here: one wanted 512 to count those for
-flood protection, the other noted that 512 is per IP, so a distributed
-reflection flood stays under it while a legitimate busy sender does not.
-Keeping the pre-hold behaviour for the let-through case keeps this change to
-what it fixes; revisit with the per-IP 512 question on its own.
-Side effects, as for 201: a pingback now runs the remaining detectors before
-it blocks (the fleet saw ~680 rule-511 hits in two weeks, so the cost is
-small, but a pingback flood now pays it and is never nft-dropped); the
-challenge / logonly hits behind 511 now show in `also_rule_ids`, so burn-in
-"also" counts include pingback bodies from this date. Mirror images: an
-operator who arms `BAD_UA` loses the 201 ban on a scanner-UA pingback (511 is
-recorded first and is held), and one who re-arms `RULE_511 = 1` while holding
-another block rule gets the usual mirror; at the shipped arming neither side
-bans. With three deferred blocks (101/103 by position, 201 and 511 by `st.*`)
-the generic fix above (`record()` continuing past a held block) is due; it
-was left out of this change to keep it small.
+`pingback.ping` still gets a 403, but `HoldAutoblock` holds its ban: a
+WordPress site sends a pingback (UA `The Incutio XML-RPC PHP Library --
+WordPress/x`) when a post links to one of ours, and at threshold 1 the ban
+landed on the sender's shared hosting server, every port. A UA carve-out was
+rejected (a one-line spoof; `ALLOW_UA_CONTAINS` exempts every family). As a
+held block rule it is recorded late (`st.xmlrpc_pingback`, after the CVE
+legs and before 201, at `::done::`, and on a raise as for 201). What counts
+as a real pingback: the method IXR dispatches, the LAST `methodName`, is
+`pingback.ping`, in a body the edge saw whole (`body_was_cut`, the test 501
+uses). A real pingback that 511 STOPS (`block`, `challenge`,
+`challenge_v2`: a server never solves a challenge) skips 512 and leaves an
+IP decision of `block_ttl_sec` (10 s), not the 30 min that 403'd every
+request from the sender's server on every vhost. The words anywhere else in
+the first 2 KB are still a 511 block but keep the 30 min decision and count
+toward 512, or adding them to a `wp.getUsersBlogs` guess would buy a sprayer
+out of 512 and every ban. A pingback 511 lets through (`logonly`, excluded)
+reaches WordPress and counts toward 512 as before. Two review rounds
+disagreed on that last case (512 is per IP, so a distributed reflection
+flood stays under it anyway); it was kept as before to keep the change to
+what it fixes. Revisit with the per-IP 512 question on its own.
 
 **Rules 303, 307 and 416 block with their bans held, in the late group
-(2026-11-17).** The 2026-11-17 tier review promoted them to block after a
-7-day read of the 8 edge nodes: 303 (`__proto__`, the React2Shell sweep:
-~19 000 hits from ~5 800 IPs, no solve), 307 (XXE, 85 hits, all datacenter)
-and 416 (a PHP file as the raw body, 289 hits, the PHPUnit `eval-stdin.php`
-sweep). Each is its family's only block rule, so the promotion arms the
-family; the ban is held per rule (`HoldAutoblock`, `RULE_<id> = 0`) rather
-than per family, so `heldAutoblockFamilies` still holds one family
-(`WAF_TRAVERSAL`) and the "second held family" trigger of the decision
-record above is not reached. As held block rules they run with the late
-group, before traversal: 303 was step 14 and 307 step 22, ahead of the armed
-SQLi / upload / CVE rules; 416 was 60e, ahead of the armed 10018
+(2026-11-17).** A 7-day read of the 8 edge nodes promoted them to block: 303
+(`__proto__`, the React2Shell sweep, ~5 800 IPs a week, no solve), 307
+(XXE, all datacenter) and 416 (a PHP file as the raw body, the PHPUnit
+`eval-stdin.php` sweep). Each is its family's only block rule, so the
+promotion arms the family; the ban is held per rule (`HoldAutoblock`)
+rather than per family, so `heldAutoblockFamilies` still holds one family
+and the "second held family" trigger above is not reached. 303 was step 14
+and 307 step 22, ahead of the armed SQLi / upload / CVE rules; 416 was 60e,
+ahead of the armed 10018. They now run in the late group before traversal
 (`cfm_waf_tier_review_2026_11_17_test.lua` pins an armed 301 keeping the
-headline over each). 332 (WAF_RCE) and 438 (WAF_BACKDOOR), promoted the
+headline over each). 332 (`WAF_RCE`) and 438 (`WAF_BACKDOOR`), promoted the
 same day, are armed and stay where they are; 10019 was un-held (armed) and
-stays in the late group, where an armed rule is merely late.
-
-## Open questions (decide before Phase 1)
-
-- **Detector name:** `waf_security` (sibling of `exim_security`,
-  `postfix_security`) vs folding into `[webdetector]`. Proposal: standalone
-  `waf_security` — clean per-family config + it is a distinct signal source.
-- **Counter key granularity:** per-IP-per-family thresholds (`SQLI`, `BAD_UA`, …)
-  with **per-rule (`RULE_<id>`) overrides** on top — resolved. Per-family keeps
-  config simple; the ID override handles rules that behave unlike their family
-  (a real driver: an admin doing bulk WP logins tripped an auth-burst *block*
-  once, hence `AUTH_BURST = 0` here — it stays edge-challenge and never feeds a
-  persistent ban). Known legit sources are handled even more sharply by
-  `ALLOW_IPS` / the global ignore list.
-- **`Kind` granularity:** `WAF/<family>` (proposed) vs `WAF/<family>/<rule_id>`.
-- **Leniency for unambiguous SQLi (GR/CY):** *resolved — temp-ban + API,* on the
-  data. A re-scan of the six production logs (85,797 events) found **zero** GR/CY
-  hits at any block-tier family; every GR/CY hit was challenge/logonly-tier and
-  benign or challenge-triageable (see "Challenge is the human/bot filter" above).
-  So `15m + API + lenient-blocklist` for GR/CY costs nothing on real customers
-  yet still surfaces the rare compromised-.gr-host, and — because GeoIP is
-  game-able (a GR-geolocated VPS was brute-forcing xmlrpc in the sample) —
-  leniency must stay a *temp-ban*, never a skip.
+stays in the late group.
 
 ## Edge ban — clients behind a trusted proxy (2026-10-10)
 
-An nft ban drops by the address on the wire. A client behind a trusted proxy
-(Cloudflare) arrives from the proxy's address, and the edge learns the real one
-from `CF-Connecting-IP` via realip, so `ip saddr @block_v4 drop` never sees it:
-34.153.214.160 was banned for 7 days by `waf_security` and kept hitting
-`cpanel.`/`cpcontacts.` hostnames through Cloudflare (titan, mars, orion,
-speedhost, 2026-10-09).
+An nft ban drops by the address on the wire. A client behind a trusted
+proxy (Cloudflare) arrives from the proxy's address, and the edge learns the
+real one from `CF-Connecting-IP` via realip, so `ip saddr @block_v4 drop`
+never sees it: an address banned for 7 days by `waf_security` kept hitting
+sites through Cloudflare on four nodes (2026-10-09).
 
 `internal/edgeban` keeps the bans the edge enforces itself. **What goes in:**
-the sink's bans for the web sections (`edgeban.WebSection`: waf_security,
-webdetector, challenge_*, modsec, cfm_endpoints, cpanel), the challenge
-server's self-protection blocks, and manual bans (`POST /api/v1/firewall/block`,
-cfm-admin's "Block selected" `POST /api/v1/firewall/block/batch`, `cfm block`
-through `POST /api/v1/webdet/edge-ban`; a CIDR block is not). **What stays
-out:** fleet feeds (`block_ext_*`), `cfm.deny` (it can hold thousands of
-entries), port-scan / flood bans (L3/L4; some may be proxy addresses), mail /
-SSH / FTP / database sections. It is not an nft mirror.
+the sink's bans for the web sections (`edgeban.WebSection`: `waf_security`,
+`webdetector`, `challenge_*`, `modsec`, `cfm_endpoints`, `cpanel`,
+`login_bruteforce`), the challenge server's self-protection and abuse
+blocks, and manual bans (`POST /api/v1/firewall/block`, cfm-admin's "Block
+selected" `POST /api/v1/firewall/block/batch`, `cfm block` through
+`POST /api/v1/webdet/edge-ban`; a CIDR block is not). **What stays out:**
+fleet feeds (`block_ext_*`), `cfm.deny` (it can hold thousands of entries),
+port-scan / flood bans (L3/L4; some may be proxy addresses), mail / SSH /
+FTP / database sections. It is not an nft mirror. The rest of nft's IP
+filter reaches a proxied client through `internal/proxyipfilter` instead
+(`docs/proxied-ipfilter.md`).
 
-**Proxied requests only.** `cfm_decision.lua` adds `px=1` to the decision RPC
-when realip replaced the TCP peer (`$realip_remote_addr ~= $remote_addr`); the
-bridge answers the store only then. A direct client is nft's alone: its ban
-drops it before the edge, and nft's allow sets decide for it. An older edge
-sends no `px` and gets nothing from the store.
+**Proxied requests only.** `cfm_decision.lua` adds `px=1` to the decision
+RPC when realip replaced the TCP peer (`$realip_remote_addr ~=
+$remote_addr`); the bridge answers the store only then. A direct client is
+nft's alone: its ban drops it before the edge, and nft's allow sets decide
+for it. An older edge sends no `px` and gets nothing from the store.
 
-**Allows win, as in nft.** A reconcile reads every set nft accepts before its
-block drops (`self_v4/v6`, `allow_v4/v6`, `allow_dyn_*`, `allow_ext_*` hosts
-and nets — the fleet whitelist — and `allow_*_nets`; hosts, CIDRs and ranges),
-and the store never answers an address they cover, even for a ban added after
-the read (a ban added right after a NEW allow, before the next reconcile, is
-the one residual). Nor does it answer a trusted proxy's own address
-(trusted_proxies.conf): realip leaves `remote_addr` at a Cloudflare address
-when CF-Connecting-IP names one (a Worker's subrequest), and a ban of it would
-403 every visitor arriving that way. `cfm allow --ttl` lifts the edge ban for
-good; when the allow expires nft blocks again but the edge does not (fails
-safe).
+**Allows win, as in nft.** A reconcile reads every set nft accepts before
+its block drops (`self_v4/v6`, `allow_v4/v6`, `allow_dyn_*`, `allow_ext_*`
+hosts and nets — the fleet whitelist — and `allow_*_nets`; hosts, CIDRs and
+ranges), and the store never answers an address they cover, even for a ban
+added after the read (a ban added right after a NEW allow, before the next
+reconcile, is the one residual). Nor does it answer a trusted proxy's own
+address (`trusted_proxies.conf`): realip leaves `remote_addr` at a
+Cloudflare address when CF-Connecting-IP names one (a Worker's subrequest),
+and a ban of it would 403 every visitor arriving that way. `cfm allow --ttl`
+lifts the edge ban for good; when the allow expires nft blocks again but the
+edge does not (fails safe).
 
 **Consistency.** Every in-daemon unblock removes the entry
 (`/api/v1/unblock`, `unblock.DoMany` — the agent's fleet unblock — and
 `ForceUnblock`, which `cfm unblock` reaches over the API); `cfm allow` (over
-`edge-ban?unban=1`) and a `cfm.allow` host lift it too. Every two minutes a
-reconcile reads the block and allow sets — all of them or none: a failed or
-partial read skips the reconcile, and three in a row make it answer nothing,
-to the edge too, until a read works (it keeps its entries; the next working
-read narrows them to nft) — and
-*narrows* the store: an entry nft no longer blocks (expired, unblocked from the
-CLI, flushed) is dropped unless it was written after the read began, and an
-earlier nft expiry clamps it. It never imports from nft. The store persists in
-`/var/lib/cfm/edgeban.json` (one writer at a time) and answers nothing until
-the first reconcile after a start.
+`edge-ban?unban=1`) and a `cfm.allow` host lift it too. A new web blocker,
+unblock or allow path must call `edgeban.Ban` / `edgeban.Unban`. Every two
+minutes (`cmd/cfm/edgeban_reconcile.go`) a reconcile reads the block and
+allow sets — all of them or none: a failed or partial read skips the
+reconcile, and three in a row clear the store so it answers nothing, to the
+edge too, until a read works — and *narrows* the store: an entry nft no
+longer blocks (expired, unblocked from the CLI, flushed) is dropped unless
+it was written after the read began, and an earlier nft expiry clamps it. It
+never imports from nft. The store persists in `/var/lib/cfm/edgeban.json`
+(one writer at a time) and answers nothing until the first reconcile after a
+start.
 
-**Enforcement at the edge (B2).** `cfm_edgeban.lua` keeps the edge's own
-copy of the list, pulled from `GET /nginx/edgeban` (`edge_ban_feed.go`). The
-daemon keeps what the edge should hold (every address the store answers, less
-IGNORE_IPS, capped at 20 000) and a numbered journal of the changes to it (the
-last 4 096; an epoch per daemon start). It resyncs that list against the store
-only when the store's version moves (every write, reconcile and switch) or
-after 5 minutes: an idle poll is a version compare. An expiry alone does not
-resync it: the edge drops an entry at its expiry by itself (the dict TTL),
-and the next resync deletes it from the list (the store's reconcile, every
-~2 minutes, removes expired entries and so moves the version; a reconcile
-that changed nothing no longer moves it). (Until 2026-11-10 an expiry
-did, and with ~20 000 TTL bans that was nearly every poll.) A resync checks
-each ban against the nft allow sets; they are merged into sorted intervals
-and searched, not scanned: on mars a linear scan of them over ~23 000 bans
-took 100-150 ms per resync, ~1 600 slow-handler lines a day
-(`BenchmarkList`: 190 ms with 1 000 allow nets and 5 000 hosts, ~3 ms now,
-the list no longer sorted either).
-The edge sends its position (`epoch`, `seq`) and gets the changes since
-(`set` / `del`), so a poll costs what changed, not the list; the whole list
-comes on its first poll, after a daemon restart, when it is further behind
-than the journal reaches, and every 10 minutes (a consistency check). A store
-that has not reconciled yet replies `{"ready":false}` and the edge keeps its
-copy.
-
-One worker at a time (a dict lock held while a poll is in flight) polls every
-5 s from a timer started by any `cfm.lua` request (the static location only
-reads). The list lives in two slots of the `cfm_edgeban` dict (`cfm_decisions`
-until the conf is reloaded), each value the id of the whole list it belongs
-to: a whole list is written into the other slot and `eb:cur` flips to it in
-one set, so a lookup never sees half a list and a leftover never matches;
-changes are written into the live slot. Each entry lives as long as its ban
-(a permanent one has no TTL), as in nft, so a daemon outage does not lift
-bans at the edge. The dict is sized for two copies of the 20 000 cap (16m;
-eight different 20k-IPv6 lists in a row kept the live list whole on nginx
-1.24): a write into a full dict does not fail, it evicts the least recently
-used keys, the leftovers of older lists. Past that size evictions would
-reach live entries silently (back with the next whole list), and a lost
-`eb:cur` makes the next poll ask for one. A store CLEARED after three
+**Enforcement at the edge.** `cfm_edgeban.lua` keeps the edge's own copy of
+the list, pulled from `GET /nginx/edgeban` (`edge_ban_feed.go`). The daemon
+keeps what the edge should hold (every address the store answers, less
+`IGNORE_IPS`, capped at 20 000) and a numbered journal of the changes to it
+(the last 4 096; an epoch per daemon start). It resyncs that list against
+the store only when the store's version moves (a write, a reconcile that
+changed something, a switch) or after 5 minutes: an idle poll is a version
+compare. An expiry alone does not move it: the edge drops an entry at its
+expiry by itself (the dict TTL), and the next resync deletes it from the
+list. A resync checks each ban against the nft allow sets merged into sorted
+intervals and searched, not scanned (a linear scan over ~23 000 bans took
+100-150 ms per resync on a busy node). The edge sends its position (`epoch`,
+`seq`) and gets the changes since (`set` / `del`), so a poll costs what
+changed; the whole list comes on its first poll, after a daemon restart,
+when it is further behind than the journal reaches, and every 10 minutes (a
+consistency check). A store that has not reconciled since a start replies
+`{"ready":false}` and the edge keeps its copy; a store CLEARED after three
 failed nft reads (the table gone after `cfm disable`) publishes an empty
-list, so the edge drops its copy; only a store not yet reconciled since a
-start replies `{"ready":false}`. An IPv4-mapped peer is looked up as IPv4.
+list, so the edge drops its copy.
 
-**Mode.** `[webdetector] EDGE_BAN_MODE`, sent with every reply: `enforce`
-(the default since 2026-11-10, read below) answers
-403 (`X-CFM-Action: block`, `X-CFM-Edge-Ban: 1`, `$cfm_upstream = cfm_block`);
-`log` counts and logs what it would block, as the burn-in ran.
-One `would_block edge_ban` / `block edge_ban` line per address per minute in
-the edge error log. The edge's counts ride on its next poll; `GET
-/api/v1/webdet/edge-ban` (admin; `edge-ban.json` in a `cfm debug` bundle) and
-the bridge status show the mode, the journal position, the list size, the
-last poll and full list, the would-block / blocked totals and the last resync
-time. The decision path (B1) answers bans regardless of the mode, so during
-the burn-in `would_block` also counts requests Step 3 blocks anyway: it is an
-upper bound of what enforce adds (the clearance cookie, cached allows, 0d,
-0a1 and static files are the difference).
+One worker at a time (a dict lock held while a poll is in flight) polls
+every 5 s from a timer started by any `cfm.lua` request. The list lives in
+two slots of the `cfm_edgeban` dict, each value the id of the whole list it
+belongs to: a whole list is written into the other slot and `eb:cur` flips
+to it in one set, so a lookup never sees half a list and a leftover never
+matches; changes are written into the live slot. Each entry lives as long
+as its ban (a permanent one has no TTL), as in nft, so a daemon outage does
+not lift bans at the edge. The dict is sized for two copies of the 20 000
+cap (16m, measured on nginx 1.24): a write into a full dict evicts the least
+recently used keys, the leftovers of older lists; past that size evictions
+would reach live entries silently (back with the next whole list), and a
+lost `eb:cur` makes the next poll ask for one. An IPv4-mapped peer is looked
+up as IPv4.
 
 `cfm.lua` checks it in **Step 0e**, right after the static IP/CIDR bypass
-(`cfm_bypass_ip`, the crawler/CDN list) and before every other exemption:
+(`cfm_bypass_ip`, the crawler / CDN list) and before every other exemption:
 the panel targeted bypass, the local-origin bypass, `/.well-known/` (0a1),
-the cPanel proxy-subdomain passthrough (0d), the clearance cookie (2b) and the
-decision's cached clean allows (up to 90 s). The static-asset locations, which
-skip `cfm.lua`, call `cfm_edgeban.static_gate()` before the Site Cache gate.
-Proxied requests only. On a proxied request it is two dict gets; on a direct
-one, a variable compare. A ban or unban reaches the edge within one poll (5 s
-plus the RPC). `cfm_edgeban_test.lua` pins the module and where `cfm.lua` and
-both confs call it.
+the cPanel proxy-subdomain passthrough (0d), the clearance cookie (2b) and
+the decision's cached clean allows (up to 90 s). A new exemption step goes
+AFTER it. The static-asset locations, which skip `cfm.lua`, call
+`cfm_edgeban.static_gate()` before the Site Cache gate. On a proxied request
+it is two dict gets; on a direct one, a variable compare. A ban or unban
+reaches the edge within one poll (5 s plus the RPC). `cfm_edgeban_test.lua`
+pins the module and where `cfm.lua` and both confs call it.
 
-**Not covered:** the panel ports (2083/2087/2096, B3), the challenge page and
+**Not covered:** the panel ports (2083/2087/2096), the challenge page and
 `/__cfm_verify`, `/cpanelwebcall` and `/cfm-admin`, which skip `cfm.lua` and
 are not static assets.
 
-### Enforce (2026-11-10)
+**Mode.** `[webdetector] EDGE_BAN_MODE`, sent with every reply: `enforce`
+(the default) answers 403 (`X-CFM-Action: block`, `X-CFM-Edge-Ban: 1`,
+`$cfm_upstream = cfm_block`); `log` only counts and logs what it would
+block. One `would_block edge_ban` / `block edge_ban` line per address per
+minute in the edge error log. Kill switch: `[webdetector] EDGE_BAN = 0`
+empties the list. `GET /api/v1/webdet/edge-ban` (admin; `edge-ban.json` in
+a `cfm debug` bundle) and the bridge status show the mode, the journal
+position, the list size, the last poll and full list, the would-block /
+blocked totals and the last resync time. The decision path answers bans
+regardless of the mode, so in `log` mode `would_block` also counts requests
+Step 3 blocks anyway: it is an upper bound of what `enforce` adds.
 
-Armed on all eight edge nodes and made the default, together with
-`login_bruteforce`. The day's read (mars, virgo, rigel): 389 addresses with a
-`would_block` line, 0 Greek or Cypriot, nearly all `waf_security` bans
-(scanners and xmlrpc brute forcers on datacenter networks; the "Google LLC"
-ones are Palo Alto Cortex Xpanse on GCP, not Googlebot, which the static
-bypass exempts before Step 0e anyway). Without it a banned client behind
-Cloudflare walked through: mars had 171 such addresses that day, orion 85.
+**Enforce became the default (2026-11-10)**, on all eight edge nodes, after
+a `log` burn-in from 2026-10-10. The read that day: 389 addresses with a
+`would_block` line, none Greek or Cypriot, nearly all `waf_security` bans
+(scanners and xmlrpc brute forcers on datacenter networks). Without it a
+banned client behind Cloudflare walked through (171 such addresses on one
+node that day). The burn-in found two false-positive classes, both from
+`webdetector`'s `403_flood` and both predating the edge ban (nft had
+already banned and reported them; behind Cloudflare the ban had simply
+missed them). They were fixed in the detector, not in the edge ban — the
+decisions below.
 
-### Burn-in read (2026-10-10, ~4 h after the deploy) — enforce is gated on it
+### Webdetector bans that the edge-ban burn-in corrected
 
-`EDGE_BAN_MODE = log` on titan, earth, mars, rigel, orion, virgo, speedhost
-since 2026-10-10 ~12:20 UTC. The first read, per node (store size /
-`would_block` count from `edge-ban.json`; `would_block` lines are one per
-address per minute):
+**Verified good bots are never banned (2026-10-10).** Googlebot
+(FCrDNS-verified) crawling a WooCommerce shop's `?add_to_wishlist=` links,
+which the origin answers 403, was banned and reported repeatedly.
+`emitIPBlocks` — every webdetector IP ban and challenge (`WEB/403`,
+`WEB/404`, `WEB/40X`, `WEB/403WAF`, `WEB/BOT`, `WEB/MALPATH`, `WEB/RPS`) —
+now skips a verified good bot (`goodBotForBan`, `ban_goodbot.go`): the
+canonical crawler PTR list forward-confirmed (FCrDNS, the bridge's verdict
+cache) and the exclude file's `verify_fcrdns=1` PTR rules. Not the file's
+`ua=` / `asn=` rules: a UA is a claim, and Google's ASN is all of GCP. A
+PTR lookup that fails is inconclusive, never "no PTR" (that would ban a
+crawler on a DNS blip). The skip is a `block_trigger` history row with
+`outcome=exempt_goodbot`. Challenge alerts (`emitIPChallenges`,
+`WEB/CHALLENGE`) do not consult it; the edge exempts a verified crawler when
+serving one (`CHALLENGE_GOODBOT_EXEMPT`). Other sections that ban web
+clients (`waf_security`, `modsec`, `challenge_*`) do not consult it either:
+a WAF block-tier hit is the request's own payload.
 
-| node | store | would_block | lines / IPs | |
-|---|---|---|---|---|
-| mars | 140 | 6 146 | 644 / 54 | 97% of lines on scanner paths |
-| orion | 103 | 2 961 | 623 / 62 | 95% |
-| titan | 31 | 1 765 | 23 / 12 | 87% |
-| earth, rigel, virgo | 40 / 8 / 10 | 0 | — | |
+**Origin 403 on WordPress REST calls (2026-10-20).** The 403 counters
+(`403_flood`, and `40x_combo`'s 403 side) no longer count the 403 WordPress
+itself gives a REST call (`/wp-json/…` at the root or one directory down,
+or a root `?rest_route=…`; `isWPRestOrigin403`). WordPress answers 403 when
+the caller may not do that one thing, so a working client polling one route
+crossed `IP403_COUNT` on the origin's own answers: a logged-in admin on the
+Site Kit dashboard, and a WooCommerce stock sync whose API key lacked write
+access. Neither country nor ASN tells these apart from an attack (a GR
+residential address ran a `wp-login.php` brute force that `403_flood`
+correctly banned in the same weeks). Three limits keep it from hiding an
+attack: only the ORIGIN's 403 is skipped (the edge's own REST 403s are the
+WAF stopping scanners, and keep counting); a route that takes a credential
+(`token`, `login`, `auth`, `jwt`, `passw`) keeps counting, because JWT Auth
+answers a wrong password with 403 and rule 501 does not see REST logins;
+and the marker must sit behind a plain install directory, with no climb or
+escape. A query `rest_route` is read the way PHP and WordPress read it (it
+overrides the path, the last duplicate wins, `rest.route` is the same key).
+Residual: a `rest_route` in a POST body, which the log does not carry, also
+overrides the path, so a REST credential brute force sent that way is not
+counted. The request still counts in the IP's total, so it dilutes the 403
+share.
 
-Sources: `waf_security` and `webdetector` almost entirely (one `modsec`). The
-bulk is a distributed `POST /xmlrpc.php` brute force through Cloudflare with a
-forged `Jetpack by WordPress.com` / `WordPress.com` UA from residential
-addresses worldwide (not Automattic's ranges), banned by rules 510-512: each
-address ~150 requests, ~95% already 403 at the WAF, the ban stops the rest.
-The others are scanners on `/wp-content/plugins/*/…php`, `/xyz.php`,
-`/.env`-style paths, and cloud-hosted crawlers (Azure, GCP, DigitalOcean).
-No Lua error, no latency change (titan `luams` p50/p95/p99 1/3/15 → 1/2/11
-ms), edge-ban CPU ~0.1% of a core.
-
-**Two false positives, both from `webdetector`'s `WEB/403` (`403_flood`), and
-both pre-date the edge ban** (nft already banned them and reported them to the
-fleet blocklist with `ttl=3600`; behind Cloudflare the nft ban missed them, the
-edge ban in `enforce` would not):
-
-- **Googlebot** (66.249.x.x, FCrDNS-verified — `abuse_shadow` already labels
-  it `good_bot=googlebot verdict=exempt_goodbot`) crawling a WooCommerce
-  shop's `?add_to_wishlist=` links, which the origin answers 403. Orion banned
-  and reported a Googlebot address 10 times between 2026-10-02 and 10-10,
-  mars once. `emitIPBlocks` has no good-bot exemption.
-- **A logged-in WordPress admin** (Greek residential ISP) on the Site Kit
-  dashboard: it polls `admin-ajax.php?action=rest-nonce` (200) and
-  `wp-json/google-site-kit/v1/` (403 from the origin) every ~5 s, a third of
-  its requests 403, above the 25% share gate.
-
-**Good bots (fixed 2026-10-10):** `emitIPBlocks` — every webdetector IP ban
-and challenge (`WEB/403`, `WEB/404`, `WEB/40X`, `WEB/403WAF`, `WEB/BOT`,
-`WEB/MALPATH`, `WEB/RPS`) — now skips a verified good bot (`goodBotForBan`):
-the same sources as the solver-farm finding's `good_bots`, the canonical
-crawler PTR list forward-confirmed (FCrDNS, the bridge's verdict cache, inline
-here) and the exclude file's `verify_fcrdns=1` PTR rules. Not the file's
-`ua=` / `asn=` rules: a UA is a claim, and Google's ASN is all of GCP. So
-the shipped file's FCrDNS crawlers (Ahrefs, Semrush, Google's googlezip
-proxy) are exempt from these bans too, request rate included. A PTR lookup
-that fails is inconclusive, never "no PTR" (that would drop a crawler's
-graced verdict and ban it on a DNS blip). The skip is a `block_trigger`
-history row with `outcome=exempt_goodbot`. Challenge alerts
-(`emitIPChallenges`, `WEB/CHALLENGE`) do not consult it; the edge exempts a
-verified crawler when serving one (`CHALLENGE_GOODBOT_EXEMPT`). Other
-sections that ban web clients (`waf_security`, `modsec`, challenge_*) do not
-consult it: a WAF block-tier hit is the request's own payload.
-
-**Origin 403 on WordPress REST calls (decided 2026-10-20):** the 403
-counters (`403_flood`, and `40x_combo`'s 403 side) no longer count the 403
-WordPress itself gives a REST call (`/wp-json/…` at the root or one directory
-down, or a root `?rest_route=…`; `isWPRestOrigin403`). WordPress answers 403
-there when the caller may not do that one thing, so a working client polling
-one route crossed `IP403_COUNT` on the origin's own answers: the Site Kit
-admin above, and (2026-10-20 read) a WooCommerce stock sync on mars whose API
-key lacks write access (84-89% 403 on `/wp-json/wc/v3/…`, banned 2 h and
-reported to the fleet). Neither country nor ASN tells these apart: a GR
-residential address in the same weeks ran a `wp-login.php` brute force that
-`403_flood` correctly banned. Three limits keep it from hiding an attack:
-only the ORIGIN's 403 is skipped (the edge's own REST 403s are the WAF
-stopping scanners: 99.7% of speedhost's, with 10 IPs over the threshold in
-three days, and they keep counting); a route that takes a credential (`token`,
-`login`, `auth`, `jwt`, `passw`) keeps counting, because JWT Auth answers a
-wrong password with 403 and rule 501 does not see REST logins; and the marker
-must sit behind a plain install directory, with no climb or escape. A query
-`rest_route` is read the way PHP and WordPress read it (it overrides the
-path, the last duplicate wins, `rest.route` is the same key). Residual: a
-`rest_route` in a POST body, which the log does not carry, also overrides
-the path, so a REST credential brute force sent that way is not counted. The
-request still counts in the IP's total, so it dilutes the 403 share.
-
-**Origin 403 on wp-admin AJAX, and a traffic rule's 403 (decided
-2026-11-17):** two more 403s left both counters, after a week's read of the
-8 edge nodes found Greek clients banned by them. (a) The ORIGIN's 403 to
-`admin-ajax.php` (root or one install directory down, not the `index.php`
-PATH_INFO pseudo-directory) with a small non-empty body (1-128 bytes: the
-app's own `-1`/`0` or a plugin's JSON error, never an origin WAF's block page)
-whose Referer is a `/wp-admin/` page of the same host and install, unless any
-`action` key names a credential (`isWPAdminAjaxOrigin403`): a shop's own admin
-on titan, whose open order list kept polling Barcode Scanner's AJAX after the
-session expired, was banned at 317 such 403s. The Referer is the client's to
-forge; what a forger gains is small app-answered admin-ajax refusals that no
-longer count, while the WAF and malicious-path counters still see them, and an
-origin WAF's refusals (ModSecurity, Imunify, Wordfence pages) keep counting. (b) The edge's 403 for a request only
-a traffic rule blocked: cfm.lua logs it as `$cfm_upstream = cfm_block_rule`
-(IP / vhost / WAF / edge-ban refusals stay `cfm_block`), and the counters
-skip it (`isRuleBlock403`): on rigel a rule blocking WhatsApp's fetcher on
-one shop turned a shopper's link-preview retries into an hour's nft ban of
-their home IP. An edge on older Lua still writes `cfm_block` there, so its
-rule blocks keep counting until it is upgraded. One predicate (`skip403`)
-decides all of this, and the per-IP challenge counters (`CHALLENGE_RPS_4XX`,
-`CHALLENGE_ERR_RATIO`) read it too: the rigel shopper had also been put under
-`CHALLENGE_ERR_RATIO` by the rule's own 403s.
-
-**Gate for `enforce`:** the good-bot fix deployed (above), the
-logged-in-origin-403 case decided, then a fresh read of every node shows no
-would-block on a verified good bot or a residential address with a normal
-browsing pattern. The next read is scheduled for 2026-10-20.
+**Origin 403 on wp-admin AJAX, and a traffic rule's 403 (2026-11-17).** Two
+more 403s left both counters, after a week's read of the 8 edge nodes found
+Greek clients banned by them. (a) The ORIGIN's 403 to `admin-ajax.php`
+(root or one install directory down, not the `index.php` PATH_INFO
+pseudo-directory) with a small non-empty body (1-128 bytes: the app's own
+`-1` / `0` or a plugin's JSON error, never an origin WAF's block page) whose
+Referer is a `/wp-admin/` page of the same host and install, unless any
+`action` key names a credential (`isWPAdminAjaxOrigin403`): a shop's own
+admin, whose open order list kept polling a plugin's AJAX after the session
+expired, was banned at 317 such 403s. The Referer is the client's to forge;
+what a forger gains is small app-answered admin-ajax refusals that no longer
+count, while the WAF and malicious-path counters still see them, and an
+origin WAF's refusals (ModSecurity, Imunify, Wordfence pages) keep counting.
+(b) The edge's 403 for a request only a traffic rule blocked: `cfm.lua` logs
+it as `$cfm_upstream = cfm_block_rule` (IP / vhost / WAF / edge-ban refusals
+stay `cfm_block`), and the counters skip it (`isRuleBlock403`): a rule
+blocking WhatsApp's fetcher on one shop turned a shopper's link-preview
+retries into an hour's nft ban of their home IP. An edge on older Lua still
+writes `cfm_block` there, so its rule blocks keep counting until it is
+upgraded. One predicate (`skip403`, `wp_rest_403.go`) decides all of this,
+and the per-IP challenge counters (`CHALLENGE_RPS_4XX`,
+`CHALLENGE_ERR_RATIO`) read it too.

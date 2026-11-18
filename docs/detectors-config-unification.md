@@ -1,378 +1,267 @@
 # Detectors config unification — auto-detected sources, layered overrides, fleet-converged defaults
 
-**Status (2026-08-25): PRs 1–4 LANDED** — srcresolve + ssh/dovecot (#1346),
-exim/postfix families + MTA self-disable (#1348), the source-resolution
-preview across CLI/API/cfm-admin/MCP (#1347), canonical-unit normalization +
-daemon-coverage CLI join (#1354). **PR 5 (Mechanism B — `detectors.d/`
-layering) in flight** on `claude/detectors-layering`; the WebUI editor still
-writes the BASE file (shows an overlay notice; overlay-editing UI is a
-follow-up). Same-day §3a (journald reliability trap) and §6.1
-(`[api_abuse]` → `cfm_endpoints`) amendments folded in. Remaining: PR 6
-(global `[leniency]` + persisted tokens), PR 7 (converged stock defaults —
-deliberately last, gathering burn-in data).**
-Evidence base: a 10-server fleet audit of live `/etc/cfm/detectors.conf`
-(3deers, earth, mailcowdocker, mars, orion, rigel, saf, speedhost, titan,
-virgo) diffed against the stock reference with `detconf`-identical parsing.
+## 1. Goal
+
+Make the shipped `/etc/cfm/detectors.conf` identical across the fleet, so
+package upgrades can update it in place and new stock knobs reach every node.
+
+The problem is that it is a conffile and every host had to hand-edit it: MTA
+flavour, log paths, journal vs file vs docker, thresholds. So every copy was
+"modified", upgrades left `.rpmnew` / `.dpkg-dist` files beside it, and new
+keys never arrived. The 2026-08 audit of ten nodes found `[cfm_endpoints]` on
+none of them.
+
+The fix has three parts:
+- **(A)** auto-detect what the environment decides;
+- **(B)** move deliberate per-host deltas into an overlay the package never
+  touches;
+- **(C)** converge stock defaults on values the fleet has already validated.
+
+(A), (B) and the per-host secrets are built. This file now holds the
+decisions behind them and the work still open. How the built parts behave is
+in `docs/DETECTORS.md` "Source modes" and "Overlay files".
 
 ---
-
-## 1. Problem
-
-`/etc/cfm/detectors.conf` is a conffile: upgrades seed it once and never touch
-it again. Because every host must hand-edit it (MTA flavor, log paths, journal
-vs file vs docker, panel differences), every host's copy is modified, so
-package upgrades leave `.rpmnew`/`.dpkg-dist` files and **new knobs never
-reach the fleet**. The audit found the failure mode live:
-
-- `[cfm_endpoints]` (shipped in stock) is present on **zero** servers.
-- ~10 newer stock keys (`PANEL_DECISION_MODE`, `PANEL_WAF_MODE`,
-  `*_GOODBOT_EXEMPT`, `UNDER_ATTACK_FP_*`, `HISTORY_MAX_ROWS`, …) exist on no
-  server.
-- The reverse also happens — the fleet diverges *around* stock: 3 servers
-  still run the deprecated `[api_abuse]` section (superseded by the built-in
-  `cfm_endpoints`, which their configs predate — drift in both directions at
-  once); `webdetector`
-  `MODE=folder`/`LOG_DIR`/`GLOB`/`RECURSIVE` run live (saf) but are
-  undocumented in stock; `waf_security BLOCK` is `7d` on all 7 holders while
-  stock says `6h`.
-- Hand-editing breeds silent bugs: 5 servers carry
-  `SESSION_ALL_FAILED": = 6` / `SLOW_FAIL_BLOCK" = 6` — the stray `"` makes
-  the key invalid, the parser folds both lines into the previous key's
-  multiline value, and **both thresholds silently run at built-in defaults**.
-
-Goal: make the shipped `detectors.conf` byte-identical across the fleet (so
-upgrades can update it cleanly), by (A) auto-detecting everything
-environment-derived, (B) moving deliberate per-host deltas into an overlay
-layer the package never touches, and (C) converging tuned defaults onto
-values the fleet has already validated.
-
-Classification of the ~120 divergent `(section, key)` pairs found:
-
-| Bucket | Share | Mechanism |
-|---|---|---|
-| Environment-derived (MTA flavor, paths, journal/file/docker, panel) | ~25% | **A. auto-detect** |
-| Policy tuning (thresholds, BLOCK policies) | ~50% | **C. converge defaults** + overlay for deliberate outliers |
-| Per-host by nature (tokens, vhost lists, allow-lists, governor rules) | ~15% | **B. overlay** / auto-generated |
-| Noise (case `yes`/`YES`, `''` vs `auto`, dead keys, typos) | ~10% | one-time cleanup |
 
 ## 2. Non-goals
 
-- No change to detector *behaviour* (parsing, scoring, sink policy) beyond
-  source resolution and leniency lookup order.
-- No remote/central config management — each node stays self-contained.
-- No YAML/format migration; `detconf` syntax stays as-is.
+- No change to detector behaviour (parsing, scoring, sink policy) beyond
+  source resolution and the leniency lookup order.
+- No remote or central config management: each node stays self-contained.
+- No format migration: `detconf` syntax stays.
 
 ---
 
-## 3. Mechanism A — source auto-resolution (`internal/detectors/srcresolve`)
+## 3. Mechanism A — source auto-resolution (built)
 
-**The knobs are NOT removed.** `MODE`, `LOG_PATH`, `JOURNAL_UNIT`,
-`DOCKER_CONTAINER`, `TOTAL_CMD`, … all keep working exactly as today, and stay
-documented (commented) in stock as the escape hatch for custom setups. What
-changes is the **default**: where a key is absent (or set to `auto`), a shared
-resolver picks the source. **An explicit value always wins over auto.**
+`internal/detectors/srcresolve` picks each detector's source from its config
+plus per-detector candidate lists. The rules are in its package comment
+(`internal/detectors/srcresolve/srcresolve.go:1-41`) and in `docs/DETECTORS.md`
+"Source modes":
+- an explicit value always wins;
+- auto's first candidate is the detector's old default (the parity
+  invariant);
+- docker discovery never guesses between two containers.
 
-This generalises what already exists piecemeal: `ftpd` has full
-`MODE=auto` (auto|file|journal), `modsec`/`mysql` have `LOG_PATH=auto`,
-`exim_*` fall back to a hard-coded candidate list on empty `LOG_PATH`
-(`exim/relays.go`), `dovecot` autodetects within its configured mode. One new
-package, `internal/detectors/srcresolve`, owns the chain so it is written
-once, unit-tested once, and every register calls it:
-
-```
-resolve(service):
-  1. explicit config (MODE/LOG_PATH/JOURNAL_UNIT/DOCKER_*)   → use verbatim
-  2. journal candidates (unit exists & journald readable)     → journal mode
-  3. file candidates per (distro, panel), first that exists   → file mode
-  4. docker discovery (name pattern, exactly-one match)       → docker mode
-  5. service not present at all                               → self-disable
-     (detector reports "disabled: <service> not found", not an error)
-```
-
-**Parity invariant:** for every detector, auto's first candidate is today's
-default, so hosts whose config omits the key see identical behaviour after
-the upgrade (e.g. `ssh_auth` tries `sshd.service` journal first — exactly the
-current `MODE=journal` default).
-
-Candidate tables (from the audit + current code):
-
-| Service | Journal units | File candidates | Docker pattern |
-|---|---|---|---|
-| ssh | `sshd.service`, `ssh.service` (Debian — live on saf) | `/var/log/secure` (EL), `/var/log/auth.log` (Debian) | — |
-| dovecot | `dovecot.service` | `/var/log/maillog`, `/var/log/mail.log`, `/var/log/dovecot.log` | `*dovecot-mailcow*` |
-| exim | **none — deliberately** (see §3a: exim writes its own files and never syslogs the mainlog; `journalctl -u exim` carries only child-process noise, so journal is explicit-`JOURNAL_UNIT` opt-in only) | `/var/log/exim_mainlog` (cPanel), `/var/log/exim4/mainlog` (Debian), `/var/log/exim/mainlog` (DA/EL — live on saf; **already in code's list**, saf's explicit value is redundant) + rejectlog siblings | — |
-| postfix | `postfix@-.service`, `postfix.service` | `/var/log/maillog` (EL), `/var/log/mail.log` (Debian) | `*postfix-mailcow*`; queue cmds become `docker exec <c> postqueue …` automatically |
-| modsec | — (file-only) | `/usr/local/apache/logs/error_log` (cPanel EA4), `/var/log/httpd/error_log` (EL), `/var/log/apache2/error_log` (Debian) — stock drops its hard-coded apache2 path | — |
-| webdetector edge log | — | derive from the daemon's own edge knowledge: OpenResty/Angie/apache tsv (`/var/log/apache2/access_cfm_tsv.log`), nginx combined (`/var/log/nginx/access_cfm_combined.log` — earth), DirectAdmin per-domain folder → `MODE=folder LOG_DIR=/var/log/nginx/domains GLOB=*.log` (saf) | — |
-| cpanel detector | n/a — presence check `/usr/local/cpanel` | | |
+The per-section planners shared by the registers and the dry-run preview are
+in `internal/detectors/source_report.go`. Adopted by: `ssh_auth`,
+`dovecot_auth`, the exim family and the postfix family.
 
 ### 3a. Journald is not a trustworthy source for every service
 
-Live fleet evidence (titan, cPanel, 2026-08-25): `journalctl -xeu exim` shows
-almost nothing of exim's — the visible lines are **dovecot LDA** entries.
-Two distinct traps, and both must shape the resolver:
+This decision shapes the resolver. Do not undo it.
 
-1. **Daemons that write their own log files never populate their journal.**
-   Exim logs `mainlog`/`rejectlog` directly to disk on every install we run
-   (cPanel, Debian exim4, DA); it does not syslog its mainlog. Its unit's
-   journal holds only startup stderr and stray child output — "the journal
-   has entries for exim.service" is TRUE and useless.
-2. **Journald attributes by cgroup, not by daemon.** Exim spawns dovecot's
-   LDA binary for local delivery, so those dovecot lines land under
-   `_SYSTEMD_UNIT=exim.service`. A unit's journal can therefore contain
-   *other services'* lines (and miss its own children's the same way).
+1. **A daemon that writes its own log files never populates its journal.**
+   Exim writes `mainlog` / `rejectlog` to disk on every install CFM runs on,
+   and its unit's journal holds only startup stderr and child output.
+2. **Journald attributes lines by cgroup, not by daemon.** Exim spawns
+   dovecot's LDA for local delivery, so dovecot lines land under
+   `_SYSTEMD_UNIT=exim.service` (seen on titan, 2026-08-25).
 
-Consequences, encoded in the resolver policy:
+Hence:
+- exim gets file candidates only. Journald is available only through an
+  explicit `JOURNAL_UNIT` (`internal/detectors/source_report.go:136-142`).
+- Services that really syslog (sshd, dovecot, postfix) keep journal
+  candidates. Postfix's are signature-checked: recent entries must carry the
+  daemon's tag, not just exist (`srcresolve.go:72-80` `JournalSignature`).
 
-- A service **known to file-log natively** (exim) gets **no journal
-  candidates at all** — file candidates only; journald is available solely by
-  explicit `JOURNAL_UNIT` (operator opt-in).
-- A service that genuinely syslogs (sshd, dovecot, postfix) keeps journal
-  candidates: for those, "unit has entries" is real signal. Where content
-  ambiguity remains (postfix in PR 3, shared syslog files), the probe becomes
-  **signature-aware** — match daemon/failure patterns in the recent journal,
-  the way the ftpd autodetect already scores candidates — instead of
-  existence-only.
-- The startup log line always prints the resolved source + reason, and
-  `detectors_status` surfaces it, so a wrong resolution is one look away.
+---
 
-Self-disable rules (kills the biggest section-presence divergence): exim
-detectors auto-disable where exim isn't installed (mailcowdocker sets
-`ENABLED=0` by hand today), postfix detectors likewise on exim-only hosts,
-`[cpanel]` on non-cPanel hosts, `[modsec]` where no modsec log exists.
-`ENABLED=0` stays as an explicit hard-off that beats auto.
+## 4. Mechanism B — config layering (built)
 
-Docker discovery matches container names per service pattern and requires
-**exactly one** match; zero or several → self-disable with a logged reason
-telling the operator to set `DOCKER_CONTAINER` explicitly (fail closed, no
-guessing).
+`/etc/cfm/detectors.conf` is read first, then `/etc/cfm/detectors.d/*.conf`
+in lexicographic order. Merge rules (`internal/detconf/layered.go:1-35`):
+- the same section and key in a later file replaces the earlier value;
+- `KEY += value` appends to it;
+- a section only in an overlay is added whole.
 
-Observability: each detector's resolved source (`mode=journal
-unit=sshd.service`, `mode=file path=…`, `mode=docker container=…`,
-`disabled: not installed`) is logged at startup **and** surfaced in
-`/api/v1/detectors/status` → the `detectors_status` MCP tool, so a wrong
-resolution is visible in one call. `whats_wrong` must not flag an
-auto-disabled detector as a failure.
+Every consumer reads the merged view: the manager
+(`internal/detectors/manager.go:741-744`), `config_drift`, the source preview,
+`cfm test` and the MCP config tool. Packaging creates the directory empty and
+never installs into it (`packaging/debian/DEBIAN/postinst:33-38`,
+`packaging/rpm/SPECS/cfm.spec:74,124`).
 
-## 4. Mechanism B — config layering (`/etc/cfm/detectors.d/`)
+`config_drift` takes missing sections and keys from the MERGED view, so an
+overlay that adopts a feature stops it reading as missing. Value diffs stay
+stock-vs-BASE, because overlay values are intentional per-host state
+(`internal/apiserver/config_drift_endpoint.go:12, 120-125, 191-197`).
 
-Even with perfect auto-detection, one deliberate per-host threshold keeps the
-conffile "modified" and resurrects `.rpmnew`. So deliberate deltas move out:
+**Open:** the cfm-admin editor still writes the BASE file. It only shows a
+notice when overlays exist (`internal/apiserver/detectors_api.go:142-150`).
+Every save through it dirties the conffile again. The plan was for it to
+write one overlay (`90-webui.conf`) and show the merged view with per-key
+provenance. `GET ?view=merged` already returns the merged view and its
+overrides (`detectors_api.go:118-134`).
 
-- Read order: `/etc/cfm/detectors.conf` (base, package-owned), then
-  `/etc/cfm/detectors.d/*.conf` sorted lexicographically (`10-…`, `50-…`).
-- Merge: same section+key → later wins (replace). New: `KEY += value`
-  appends to list-valued keys (comma-joined) — needed for `IGNORE_NETS`,
-  `IGNORE_IPS`, `CHALLENGE_VHOST_IGNORE`, `ALLOW_*`, so hosts extend the
-  common base instead of forking the whole list.
-- Sections may exist only in an overlay (named instances, host-local extras).
-- `Sections.StampNS` becomes max mtime across all read files, and a
-  `LayerSig` (hash of the overlay set: name+mtime+size per file) covers what
-  max-mtime cannot see — an overlay removed, renamed, or installed with an
-  older mtime (`mv`/`cp -p`/`rsync -a`) — so hot reload always notices.
-- `detconf` grows `ReadLayered(basePath, dropinDir)`; all consumers move to
-  it (manager, admin editor read path, configdrift live side, detector
-  coverage endpoint). With no overlay present, output is byte-identical to
-  `ReadSectionsFile(basePath)` — asserted by a parity test.
-- **WebUI admin editor writes only an overlay** (`90-webui.conf`), never the
-  base — today `detectorscfg/admin_config.go` rewrites
-  `/etc/cfm/detectors.conf` in place, which would dirty the conffile again.
-  The editor shows the merged view with per-key provenance (base/overlay).
-- Packaging ships the empty `detectors.d/` directory and **never** installs
-  files into it (that would recreate the conffile problem one level down).
-- `config_drift` (API + MCP) compares VALUES stock vs **base** — overlay
-  values are intentional per-host state, not drift — but computes
-  `missing_sections`/`missing_keys` against the **merged** view, since the
-  recommended way to adopt a missing feature is exactly an overlay (it must
-  stop being reported missing once added). Overlays are additionally
-  summarized as per-file section/key counts so an audit sees they exist.
+---
 
-End state: `/etc/cfm/detectors.conf` is pristine → upgrades update it in
-place; every new stock knob reaches every host on the next upgrade; a host's
-entire personality is its (tiny) overlay.
+## 5. Mechanism C — global `[leniency]` (not built)
 
-## 5. Mechanism C — global `[leniency]` + persisted auto-tokens
-
-**Global leniency.** Six near-identical `[X.leniency]` blocks exist across
-the fleet (GR,CY / short TTL / lenient list) with accidental micro-variation.
-Since leniency is purely a sink policy (`autoblock_sink.go`, DETECTORS.md §6),
-add one lookup fallback — no detector changes:
+The 2026-08 audit found six near-identical `[X.leniency]` blocks across the
+fleet (GR,CY / short TTL / lenient list), with accidental differences between
+them. Leniency is purely a sink policy, so a lookup fallback changes no
+detector:
 
 ```
 [type:instance.leniency] → [type.leniency] → [leniency]   (first found wins)
 ```
 
-Stock ships one global block; per-detector blocks remain for overrides.
-Audit cleanup folded in: 5 servers put `AUTHFAIL_IP`/`AUTHFAIL_USER`/`DDOS_IP`
-*inside* `.leniency` sections — the sink ignores unknown keys, so these are
-dead lines (someone believed they set softer thresholds for GR; they set
-nothing). Validation should warn on unknown keys in `.leniency` sections.
+Stock would ship one global block, and per-detector blocks stay for
+overrides. Today only the exact `[<section>.leniency]` is read
+(`internal/detectors/manager.go:665-668`). Two things block it:
+- a bare `[leniency]` section would currently be instantiated as a detector
+  type and fail as `unknown section type` (`manager.go:488-502`);
+- validation should also warn on unknown keys in a `.leniency` section. The
+  audit found `AUTHFAIL_IP` / `AUTHFAIL_USER` / `DDOS_IP` inside them on five
+  nodes. `parseLeniencyPolicy` reads only `MATCH_COUNTRY`, `MATCH_ASN`, the
+  block-policy keys, `SEND_TO_API` and `SEND_TO_BLOCKLIST`
+  (`internal/detectors/leniency.go:53-106`), so those lines set nothing.
 
-**Tokens (PR 6, release after 2026.09.30).** `CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` were
-per-host secrets generated INTO the conffile — the last blocker to a
-byte-identical file. `internal/hostsecrets` keeps each in
-`/var/lib/cfm/secrets/` (root, dir `0700`, files `0600`; only the daemon reads
-them, the edge keeps reading the `cfm_bridge_token.lua` mirror) and never
-writes `detectors.conf`. The store is the source of truth: a token file is
-created once, copied from the conffile's value when it carries one (the
-base `[webdetector]`, or an overlay's when the base has none, as the old
-binary read it; the migration: no cookie is invalidated), else generated. The stock file ships
-the two keys as `placeholder` (kept so an older binary after a rollback
-replaces them in place instead of appending them to whatever section is
-last; an empty value is worse, its regex overwrites the next line). Taking
-the package's file at a Debian upgrade rotates the tokens once, and a
-rollback with the line at placeholder twice; that was judged cheaper than
-the pre-upgrade machinery avoiding it.
-`cfm health` reads the same resolution (`hostsecrets.Effective`).
+The per-host secrets that were also part of this step are done:
+`CHALLENGE_TOKEN` / `OPENRESTY_TOKEN` live in `/var/lib/cfm/secrets/`
+(`internal/hostsecrets/hostsecrets.go:1-20`), and stock ships both lines as
+`placeholder` (`configs/detectors.conf:1463-1474, 2266-2270`).
 
 ---
 
-## 6. Fleet-converged defaults
+## 6. Fleet-converged defaults (not built)
 
-The audit gives real burn-in data. Per the operator, the heavy-traffic nodes
-are **orion, titan, earth, mars** — their values carry the most weight (they
-absorbed the FP pressure that forced retuning), with one caveat: titan is the
-experiments box, so titan-only deltas read as burn-in, not consensus.
+These are stock changes proposed from the 2026-08 audit. The heavy-traffic
+nodes (orion, titan, earth, mars) carry the most weight, except that titan is
+the experiments box: titan-only deltas are burn-in, not consensus.
 
-Legend: **bold** = change stock; ⚠ = needs operator sign-off in review;
-"overlay" = deliberate outlier stays as that host's overlay line.
+None has landed. The "Stock now" column is the current reference file. ⚠ =
+needs operator sign-off. "overlay" = the outlier stays as that host's overlay
+line. Per-node values are as audited in 2026-08 and have not been re-read since.
 
-### 6.1 Strong signals (heavy nodes agree — adopt)
+### 6.1 Strong signals (heavy nodes agree)
 
-| Key | Stock | Heavy-4 (earth/mars/orion/titan) | Proposed |
+| Key | Stock now | Heavy-4 (earth / mars / orion / titan) | Proposed |
 |---|---|---|---|
-| `[webdetector] BLOCK` | 2h | 1h / 1h / 1h / 1h | **1h** |
-| `[webdetector] OPENRESTY_OK_IP_TTL` | 10m | 45m ×4 (+rigel, virgo) | **45m** |
-| `[webdetector] AGENT_COUNT` | 35 (was 20; set 2026-11-17, see the stock comment) | 25 / 25 / 25 / 35 | **35** (shipped) |
-| `[webdetector] AGENT_LIST` | curl,wget,python-requests,Go-http-client,spider,FacebookExternalHit | 3 of 4: python-requests,Go-http-client,spider | **python-requests,Go-http-client,spider** ⚠ (fleet dropped curl/wget/FacebookExternalHit as FP-prone — legit tooling & FB previews) |
-| `[webdetector] IP404_COUNT` | 250 | 200 / 300 / 280 / 350 | **300** |
-| `[webdetector] IP40X_COMBO` | 120 | 160 / 290 / 220 / 300 | **250** |
-| `[webdetector] IP40X_UNIQUE_PATHS` | 20 | 20 / 35 / 25 / 40 | **30** |
-| `[webdetector] IP403_COUNT` | 150 | 200 / 250 / 60 / 250 | **200** (orion 60 = deliberate aggressive → overlay) |
-| `[webdetector] ORIGIN_KEEPALIVE` | 0 | 1 on all 7 holders | **1** (+ document IDLE_SEC/MAX_REQS; see docs/proxy-performance.md) |
-| `[waf_security] BLOCK` | 6h | 7d on all 7 holders | **7d** |
-| `[cpanel] AUTHFAIL_IP/_USER` | 5 | 10 / 10 / 10 / 8 | **10** |
-| `[cpanel] ROOT_IP` | 3 | 5 / 5 / 5 / 5 | **5** |
-| `[exim_security] BLOCK` | 12h "interim" | permanent / permanent / permanent / 24h | **permanent** ⚠ (the 2026-04-22 interim note is stale — fleet moved on; titan 24h → overlay) |
-| `[exim_security] NO_MAIL` | 8 | 10 / 8 / 8 / 15 | **10** |
-| `[exim_security] SENDER_VERIFY_FAIL` | 12 | 0 / 0 / 6 / 0 | **0 (off)** ⚠ — 3 of 4 heavy MX disabled it (FP-prone); orion 6 → overlay |
-| `[exim_security] RCPT_REJECT` | 12 | 0 / 0 / 6 / 0 | **0 (off)** ⚠ — same pattern |
-| `[exim_security] SESSION_ALL_FAILED` | 6 | 50 / (typo) / (typo) / 50 | **50** ⚠ — earth+titan are the only heavy nodes where the knob works; both raised it deliberately |
-| `[exim_security] SLOW_FAIL_BLOCK` | 6 | 20 / (typo) / (typo) / 20 | **20** ⚠ |
-| `[api_abuse]` → `[cfm_endpoints]` | stock ships `[cfm_endpoints]` | `[api_abuse]` live on 3deers/titan/virgo | **do NOT add `[api_abuse]` to stock — it is deprecated** (superseded by the built-in `cfm_endpoints` detector, which runs with staged defaults even with no config section and merges legacy `[api_abuse]` in memory; `docs/DETECTORS.md` "cfm_endpoints"). Migration: move the 3 hosts' `ALLOW_IPS`/`ALLOW_NETS`/`PATH_EXCEPTIONS`/threshold overrides into `[cfm_endpoints]` overlay keys and delete `[api_abuse]`. |
-| `[health] CONN_EST/SYN/TOTAL_SPIKE` | 5.0 | 5.0 / 5.0 / 3.0 / 5.0 | keep **5.0** (orion 3.0 → overlay) |
-| `[leniency]` (new global) | — | 15m/15m dominant (earth+titan dovecot 1h/30m) | **MATCH_COUNTRY=GR,CY · BLOCK=15m · BLOCK_COOLDOWN=15m · SEND_TO_API=yes · SEND_TO_BLOCKLIST=lenient** |
+| `[webdetector] BLOCK` | 12h (`:1415`) | 1h ×4 | **1h** |
+| `[webdetector] OPENRESTY_OK_IP_TTL` | 10m (`:1527`) | 45m ×4 (+rigel, virgo) | **45m** |
+| `[webdetector] AGENT_LIST` | curl,wget,python-requests,Go-http-client,spider,FacebookExternalHit (`:1396`) | 3 of 4: python-requests,Go-http-client,spider | python-requests,Go-http-client,spider ⚠ (curl / wget / FacebookExternalHit are FP-prone: legit tooling and FB previews) |
+| `[webdetector] IP404_COUNT` | 250 (`:1388`) | 200 / 300 / 280 / 350 | **300** |
+| `[webdetector] IP40X_COMBO` | 120 (`:1422`) | 160 / 290 / 220 / 300 | **250** |
+| `[webdetector] IP40X_UNIQUE_PATHS` | 20 (`:1423`) | 20 / 35 / 25 / 40 | **30** |
+| `[webdetector] IP403_COUNT` | 150 (`:1395`) | 200 / 250 / 60 / 250 | **200** (orion 60 → overlay) |
+| `[webdetector] ORIGIN_KEEPALIVE` | 0 (`:1566`) | 1 on all 7 holders | **1** (see `docs/proxy-performance.md`) |
+| `[waf_security] BLOCK` | 6h (`:311`) | 7d on all 7 holders | **7d** |
+| `[cpanel] AUTHFAIL_IP` / `_USER` | 5 (`:1001-1002`) | 10 / 10 / 10 / 8 | **10** |
+| `[cpanel] ROOT_IP` | 3 (`:1003`) | 5 ×4 | **5** |
+| `[exim_security] BLOCK` | 12h (`:728`) | permanent / permanent / permanent / 24h | **permanent** ⚠ (titan 24h → overlay) |
+| `[exim_security] NO_MAIL` | 8 (`:712`) | 10 / 8 / 8 / 15 | **10** |
+| `[exim_security] SENDER_VERIFY_FAIL` | 12 (`:708`) | 0 / 0 / 6 / 0 | **0 (off)** ⚠ (FP-prone; orion 6 → overlay) |
+| `[exim_security] RCPT_REJECT` | 12 (`:709`) | 0 / 0 / 6 / 0 | **0 (off)** ⚠ |
+| `[exim_security] SESSION_ALL_FAILED` | 6 (`:723`) | 50 / typo / typo / 50 | **50** ⚠ (earth and titan are the only heavy nodes where the key parses) |
+| `[exim_security] SLOW_FAIL_BLOCK` | 6 (`:724`) | 20 / typo / typo / 20 | **20** ⚠ |
+| `[health] CONN_EST/SYN/TOTAL_SPIKE` | 5.0 (`:1289-1291`) | 5.0 / 5.0 / 3.0 / 5.0 | keep 5.0 (orion 3.0 → overlay) |
+| `[leniency]` (new global, §5) | — | 15m / 15m dominant | MATCH_COUNTRY=GR,CY · BLOCK=15m · BLOCK_COOLDOWN=15m · SEND_TO_API=yes · SEND_TO_BLOCKLIST=lenient |
+
+Settled since the audit:
+- `[webdetector] AGENT_COUNT` is 35 (`configs/detectors.conf:1398-1406`).
+- Stock `IGNORE_NETS` is the RFC1918 ranges plus `84.54.49.0/24`
+  (`configs/detectors.conf:101`), pinned by `reference_defaults_config_test.go`.
+- `[api_abuse]` is NOT added to stock: it is a deprecated alias that is
+  merged into `cfm_endpoints` in memory
+  (`internal/detectors/api_abuse_register.go:103-175`; `docs/DETECTORS.md`).
+  Nodes still running `[api_abuse]` (3deers, titan and virgo in the audit)
+  move its keys into a `[cfm_endpoints]` overlay.
 
 ### 6.2 Keep stock; outliers become overlay lines
 
-`[dovecot_auth]` 10/10 + `BLOCK=permanent` (titan 24h, saf 3/3, mailcow 5/5 →
-overlay or adopt fleet value at migration); `[ssh_auth]` 8/8/8 (titan 5/5/6,
-saf 4/4/4); `[modsec] MODSEC_IP=20` (titan 15, speedhost 10);
-`[exim_relays]`/`[exim_queues]` stock values (titan's mild lowering →
-overlay); `[ftpd]` 8/8 (speedhost 5/5); challenge subnet / suspicious-vhost
-thresholds (titan's across-the-board lowering is Under-Attack burn-in →
-overlay); `[challenge_solver_farm]`/`[challenge_cookie_discard]` (orion vs
-titan differ — both mid-burn-in); `[health] CONN_TOTAL_ABS=20000` (titan
-10000 = smaller box → overlay); `[mysql_governor]` rule blocks are per-tenant
-by nature → overlay forever.
+- `[dovecot_auth]` 10/10 and `BLOCK=permanent` (titan 24h, saf 3/3, mailcow 5/5);
+- `[ssh_auth]` 8/8/8;
+- `[modsec] MODSEC_IP=20`;
+- `[exim_relays]` / `[exim_queues]`;
+- `[ftpd]` 8/8;
+- the challenge subnet / suspicious-vhost thresholds (titan's lowering is
+  Under-Attack burn-in);
+- `[challenge_solver_farm]` / `[challenge_cookie_discard]` (mid burn-in);
+- `[health] CONN_TOTAL_ABS=20000`;
+- `[mysql_governor]` rule blocks (per tenant: overlay forever).
 
 ### 6.3 Split decisions ⚠ (operator picks in review)
 
-| Key | Stock | Heavy-4 | Options |
+| Key | Stock now | Heavy-4 | Options |
 |---|---|---|---|
-| `[exim_security] PROTO_ERR` | 8 | 0 / 8 / 8 / 0 | keep 8 (earth+titan overlay 0) — or adopt 0 |
-| `[exim_security] BLOCK_COOLDOWN` | 10m | 30m / 10m / 10m / 30m | keep 10m — or 30m |
-| `[mysql] BLOCK` | permanent | 24h / permanent / permanent / 24h | propose **24h** (matches waf_security's self-healing-TTL philosophy; earth/saf/titan already there) — or keep permanent |
-| `[health] THROUGHPUT_MIN_MBPS` | 60 | 80 / 70 / 60 / 80 | propose **70** |
-| `[health] PORT_SPIKE_X` | *not in stock* | 5.0 / 3.0 / 3.0 / 5.5 | **add to stock**; propose 5.0 |
-| `[health] PORT_WATCH` | *not in stock* | role-dependent everywhere | add superset `80,443,25,110,143,21,22,3306,465,587` now; **v2: auto-derive from listening services** (it is environment, not policy) |
+| `[exim_security] PROTO_ERR` | 8 (`:711`) | 0 / 8 / 8 / 0 | keep 8 (earth and titan overlay 0), or adopt 0 |
+| `[exim_security] BLOCK_COOLDOWN` | 10m (`:729`) | 30m / 10m / 10m / 30m | keep 10m, or 30m |
+| `[mysql] BLOCK` | permanent (`:1095`) | 24h / permanent / permanent / 24h | 24h (self-healing TTL, like waf_security), or keep permanent |
+| `[health] THROUGHPUT_MIN_MBPS` | 60 (`:1293`) | 80 / 70 / 60 / 80 | 70 |
 
-### 6.4 Reverse-drift: document in stock what already runs
+`PORT_SPIKE_X` and `PORT_WATCH` were proposed for stock, but no code reads
+either key (no match in `internal/`). On the nodes that carry them they are
+dead lines: clean them up as in §7, don't ship them. A port watch derived from
+the listening services would be new detector work.
 
-`OPENRESTY_MODE`, `API_LISTEN`, `CHALLENGE_HTTPS_LISTEN` (present on most
-servers, absent from stock); webdetector folder mode
-(`MODE=folder`/`LOG_DIR`/`GLOB`/`RECURSIVE` — live on saf); `IP403WAF_COUNT`
-(orion). Stock `IGNORE_NETS` `172.17.0.1/16` (host bit set — copied verbatim
-to most of the fleet) was replaced on 2026-09-30 by the RFC1918 ranges plus our
-own `84.54.49.0/24`; `reference_defaults_config_test.go` rejects an entry that
-is not a network address.
+### 6.4 Undocumented keys that run
+
+`IP403WAF_COUNT` is read (`internal/detectors/webdetector_register.go:674`)
+but appears nowhere in stock. The webdetector folder mode is now documented
+as commented examples (`configs/detectors.conf:1320-1350`). The other keys the
+audit found live but undocumented are retired and are dead lines on the
+nodes, not stock candidates:
+- `OPENRESTY_MODE`: ignored with a warning, see `docs/edge-unification-plan.md`;
+- `CHALLENGE_HTTPS_LISTEN`: the 9099 listener is gone;
+- `API_LISTEN`: deprecated, `webdetector_register.go:629-630`.
 
 ---
 
-## 7. Immediate operator fixes (no code needed — do before/while Phase 1)
+## 7. Operator fixes on the fleet (no code)
 
-1. **mailcowdocker, mars, orion, rigel, speedhost**: fix
-   `SESSION_ALL_FAILED": = 6` / `SLOW_FAIL_BLOCK" = 6` (stray `"` → both
-   thresholds silently ignored today).
-2. **3deers**: `CHALLENGE_VHOST = victim.com,` — panel patterns
-   (`webmail.*, whm.*, cpanel.*`) are missing, so panel vhosts are
-   unprotected there; `victim.com` looks like a test leftover (also present
-   in several servers' lists — sweep it out).
-3. **titan**: `CHALLENGE_HOST_BYPASS = api.mybank.gr,` trailing comma.
-4. **speedhost**: `[exim_security.leniency] BLOCK = permanent` defeats the
-   purpose of leniency → `15m`.
-5. **earth, mars, orion, rigel, speedhost**: delete dead
-   `AUTHFAIL_*`/`DDOS_IP` keys inside `.leniency` sections (ignored by the
-   sink).
-6. **mars**: delete `[httpd_access]` / `[nginx_access]` — no such detectors
-   exist in code; silently ignored.
-7. Case/cosmetic sweep: `SEND_TO_API yes` casing, `LOG_PATH ""` vs `auto`.
+These come from the 2026-08 audit and have not been re-verified since. Check
+each with `config_drift` / `detectors_config` before acting.
 
-## 8. Per-server end state (expected overlay after all phases)
+1. mailcowdocker, mars, orion, rigel, speedhost: `SESSION_ALL_FAILED": = 6` /
+   `SLOW_FAIL_BLOCK" = 6`. The stray `"` makes the key invalid, so both
+   thresholds run at built-in defaults.
+2. 3deers: `CHALLENGE_VHOST = victim.com,`. The panel patterns
+   (`webmail.*, whm.*, cpanel.*`) are missing. `victim.com` is a test
+   leftover found on several nodes: sweep it out.
+3. titan: `CHALLENGE_HOST_BYPASS = api.mybank.gr,` has a trailing comma.
+4. speedhost: `[exim_security.leniency] BLOCK = permanent` defeats leniency.
+   Set it to `15m`.
+5. earth, mars, orion, rigel, speedhost: delete the dead `AUTHFAIL_*` /
+   `DDOS_IP` keys inside `.leniency` sections (§5).
+6. mars: delete `[httpd_access]` / `[nginx_access]`. No such detectors exist,
+   and an unknown section type is logged and marked init-failed
+   (`internal/detectors/manager.go:501-502`).
+7. Remove the retired keys from §6.4 and `PORT_SPIKE_X` / `PORT_WATCH`.
+8. Case and cosmetic sweep: `SEND_TO_API yes` casing, `LOG_PATH ""` vs `auto`.
 
-| Server | Expected overlay content |
-|---|---|
-| mailcowdocker | *(empty)* — everything was environment (docker/MTA/panel), now auto |
-| mars, rigel, virgo, 3deers | ≤5 lines (allow-list extras via `+=`) |
-| earth | ≤5 lines (PROTO_ERR=0 if not adopted; dovecot leniency 1h if kept) |
-| saf | ≤6 lines (deliberately tight thresholds for a small box: ssh 4/4, dovecot 3/3) |
-| speedhost | ≤6 lines (ftpd 5/5, modsec 10, cpanel 4) |
-| orion | ~10 lines (aggressive IP403=60, CONN spikes 3.0, governor rules, solver-farm burn-in) |
-| titan | the playground set (~15 lines: under_attack, abuse_shadow, lowered challenge thresholds, TTL blocks) |
+---
 
-## 9. Rollout (small single-concern PRs, per CLAUDE.md §9)
+## 8. Remaining work
 
-1. **PR 1 — this doc** (+ CLAUDE.md §7 row, ROADMAP index entry).
-2. **PR 2 — `srcresolve` package** + adopt in `ssh_auth`/`dovecot_auth`
-   (journal-unit candidates with canonical-alias resolution, `MODE=auto`
-   default, docker discovery for dovecot). **In flight**
-   (`claude/detectors-srcresolve`). As shipped: nothing-confirmed falls back
-   to the historical blind default (provisional, self-healing) — true
-   self-disable arrives with MTA-flavor detection in PR 3.
-3. **PR 3 — exim/postfix on srcresolve** incl. docker discovery and
-   docker-ized queue commands; MTA-flavor self-disable (kills the
-   postfix-vs-exim section divergence). Per §3a: exim gets file candidates
-   ONLY (journal is explicit opt-in); postfix keeps journal candidates with a
-   signature-aware entries probe.
-4. **PR 4 — webdetector edge-source auto** (engine-derived path, folder mode
-   for DA) + modsec candidate cleanup.
-5. **PR 5 — `detconf` layering** (`ReadLayered`, `+=`, StampNS, parity
-   test), consumers switched, **WebUI editor → overlay**, `config_drift`
-   overlay counts. This PR flips the conffile back to pristine-able.
-6. **PR 6 — global `[leniency]` fallback + persisted tokens.**
-7. **PR 7 — stock `detectors.conf` converged defaults** (§6 table, one
-   reviewable diff) + CHANGELOG. Behaviour change on hosts that inherit
-   defaults — ships alone, like the `cleanScalar` fix did.
-8. **Fleet migration** (operational, per server): apply §7 fixes → upgrade →
-   move deltas to overlay → verify `config_drift` reports clean base →
-   delete token keys. `detectors_status` shows each resolved source.
+- **PR 6: global `[leniency]` fallback** (§5). The persisted-token half
+  shipped.
+- **Edge-source and modsec auto.** Not built:
+  - `[webdetector]` still defaults to `MODE=file` with the apache tsv path
+    (`internal/detectors/webdetector_register.go:611-612`;
+    `configs/detectors.conf:1359-1360`).
+  - `[modsec]` stock pins `LOG_PATH = /var/log/apache2/error_log`
+    (`configs/detectors.conf:977-978`). That explicit value disables the
+    register's own candidate scan (`internal/detectors/modsec_register.go:103-140`).
 
-Every code PR: adversarial self-review before opening; update
-`docs/DETECTORS.md` (§6 leniency lookup order, §1 "Source modes") and
-`docs/endpoint_scope_inventory.md` if any endpoint changes, in the same
-change.
+  The aim: derive the edge log from the daemon's own edge knowledge (tsv,
+  nginx combined, DirectAdmin folder mode), and drop the hard-coded modsec
+  path from stock.
+- **cfm-admin editor writes an overlay** (§4).
+- **PR 7: stock converged defaults** (§6), one reviewable diff plus
+  CHANGELOG. It changes behaviour on hosts that inherit defaults, so it ships
+  alone, like the `cleanScalar` fix did, with the §6.1 ⚠ rows and §6.3
+  resolved in review.
+- **Fleet migration** (operational, per node): apply §7, upgrade, move deltas
+  to an overlay, confirm `config_drift` reports a clean base.
+  `detectors_srcresolve` shows each resolved source.
 
-## 10. Risks & open questions
+Every code PR also updates `docs/DETECTORS.md` (leniency lookup order,
+"Source modes") and `docs/endpoint_scope_inventory.md` if an endpoint changes,
+in the same change.
 
-- **Auto changes behaviour only where keys are absent.** Explicit values win,
-  so upgraded hosts are unaffected until they delete lines. The parity
-  invariant (§3) covers the absent-key case.
-- **Docker discovery ambiguity** fails closed to self-disable + log; never
-  guesses among multiple matches.
-- **Threshold convergence (PR 7) is the only behaviour-visible step** for
-  hosts tracking stock defaults; it lands as its own PR with the ⚠ decisions
-  from §6.3 resolved in review.
-- Open: should `PORT_WATCH` auto-derive in v1 or v2? Should mailcow's softer
-  dovecot/postfix thresholds (5/5) become the fleet default for docker-mail
-  hosts or stay overlay? Does the WebUI need per-key "reset to base" UX at
-  the same time as PR 5, or later?
+## 9. Open questions
+
+- Should mailcow's softer dovecot / postfix thresholds (5/5) be the default
+  for docker-mail hosts, or stay an overlay?
+- Does the editor need a per-key "reset to base" when it moves to an overlay?

@@ -178,7 +178,7 @@ func TestWAFRuleIDs_NoRenumber(t *testing.T) {
 func TestWAFRuleIDs_GroupingDigits(t *testing.T) {
 	for _, r := range wafRuleIDs {
 		// Legacy families live in 100-999 (grouped by leading digit); named-
-		// vulnerability (CVE) detectors use the 10000+ band (WAF_CVE_PLAN.md).
+		// vulnerability (CVE) detectors use the 10000+ band (WAF_CVE.md).
 		inLegacy := r.ID >= 100 && r.ID <= 999
 		inCVE := r.ID >= 10000 && r.ID <= 99999
 		if !inLegacy && !inCVE {

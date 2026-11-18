@@ -531,9 +531,9 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
 `docs/waf-autoblock-design.md`. Hard-won points:
 - **Phase 1 feeds edge-`block` hits ONLY** (the subscribe callback drops any
   hit whose action != `block`). Do **not** key autoblock on reason-family
-  alone: a family spans edge tiers — `WAF_BACKDOOR` mixes block 440 with
-  logonly/challenge 430-439, and `WAF_RCE` mixes block 320 with logonly
-  322-327, so family-only keying autoblocks logonly recon. Families with an edge-`block`
+  alone: a family spans edge tiers — `WAF_BACKDOOR` mixes block 438/440 with
+  logonly/challenge_v2 430-439, and `WAF_RCE` mixes block 320/329/332 with
+  challenge_v2 322-327, so family-only keying autoblocks lower-tier recon. Families with an edge-`block`
   rule today (the Go registry, `DefaultMode: "block"`, is the source — check it
   before editing this list): `WAF_SQLI` (301), `WAF_SQLI_LEXICAL` (309, since
   2026-08-23), `WAF_RCE` (320, 329, 332 since 2026-11-17), `WAF_UPLOAD_FNAME` (401, 414),
@@ -632,7 +632,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   when a DNAT runs ahead while WebShield serves real traffic. With CFM first,
   a graylisted direct visitor is dropped by Imunify's own filter (it accepts
   that set only on WebShield's ports), never challenged. What WebShield did
-  that CFM lost, measured: `docs/imunify-webshield-parity.md`.
+  that CFM lost, measured: `docs/imunify360-gap-analysis.md` ("WebShield").
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
@@ -648,7 +648,7 @@ Per-CVE in-path detectors live in the `10000+` rule-id band and emit the
 autoblock notifier turns into a `WAF/CVE-YYYY-NNNN` alert automatically
 (`cveFromReason` in `wafsec/detector.go`). **Read `WAF_CVE.md` before adding
 one** — it carries the as-built reference and a step-by-step "CVE hunting"
-recipe; `WAF_CVE_PLAN.md` is the original design + candidate backlog. Hard-won
+recipe, plus the candidate backlog and the design decisions (§5–§6). Hard-won
 points:
 - **Never write a CVE signature from memory.** The assistant's knowledge cutoff
   predates most target CVEs — get the exact method/endpoint/marker from a public
@@ -1052,7 +1052,7 @@ because of that. Hard-won points:
 | Scope/host-bound clearance model | `docs/security/challenge-scope-mapping.md` |
 | sslcollector (cert discovery + socket API) | `docs/ssl-collector.md` |
 | WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
-| WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + "CVE hunting" recipe) · `WAF_CVE_PLAN.md` (design + backlog) |
+| WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + backlog + design decisions + "CVE hunting" recipe) |
 | Admin/WebUI API | `docs/webui-api-curl-recipes.md` (recipes + sample responses) |
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
@@ -1071,12 +1071,9 @@ because of that. Hard-won points:
 | Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |
 | Vhost lockdown (no client exemption on a manual vhost challenge: crawler storms) | `docs/vhost-lockdown.md` |
 | Proxied-client IP filter (fleet feeds, local bans and allows for clients behind Cloudflare) | `docs/proxied-ipfilter.md` |
-| Imunify360 vs CFM: what Imunify catches that CFM does not (measured on earth; status of each gap) | `docs/imunify360-gap-analysis.md` · WebShield alone: `docs/imunify-webshield-parity.md` |
+| Imunify360 vs CFM: what Imunify catches that CFM does not (measured on earth; status of each gap) | `docs/imunify360-gap-analysis.md` (WebShield included) |
 | PHP runtime defense (CFM-managed Snuffleupagus; CFM writes no PHP extension of its own) | `docs/roadmaps/php-runtime-defense.md` |
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
-
-**Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
-`WAF_CVE_PLAN.md` (backlog → `WAF_CVE.md`).
 
 Comments citing "audit Fnn" (Lua, confs, tests) refer to the closed
 2026-07 edge-Lua audit, deleted 2026-11-18: `git log --diff-filter=D --

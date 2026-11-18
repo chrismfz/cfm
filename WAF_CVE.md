@@ -1,308 +1,465 @@
-# WAF CVE Detection — implemented state & "CVE hunting" workflow
+# WAF CVE detectors (`WAF_CVE`)
 
-Companion to [`WAF_CVE_PLAN.md`](WAF_CVE_PLAN.md). The plan is the *design*;
-this doc is the **as-built reference** (what actually ships today) plus the
-step-by-step recipe for adding the next CVE detector. When the two disagree,
-this doc and the code win — update this doc in the same change that lands new
-CVE work.
+The one doc for CFM's named-vulnerability WAF rules: what ships (§1–§3), the
+coverage decisions (§4), the backlog (§5), the design decisions behind the
+framework (§6) and the recipe for adding the next rule (§7, "CVE hunting").
+The code wins over this doc: `configs/lua/cfm_waf.lua` (`CFG` defaults,
+`RULE_IDS`, `check()`), `configs/lua/cfm_waf_detectors.lua` (the
+`detect_cve_*` functions), `internal/webdetector/waf_rule_ids.go` (the Go
+mirror: `DefaultMode`, `HoldAutoblock`) and
+`internal/detectors/wafsec/detector.go` (`cveFromReason`). Update this doc in
+the same change that adds, promotes, holds or removes a CVE rule.
+
+(The former design + backlog doc, `WAF_CVE_PLAN.md`, is folded in here: §5
+and §6 keep what was still open or still decides something; git history
+keeps the rest.)
 
 ---
 
-## 1. What is implemented today
-
-The CVE framework is live end-to-end. A single-request, near-zero-FP CVE
-can be detected in-path, attributed to its CVE id, and (opt-in) turned into a
-persistent nft block with a CVE-named notification.
+## 1. Framework
 
 ### 1.1 Rule identity — the `10000+` band
 
-CVE detectors use stable numeric IDs in the **`10000–99999`** band, kept out
-of the legacy `1xx–9xx` families (the `9xx` band is reserved for behavioural
-rules and is too small for long-term CVE coverage).
+- **Ids.** CVE detectors use stable ids from `10001`, kept out of the legacy
+  `1xx–9xx` families (`9xx`, reserved for behavioural rules, is too small for
+  long-term CVE coverage). **Never renumber** an id: operators reference them
+  in excludes, `RULE_<id>` overrides, dashboards and tickets. `10015` is
+  skipped for good (the removed vBulletin rule, §3).
+- **Lua is canonical:** `RULE_IDS` in `configs/lua/cfm_waf.lua` (ids) and its
+  `CFG` table (default modes). **Go mirror:** `wafRuleIDs` in
+  `internal/webdetector/waf_rule_ids.go`, every entry
+  `ReasonFamily: "WAF_CVE"`.
+- **Parity tests** (`internal/webdetector/waf_rule_ids_test.go`):
+  `TestWAFRuleIDs_LuaParity` (ids) and `TestWAFRuleIDs_DefaultModeLuaParity`
+  (every Go `DefaultMode` equals the Lua `CFG` default; a promotion edits both
+  in the same change).
+- **Grouping:** `Group = id / 100`, and `wafRuleGroupNames[100] = "cve"`.
+  `TestWAFRuleIDs_GroupingDigits` accepts ids in `10000–99999` **but also
+  requires the group to be in `wafRuleGroupNames`, which only has `100`** — so
+  as the code stands only `10000–10099` pass. The next free id is `10031`; an
+  id `>= 10100` needs a `wafRuleGroupNames` change first.
+- **`rule_log4shell` (id `328`)** predates the band, keeps its legacy id and
+  also reports the `WAF_CVE` family (default `challenge_v2`, so its hits never
+  reach autoblock; its reason has no `CVE_*` token, see 1.2).
 
-- **Source of truth:** the `RULE_IDS` table in
-  `configs/lua/cfm_waf.lua` (Lua is canonical).
-- **Go mirror:** `wafRuleIDs` in `internal/webdetector/waf_rule_ids.go`.
-  Every Lua id has a matching Go entry with `ReasonFamily: "WAF_CVE"`.
-- **Parity guard:** `TestWAFRuleIDs_LuaParity` parses the Lua table at test
-  time and diffs it against the Go mirror — drift fails CI.
-- **Grouping:** `wafRuleGroupNames[100] = "cve"` labels the whole `10000+`
-  band (`id/100` for a `100xx` id lands in group `100`). `TestWAFRuleIDs_GroupingDigits`
-  accepts `100–999` **or** `10000–99999`.
-
-> **Historical note:** `rule_log4shell` (id `328`) predates this framework and
-> keeps its legacy id, but *already* reports the `WAF_CVE` reason family. So
-> `WAF_CVE` is not brand-new — the `10000+` band and the notification plumbing
-> are.
-
-### 1.2 Reason family & runtime reason format
-
-All CVE rules emit the **`WAF_CVE`** reason family. The full runtime reason is:
+### 1.2 Reason format
 
 ```
 WAF_CVE:CVE_<year>_<suffix>:<PRODUCT>:<TAG>
 ```
 
 e.g. `WAF_CVE:CVE_2025_34085:SIMPLE_FILE_LIST:RENAME_TO_PHP`. The `<TAG>`
-distinguishes exploit legs of the same CVE (see the Simple File List detector,
-which tags `RENAME_TO_PHP` vs `UPLOAD_PHP`).
+names the exploit leg. The CVE segment uses underscores (Lua/log friendly).
+A rule that covers several CVEs picks one per leg in `check()` (10006, 10008,
+10011, 10030 do this); otherwise it reports the campaign-primary one.
 
-The `CVE_<year>_<suffix>` segment uses **underscores** in the reason (Lua/log
-friendly) and is converted to the canonical dashed id for display.
+Reasons with **no** `CVE_*` segment (the notification then reads plain
+`WAF/CVE`): `WAF_CVE:REVSLIDER:PLUGIN_UPLOAD` (10005's upload leg) and
+`WAF_CVE:LOG4SHELL:<tag>` (328).
 
 ### 1.3 CVE-named notifications
 
-`internal/detectors/wafsec/detector.go` turns a `WAF_CVE` autoblock into a
-notification whose `Kind` names the concrete CVE, not the generic family:
+`cveFromReason` (`internal/detectors/wafsec/detector.go`) takes the second
+colon segment and, if it starts with `CVE_`, dash-converts it
+(`CVE_2025_34085` → `CVE-2025-34085`); otherwise it returns `""`. For a
+`WAF_CVE` hit the alert `Kind` becomes `WAF/CVE-2025-34085` and
+`Extra["cve"]` carries the id, so sinks never parse message text;
+`Extra["rule_id"]` cross-references the registry. Nothing to write per rule:
+get the reason format right.
 
-- `cveFromReason(reason)` pulls the second colon-segment and dash-converts it:
-  `WAF_CVE:CVE_2025_34085:… → CVE-2025-34085`. It returns `""` for a
-  `WAF_CVE` reason with no `CVE_*` token (e.g. a future `WAF_CVE:LOG4SHELL:…`),
-  so the caller falls back to the plain `WAF/CVE` label.
-- The alert `Kind` becomes `WAF/CVE-2025-34085`; `Extra["cve"]` carries the id
-  for sinks so they never parse free-form message text. `Extra["rule_id"]`
-  cross-references the Lua/Go registry.
+### 1.4 waf_security autoblock — family armed, doubtful rules held
 
-So a Slack/mail line reads e.g. `WAF/CVE-2025-34085` — exactly the format the
-operator asked for when scoping this work.
+- **`WAF_CVE` arms to `1` by default** because it has edge-`block` rules
+  (`wafSecurityFamilies` in `internal/detectors/waf_security_register.go`: a
+  family defaults to `1` iff `WAFFamilyHasBlockRule`, unless it is in
+  `heldAutoblockFamilies`, today only `WAF_TRAVERSAL`). The operator wants CVE
+  hits to both nft-ban (6 h) and alert; an un-armed family is dropped by
+  `wafsec` before the sink, so `CVE = 0` would notify nothing.
+  `TestWAFSecurityFamilyCoverage` enforces "block rule ⇒ armed" for every
+  family, `WAF_CVE` included.
+- **The family is heterogeneous, so hold the doubtful RULE, not the family.**
+  A block rule whose 403 is right but whose ban could land on a legitimate
+  user ships with `HoldAutoblock: true` on its `WAFRule` in
+  `waf_rule_ids.go`: that makes `RULE_<id> = 0` the code default
+  (`wafSecurityRuleOverrides`), which reaches configs that predate the rule;
+  an operator's `RULE_<id>` in `detectors.conf` still wins. Mention the hold
+  in the `[waf_security]` comment block of `configs/detectors.conf`. Held
+  today: **10020, 10022, 10026, 10028**.
+- **A held block rule runs late in `check()`.** The first block hit owns the
+  headline `record()` and `goto done` ends evaluation, so a held rule placed
+  early would take the ban from an armed rule on the same request. Held CVE
+  rules sit with traversal, after every armed block family (CLAUDE.md §6).
+- Only edge-`block` hits feed autoblock (Phase 1); a tag recorded `logonly`
+  (10024 `SAME_SITE`, 10028 `FILE_INFO_ELSEWHERE`, 10029 `EVAL_ZERO`) never
+  bans. `DRY_RUN = 1` in `[waf_security]` alerts without banning.
+- The edge action is per rule (`CFG.rule_cve_* = "block"` or a per-vhost
+  override), independent of arming. Block tier is also what the panel-port
+  gate (`cfm_panel.lua`, `:2083/:2087/:2096`) enforces, for rules that run
+  there (the panel gate reads no body and passes no raw path).
 
-### 1.4 waf_security autoblock — **armed by default, held per-rule**
+### 1.5 Body burn-in
 
-`WAF_CVE` follows the normal block-rule rule: it has an edge-`block` rule
-(10001) so it **arms to 1 by default**, exactly like `WAF_SQLI`/`WAF_RCE`/etc.
-The reason is deliberate — the operator wants CVE hits to *both* nft-ban the
-source *and* surface on Slack/mail, and an **un-armed family notifies nothing**
-(`wafsec` drops a family whose threshold is `0` before it ever reaches the
-sink). So `CVE = 0` would silence the very alerts the `block` tier exists to
-produce.
-
-- `wafSecurityFamilies` (`internal/detectors/waf_security_register.go`) arms a
-  family by default *iff* it has an edge-`block` rule (plus `WAF_BACKDOOR`,
-  armed ahead of its first block rule):
-
-  ```go
-  if webdetector.WAFFamilyHasBlockRule(fam) || fam == "WAF_BACKDOOR" {
-      def = 1
-  }
-  ```
-
-  (`WAF_WEBSHELL` was held at `0` through burn-in — arming it nft-bans a source
-  that GETs `/c99.php`, which includes benign scanners — but as of 2026-07-18 the
-  operator runs it armed fleet-wide with acceptable collateral, so it now arms to
-  `1` like the rest; exempt a scanner with `ALLOW_UA_CONTAINS`/`ALLOW_NETS` or
-  hold rule 413 with `RULE_413 = 0` if needed.)
-  `TestWAFSecurityFamilyCoverage` asserts `WAF_CVE` **and** `WAF_WEBSHELL`
-  default to `1`.
-
-- **`WAF_CVE` is heterogeneous** — it collects many CVEs of varying FP
-  confidence under one family. Because the family is armed, a
-  **lower-confidence CVE rule must ship with a per-rule `RULE_<id> = 0`
-  override in the SAME change that adds it** (the per-rule override wins over
-  the family threshold), holding just that rule while the family stays armed
-  for the high-confidence ones. This is the inverse of the old "family opt-in"
-  stance: arm the family, hold the doubtful rules.
-
-- **Watch-first burn-in without real bans:** `DRY_RUN = 1` in `[waf_security]`
-  still emits the Slack/mail alerts (`Extra["enforcement"]="dryrun"`) but skips
-  the nft ban. Flip it off once the stats look clean.
-
-- The edge action (`disabled`/`logonly`/`challenge`/`block`) is independent of
-  autoblock arming and is controlled per rule via the CFG key
-  (`rule_cve_… = "block"`) or a per-vhost override.
-
-### 1.5 Worked example — the Simple File List detector (rule 10001)
-
-**Simple File List (WordPress) — `CVE-2025-34085` / `CVE-2020-36847`**
-(unauthenticated upload → rename → RCE). One detector covers **both** CVEs
-(same plugin, same endpoints, same exploit); the reason carries the
-campaign-primary `CVE-2025-34085`.
-
-| Field | Value |
-| --- | --- |
-| Rule name | `rule_cve_simple_file_list_upload` |
-| Rule id | `10001` |
-| Edge default | `block` (both exploit legs are exact, near-zero FP) |
-| Autoblock | **armed** (`WAF_CVE` family default `1`) → 6h nft ban + `WAF/CVE-2025-34085` Slack/mail |
-| Detector | `_M.detect_cve_simple_file_list_upload(uri, method, args, body, headers)` in `configs/lua/cfm_waf_detectors.lua` |
-| Tests | `scripts/tests/cfm_waf_cve_simple_file_list_test.lua` |
-
-Two legs, keyed on the **exact plugin endpoints** (not on guessable param
-names):
-
-- `…/simple-file-list/ee-file-engine.php` renaming a stored upload **to** a
-  PHP-executable extension → tag `RENAME_TO_PHP`. Extension match
-  (`_cve_sfl_has_exec_ext`) covers `.php[0-9]?`, `.pht`, `.phtm`, `.phtml`,
-  `.phar` at a value boundary — kept in step with `bad_fname()` (rule 401).
-- `…/simple-file-list/ee-upload-engine.php` carrying PHP content → tag
-  `UPLOAD_PHP`. This leg **delegates to the hardened rule-402 scanner**
-  `_M.detect_upload_content(body, headers)` (requires `multipart/form-data`
-  and a binary-safe short-echo check) rather than a naive `<?php` substring,
-  which would reintroduce the documented rule-402 image-body false positive.
-
-Both PoCs were sourced from public exploit code
-(`0xGunrunner/CVE-2025-34085`, and the CVE-2020-36847 upload/rename PoC), not
-from memory — see §3.
+A large or chunked body on `location /` is read by cfm.lua in a burn-in pass,
+where only the block rules in `BURNIN_ENFORCE_IDS` (`configs/lua/cfm.lua`)
+are enforced: today **10021, 10024, 10027, 10028, 10030**. A rule whose
+exploit arrives that way must be in that list and must run before any other
+block rule that the same request can trip (the pass ends at the first block,
+enforced or not). That is why 10021, 10024, 10027 and 10030 run first in
+`check()`, and why 10028 runs right after 10027 in the burn-in second pass
+(`ctx.burnin_pass`) but late otherwise.
 
 ---
 
-## 2. Candidate status (the ACSC campaign shortlist — WordPress/Joomla only)
+## 2. Rules in code
 
-**Scope: WordPress and Joomla only.** The fleet this WAF protects hosts
-WordPress and Joomla sites, so CVEs for other/standalone CMSs are **out of
-scope** — a detector for software nobody runs is pure FP surface and
-maintenance cost for zero protection. The ACSC shortlist's non-WP/Joomla
-entries are dropped: **Craft CMS** (`CVE-2025-32432`), **MaxSite CMS**
-(`CVE-2026-3395`), **MetInfo CMS** (`CVE-2026-29014`). Revisit only if the
-hosting mix changes. **Drupal** is the exception since 2026-11-18: a fleet read found
-three accounts running it (8.6.15 and 9.3.5, past end of life, and 10.6.1),
-so rule 10030 covers its render-array callback injections.
+Every rule below ships at edge default **`block`** (Lua `CFG` and Go
+`DefaultMode` agree). "Armed" = the `WAF_CVE` default applies (6 h nft ban +
+`WAF/CVE-…` alert); "held" = `HoldAutoblock` (403 only).
 
-Twenty-two implemented; the rest are WordPress/Joomla candidates awaiting a
-validated exact request shape:
+| Id | `CFG` name | CVE(s) in the reason | Product | Keyed on | Autoblock |
+|---|---|---|---|---|---|
+| 10001 | `rule_cve_simple_file_list_upload` | CVE-2025-34085 (also covers CVE-2020-36847) | Simple File List (WP) | `ee-file-engine.php` rename to a PHP-exec ext; `ee-upload-engine.php` + PHP content (rule-402 scanner) | armed |
+| 10002 | `rule_cve_joomla_jce_profile_import` | CVE-2026-48907 | Joomla JCE | `option=com_jce` + `profiles.import` + php-exec upload filename | armed |
+| 10003 | `rule_cve_ninja_forms_fu_upload` | CVE-2026-0740 | Ninja Forms File Uploads | `action=nf_fu_upload` + (php-exec filename OR `image_jpg` traversal) | armed |
+| 10004 | `rule_cve_litespeed_hash_privesc` | CVE-2024-28000 | LiteSpeed Cache | `litespeed_hash` / `litespeed_role` cookie, all methods | armed |
+| 10005 | `rule_cve_revslider` | CVE-2015-1579 (LFI leg); upload leg has no CVE token | Slider Revolution | `revslider_show_image` + `../`; unauth `revslider_ajax_action` + `update_plugin` | armed |
+| 10006 | `rule_cve_w3tc` | CVE-2026-5032 (UA leg), CVE-2025-9501 (mfunc leg) | W3 Total Cache | `User-Agent: W3 Total Cache`; `mfunc`/`mclude` in a comment POST | armed |
+| 10007 | `rule_cve_post_smtp` | CVE-2025-11833 (also covers CVE-2023-6875) | Post SMTP | unauth `/wp-json/post-smtp/` or `postman_email_log` page | armed |
+| 10008 | `rule_cve_fusion_builder` | CVE-2026-6279 (RCE), CVE-2026-8713 (file delete) | Avada / Fusion Builder | `fusion_get_widget_markup` + base64 `render_logics` → dangerous callable; `fusion_form_submit_ajax` + `privacy_expiration_action` | armed |
+| 10009 | `rule_cve_kirki_forgot_password` | CVE-2026-8206 | Kirki | `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` + `username` & `email` | armed |
+| 10010 | `rule_cve_gf_multi_uploader` | CVE-2025-23921 | Multi Uploader for Gravity Forms | `gf_page=upload` + `gform_unique_id` traversal → `.phtml`/`.php` | armed |
+| 10011 | `rule_cve_wp2shell` | CVE-2026-63030 (desync), CVE-2026-60137 (SQLi) | WordPress core | REST `batch/v1` POST: `"///"` primer; SQL breakout in `author_exclude`/`author_not_in` | armed |
+| 10012 | `rule_cve_woocommerce_payments` | CVE-2023-28121 | WooCommerce Payments | `X-WCPAY-Platform-Checkout-User` header present, all methods | armed |
+| 10013 | `rule_cve_gravity_smtp` | CVE-2026-4020 | Gravity SMTP | unauth `/gravitysmtp/v1/tests/mock-data` (both permalink forms) | armed |
+| 10014 | `rule_cve_sppagebuilder_upload` | CVE-2026-48908 | SP Page Builder (Joomla) | `com_sppagebuilder` + `task=asset.upload*` + php-exec payload | armed |
+| 10016 | `rule_cve_elementor_pro_form_upload` | CVE-2026-32475 | Elementor Pro Forms | `action=elementor_pro_forms_send_form` + php-exec upload filename | armed |
+| 10017 | `rule_cve_wp_pagename_traversal` | CVE-2026-87902 | WordPress core | a `pagename` field (query / POST) with a `..` segment | armed |
+| 10018 | `rule_cve_translatepress_reset_preview` | CVE-2026-19632 | TranslatePress | `trp-edit-translation` on a password-reset POST, no login cookie | armed |
+| 10019 | `rule_cve_translatepress_id_lookup` | CVE-2026-19632 | TranslatePress | `action=trp_get_translations_regular` + non-empty `string_ids`, no login cookie | armed (since 2026-11-17) |
+| 10020 | `rule_cve_translatepress_reset_preview_authed` | CVE-2026-19632 | TranslatePress | 10018's request WITH a login cookie | **held** |
+| 10021 | `rule_cve_php_multipart_oom` | CVE-2026-109618 | PHP core | multipart body: `PART_HEADERS` / `EMPTY_FILES` / `NESTING` | armed |
+| 10022 | `rule_cve_php_multipart_no_length` | CVE-2026-109618 | PHP core | multipart POST with no Content-Length the edge never read (`NO_CL`) | **held** |
+| 10023 | `rule_cve_php2shell_tool` | CVE-2026-109619 | PHP core (PHP2Shell tool) | `php2shell-…` UA or a PoC boundary (header only) | armed |
+| 10024 | `rule_cve_php_upload_progress` | CVE-2026-109619 | PHP core | `PHP_SESSION_UPLOAD_PROGRESS` part without same-site Referer/Origin + Fetch Metadata (`SAME_SITE` is logonly) | armed |
+| 10025 | `rule_cve_pixelyoursite_xss` | CVE-2026-1844 (also covers -1841, -109987) | PixelYourSite / PRO | executable markup / attribute breakout / script URL in the plugin's own cookies | armed |
+| 10026 | `rule_cve_pixelyoursite_session_xss` | CVE-2026-1844 | PixelYourSite / PRO | the same in the raw path, the Referer host, `utm_*` query fields | **held** |
+| 10027 | `rule_cve_magento_polyshell` | CVE-2026-48356 | Magento / Adobe Commerce | cart-save request (REST / SOAP) carrying `custom_options` + `file_info` + `base64_encoded_data` | armed |
+| 10028 | `rule_cve_magento_polyshell_unseen` | CVE-2026-48356 | Magento / Adobe Commerce | a cart-save request 10027 could not read (`OVERSIZE` / `XML_ENTITY` / `UNREADABLE`); `FILE_INFO_ELSEWHERE` logonly | **held** |
+| 10029 | `rule_cve_fabrik_listfilter_eval` | CVE-2026-67282 | Fabrik (Joomla) | an `[eval]` index set on a Fabrik request field (`EVAL_ZERO` logonly) | armed (block since 2026-11-17) |
+| 10030 | `rule_cve_drupal_render_callback` | CVE-2026-108097 (`#region_callback`), CVE-2018-7600 (the other keys) | Drupal core | a render-array callback key as a field NAME / JSON KEY | armed |
 
-| Product / CVE | Status |
-| --- | --- |
-| Simple File List (`CVE-2025-34085` / `CVE-2020-36847`) | ✅ **implemented** (rule 10001) |
-| Joomla JCE (`CVE-2026-48907`) | ✅ **implemented** (rule 10002) — `option=com_jce` + `profiles.import` + php-exec upload |
-| Ninja Forms (`CVE-2026-0740`) | ✅ **implemented** (rule 10003) — `action=nf_fu_upload` + (php-exec upload OR `image_jpg` traversal) |
-| LiteSpeed Cache (`CVE-2024-28000`) | ✅ **implemented** (rule 10004) — `litespeed_hash`/`litespeed_role` cookie (unauth privesc brute-force) |
-| Slider Revolution (`CVE-2015-1579` + classic upload RCE) | ✅ **implemented** (rule 10005) — behavioural virtual-patch: `revslider_show_image`+`../` LFI, `revslider_ajax_action`+`update_plugin` unauth upload |
-| W3 Total Cache (`CVE-2026-5032` + `CVE-2025-9501`) | ✅ **implemented** (rule 10006) — `User-Agent: W3 Total Cache` token-leak + `mfunc`/`mclude` in a comment POST (mfunc eval RCE) |
-| Post SMTP (`CVE-2025-11833` + `CVE-2023-6875`) | ✅ **implemented** (rule 10007) — unauth `/wp-json/post-smtp/` (get-log/connect-app) or `postman_email_log` page → email-log/reset-link disclosure |
-| Avada / Fusion Builder (`CVE-2026-6279` + `CVE-2026-8713`) | ✅ **implemented** (rule 10008) — `fusion_get_widget_markup` + `render_logics` base64→dangerous callable (RCE); `fusion_form_submit_ajax` + `privacy_expiration_action` (file delete) |
-| Kirki (`CVE-2026-8206`) | ✅ **implemented** (rule 10009) — unauth `POST /wp-json/KirkiComponentLibrary/v1/kirki-forgot-password` + `username`&`email` → account takeover (reset link to attacker) |
-| Multi Uploader for Gravity Forms (`CVE-2025-23921`) | ✅ **implemented** (rule 10010) — `gf_page=upload` + `gform_unique_id` traversal→`.phtml` (php-exec in field value, not `filename=`, so rule 401 misses it) |
-| WordPress **core** "wp2shell" (`CVE-2026-63030` + `CVE-2026-60137`) | ✅ **implemented** (rule 10011) — batch-endpoint (`batch/v1`) POST; `"///"` desync primer (63030 route confusion) → `BATCH_DESYNC`, and SQL breakout in the integer-only `author_exclude`/`author_not_in` param (60137 core SQLi) → `BATCH_SQLI`. Two CVE ids, one rule. Affects 6.9–6.9.4 / 7.0–7.0.1; public PoC, actively exploited |
-| WooCommerce Payments (`CVE-2023-28121`) | ✅ **implemented** (rule 10012) — `X-WCPAY-Platform-Checkout-User` request header trusted as the current user id (unauth auth-bypass→privesc); keyed on header presence, all methods. Server-set by WooPay only, so near-zero FP; exempt genuine WooPay nets via `ALLOW_NETS` |
-| Gravity SMTP (`CVE-2026-4020`) | ✅ **implemented** (rule 10013) — unauth REST route `/gravitysmtp/v1/tests/mock-data` (`permission_callback=true`) dumps the full System Report (versions/paths/plugins/API keys). Keyed on the plugin-unique route (both permalink forms) + UNAUTH gate (only legit caller is the wp-admin settings screen) |
-| SP Page Builder (Joomla, `CVE-2026-48908`) | ✅ **implemented** (rule 10014) — `com_sppagebuilder` + `task=asset.upload*` (uploadCustomIcon/uploadImage/uploadFont) unauth arbitrary upload→RCE ("ANTONKILL"). Runs before rules 401/414 for CVE attribution; keyed on component+task + a php-exec payload (direct filename / php-in-zip / php content), reusing the hardened upload detectors. Body-budget caveat: a php entry past `waf_body_max_len` is ClamAV's backstop |
-| Elementor Pro Forms (`CVE-2026-32475`) | ✅ **implemented** (rule 10016) — Elementor Pro <4.2.2 File Upload field: `validation()` `return`s (vs `continue`) on an empty (`UPLOAD_ERR_NO_FILE`) first part, skipping the extension blocklist for a following `.php` part that `process_field()` still moves into public `wp-content/uploads/elementor/forms/`. POST `admin-ajax.php` `action=elementor_pro_forms_send_form` (nopriv) + a php-exec upload filename — the surviving file *extension* is the vuln (`process_field()` keeps `pathinfo($name, EXTENSION)`), so a content leg is intentionally omitted (it would mis-attribute benign php-text field pastes / non-PHP payloads; raw php content is already covered by the armed generic rule 402). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). The generic rule 401 already blocks the straightforward `.php` upload fleet-wide; this rule adds CVE attribution. Note: id **10015 is skipped** (the removed vBulletin rule below) |
-| WordPress **core** page-template traversal (`CVE-2026-87902`, GHSA-7hp8-65ch-5whp) | ✅ **implemented** (rule 10017, + rule 103) — WordPress 4.7.0–7.1.1 (fixed 7.1.2 and every branch back to 4.7.37): `get_page_template()` builds `page-{$pagename}.php` from the url-decoded `pagename` query var without the `..` check, so a readable local `.php` outside the theme is included (RCE with `pearcmd.php` when `register_argc_argv=On`; needs a top-level `page-*` theme dir — Twenty Twelve/Fourteen, Neve, Hestia, Sydney). Source: the WordPress advisory + Wordfence entry (operator-supplied; no public PoC at release). **10017** fires on a `pagename` value — query string, urlencoded or multipart POST (WP reads `$_POST` first), keys decoded, every duplicate checked — holding a `..` segment; a real pagename is a slug path, never one. Armed: 6h ban + `WAF/CVE-2026-87902` alert. The pretty-permalink route (the path itself becomes `pagename`) was **invisible** to the WAF: `ctx.uri` is `ngx.var.uri`, already decoded and dot-segment-resolved by nginx, while the origin gets the raw path. **Rule 103** (`rule_traversal_raw_path`, `WAF_TRAVERSAL`, block) closes that blind spot generically from `ctx.raw_uri` — named as traversal, not as this CVE, because it also catches every other raw-path sweep; the family's autoblock is held, so it is a 403 without an alert. Web edge only (the panel gate passes no `raw_uri`). |
-| TranslatePress (`CVE-2026-19632`) | ✅ **implemented** (rules 10018, 10019, 10020) — `translatepress-multilingual` <= 3.3.1 (fixed 3.3.2) unauth account takeover; source: the 3.3.1→3.3.2 diff and the titan capture (2026-10-08). **10018** (armed): `trp-edit-translation` on a password-reset POST (`action=lostpassword`/`retrievepassword`, or WooCommerce's lost-password form; a GET of the form sends no mail) without a WordPress login cookie — `force_language_in_preview()` makes `wp_mail_filter()` store the reset mail, key included; fleet sightings 09-15..10-08 = the attack only. **10020** (edge block, autoblock held in code): the same request WITH a login cookie — the editor preview (`trp-iframe-preview-script.js`) adds the parameter to every form, so a translator can send it. Placed after every armed block family in `cfm_waf.lua` (with traversal), so a held 10019/10020 hit cannot take the ban from an armed rule on the same request. Fields are read as PHP reads them (`php_request_fields`: media type, rfc1867 multipart, `php_register_variable_ex` names; checked against a real PHP by `scripts/tests/php_request_fields_oracle.py`) and any value of a repeated field counts (PHP stops at `max_input_vars`). Residuals: a theme/plugin AJAX reset reached with the parameter in the Referer / `_wp_http_referer` (the plugin copies it into `$_REQUEST`), and a field in a body the WAF does not see (past `waf_body_max_len`, or a chunked POST outside the body allowlist; a "body not seen" tag was tried and dropped, as it would ban a translator's large form submitted in the preview). **10019** (edge block; armed since 2026-11-17 — it was held in code against banning a translator whose login expired, and a 7-day read of the 8 edge nodes found 87 hits, every one from a datacenter, none from GR or a residential network): `action=trp_get_translations_regular` + a non-empty `string_ids` (anything beyond whitespace and brackets: `[]`, `[ ]`, an empty value do not count) + no `wordpress_logged_in_` cookie — the nopriv lookup by row id that reads the key back; only the logged-in `trp-editor.js` sends `string_ids`. The cookie gate is an FP filter (a junk cookie bypasses it), and an admin whose locale is a secondary language has the mail stored without the preview trick: update to 3.3.2+ |
-| PHP core (`CVE-2026-109618` + `CVE-2026-109619`) | ✅ **implemented** (rules 10021, 10022, 10023, 10024) — in scope because every WordPress/Joomla site runs on it. PHP < 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 unauth RCE: an out-of-memory during the startup multipart parse leaves request memory half-initialised for shutdown (mod_php confirmed; FPM via session upload progress for -109619). Source: php-src advisories GHSA-w8hw-w9fx-j79w / GHSA-6wmf-4rv5-p3rp (2026-10-21) — the OOM strategies they name, all on a multipart POST. **10021** (armed), from the body: `PART_HEADERS` (a part with >16 header lines), `EMPTY_FILES` (>=128 empty-filename file controls, which `max_file_uploads` does not count; shallow ones are cheap, so the bar sits well above real forms), `NESTING` (a file part's name nested >16 levels — the advisory's multiplier — or a plain field's >32: Drupal Paragraphs and axios/Inertia FormData nest plain fields past 16). Parts are found by a line scan like `find_boundary` (a closing `--<bnd>--` does not end it, a part PHP does not read hands the scan back at its header end, a garbled part does not stop it; only the first Content-Disposition is read) — three bypasses in two review rounds, checked against PHP 8.3.6. It runs FIRST in `check()` and is, with 10024, a body rule cfm.lua enforces in the body burn-in (`BURNIN_ENFORCE_IDS`, also over a first-pass challenge, which a cleared client would turn into logonly): its exploit is a large or chunked `POST /`. Real forms send none of these shapes (fastest FP lever: a per-host/path WAF exclude for 10021); the exploit needs many attempts (AC:H), so the 6 h ban on the first stops the rest. **10022** (edge block, autoblock held in code): `NO_CL`, no Content-Length on a body the edge never read (cfm.lua `no_body_length`: a body read in full first — by `get_req_body_for_waf` or a buffering `location /` — goes upstream with a real Content-Length, checked on nginx 1.24). Off when the edge conf predates `$cfm_body_buffered` (2026-10-09). Held because a streaming upload client sends the same shape; runs late with 10019/10020. Residuals: the structural legs see only `waf_body_max_len` (32 KB) — PHP frees each part's headers, so one abusive part after 32 KB of padding is not seen; the panel ports read no body; nodes without the edge get nothing; an application-specific OOM is invisible here. **10023 / 10024** (both armed; added the same night, after the public PHP2Shell tool passed 10021 on this fleet and Imunify360 stopped it at the origin): the tool drives the session upload progress path with none of the OOM shapes. Sources: Imunify360 ruleset 8.85 (77318849, 77866818, 77236259) and the fleet's edge logs (`ua="php2shell-scanner"`, `POST /`). **10023**, the request head: User-Agent `php2shell-…` (`TOOL_UA`) or a PoC boundary — `B7kQpoc61N`, `UctxPoc20NN`, up to 70 dashes + `nphp618/619`, `[-0-9a-z_.]{0,80}php2shell` (`TOOL_BOUNDARY`); header-only, so it holds on the panel ports. **10024**, the body: a multipart field or file part named `PHP_SESSION_UPLOAD_PROGRESS` (any case, a superset of PHP's exact compare) blocks as `NO_REFERER` / `XSITE` (no same-site Referer or Origin) or `NO_FETCH_METADATA` (a same-site one without a same-site `Sec-Fetch-Site` — the scanner forged a same-site Referer, 94.26.104.67 on 2026-10-21); with all three (`SAME_SITE`, a browser's own upload-progress form) it is logonly, as is `Sec-Fetch-Site: same-site` from a `www.`/sibling host and `same-origin` with `Origin: null` and no Referer (`Referrer-Policy: no-referrer`). The name is read from the multipart parse (shared with rules 401/415), never the raw body: PHP joins a name split across header lines (a continuation line, a NUL at the 5120-byte cut), a bypass the self-review confirmed on PHP 8.3.6. A browser without Fetch Metadata (Safari < 16.4) posting its own progress form is blocked. It runs right after 10021 and is enforced in the body burn-in — exactly where the tool's chunked `POST /` passed (`cfm_waf_cve_php_upload_progress_e2e_test.lua`; removing it from `BURNIN_ENFORCE_IDS` reproduces the pass). Residuals: a renamed tool passes 10023; a request forging Referer AND `Sec-Fetch-Site`, a progress field past the 32 KB window, and a large body the edge never reads (off the read allowlist) pass 10024 (a length-less one is 10022's). A stopgap, not the fix: update PHP and set `session.upload_progress.enabled = 0`. |
-| PixelYourSite / PixelYourSite PRO (`CVE-2026-1844` + `CVE-2026-1841` + `CVE-2026-109987`) | ✅ **implemented** (rules 10025 armed, 10026 ban held) — unauth stored XSS through the order "enrich" data. Source: the plugin code (PRO 12.2.7.1: on a Store API checkout `class_enrich_order.php` stores the traffic source `$_SESSION['TrafficSource'] ?? $_COOKIE['pysTrafficSource']`, the landing page `$_SESSION['LandingPage'] ?? $_COOKIE['pys_landing_page']` and the UTMs `$_GET['utm_*'] ?? $_COOKIE['pys_utm_*']` raw; `views/html-order-meta-box.php` and `printUtm` print them unescaped, the landing page also in `href="…"`; the session copies come from `parse_url(HTTP_REFERER)['host']`, the raw `REQUEST_URI` path and `$_GET` of a session's first request; fixed releases sanitize on store and `esc_html` on output) and ~100 planted orders on 16 fleet shops (2026-02-13, the day 1844 was published, to 2026-10-10). On tophair.gr staff opening one order ran `patchstackk.com/fz/x.js`, which uploaded a fake plugin and created two administrators in 15 s. Both rules look for **executable markup** only: a `<script>`/`<iframe>`/`<frame>`/`<object>`/`<embed>`/`<meta>`/`<base>` element, or any element with an `on…=` handler, `srcdoc=` or `javascript:`. A bare `<`/`>` ("Retargeting > 30 days"), a `<b>` or an unfilled `<campaign_name>` placeholder is not. **10025** (all methods, armed: 6 h ban + `WAF/CVE-2026-1844` alert) reads only the plugin's own cookies, `pysTrafficSource` / `pys_landing_page` / `pys_utm_*` and their `last_` twins: executable markup (`COOKIE_MARKUP`), a landing-page quote that closes the href and opens a handler or `style` attribute, after any other attributes (`COOKIE_ATTR_BREAKOUT`), or a landing URL whose scheme, character references decoded and tabs/newlines dropped as a browser does, is `javascript:`, `vbscript:` or `data:` (`COOKIE_SCRIPT_URL`). **10026** (edge block, ban held via `HoldAutoblock`, runs late in `check()`) covers the session copies, which come from request parts any site sees: executable markup or a handler-opening quote in the raw path (`PATH_MARKUP` / `PATH_ATTR_BREAKOUT`), executable markup in what `parse_url` takes as the Referer's host, including the `x<b>:80` host:port form (`REFERER_HOST_MARKUP`), and in a `utm_*` query field read through `php_request_fields` (`QUERY_UTM_MARKUP`; the plugin reads `$_GET` only). A 7-day replay of every server's edge log and 10 days of Apache Referers (2026-10-27) found 10026 hits only from one XSS scanner (`xsss-…` payloads in `utm_*`); the old tag-opener path match had hit thousands of `meta-externalads` broken links (`/<span></span></div>`), which the executable-markup test leaves alone. A repeated Cookie or Referer is read each line, as nginx joins it and as Apache merges it (", "). Cookie values are %-decoded as PHP does (raw: `+` stays); names are not decoded (PHP decodes no cookie name) but are lowercased, an over-read. Fixed: free 11.4.3, PRO 12.6.8. Protects new orders only: payloads already stored in `pys_enrich_data` need a DB clean-up. |
-| Magento Open Source / Adobe Commerce "PolyShell" (`CVE-2026-48356`) | ✅ **implemented** (rules 10027 armed, 10028 ban held) — unauth arbitrary file upload: a cart item whose custom option carries the extension attribute `file_info` (`base64_encoded_data`, `type`, `name`) makes Magento write the decoded file, under the attacker's name and extension, to `pub/media/custom_options/quote/` before the cart add fails; the only check is `getimagesizefromstring`, which a GIF header in front of the PHP passes. Source: Sansec's write-up (sansec.io/research/magento-polyshell), Magento's own code (2.3.7 on orion and 2.4-develop: `ServiceInputProcessor`, `SimpleDataObjectConverter::snakeCaseToUpperCamelCase`, `NameFinder`, `ImageContentInterface`, `Rest\Request::getRequestData`, the REST deserializers, `module-webapi-async`, `Soap\Server`) and the 2026-10-29 attack on dabizasfoods.gr (orion: 4 POSTs to `/rest/default/V1/guest-carts/<id>/items` from 213.163.195.0, ~106 KB of JSON each, 8 GIF+PHP files on disk — a `system($_GET["c"])` shell and a 78 KB obfuscated file manager — although every request got a 400; the edge read the body and no rule fired: the file is base64 inside JSON, which rules 401/402 do not decode). Every web API call that saves a cart item reaches the write: the cart-items routes (guest, customer, admin), the quote save (`PUT /V1/carts/mine`, `/V1/carts/:cartId`), their async and async/bulk forms and their SOAP services; the file gets there only as `custom_options[] → extension_attributes → file_info → base64_encoded_data`. Magento drops every `_` from a field name and finds the getter with PHP's case-insensitive `hasMethod`, `json_decode` unescapes `\u` keys, and the REST input is the deserialized body merged with `getParams()` (query + `$_POST`, so a multipart POST carries the cart item as form fields). **10027** (armed: 6 h ban + `WAF/CVE-2026-48356` alert) blocks a cart-save request — a REST cart route above (path with `/rest/…/V<n>/`, read from `$uri` and the raw path, which Magento routes on) or a SOAP call (`…/soap`, `…/soap/<store>[/…]`, a subdirectory shop too; any method, as Magento's SOAP controller runs SoapServer on a GET's body too) whose `services` (query or form body, read as PHP reads it) names a cart or cart-item repository — carrying all three names, compared with `_` removed and lowercased, in its JSON keys (string tokens followed by `:`, values skipped), its XML element and attribute names (inside tags, prefix dropped, text skipped; SOAP is XML whatever its Content-Type) or the bracket keys of its query and form fields (`FILE_INFO`). Where its own gate would not read it, the edge reads a SOAP call's body (a `…/soap[/<store>]` path with `services` in the query) whatever its Content-Type, within the size limit the gate applies (a larger or chunked PUT / PATCH keeps streaming, and 10028 refuses it unread) (`cfm.lua waf_should_read_body_or_soap`; burn-in for every other rule; 10027 / 10028 are in `BURNIN_ENFORCE_IDS`, enforced on any body in burn-in (they gate themselves on a Magento cart-save request)), as SoapServer does. **10028** (edge block, ban held via `HoldAutoblock`) covers the inferences. 10027 runs right after 10024 in `check()`; 10028 runs late with the other held rules, and right after 10027 in cfm.lua's burn-in second pass (`ctx.burnin_pass`) — that pass ends at the first block hit, and only `BURNIN_ENFORCE_IDS` blocks (10021, 10024, 10027, 10028) are enforced in it, so a rule not enforced there (10005 or 301 on an envelope's text) must not end it first. on a cart-save request 10027 could not read: a body the edge did not hold whole — cut past `waf_body_max_len`, a PUT declared but not read, or a SOAP call's declared body (Content-Length / Transfer-Encoding) sent by a method the edge reads none for (DELETE) — with `custom_options` in the part it saw, or on the routes a guest or customer reaches (guest-carts and carts/mine items, async/bulk too, and the carts/mine quote save: an item is a few hundred bytes), or on SOAP naming a cart service, or with `services` possibly in a form body past the cut (an envelope sent urlencoded) (`OVERSIZE`; never a REST DELETE, never from the panel gate, which reads no body, nor from cfm.lua's first pass over a burn-in body, which it hands the WAF in a second pass); an XML entity declaration (`XML_ENTITY`); and a JSON / XML body (by media type) the scan cannot read as Magento would — a raw NUL, an XML body that does not start with `<` (after a BOM), a declared encoding that is not ASCII-compatible (UTF-16/32, UTF-7, ISO-2022, EBCDIC; UTF-8, ASCII, ISO-8859-*, Latin-*, windows-12xx, KOI8, Shift_JIS, EUC-JP/KR, GBK/GB2312/GB18030, Big5, TIS-620 and macintosh are read), or a SOAP body with an `xsi:type="…:Map"` (ext/soap builds a Map's keys from `<key>` text, which the name scan does not read; other xsi:types, e.g. a SoapClient's `xsd:string` for an anyType, keep element names) (`UNREADABLE`). Late, **logonly**: the same three names on a web API request that saves no cart (`FILE_INFO_ELSEWHERE`: an order an integration writes back can carry them, and no file is written there; on a cart-save request the names are 10027's alone, so its exclude or demotion holds). A request at `…/soap` with neither `services` nor an XML body is a shop's own page there and is left alone, as is a non-Magento SOAP server there (no cart service named). The edge's decision to read a SOAP body and the detectors share one matcher (`magento_soap_call`). GraphQL takes another code path (not vulnerable per Sansec). Magento's storefront uploads a file option through the `/checkout/cart/add` form, never this API; a shop whose own integration does upload a file option through the web API needs a per-vhost exclude of rules 10027 and 10028 (a real file is past 32 KB as base64, so 10028's OVERSIZE would refuse it). Known limits: a legitimate bulk or quote-save call past 32 KB, and an add-to-cart the edge could not read (HTTP/3 or a PUT without a Content-Length), get 10028's 403. Fixed: 2.4.9 and (Sansec's timeline) the APSB26-73 backports; 2.3.x and other EOL lines stay vulnerable, and the rules protect a site only while it is behind the edge. Also keep `pub/media/custom_options/.htaccess` (`Deny from all`, `php_flag engine 0`), which is what stopped the orion files from running. |
-| Fabrik for Joomla (`CVE-2026-67282`) | ✅ **implemented** (rule 10029, **block** since 2026-11-17, armed) — Fabrik 1.0.0–4.6.7 (fixed in 4.7.2, which also fixes `CVE-2026-66915`, the `ajax_calc` leg: no PoC yet, no rule) unauth RCE through the list filter: `<table>___<element>[value]` runs as PHP when the same element carries `[eval]` set. Source: the operator's incident report for the dmkomotinis.gr compromise (earth, 2026-11-12) and that site's edge log — `GET /index.php?option=com_fabrik&view=list&listid=1&dm_ypodeigma1a___aiton[value]=1;&dm_ypodeigma1a___aiton[eval]=1&dm_ypodeigma1a___aiton[condition]==` probes (`sleep(3);` for timing), then the `fopen`/`fwrite`/`chr()` payloads that wrote `up.php`, which rule 332 (block since 2026-11-17) reads. Fires on a request field (query, urlencoded or multipart POST: Fabrik reads `$_REQUEST`) whose key has an `[eval]` index on a Fabrik request — an `option` field `com_fabrik`, `fabrik` in the path (SEF `/component/fabrik/`), or the element name's `___` (a menu-alias route carries neither). Tags `EVAL_ARG` / `EVAL_BODY` for a set value; `EVAL_ZERO` for `=0`, recorded logonly whatever the rule's mode (it runs nothing). Fleet read before shipping (7 days of edge `access.log`, all 8 edge nodes, 2026-11-17): ~17 800 Fabrik requests, `[eval]` only from the attacker (151 set, 10 `=0`), so the list filter's own requests never send it. Promoted to block on 2026-11-17 after a 14-day read of all 8 nodes' `cfm.waf.log`: `EVAL_ZERO` only (10 hits, Greek users on three Fabrik sites, still logonly by code) and a set `[eval]` only from the attacker. `WAF_CVE` is armed, so the first probe bans before any payload reaches 332. The panel ports (`cfm_panel.lua`, block tier enforced there) were in the same reads (the edge `access.log` carries the panel passthrough) and saw no `[eval]`. |
-| Drupal render-array callbacks (`CVE-2026-108097` / SA-CORE-2026-014 + `CVE-2018-7600` Drupalgeddon2) | ✅ **implemented** (rule 10030, **block**, armed) — a render-array callback key (`#region_callback`, `#post_render`, `#pre_render`, `#lazy_builder`, `#access_callback`) as a request-field NAME, split as PHP splits the query and a urlencoded or multipart body (`name[#post_render][0]=…`), or as a JSON object KEY (`"#region_callback":`, read as `json_decode` reads it, `\u0023` and escaped letters included) in a JSON body (POST, PUT, PATCH), or `#region_callback` alone in a field value that is a JSON document (the lab probe's `rows={…}`; a render array pasted whole into a field does not match), or in the query of Drupal 7's `destination` (the node-delete Drupalgeddon2). Enforced in the body burn-in (cfm.lua `BURNIN_ENFORCE_IDS`): Drupal 8's Drupalgeddon2 is a POST to `/user/register`, which can come chunked or large. Drupal builds those keys server-side, so no form, API or link sends one as a key; the words in a value (a quoted search, a code sample, a Markdown or wiki link, YAML) never match. The first draft, a plain find over the whole surface, blocked 11 such legitimate requests in an independent FP review; they are negative tests now. A final independent review added the escaped-letter, PUT / PATCH, `destination` and burn-in cases and removed a second URL decode that turned a search URL's `%22` inside JSON into a key quote. Tag = the key; `REGION_CALLBACK` is reported as CVE-2026-108097, the rest as CVE-2018-7600. Sources: SA-CORE-2026-014 (fixed 2026-10-14 in 10.6.19 / 11.3.19 / 11.4.10; the sink is `call_user_func_array($row['#region_callback'], …)` in FieldUiTable, exploit status "Theoretical": it needs a contrib or custom route that writes request data there) and the 0xABCD01 lab; Drupalgeddon2's public payload. Fleet read before shipping (7 days of edge `access.log`, all 8 edge nodes, 2026-11-18): the keys only in attacks — the lab-route probe `/poc/fieldui?rows={"#region_callback": …}` on 5 sites, and Drupalgeddon2 (`?q=user/password&name[#post_render][0]=array_map&name[#suffix]=eval($_POST[c]);//`) on 2 sites, one answered 200. Armed because the fleet's three Drupal accounts include two that cannot take the core patch. |
-| vBulletin (`CVE-2026-61511`) | ⛔ **block rule REMOVED** (was rule 10015) — see the "Removed" note below. Only a **logonly** technique-level phpfuck detector (rule 439, `WAF_BACKDOOR`) remains; there is no CVE-attributed block/ban for this vector. |
-| WavePlayer, BerqWP, WPBookit, ThemeREX, Breeze, pay-uz, ACF Extended, Sneeit, WPvivid, Gravity Forms, GutenKit/Hunk (all WordPress plugins) | candidate — need exact endpoint/action/payload before any mode above `logonly` |
+Lua tests: `scripts/tests/cfm_waf_cve_<slug>_test.lua` per product (plus
+`*_e2e_test.lua` for 10021/10022, 10024, 10027/10028, 10030). 10023 is
+tested in the `php_upload_progress` files, 10029 in
+`cfm_waf_tier_review_2026_11_17_test.lua`.
 
-Keep the plan doc's candidate table as the backlog; update the ✅ column here
-as detectors land.
+### 2.1 Rule notes (sources, residuals, decisions)
 
-**Removed — vBulletin `runMaths()` (CVE-2026-61511), block rule 10015.** A
-route-anchored, block-tier phpfuck detector was prototyped and, over three
+- **10001 Simple File List** (unauth upload → rename → RCE). One detector for
+  both CVEs (same plugin, endpoints, exploit). Rename leg: extension match
+  `_cve_sfl_has_exec_ext` (`.php[0-9]?`, `.pht`, `.phtm`, `.phtml`, `.phar` at
+  a value boundary), kept in step with `bad_fname()` (rule 401). Upload leg
+  delegates to the hardened rule-402 scanner `_M.detect_upload_content`
+  (multipart only, binary-safe short-echo check) rather than a naive `<?php`
+  substring, which would bring back the rule-402 image-body FP. Sources:
+  `0xGunrunner/CVE-2025-34085` and the CVE-2020-36847 upload/rename PoC.
+- **10005 Slider Revolution** is a behavioural virtual-patch (§4.3): the
+  shapes are malicious on any version. The `update_plugin` leg is unauth-gated.
+- **10012 WooCommerce Payments.** The header is server-set by WooPay only;
+  exempt genuine WooPay nets with `ALLOW_NETS`.
+- **10013 Gravity SMTP.** The only legitimate caller is the wp-admin settings
+  screen, which carries the login cookie (UNAUTH gate).
+- **10014 SP Page Builder** ("ANTONKILL"). Runs before 401/414 for CVE
+  attribution; payload = direct filename, php-in-zip or php content, reusing
+  the upload detectors. A php entry past `waf_body_max_len` is ClamAV's
+  backstop.
+- **10016 Elementor Pro <4.2.2.** `validation()` `return`s on an empty first
+  part, skipping the extension blocklist for a following `.php` part that
+  `process_field()` still moves into `wp-content/uploads/elementor/forms/`.
+  The surviving extension is the vuln, so there is deliberately no content leg
+  (it would mis-attribute pasted PHP text; rule 402 covers raw PHP content).
+  Runs before 401 for attribution.
+- **10017 WordPress core page-template traversal** (GHSA-7hp8-65ch-5whp;
+  4.7.0–7.1.1, fixed 7.1.2 and back to 4.7.37). `get_page_template()` builds
+  `page-{$pagename}.php` from the url-decoded `pagename` without the `..`
+  check (RCE via `pearcmd.php` with `register_argc_argv=On`; needs a top-level
+  `page-*` theme dir). Source: the WordPress advisory + Wordfence entry
+  (operator-supplied). Every duplicate field is checked; WP reads `$_POST`
+  first. The pretty-permalink route (the path becomes `pagename`) was
+  invisible because `ctx.uri` is nginx's decoded, dot-resolved `$uri`;
+  **rule 103** (`rule_traversal_raw_path`, `WAF_TRAVERSAL`, block, family
+  held) closes it generically from `ctx.raw_uri`. Web edge only.
+- **10018 / 10019 / 10020 TranslatePress <= 3.3.1** (fixed 3.3.2), unauth
+  account takeover. Source: the 3.3.1→3.3.2 diff and the titan capture
+  (2026-10-08). `force_language_in_preview()` makes `wp_mail_filter()` store
+  the reset mail, key included. 10020 is held because the editor preview
+  (`trp-iframe-preview-script.js`) adds the parameter to every form a
+  translator submits. 10019 was held against a translator whose login expired
+  and is armed since 2026-11-17 (87 hits / 7 days / 8 nodes, all datacenter).
+  `string_ids` of only whitespace and brackets does not count; the cookie
+  gate is an FP filter (a junk cookie bypasses it). Fields are read as PHP
+  reads them (`php_request_fields`). Residuals: a theme/plugin AJAX reset with
+  the parameter in the Referer / `_wp_http_referer`; a field in a body the WAF
+  does not see (a "body not seen" tag was tried and dropped: it would ban a
+  translator's large form). An admin whose locale is a secondary language has
+  the mail stored without the trick: update to 3.3.2+.
+- **10021–10024 PHP core** (in scope because every WP/Joomla site runs on it).
+  PHP < 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 unauth RCE: an OOM during the
+  startup multipart parse leaves request memory half-initialised for
+  shutdown. Sources: GHSA-w8hw-w9fx-j79w / GHSA-6wmf-4rv5-p3rp (2026-10-21);
+  for 10023/10024 Imunify360 ruleset 8.85 (77318849, 77866818, 77236259) and
+  the fleet's edge logs (`ua="php2shell-scanner"`, `POST /`).
+  - 10021: parts found by a line scan like `find_boundary` (three bypasses in
+    two review rounds, checked against PHP 8.3.6). Nesting bar: a file part
+    >16 levels, a plain field >32 (Drupal Paragraphs, axios/Inertia FormData).
+    Fastest FP lever: a per-host/path exclude for 10021.
+  - 10022: `NO_CL` per cfm.lua `no_body_length` (a body read in full first
+    goes upstream with a real Content-Length). Off on an edge conf without
+    `$cfm_body_buffered`. Held: chunked multipart clients (Go `io.Pipe`,
+    `curl -F f=@-`, Java chunked mode) send the same shape.
+  - 10023: User-Agent `php2shell-…` (`TOOL_UA`) or a PoC boundary
+    (`TOOL_BOUNDARY`); header-only. A renamed tool passes.
+  - 10024: blocks `NO_REFERER` / `XSITE` / `NO_FETCH_METADATA` (the scanner
+    forged a same-site Referer, 2026-10-21); `SAME_SITE`, a `www.`/sibling
+    host and `Origin: null` + same-origin are logonly. Name read from the
+    multipart parse (PHP joins a split name). A browser without Fetch Metadata
+    (Safari < 16.4) posting its own progress form is blocked. Removing 10024
+    from `BURNIN_ENFORCE_IDS` reproduces the tool's pass
+    (`cfm_waf_cve_php_upload_progress_e2e_test.lua`).
+  - Residuals: only the first `waf_body_max_len` (32 KB) is seen; the panel
+    ports read no body; nodes without the edge get nothing. A stopgap: update
+    PHP and set `session.upload_progress.enabled = 0`.
+- **10025 / 10026 PixelYourSite** (free < 11.4.3, PRO < 12.6.8), unauth stored
+  XSS through the order "enrich" data. Source: the plugin code (PRO
+  12.2.7.1, `class_enrich_order.php`, `views/html-order-meta-box.php`) and
+  ~100 planted orders on 16 fleet shops (2026-02-13 → 2026-10-10; tophair.gr:
+  fake plugin + two admins in 15 s). Both look for **executable markup** only
+  (a script/iframe/frame/object/embed/meta/base element, or any element with
+  an `on…=` handler, `srcdoc=` or `javascript:`); a bare `<`/`>` or a
+  `<campaign_name>` placeholder is not. 10025 tags `COOKIE_MARKUP`,
+  `COOKIE_ATTR_BREAKOUT`, `COOKIE_SCRIPT_URL`; 10026 `PATH_MARKUP`,
+  `PATH_ATTR_BREAKOUT`, `REFERER_HOST_MARKUP`, `QUERY_UTM_MARKUP`. A 7-day
+  replay (2026-10-27) found 10026 hits only from one XSS scanner. Protects new
+  orders only: stored payloads need a DB clean-up.
+- **10027 / 10028 Magento "PolyShell"**. A cart item's custom option
+  `file_info` makes Magento write the decoded file, attacker's name and
+  extension, to `pub/media/custom_options/quote/`. Sources: Sansec's write-up,
+  Magento's own code (2.3.7 and 2.4-develop) and the 2026-10-29 attack on
+  dabizasfoods.gr (orion; base64 inside JSON, which 401/402 do not decode).
+  Names compared with `_` removed and lowercased, in JSON keys, XML
+  element/attribute names and bracketed form/query keys. The edge reads a
+  SOAP call's body (`waf_should_read_body_or_soap`); the edge and the
+  detectors share one matcher (`magento_soap_call`). GraphQL is not
+  vulnerable per Sansec. A shop whose own integration uploads a file option
+  through the web API needs a per-vhost exclude of 10027 and 10028. Known
+  limits: a legitimate bulk/quote-save call past 32 KB and an add-to-cart the
+  edge could not read (HTTP/3, a PUT without Content-Length) get 10028's 403.
+  Fixed in 2.4.9 and the APSB26-73 backports; keep
+  `pub/media/custom_options/.htaccess` (`Deny from all`, `php_flag engine 0`).
+- **10029 Fabrik for Joomla** 1.0.0–4.6.7 (fixed in 4.7.2), unauth RCE
+  through the list filter (`<table>___<element>[value]` runs as PHP when the
+  element carries `[eval]`). Source: the dmkomotinis.gr compromise (earth,
+  2026-11-12) and its edge log. A Fabrik request = `option=com_fabrik`,
+  `fabrik` in the path, or the element name's `___`. Promoted to block
+  2026-11-17 after a 14-day read of all 8 nodes' `cfm.waf.log` (`EVAL_ZERO`
+  only from real users, a set `[eval]` only from the attacker). Armed, so the
+  first probe bans before a payload reaches rule 332.
+- **10030 Drupal render-array callbacks** (`#region_callback`,
+  `#post_render`, `#pre_render`, `#lazy_builder`, `#access_callback`) as a
+  field NAME (query, urlencoded, multipart), a JSON KEY (POST/PUT/PATCH,
+  `#` decoded), `#region_callback` in a field value that is a JSON
+  document, or in the query of Drupal 7's `destination`; words in a value
+  never match. Sources: SA-CORE-2026-014 (fixed 2026-10-14 in 10.6.19 /
+  11.3.19 / 11.4.10; exploit status "Theoretical") with the 0xABCD01 lab, and
+  Drupalgeddon2's public payload. A first draft (a plain find) blocked 11
+  legitimate requests in an FP review; they are negative tests now. Armed:
+  the fleet's EOL Drupal sites cannot take the core patch.
+
+---
+
+## 3. Removed — vBulletin `runMaths()` (CVE-2026-61511), block rule 10015
+
+A route-anchored, block-tier phpfuck detector was prototyped and, over three
 adversarial review rounds, **removed** as too dangerous for a forum-hosting
-fleet. The signature scores a "phpfuck" blob — a dense run of parenthesised
-digit literals joined by `.` and XORed with `^`. The fatal flaw was a
-false-positive **ban**: an ordinary *spaced* math forum post
-(`(1.5)^2 + (2.5)^2 + …`) is sent by the browser as `application/x-www-form-
-urlencoded`, where each space becomes `+`; `normalize` does not turn `+` back
-into a space, so with `+` in the run charset the whole expression bridged into
-one qualifying run → `block` → `WAF_CVE` 6h nft ban of a real user on the
-`ajax/render` preview route. Removing `+` from the charset (to fix the FP)
-re-opens a no-op-operator bypass, and projecting the payload the way the sink
-does re-merges legit code — the defences collide. Since the endpoint gate
-cannot separate a benign math post from the attack at request time, an
-enforcement rule here bans real users; the correct fix is **patching vBulletin
-(≥6.2.2)**. What remains is the logonly rule 439 (below), for visibility only.
-It is best-effort: body-only (misses GET-args delivery), tight-charset (no-op /
-strip-char interspersing evades), and never to be promoted above logonly.
+fleet. The signature scores a dense run of parenthesised digit literals
+joined by `.` and XORed with `^`. The fatal flaw was an FP **ban**: an
+ordinary spaced math post (`(1.5)^2 + (2.5)^2 + …`) is sent form-urlencoded,
+each space becomes `+`, `normalize` does not turn `+` back, so with `+` in the
+run charset the expression bridged into one qualifying run → `block` →
+`WAF_CVE` 6 h ban of a real user on the `ajax/render` preview route. Removing
+`+` reopens a no-op-operator bypass, and projecting the payload as the sink
+does re-merges legit code. The endpoint gate cannot separate a math post from
+the attack at request time; the fix is **patching vBulletin (≥ 6.2.2)**.
 
-**Fleet-driven priority (2026-07):** the operator's own plugin scan (1,473
-critical-unauth installs across 495 sites) produced a ranked WAF-rule worklist
-(rule groups R1–R9). Tier-1 net-new detectors from it, in rollout order:
-**R6 LiteSpeed** (✅ 10004) → **R1 W3TC** (✅ 10006) → **R7 post-smtp**
-(✅ 10007) → **R4 Fusion Builder** (✅ 10008 — `fusion_*` nopriv ajax). That
-completes every "block now" net-new detector in the rollout. R3 upload / R5
-`wp-config` traversal are covered by the generic rules (401 / 101).
-
-**R2 (object injection) → rule 329** (`WAF_RCE:PHP_OBJECT_INJECTION`, armed
-block): rather than promote the broad rule 306 (`WAF_SERIALIZE`, challenge,
-**args-only**) — which would block/ban legit *authenticated* serialized blobs
-(WooCommerce/Elementor/WPML) — a dedicated **unauth-gated** detector fires on an
-`O:N:"…"`/`C:N:"…"` object marker in args OR body (incl. base64, closing rule
-304's logonly gap) and emits `WAF_RCE` (already armed). Covers the ~153-site
-object-injection exposure in one detector; rule 306 keeps the authenticated case
-at challenge. It is **not** a `10xxx` WAF_CVE rule because it's a vuln *class*,
-not one named CVE.
-
-**R8 (jet SQLi) → skipped.** Generic rule 301 (`WAF_SQLI`, armed block) already
-catches+bans the keyword markers globally; JetEngine's novel injections are
-keyword-less operator/blind SQLi that can't be signatured without FPing legit
-filter traffic (the fleet spec's own note). Fix = upgrade JetEngine on the
-affected sites.
-
-**Behavioural virtual-patch (a valid WAF_CVE flavour):** rule 10005
-(Slider Revolution) is not a version match — it keys on the known-malicious
-*request shapes* (`revslider_show_image` + `../`, and unauth
-`revslider_ajax_action` + `update_plugin`). Those shapes are malicious on **any**
-version, so this protects the whole fleet spread rather than only the one install
-a version check would flag, and it fills a real gap (a revslider `update_plugin`
-ZIP-with-PHP upload is not caught by the generic upload rules). Use this pattern
-when a plugin has a long history of the same abused endpoints and version-specific
-CVE matching would under-protect. Gate any leg whose action is also legitimate for
-an admin on UNAUTH (absence of a `wordpress_logged_in_*` cookie) — a forgeable
-FP-reduction heuristic, not a security control.
+What remains is rule **439** (`rule_php_numeric_xor_obfuscation`,
+`WAF_BACKDOOR`, **logonly**, never to be promoted): body-only, tight charset,
+best-effort visibility. There is no CVE-attributed block/ban for this vector.
 
 ---
 
-## 3. "CVE hunting!" — adding a new CVE detector
+## 4. Coverage decisions
 
-The repeatable recipe. Treat every step as required; the safety checklist at
-the end mirrors `WAF_CVE_PLAN.md` and CI.
+### 4.1 Scope: what the fleet runs
+
+A detector for software nobody on the fleet runs is pure FP surface and
+maintenance for zero protection. The ACSC campaign shortlist's Craft CMS
+(`CVE-2025-32432`), MaxSite CMS (`CVE-2026-3395`) and MetInfo CMS
+(`CVE-2026-29014`) were dropped for that reason; revisit only if the hosting
+mix changes. The rules in scope are WordPress / Joomla plugins and core, plus
+products a fleet read or an incident showed are present: PHP core (every site
+runs on it), Magento (the orion attack, 10027/10028) and Drupal (three
+accounts, two past end of life, 10030).
+
+### 4.2 Fleet-driven priority (2026-07)
+
+The operator's plugin scan (1 473 critical-unauth installs across 495 sites)
+produced a ranked worklist (R1–R9). Net-new detectors from it: R6 LiteSpeed
+(10004), R1 W3TC (10006), R7 Post SMTP (10007), R4 Fusion Builder (10008).
+R3 (upload) and R5 (`wp-config` traversal) are covered by the generic rules
+401 / 101.
+
+- **R2 (object injection) → rule 329** (`rule_php_object_injection`,
+  `WAF_RCE`, armed block), not a `10xxx` rule: it is a vulnerability class,
+  not one CVE. Rather than promote the broad rule 306 (`WAF_SERIALIZE`,
+  `challenge_v2`, args only), which would ban legitimate authenticated
+  serialized blobs (WooCommerce / Elementor / WPML), 329 is unauth-gated and
+  reads an `O:N:"…"`/`C:N:"…"` marker in args or body (base64 included).
+- **R8 (JetEngine SQLi) → skipped.** Rule 301 (`WAF_SQLI`, armed block)
+  already catches the keyword markers; JetEngine's keyword-less operator /
+  blind SQLi cannot be signatured without FPing legit filter traffic. The fix
+  is upgrading JetEngine.
+
+### 4.3 Behavioural virtual-patch is a valid `WAF_CVE` flavour
+
+Rule 10005 keys on known-malicious request shapes, not on a version, so it
+protects every install on the fleet. Use this pattern when a plugin has a long
+history of the same abused endpoints and a version-specific match would
+under-protect. Gate any leg whose action is also legitimate for an admin on
+UNAUTH (no `wordpress_logged_in_*` cookie) — a forgeable FP filter, not a
+security control.
+
+---
+
+## 5. Backlog
+
+Candidates without a validated exact request shape. **None has a rule.** CVE
+ids are as recorded in the original ACSC shortlist; confirm each against a
+primary source (§7 step 0) before writing anything.
+
+| Product | CVE | Note |
+|---|---|---|
+| WavePlayer (WP) | CVE-2025-12057 | exact endpoint/action/payload needed |
+| BerqWP (WP) | CVE-2025-7443 | exact endpoint/action/payload needed |
+| WPBookit (WP) | CVE-2025-7852 | exact endpoint/action/payload needed |
+| ThemeREX Addons (WP) | CVE-2026-1969 | exact vulnerable action needed |
+| Breeze Cache (WP) | CVE-2026-3844 | cache/admin endpoints: careful FP review |
+| pay-uz (WP) | CVE-2026-31843 | exact exploit route needed |
+| ACF Extended (WP) | CVE-2025-13486 | ACF admin traffic is common |
+| Sneeit Framework (WP) | CVE-2025-6389 | exact framework endpoint needed |
+| WPvivid Backup (WP) | CVE-2026-1357 | backup/restore endpoints: high FP risk |
+| Gravity Forms (WP) | CVE-2025-12352 | form submissions are common: exploit-specific payload needed |
+| GutenKit / Hunk Companion (WP) | likely CVE-2024-9234 | CVE mapping unconfirmed |
+| Fabrik (Joomla) `ajax_calc` | CVE-2026-66915 | fixed with 10029's CVE in 4.7.2; no PoC yet |
+
+Ranking: prefer KEV-listed / unauthenticated / RCE-upload-authbypass-SQLi /
+public-PoC CVEs in software the fleet actually runs (the vulnerable-code list
+in `docs/imunify360-gap-analysis.md` G4 is the exposure source). An
+authenticated-admin-only issue or one with no stable request fingerprint is
+not a WAF rule.
+
+---
+
+## 6. Design decisions (do not reopen without new evidence)
+
+- **Internal ids are not CVE numbers.** One rule can cover several CVEs
+  (10001, 10006, 10030) and one CVE can need several rules with different FP
+  risk (10018/10019/10020, 10025/10026, 10027/10028); CVE suffix lengths vary;
+  CVEs are external taxonomy, ids are an internal compatibility contract.
+- **One `WAF_CVE` family**, not a `WAF_CMS_CVE` split. FP risk is handled per
+  rule (`HoldAutoblock` / `RULE_<id>`), not by splitting families.
+- **Arm the family, hold the doubtful rule.** The original plan said the
+  opposite (family `CVE = 0`, opt in per CVE); it was reversed because an
+  un-armed family notifies nothing (§1.4). Do not un-arm `WAF_CVE` for one
+  rule.
+- **Passive reconnaissance never blocks:** `GET …/plugins/<slug>/`,
+  `readme.txt`, `/administrator/components/…`, `/vendor/…`, a login page, a
+  bare `admin-ajax.php`, a generic multipart upload. A plugin slug is at most
+  one constraint among several.
+- **Rollout ladder** `logonly` → `challenge` → `block`. Direct-to-block only
+  for an exact exploit shape with near-zero legitimate use (exact unauth
+  endpoint + action, an upload of PHP to an exact endpoint, an exact
+  injection payload on the vulnerable route, a header with no legitimate
+  client use). Every rule in §2 ships at block on that basis, most after a
+  fleet read.
+- **Not built** (proposed in the original plan, no current need):
+  per-rule CVE metadata on `WAFRule` (`CVEs`, `Product`, `ExploitClass`),
+  `CVE_<year>_<suffix>` aliases in `[waf_security]`, and top-CVE summaries in
+  `cfm webtop waf`. The reason string (§1.2) is the CVE carrier today.
+
+---
+
+## 7. "CVE hunting" — adding a new CVE detector
+
+Every step is required.
 
 ### Step 0 — Get the *exact* exploit shape (never from memory)
 
-My (assistant) knowledge cutoff means 2025–2026 CVEs are **not** reliably in
-training data. **Do not invent signatures.** Obtain the request shape from a
-primary source, in rough order of confidence:
+The assistant's knowledge cutoff predates most target CVEs. **Do not invent
+signatures.** Get the request shape from a primary source, in rough order of
+confidence:
 
-1. A **public PoC / exploit script** (GitHub, exploit-db) — read the actual
-   HTTP request it builds: method, path, param/field names, marker payload.
-2. The **vendor patch / diff** — shows the vulnerable endpoint and the input
-   that reaches the sink.
-3. **NVD → references** for the CVE, then follow to advisory/PoC.
-4. **Operator-supplied** PoC, packet capture, or `cfm.waf.log` samples of the
+1. A **public PoC / exploit script** — read the HTTP request it builds:
+   method, path, field names, marker payload.
+2. The **vendor patch / diff** — the vulnerable endpoint and the input that
+   reaches the sink.
+3. **NVD → references**, followed to the advisory / PoC.
+4. **Operator-supplied** PoC, capture, or edge / `cfm.waf.log` samples of the
    real attack.
 
-Pin the exact: **HTTP method**, **endpoint path** (prefer a
-plugin/product-unique path segment), and a **request-body/param marker** that
-only the exploit carries. If you can only get a param *name* that legitimate
-traffic also uses, the shape is not exact enough — keep it `logonly` or don't
-ship it.
+Pin the **method**, the **endpoint** (prefer a product-unique path segment)
+and a **marker** only the exploit carries. A parameter *name* legitimate
+traffic also sends is not exact enough: keep it `logonly` or don't ship it.
+Before shipping, read the fleet's edge logs for the marker (CFM MCP
+`edge_error_tail` / `cfm_log_tail`, `node="all"`): the fleet reads in §2.1
+are what justified block.
 
-### Step 1 — Pick a stable id in the `10000+` band
+### Step 1 — Pick the id
 
-Next free id ≥ `10001`. **Never renumber** an existing one (operators
-reference ids in exclusions, dashboards, tickets).
+Next free id (`10031` today). Never reuse `10015`. An id `>= 10100` needs a
+`wafRuleGroupNames` entry first (§1.1).
 
 ### Step 2 — Lua detector (`configs/lua/cfm_waf_detectors.lua`)
 
-Write `_M.detect_cve_<slug>(uri, method, args, body, headers)` that returns a
-`<TAG>` string on a hit or `nil` otherwise. Rules:
+Write `_M.detect_cve_<slug>(…)` taking what it needs (most take
+`uri, method, args, body, headers`; cookie- or header-only rules take less)
+and returning a `<TAG>` on a hit, `nil` otherwise.
 
-- Gate on **method** and the **exact endpoint** first (cheap, and the main FP
-  guard). Key on the endpoint/marker, **not** on param names alone.
-- **Reuse hardened helpers** — `_M.detect_upload_content`, `has_php_short_echo`,
-  `bad_fname`, etc. — instead of re-rolling body scans. A naive `<?php`
-  substring on a raw body is a known FP source (large images).
-- Use `cap(…, CFG.max_scan_len)` before lowercasing large bodies; use
-  `%f[%W]` value-boundary frontier patterns for extension matches.
-- Must parse under **LuaJIT** (`goto` is used elsewhere): `make lua`.
+- Gate on method and the exact endpoint first (cheap, and the main FP guard).
+- **A rule keyed on a request field reads it through `php_request_fields`**,
+  never a hand-rolled split: a field the edge reads differently from PHP is a
+  bypass. Change that reader only with
+  `scripts/tests/php_request_fields_oracle.py check` passing against a real
+  PHP.
+- **Reuse hardened helpers** (`_M.detect_upload_content`,
+  `has_php_short_echo`, the rule-401 filename matcher) instead of re-rolling
+  body scans; a naive `<?php` substring on a raw body is a known FP source.
+- `cap(…, CFG.max_scan_len)` before lowercasing large bodies; `%f[%W]`
+  frontier patterns for extension matches. Must parse under LuaJIT
+  (`make lua`).
 
 ### Step 3 — Wire the check site (`configs/lua/cfm_waf.lua`)
 
-Add the CFG default and the `RULE_IDS` entry, then a `check()` call site:
+Add the `CFG` default (with a comment carrying the CVE, source and why that
+mode), the `RULE_IDS` entry, and a `check()` call site:
 
 ```lua
 -- CFG
-rule_cve_<slug> = "block",   -- or "logonly"/"challenge"; justify in a comment
+rule_cve_<slug> = "block",   -- CVE-…: source, keyed on …, why block
 
--- RULE_IDS  (10xxx band)
-rule_cve_<slug> = 10002,
+-- RULE_IDS
+rule_cve_<slug> = 10031,
 
--- check(ctx)  (order matters: first match wins via `goto done`)
+-- check()  (first block hit wins via `goto done`)
 do
   local mode = rule_mode(CFG.rule_cve_<slug>, "block")
   if mode ~= "disabled" and body_inspect_ok then
@@ -315,68 +472,72 @@ do
 end
 ```
 
-Place the call site with rule-order in mind — an earlier matching rule wins
-attribution. For upload/RCE CVEs, put it before the generic upload rules so the
-hit is attributed to the CVE.
+(`body_inspect_ok` is "POST with a non-empty body"; drop it for a rule that
+reads headers, cookies or the query, or that must see PUT/PATCH.) Placement:
+
+- an upload/RCE CVE goes before the generic upload rules (401/402/414) so the
+  hit is attributed to the CVE;
+- a rule whose ban is held goes late, with the other held rules (§1.4);
+- a rule whose exploit is a large or chunked body joins
+  `BURNIN_ENFORCE_IDS` in `configs/lua/cfm.lua` and runs in step 0 (§1.5).
 
 ### Step 4 — Go registry mirror (`internal/webdetector/waf_rule_ids.go`)
 
-Add the matching entry (parity test requires it):
-
 ```go
-{ID: 10002, Name: "rule_cve_<slug>", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+{ID: 10031, Name: "rule_cve_<slug>", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 ```
 
-### Step 5 — Decide autoblock intent **in the same change**
+`DefaultMode` must equal the Lua `CFG` default
+(`TestWAFRuleIDs_DefaultModeLuaParity`); a later promotion edits both.
 
-`WAF_CVE` is **armed by default** (family threshold `1`), so a new `block`-tier
-CVE rule autoblocks the moment it lands. Decide, per new rule:
+### Step 5 — Decide autoblock intent in the same change
 
-- **High-confidence, exact shape** (like 10001) → leave it armed. Hits get a 6h
-  nft ban + `WAF/CVE-YYYY-NNNN` Slack/mail. This is the common case.
-- **Lower-confidence** → ship a per-rule `RULE_<id> = 0` in the reference
-  `configs/detectors.conf` in the SAME change (the per-rule override wins over
-  the family threshold), holding just that rule while the family stays armed for
-  the good ones. Note it in `[waf_security]`.
-- Operators can burn-in the whole family with `DRY_RUN = 1` (alerts, no bans).
+`WAF_CVE` is armed, so a new block rule bans the moment it lands.
 
-Do **not** un-arm the whole `WAF_CVE` family for one doubtful rule — that
-silences the alerts for every other CVE. Hold the rule, not the family.
+- **Exact shape, no legitimate sender** → leave it armed (the common case).
+- **Right to 403, but a ban could land on a legitimate user** → set
+  `HoldAutoblock: true` on its Go entry, note it in the `[waf_security]`
+  block of `configs/detectors.conf` (`RULE_<id> = 1` arms it), and place its
+  check site late.
+- Never un-arm the family for one rule.
 
 ### Step 6 — Tests
 
-- **Lua** (`scripts/tests/cfm_waf_cve_<slug>_test.lua`): positive cases for
-  every exploit leg/`<TAG>`, plus negatives — wrong method, wrong endpoint,
-  near-miss extensions, legit traffic to the same product (passive version
-  probes, normal uploads). Run `make test-lua`.
-- **Go**: `TestWAFRuleIDs_LuaParity`, `TestWAFRuleIDs_GroupingDigits`,
-  `TestWAFSecurityFamilyCoverage` must stay green. If the new rule ships at
-  `block`, the coverage test already expects `WAF_CVE` to stay at default `0`
-  — no change needed there.
+- **Lua** (`scripts/tests/cfm_waf_cve_<slug>_test.lua`): a positive per
+  exploit leg / `<TAG>`, and negatives — wrong method, wrong endpoint,
+  near-miss values, passive probes, legitimate traffic to the same product.
+  Add an `_e2e_test.lua` through cfm.lua for a burn-in rule. `make test-lua`.
+- **Go**: `go test ./internal/webdetector/ ./internal/detectors/...`
+  (`TestWAFRuleIDs_LuaParity`, `TestWAFRuleIDs_DefaultModeLuaParity`,
+  `TestWAFRuleIDs_GroupingDigits`, `TestWAFSecurityFamilyCoverage`, which
+  needs no change: `WAF_CVE` stays armed).
 
 ### Step 7 — Notification
 
-No code needed for the CVE name to appear — `cveFromReason` derives
-`WAF/CVE-YYYY-NNNN` from the reason automatically, provided the reason is
-`WAF_CVE:CVE_<year>_<suffix>:…`. Just get the reason format right in Step 3.
+Nothing to write: `cveFromReason` names the alert `WAF/CVE-YYYY-NNNN` from a
+`WAF_CVE:CVE_<year>_<suffix>:…` reason. A reason without that segment alerts
+as plain `WAF/CVE`.
 
 ### Step 8 — Docs & changelog
 
-- Flip the candidate to ✅ in §2 here and note the rule id.
-- Add a `CHANGELOG.md` `[Unreleased] → Added` bullet (operator-facing).
-- Follow `docs/challenge-waf-release-checklist.md` for the edge reload gate.
+- Add the rule to the §2 table and a note to §2.1 here; drop it from §5.
+- `CHANGELOG.md` `[Unreleased]` → Added (operator-facing).
+- If it is block-tier, check its panel-port behaviour (§1.4) and follow
+  `docs/challenge-waf-release-checklist.md` for the edge reload gate.
 
 ### Safety checklist (every new CVE rule)
 
 - [ ] Exact method **and** endpoint constraints.
-- [ ] Exploit-specific request marker (not a param name legit traffic shares).
-- [ ] Passive version/plugin probes are **negative** tests.
-- [ ] Legit CMS/admin/form/upload traffic considered in negative tests.
-- [ ] Default edge mode justified in a comment.
-- [ ] Id stable and in the `10000+` band; Go mirrors Lua id + metadata.
-- [ ] Reason is `WAF_CVE:CVE_YYYY_NNNN:PRODUCT:TAG` so the notifier names it.
-- [ ] `waf_security` autoblock is explicit: `WAF_CVE` is armed by default, so a
-      high-confidence rule stays armed and a lower-confidence one ships with a
-      per-rule `RULE_<id> = 0` (hold the rule, not the family).
-- [ ] `make lua`, `make test-lua`, and `go test ./internal/...` pass.
-- [ ] PoC/patch source link recorded; **no signatures written from memory**.
+- [ ] Exploit-specific marker (not a field name legitimate traffic shares);
+      request fields read through `php_request_fields`.
+- [ ] Passive version/plugin probes and legitimate product traffic are
+      negative tests.
+- [ ] Default edge mode justified in the `CFG` comment; Lua `CFG` = Go
+      `DefaultMode`.
+- [ ] Id stable, next free in the band; Go mirrors Lua.
+- [ ] Reason is `WAF_CVE:CVE_YYYY_NNNN:PRODUCT:TAG`.
+- [ ] Autoblock explicit: armed, or `HoldAutoblock` + late placement.
+- [ ] Burn-in body rule listed in `BURNIN_ENFORCE_IDS` and run first.
+- [ ] `make lua`, `make test-lua`, `go test ./internal/...` pass.
+- [ ] PoC / patch / capture source recorded in the `CFG` comment and §2.1;
+      **no signature written from memory**.

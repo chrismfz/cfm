@@ -237,12 +237,12 @@ local function panel_decision_probe(ip, host, uri, method, ua, scope, enforce)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- Panel WAF (edge-unification Phase 2e) — LOGONLY.
+-- Panel WAF (edge-unification Phase 2e).
 --
 -- Runs the SAME cfm_waf ruleset the web edge uses against panel human-entry +
--- generic requests and RECORDS what it WOULD do — it never blocks, challenges,
--- or alters the flow (parallel to panel_decision_probe). The point is to gather
--- false-positive data on real panel traffic before any enforcement phase.
+-- generic requests. PANEL_WAF_MODE (default enforce, see the mode resolution
+-- above) decides whether a block-tier hit is denied or only recorded;
+-- challenge-tier hits are recorded, never served (see below).
 --
 -- Reduced profile, deliberately:
 --   * Header / URI / args / cookie only — NO request body is read, so panel
@@ -1250,10 +1250,10 @@ end
 --     are held at logonly precisely because they haven't passed FP burn-in);
 --   * `challenge`-tier hits are NOT converted to a standalone WAF challenge here
 --     — that would LOOP (a solved clearance cookie doesn't clear the WAF match,
---     so the request re-trips and re-challenges, and this returns before the
---     section-3 loop-breaker) and would hand non-browser clients an unsolvable
---     PoW. Challenge-tier enforcement is deferred to the clearance-aware Phase 4b
---     decision path; the existing human-entry challenge (section 3) is unchanged.
+--     so the request re-trips and re-challenges) and would hand non-browser
+--     clients an unsolvable PoW. Challenge-tier enforcement on the panel was
+--     decided against (docs/edge-unification-plan.md); the existing human-entry
+--     challenge (section 3) is unchanged.
 -- `deny` can't loop (no redirect). Self/IGNORE_NETS sources never reach here
 -- (panel_waf_probe skips them), and the probe is pcall'd so any WAF error fails
 -- OPEN to the normal flow — a WAF fault can never lock the panel, even when the
