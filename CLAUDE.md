@@ -632,7 +632,7 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
   when a DNAT runs ahead while WebShield serves real traffic. With CFM first,
   a graylisted direct visitor is dropped by Imunify's own filter (it accepts
   that set only on WebShield's ports), never challenged. What WebShield did
-  that CFM lost, measured: `docs/imunify-webshield-parity.md`.
+  that CFM lost, measured: `docs/imunify360-gap-analysis.md` ("WebShield").
 - **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
   API reporting and email are the section sink's job (`autoblock_sink.go`) —
   don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
@@ -1071,7 +1071,7 @@ because of that. Hard-won points:
 | Site Cache (per-vhost edge caching): design + as-built / operating it | `docs/site-cache-design.md` · `docs/site-cache-runbook.md` |
 | Vhost lockdown (no client exemption on a manual vhost challenge: crawler storms) | `docs/vhost-lockdown.md` |
 | Proxied-client IP filter (fleet feeds, local bans and allows for clients behind Cloudflare) | `docs/proxied-ipfilter.md` |
-| Imunify360 vs CFM: what Imunify catches that CFM does not (measured on earth; status of each gap) | `docs/imunify360-gap-analysis.md` · WebShield alone: `docs/imunify-webshield-parity.md` |
+| Imunify360 vs CFM: what Imunify catches that CFM does not (measured on earth; status of each gap) | `docs/imunify360-gap-analysis.md` (WebShield included) |
 | PHP runtime defense (CFM-managed Snuffleupagus; CFM writes no PHP extension of its own) | `docs/roadmaps/php-runtime-defense.md` |
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
 

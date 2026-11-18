@@ -213,7 +213,7 @@ DNATs its sets to WebShield at priority -100, and on a cPanel node its
 `remote_proxy_static` set holds Cloudflare's ranges; CFM's web redirect
 defaults to -99 (`cfm dnat`), so with that default every Cloudflare visitor
 skips the edge (earth, 2026-11-17: ~29 % of its web requests). See
-`docs/imunify-webshield-parity.md`.
+`docs/imunify360-gap-analysis.md` ("WebShield").
 
 The check reads the ruleset (`netfilterdiag.WebDNATAhead`: non-CFM `dnat` /
 `redirect` rules in prerouting for tcp/80 or tcp/443 at a priority no later
