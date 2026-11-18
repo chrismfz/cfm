@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -133,29 +134,41 @@ func TestApplyUpdatesRunsAllowlistedActionsOnce(t *testing.T) {
 	}
 }
 
-// spamd runs as root and loads Perl from loadplugin/tryplugin lines and .pre
-// files: neither may arrive through the sync, whatever the command allowlist.
+// spamd runs as root and loads Perl named by a plugin file path, a .pre file,
+// or a file included from outside its dir: none may arrive through the sync,
+// whatever the command allowlist. A plugin by module name (myip.cf's SPF,
+// DKIM, DCC...) loads only what is installed, and stays allowed. A refused
+// version is parked, so it is logged once rather than re-downloaded per tick.
 func TestApplyUpdatesRefusesSpamassassinCode(t *testing.T) {
 	f := newSyncFixture(t)
 	var st fileSyncState
-	res := st.applyUpdates(context.Background(), []ConfigUpdate{
+	refused := []ConfigUpdate{
 		f.update(f.saDir+"evil.cf", "score A 1\n  LoadPlugin Evil /tmp/x.pm\n", "systemctl restart spamd"),
-		f.update(f.saDir+"evil2.cf", "tryplugin Evil /tmp/x.pm\n", "systemctl restart spamd"),
+		f.update(f.saDir+"evil2.cf", "tryplugin Evil x.pm\n", "systemctl restart spamd"),
+		f.update(f.saDir+"evil3.cf", "include /etc/cfm/x.cf\n", "systemctl restart spamd"),
+		f.update(f.saDir+"evil4.cf", "include ../../etc/cfm/x.cf\n", ""),
 		f.update(f.saDir+"v999.pre", "score A 1\n", "systemctl restart spamd"),
 		f.update(f.saDir+"x.pm", "1;\n", ""),
-	}, f.allowed())
+	}
+	res := st.applyUpdates(context.Background(), refused, f.allowed())
 	if len(res.Written) != 0 || len(f.cmds) != 0 || f.lintCalls != 0 {
 		t.Fatalf("code reached spamd: %+v cmds=%v lints=%d", res, f.cmds, f.lintCalls)
 	}
-	for _, n := range []string{"evil.cf", "evil2.cf", "v999.pre", "x.pm"} {
-		if _, err := os.Stat(f.saDir + n); err == nil {
-			t.Errorf("%s written", n)
+	for _, u := range refused {
+		if _, err := os.Stat(u.TargetPath); err == nil {
+			t.Errorf("%s written", u.TargetPath)
+		}
+		if !st.isParked(u.TargetPath, u.Hash) {
+			t.Errorf("%s not parked", u.TargetPath)
 		}
 	}
-	// a rule that only mentions the word is fine
-	res = st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"ok.cf", "describe X mentions loadplugin in text\n", "")}, f.allowed())
-	if len(res.Written) != 1 {
-		t.Fatalf("a rule describing the word was refused: %+v", res)
+	res = st.applyUpdates(context.Background(), []ConfigUpdate{
+		f.update(f.saDir+"myip.cf", "loadplugin    Mail::SpamAssassin::Plugin::DCC\ndcc_home /var/dcc\n", ""),
+		f.update(f.saDir+"inc.cf", "include extra/rules.cf\ninclude "+f.saDir+"more.cf\n", ""),
+		f.update(f.saDir+"ok.cf", "describe X mentions loadplugin in text\n", ""),
+	}, f.allowed())
+	if len(res.Written) != 3 {
+		t.Fatalf("allowed content refused: %+v", res)
 	}
 }
 
@@ -275,7 +288,7 @@ func TestApplyUpdatesIgnoresPreexistingLintProblems(t *testing.T) {
 	}
 	var st fileSyncState
 	res := st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"myip.cf", "score Y 1\ndcc_home /var/dcc\n", "/scripts/restartsrv_spamd")}, f.allowed())
-	if len(res.Written) != 1 || len(res.RolledBack) != 0 || len(f.cmds) != 1 || f.cmds[0][0] != "/scripts/restartsrv_spamd" {
+	if len(res.Written) != 1 || len(res.RolledBack) != 0 || len(f.cmds) != 1 || strings.Join(f.cmds[0], " ") != "systemctl restart spamd" {
 		t.Fatalf("pre-existing lint problems blocked the update: %+v %v", res, f.cmds)
 	}
 }
@@ -295,6 +308,7 @@ func TestApplyUpdatesLintFailures(t *testing.T) {
 		t.Fatalf("baseline failure: %+v", res)
 	}
 
+	st.lintRetryAt = time.Time{} // past the backoff the first failure set
 	f.lintCalls = 0
 	f.lint = func(n int) (string, error) {
 		if n == 1 {
@@ -392,5 +406,114 @@ func TestStartConfigSyncDoesNotOverlap(t *testing.T) {
 	}
 	if r.fileSyncRunning.Load() {
 		t.Fatal("sync still marked running")
+	}
+}
+
+// The same warning on a second line is a new problem even though its text
+// matches one that was already there.
+func TestApplyUpdatesCountsRepeatedLintProblems(t *testing.T) {
+	f := newSyncFixture(t)
+	f.seed(t, f.saDir+"myip.cf", "dcc_home /var/dcc\n", 0o600)
+	warn := "warn: config: invalid 'dcc_home' value in /etc/mail/spamassassin/myip.cf (line %s): dcc_home /var/dcc\n"
+	f.lint = func(n int) (string, error) {
+		out := strings.Replace(warn, "%s", "1", 1)
+		if n == 1 {
+			out += strings.Replace(warn, "%s", "9", 1)
+		}
+		return out, &exitError
+	}
+	var st fileSyncState
+	u := f.update(f.saDir+"myip.cf", "dcc_home /var/dcc\nscore X 1\ndcc_home /var/dcc\n", "systemctl restart spamd")
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{u}, f.allowed())
+	if len(res.RolledBack) != 1 || len(f.cmds) != 0 || !st.isParked(f.saDir+"myip.cf", u.Hash) {
+		t.Fatalf("a second copy of a known warning passed: %+v cmds=%v", res, f.cmds)
+	}
+}
+
+// Many SpamAssassin files changing together with one bad: the bad one is
+// found by halving the set, in fewer lints than one per file.
+func TestApplyUpdatesBisectsManyFiles(t *testing.T) {
+	f := newSyncFixture(t)
+	var ups []ConfigUpdate
+	for i := 0; i < 8; i++ {
+		ups = append(ups, f.update(f.saDir+fmt.Sprintf("r%d.cf", i), fmt.Sprintf("score R%d 1\n", i), "systemctl restart spamd"))
+	}
+	badPath := f.saDir + "r5.cf"
+	ups[5] = f.update(badPath, "body __BAD /(unclosed/\n", "systemctl restart spamd")
+	f.lint = func(int) (string, error) {
+		if b, _ := os.ReadFile(badPath); string(b) == ups[5].Content {
+			return badRuleLint, &exitError
+		}
+		return "", nil
+	}
+	var st fileSyncState
+	res := st.applyUpdates(context.Background(), ups, f.allowed())
+	if len(res.Written) != 7 || !st.isParked(badPath, ups[5].Hash) || len(f.cmds) != 1 {
+		t.Fatalf("%+v parked=%v cmds=%v", res, st.parked, f.cmds)
+	}
+	if _, err := os.Stat(badPath); !os.IsNotExist(err) {
+		t.Fatal("bad file left on disk")
+	}
+	if f.lintCalls >= 1+1+8 {
+		t.Fatalf("%d lints: no better than one per file", f.lintCalls)
+	}
+}
+
+// A lint that keeps failing is retried with a growing delay, not on every
+// tick; a lint that completes resets the delay.
+func TestApplyUpdatesLintBackoff(t *testing.T) {
+	f := newSyncFixture(t)
+	clock := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	prevNow := now
+	now = func() time.Time { return clock }
+	defer func() { now = prevNow }()
+	f.lint = func(int) (string, error) { return "", context.DeadlineExceeded }
+	u := f.update(f.saDir+"rules.cf", "score X 1\n", "systemctl restart spamd")
+	var st fileSyncState
+
+	st.applyUpdates(context.Background(), []ConfigUpdate{u}, f.allowed())
+	if f.lintCalls != 1 || st.lintBackoff != lintBackoffMin {
+		t.Fatalf("lints=%d backoff=%s", f.lintCalls, st.lintBackoff)
+	}
+	clock = clock.Add(30 * time.Second) // before the retry time: no lint
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{u}, f.allowed())
+	if f.lintCalls != 1 || len(res.Deferred) != 1 {
+		t.Fatalf("linted again inside the backoff: %d", f.lintCalls)
+	}
+	clock = clock.Add(time.Minute) // past it: lint, fail, double
+	st.applyUpdates(context.Background(), []ConfigUpdate{u}, f.allowed())
+	if f.lintCalls != 2 || st.lintBackoff != 2*lintBackoffMin {
+		t.Fatalf("lints=%d backoff=%s", f.lintCalls, st.lintBackoff)
+	}
+	clock = clock.Add(3 * time.Minute)
+	f.lint = nil
+	res = st.applyUpdates(context.Background(), []ConfigUpdate{u}, f.allowed())
+	if len(res.Written) != 1 || !st.lintRetryAt.IsZero() || st.lintBackoff != 0 {
+		t.Fatalf("a completed lint did not reset the backoff: %+v %+v", res, st)
+	}
+}
+
+// Stopping the agent (a cancelled sync context) must not cancel a restart in
+// flight: systemd gets the job and the command keeps its own timeout.
+func TestPostUpdateNotCancelledByStop(t *testing.T) {
+	f := newSyncFixture(t)
+	var cmdCtxErr error
+	runSyncCommand = func(ctx context.Context, argv []string) ([]byte, error) {
+		if len(argv) == 2 && argv[1] == "--lint" {
+			return nil, nil
+		}
+		cmdCtxErr = ctx.Err()
+		f.cmds = append(f.cmds, argv)
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var st fileSyncState
+	st.applyUpdates(ctx, []ConfigUpdate{f.update(f.other+"cfm.conf", "x=1\n", "/scripts/restartsrv_spamd")}, f.allowed())
+	if len(f.cmds) != 1 || cmdCtxErr != nil {
+		t.Fatalf("restart ran under a cancelled context (%v) or not at all: %v", cmdCtxErr, f.cmds)
+	}
+	if strings.Join(f.cmds[0], " ") != "systemctl restart spamd" {
+		t.Fatalf("restartsrv not run as a systemd job: %v", f.cmds[0])
 	}
 }

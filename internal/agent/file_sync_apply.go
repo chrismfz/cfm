@@ -14,9 +14,10 @@ package agent
 //     names would make a compromise of it root on the whole fleet (the same
 //     reason the write path is prefix-allowlisted).
 //   - that alone is not enough under /etc/mail/spamassassin/: spamd runs as
-//     root and loads Perl named by `loadplugin`/`tryplugin` lines and `.pre`
-//     files, so a file written there is code once spamd restarts. Only `.cf`
-//     files without those directives are accepted there (saContentRefusal).
+//     root and loads Perl from a plugin file path, a `.pre` file or a file it
+//     `include`s, so a file written there is code once spamd restarts. Only
+//     `.cf` files are accepted there, with plugins by module name only and
+//     includes only inside that dir (saContentRefusal).
 //     The other allowed dirs (/etc/cfm, the OpenResty conf and Lua dirs) are
 //     not sandboxed by this file: what lands there is trusted as it always was.
 //
@@ -24,8 +25,10 @@ package agent
 // problem the new files introduced (one the lint before the write did not
 // report) rolls them back and skips the restart; when several SpamAssassin
 // files changed at once, each is then retried alone so only the one at fault
-// is parked (left alone until cfm-web sends a different version). Problems
-// that were already there (a dcc_* line with the DCC plugin off) do not block.
+// is parked (left alone until cfm-web sends a different version); the files
+// are narrowed down by halving, not one lint per file. Problems that were
+// already there (a dcc_* line with the DCC plugin off) do not block, and a
+// lint that cannot run backs off instead of retrying every tick.
 
 import (
 	"bytes"
@@ -57,10 +60,14 @@ const (
 )
 
 // postUpdateActions maps the post_update_command strings cfm-web may send to
-// what the agent runs. Anything else is refused and logged.
+// what the agent runs. Anything else is refused and logged. Every action is a
+// systemctl job, cPanel's /scripts/restartsrv_spamd included: systemd carries
+// the restart through even if the cfm daemon is stopped (and its cgroup
+// killed) mid-command, where a script killed between its stop and start would
+// leave spamd down.
 var postUpdateActions = map[string]postAction{
 	"systemctl restart spamd":   {actionRestartSpamd, []string{"systemctl", "restart", "spamd"}},
-	"/scripts/restartsrv_spamd": {actionRestartSpamd, []string{"/scripts/restartsrv_spamd"}},
+	"/scripts/restartsrv_spamd": {actionRestartSpamd, []string{"systemctl", "restart", "spamd"}},
 	"systemctl reload spamd":    {actionReloadSpamd, []string{"systemctl", "reload", "spamd"}},
 }
 
@@ -97,10 +104,36 @@ const (
 // fileSyncState is what the sync remembers between ticks. Only the config-sync
 // goroutine touches it (one at a time, startConfigSync).
 type fileSyncState struct {
-	// parked: target path → the hash whose SpamAssassin lint failed. That
-	// version is neither downloaded nor applied again; a new hash is.
+	// parked: target path → the hash that failed the SpamAssassin lint or the
+	// content check. That version is neither downloaded nor applied again; a
+	// new hash is.
 	parked map[string]string
+	// lintRetryAt / lintBackoff: after a lint that did not complete (timed
+	// out on a loaded box), SpamAssassin changes wait until lintRetryAt
+	// instead of starting another multi-minute lint on every tick.
+	lintRetryAt time.Time
+	lintBackoff time.Duration
 }
+
+const (
+	lintBackoffMin = time.Minute
+	lintBackoffMax = time.Hour
+)
+
+// now is the clock, a seam for the backoff tests.
+var now = time.Now
+
+// lintFailed schedules the next lint attempt, doubling the wait each time.
+func (st *fileSyncState) lintFailed() {
+	if st.lintBackoff < lintBackoffMin {
+		st.lintBackoff = lintBackoffMin
+	} else if st.lintBackoff *= 2; st.lintBackoff > lintBackoffMax {
+		st.lintBackoff = lintBackoffMax
+	}
+	st.lintRetryAt = now().Add(st.lintBackoff)
+}
+
+func (st *fileSyncState) lintOK() { st.lintRetryAt, st.lintBackoff = time.Time{}, 0 }
 
 // isParked reports whether path's version hash is parked.
 func (st *fileSyncState) isParked(path, hash string) bool {
@@ -150,6 +183,7 @@ func (st *fileSyncState) applyUpdates(ctx context.Context, updates []ConfigUpdat
 		if isSpamassassinFile(path) {
 			if why := saContentRefusal(path, u.Content); why != "" {
 				logging.LogfAPI("[files] REJECTED %s: %s", path, why)
+				st.parked[path] = u.Hash // logged once, not downloaded again
 				continue
 			}
 		}
@@ -213,7 +247,8 @@ func (st *fileSyncState) applyUpdates(ctx context.Context, updates []ConfigUpdat
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		cctx, cancel := context.WithTimeout(ctx, postUpdateTimeout)
+		// Not under ctx: Stop must not cancel a restart half-way.
+		cctx, cancel := context.WithTimeout(context.Background(), postUpdateTimeout)
 		out, err := runSyncCommand(cctx, actions[id])
 		cancel()
 		if err != nil {
@@ -240,15 +275,24 @@ func (st *fileSyncState) applySpamassassin(ctx context.Context, sa []pendingWrit
 		}
 		return kept
 	}
-	baseline, err := saLintProblems(ctx, bin)
-	if err != nil {
-		// Without a baseline nothing can be attributed; try again next sync.
-		logging.LogfAPI("[files] spamassassin lint did not run (%v); deferring %d file(s) to the next sync", err, len(sa))
+	if t := st.lintRetryAt; !t.IsZero() && now().Before(t) {
 		for _, w := range sa {
 			res.Deferred = append(res.Deferred, w.path)
 		}
 		return nil
 	}
+	baseline, err := saLintProblems(ctx, bin)
+	if err != nil {
+		// Without a baseline nothing can be attributed; try again later.
+		st.lintFailed()
+		logging.LogfAPI("[files] spamassassin lint did not run (%v); deferring %d file(s) until %s",
+			err, len(sa), st.lintRetryAt.Format(time.RFC3339))
+		for _, w := range sa {
+			res.Deferred = append(res.Deferred, w.path)
+		}
+		return nil
+	}
+	st.lintOK()
 
 	var written []pendingWrite
 	for _, w := range sa {
@@ -256,43 +300,45 @@ func (st *fileSyncState) applySpamassassin(ctx context.Context, sa []pendingWrit
 			written = append(written, w)
 		}
 	}
-	if len(written) == 0 {
+	return st.bisect(ctx, bin, baseline, written, res)
+}
+
+// bisect keeps the files in ws that lint clean on top of what is already
+// kept: all of them when the set is clean, else each half in turn, down to
+// the single files at fault, which are parked. A sync of n files with one bad
+// costs about 2·log2(n) lints instead of one per file. ws are already on disk.
+func (st *fileSyncState) bisect(ctx context.Context, bin string, baseline map[string]int, ws []pendingWrite, res *applyResult) []pendingWrite {
+	if len(ws) == 0 {
 		return nil
 	}
 	introduced, err := saIntroduced(ctx, bin, baseline)
 	switch {
 	case err != nil:
-		logging.LogfAPI("[files] spamassassin lint after the update did not run (%v); rolling back, retrying next sync", err)
-		rollback(written, res)
+		st.lintFailed()
+		logging.LogfAPI("[files] spamassassin lint after the update did not run (%v); rolling back, retrying after %s",
+			err, st.lintRetryAt.Format(time.RFC3339))
+		rollback(ws, res)
 		return nil
 	case len(introduced) == 0:
-		return written
-	case len(written) == 1:
-		st.park(written, introduced, res)
+		return ws
+	case len(ws) == 1:
+		st.park(ws, introduced, res)
 		return nil
 	}
-
-	// Several files changed and something broke: find which, one at a time.
-	logging.LogfAPI("[files] spamassassin lint: %d file(s) changed together introduced %d problem(s); retrying each alone",
-		len(written), len(introduced))
-	rollback(written, res)
-	res.RolledBack = res.RolledBack[:len(res.RolledBack)-len(written)]
+	logging.LogfAPI("[files] spamassassin lint: %d file(s) changed together introduced %d problem(s); narrowing down",
+		len(ws), len(introduced))
+	rollback(ws, res)
+	res.RolledBack = res.RolledBack[:len(res.RolledBack)-len(ws)]
+	half := len(ws) / 2
 	var kept []pendingWrite
-	for _, w := range written {
-		if !writePending(w) {
-			continue
+	for _, part := range [][]pendingWrite{ws[:half], ws[half:]} {
+		var onDisk []pendingWrite
+		for _, w := range part {
+			if writePending(w) {
+				onDisk = append(onDisk, w)
+			}
 		}
-		one := []pendingWrite{w}
-		intro, err := saIntroduced(ctx, bin, baseline)
-		switch {
-		case err != nil:
-			logging.LogfAPI("[files] spamassassin lint did not run (%v); rolling back %s, retrying next sync", err, w.path)
-			rollback(one, res)
-		case len(intro) > 0:
-			st.park(one, intro, res)
-		default:
-			kept = append(kept, w)
-		}
+		kept = append(kept, st.bisect(ctx, bin, baseline, onDisk, res)...)
 	}
 	return kept
 }
@@ -355,17 +401,38 @@ func pathUnder(p string, prefixes []string) bool {
 
 func isSpamassassinFile(p string) bool { return strings.HasPrefix(p, spamassassinDir) }
 
-// saCodeDirective matches the SpamAssassin lines that load Perl code.
-var saCodeDirective = regexp.MustCompile(`(?mi)^[ \t]*(loadplugin|tryplugin)\b`)
+// saPluginLine and saIncludeLine match the SpamAssassin directives that can
+// pull code or other files into spamd.
+var (
+	saPluginLine  = regexp.MustCompile(`(?mi)^[ \t]*(loadplugin|tryplugin)[ \t]+(\S+)(?:[ \t]+(\S+))?`)
+	saIncludeLine = regexp.MustCompile(`(?mi)^[ \t]*include[ \t]+(\S+)`)
+)
 
 // saContentRefusal says why a file may not be written to the SpamAssassin
-// dir, or "" when it may: only rule files (.cf), and none that load code.
+// dir, or "" when it may. Only rule files (.cf). A `loadplugin Module` line
+// is fine: it loads a module already installed in Perl's @INC, none of which
+// the sync can write (myip.cf loads SPF, DKIM, DCC, HashBL that way). A
+// plugin with a file path (`loadplugin Name /path/x.pm`) is Perl from
+// wherever the sender chose, run by spamd as root, so it is refused; so is an
+// `include` of a file outside the SpamAssassin dir, which could be one the
+// sync wrote unchecked under /etc/cfm/.
 func saContentRefusal(path, content string) string {
 	if filepath.Ext(path) != ".cf" {
 		return "only .cf rule files may be distributed to " + spamassassinDir + " (a .pre or .pm file loads Perl into spamd)"
 	}
-	if m := saCodeDirective.FindString(content); m != "" {
-		return fmt.Sprintf("contains a %q directive (loads Perl into spamd, which runs as root)", strings.TrimSpace(m))
+	for _, m := range saPluginLine.FindAllStringSubmatch(content, -1) {
+		if m[3] != "" {
+			return fmt.Sprintf("%s %s loads Perl from the file %s into spamd, which runs as root", m[1], m[2], m[3])
+		}
+	}
+	for _, m := range saIncludeLine.FindAllStringSubmatch(content, -1) {
+		target := m[1]
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(path), target)
+		}
+		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(spamassassinDir)+"/") {
+			return fmt.Sprintf("includes %s, outside %s", m[1], spamassassinDir)
+		}
 	}
 	return ""
 }
@@ -396,7 +463,7 @@ var saLintVolatile = regexp.MustCompile(`\(eval \d+\)|<[A-Z]+> line \d+|\(line \
 // issues detected" summary is dropped: its count changes with every problem.
 // An error means the lint did not complete (timed out, could not start); a
 // non-zero exit for reported problems is not an error.
-func saLintProblems(ctx context.Context, bin string) (map[string]bool, error) {
+func saLintProblems(ctx context.Context, bin string) (map[string]int, error) {
 	cctx, cancel := context.WithTimeout(ctx, saLintTimeout)
 	defer cancel()
 	out, err := runSyncCommand(cctx, []string{bin, "--lint"})
@@ -407,27 +474,28 @@ func saLintProblems(ctx context.Context, bin string) (map[string]bool, error) {
 	if err != nil && !errors.As(err, &exitErr) {
 		return nil, err
 	}
-	problems := map[string]bool{}
+	problems := map[string]int{}
 	for _, line := range bytes.Split(out, []byte("\n")) {
 		l := strings.TrimSpace(saLintPrefix.ReplaceAllString(string(line), ""))
 		l = saLintVolatile.ReplaceAllString(l, "…")
 		if l == "" || strings.Contains(l, "issues detected, please rerun") {
 			continue
 		}
-		problems[l] = true
+		problems[l]++ // counted: the same warning on a second line is a new problem
 	}
 	return problems, nil
 }
 
-// saIntroduced lints again and returns the problems not in baseline, sorted.
-func saIntroduced(ctx context.Context, bin string, baseline map[string]bool) ([]string, error) {
+// saIntroduced lints again and returns the problems reported more often than
+// in baseline, sorted.
+func saIntroduced(ctx context.Context, bin string, baseline map[string]int) ([]string, error) {
 	after, err := saLintProblems(ctx, bin)
 	if err != nil {
 		return nil, err
 	}
 	var introduced []string
-	for p := range after {
-		if !baseline[p] {
+	for p, n := range after {
+		if n > baseline[p] {
 			introduced = append(introduced, p)
 		}
 	}
