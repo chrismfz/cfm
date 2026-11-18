@@ -1289,8 +1289,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 // its www. challenged through the expansion). Concrete hosts
                 // only: the resolver reads notes by host (and www→apex), so a
                 // pattern key would only make the pattern's own list row claim
-                // a tier no matching host gets; wildcard-matched hosts are
-                // noted as the tick evaluates them.
+                // a tier no matching host gets. A wildcard-matched host needs
+                // no note: the resolver reads the list itself (autoV2Trigger),
+                // or a quiet one's first solves ran at v1.
                 if !strings.Contains(pat, "*") {
                     e.nginxBridge.NoteVhostAutoSource(pat, autoV2VhostConfig, e.autoSourceNoteTTL())
                 }

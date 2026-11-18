@@ -1252,9 +1252,11 @@ reports a 0x0 size; if the next read still finds it, that is the α question.
 Counting this arm's rejects: `autoSourceOrder` puts `vhost_config` last, so a
 listed host that is also suspicious logs `v2_via=auto:suspicious_vhost`; count
 `src=vhost:vhost_config` as well. A wildcard-listed host is noted only while
-it is in the tick's candidate set (the note lives 2-10 minutes), so the first
-solve after a long quiet spell can verify at v1 (fails open; the gate and
-every surface still agree).
+it is in the tick's candidate set, so the resolver also reads the list itself:
+a listed host under a live vhost challenge is `vhost_config` noted or not.
+Before 2026-11-18 a quiet panel subdomain's first solves verified at v1 —
+16 farm solves (`hs` 110-140, `no_input`) on `cpanel.`/`webmail.` hosts in
+seven hours on orion and titan.
 
 **One resolver** (`challengeV2VhostTier`) answers "what tier is this vhost
 at", for the verify gate AND every surface (vhost list/status, controls
