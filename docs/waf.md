@@ -1,25 +1,12 @@
 # CFM WAF and Challenge-Clearance Boundary
 
-## Status
-
-The WAF rebuild is complete. **53 detectors across 9 rule-ID groups** (1xx-9xx)
-inspect every dynamic request before it reaches origin. Severity-aggregation
-returns the strongest rule's action; per-vhost exclusions let operators
-whitelist specific rules on noisy hosts; hit-rate counters and the per-
-trigger JSON hit log (`cfm.waf.log`) give operators data-driven evidence
-before promoting any rule up the `logonly` → `challenge` → `challenge_v2` →
-`block` ladder.
-
-Open follow-ups (none blocking):
-
-- **Promotion review** — most of the new detectors (Phase 1-5 + extensions)
-  ship at `logonly`. Walk `cfm webtop waf hit-rates --hours 168` after a week
-  of production data and promote well-behaved rules per the playbook below.
-- **Inspector-audit deferred items** — see "Known gaps" item 8.
-
-The git log on `configs/lua/cfm_waf*.lua` and `internal/webdetector/waf_*.go`
-is the canonical record of what was shipped when. A snapshot of the rules and
-their default modes lives in [Rule IDs](#rule-ids) below.
+The in-path Lua WAF: what it checks, how to run and tune it, why its rules are
+shaped the way they are. The rule list and each rule's default mode live in
+code, not here: `internal/webdetector/waf_rule_ids.go` (Go registry, mirrored
+by `RULE_IDS` and the CFG defaults in `configs/lua/cfm_waf.lua`, parity
+enforced by tests). Read them with `cfm webtop waf rules` or
+`GET /api/v1/waf/rules`. Autoblock of block-tier hits: `docs/waf-autoblock-design.md`.
+CVE rules (10000+): `WAF_CVE.md`.
 
 ---
 
@@ -70,8 +57,8 @@ in that window — also one that answers a challenge the WAF did not impose —
 so `v2=mark` beside `src=vhost:…` is expected. The legacy `/verify` alias is
 gone (it bypassed the verify location's header clears). Semantics to know:
 
-- **Set per rule** via `/etc/cfm/cfm_waf_config.lua`
-  (`return { rule_<name> = "challenge_v2" }`). Since **2026-09-23 the entire
+- **Set per rule** in `cfm_waf_config.lua` (see "Setting a rule's mode"
+  below; `return { rule_<name> = "challenge_v2" }`). Since **2026-09-23 the entire
   challenge tier ships at `challenge_v2`** — every rule whose built-in default
   was `challenge` now defaults to `challenge_v2` (`rule_xss` (302) led on
   2026-09-22). The rationale is uniform: a v1 challenge is a paper wall against
@@ -187,22 +174,37 @@ the hint, look up the rule, decide what to do:
 
 ### Promoting a rule
 
-```bash
-cfm webtop waf set-rule rule_persistence challenge   # logonly → challenge
-cfm webtop waf set-rule rule_persistence block       # challenge → block
+There is no CLI to change a rule's mode. A rule's mode is its CFG default in
+`cfm_waf.lua`, overridden by an operator file the edge `require`s as
+`cfm_waf_config`:
+
+```lua
+-- /var/lib/cfm/lua/cfm_waf_config.lua   (first on the edge's lua_package_path)
+return {
+  rule_persistence = "challenge",   -- disabled | logonly | challenge | challenge_v2 | block
+}
 ```
+
+then reload the edge. The file must be on the edge's `lua_package_path`:
+`/var/lib/cfm/lua/` (first), or `/usr/local/openresty/nginx/lua/` (OpenResty)
+/ `/etc/angie/lua/` (Angie). **`/etc/cfm/` is not on that path**: an override
+written there is never loaded. The package does not own
+`/var/lib/cfm/lua/cfm_waf_config.lua`, so an upgrade leaves it in place.
+Changing a default for the fleet is a code change (Lua CFG default and the Go
+`DefaultMode` together, `TestWAFRuleIDs_DefaultModeLuaParity`).
 
 **The playbook (don't skip steps):**
 
 1. Land each new detector with mode `logonly`.
 2. Wait at least one full week of production traffic.
-3. Promote `logonly → challenge` only if `promotion_hint == ok_to_promote`.
+3. Promote `logonly → challenge_v2` only if `promotion_hint == ok_to_promote`.
 4. Wait at least one more week with no operator complaints.
-5. Promote `challenge → block` only if no operator complaints AND
-   `promotion_hint == ok_to_promote`.
+5. Promote to `block` only if no operator complaints AND
+   `promotion_hint == ok_to_promote`. A block promotion can arm the family's
+   autoblock: decide that in the same change (CLAUDE.md §6).
 6. Never go `logonly → block` directly.
-7. Per-rule kill-switch: `cfm webtop waf set-rule <name> disabled` — per-worker,
-   doesn't survive reload.
+7. To switch a rule off on one node: `rule_<name> = "disabled"` in the file
+   above.
 
 False positives become tuning data: adjust score, context, or family — don't
 just disable the rule. Most of the time the right move is a per-vhost
@@ -1084,119 +1086,9 @@ Every WAF rule has a stable numeric ID grouped by first digit:
 
 Stability rule: **never renumber** an existing ID. New rules get the next free slot in their semantic group. Drift between the Lua source of truth (`configs/lua/cfm_waf.lua`) and the Go mirror (`internal/webdetector/waf_rule_ids.go`) is caught by `TestWAFRuleIDs_LuaParity`.
 
-Current assignments:
-
-```
-1xx — Path / traversal
-  101  rule_traversal                  (block; promoted challenge→block 2026-09-05, see FP review below)
-  102  rule_long_path_segment
-  103  rule_traversal_raw_path         (block, 2026-09-22; a `..` segment in the RAW $request_uri — ngx.var.uri,
-                                        which 101 scans, is already dot-segment-resolved by nginx. Added for the
-                                        WordPress permalink route of CVE-2026-87902; WAF_TRAVERSAL, autoblock held)
-
-2xx — Client identity
-  201  rule_bad_ua
-
-3xx — Injection
-  301  rule_sqli                       310  rule_cmd_params
-  302  rule_xss                        311  rule_cmd_payload
-  303  rule_js_proto                   312  rule_cmd_payload_semi_cmd
-  304  rule_b64_injection              313  rule_cmd_payload_pipe_wget
-  305  rule_php_wrappers               314  rule_cmd_payload_pipe_curl
-  306  rule_serialize                  315  rule_cmd_payload_pipe_bash
-  307  rule_xxe                        316  rule_cmd_payload_pipe_sh
-  308  rule_shellshock                 317  rule_cmd_payload_backtick
-  309  rule_sqli_blind_lexical         318  rule_superglobal_override
-                                       319  rule_sqli_union_variant
-                                       320  rule_rce
-                                       321  rule_proxy_header_sqli
-                                       322  rule_reverse_shell
-                                       323  rule_persistence
-                                       324  rule_rootkit_artifacts
-                                       325  rule_lolbin
-                                       326  rule_java_deserialize
-                                       327  rule_coinminer
-                                       328  rule_log4shell          (challenge_v2 since 2026-11-01 for the
-                                                                    JNDI / DEFAULT_VAL / LOWER / UPPER /
-                                                                    RESOLVED / DEEP tags;
-                                                                    NESTED / ENV / SYS / MAIN / DATE / BASE64
-                                                                    stay logonly at any mode)
-                                       329  rule_php_object_injection
-                                       330  rule_xss_body           (logonly, 2026-10-22: explicit XSS markup in a POST
-                                                                    body — attribute breakout, a tag with an event handler,
-                                                                    <script (a javascript: URL tag was dropped 2026-10-24:
-                                                                    TranslatePress / PixelYourSite noise, 99.8% of 48 h of
-                                                                    hits); not for a logged-in WordPress user, a request with
-                                                                    Authorization, /wp-admin/ (not admin-ajax / admin-post),
-                                                                    /administrator/, LHC's /site_admin/ or /cpsess<N>/ on
-                                                                    a cpanel./whm./webmail. host;
-                                                                    expected noise: other apps' admin areas
-                                                                    (OpenCart, PrestaShop, Drupal, WHMCS tickets); runs after
-                                                                    the 421-439 scanners so it never takes their headline)
-                                       331  rule_shell_write_exec   (logonly, 2026-10-27: a shell command in the args OR body
-                                                                    that writes an executable file — wget/curl output, a
-                                                                    > / >> redirect or a tee, to .php*/.phtml/.phar/.inc/
-                                                                    .htaccess/.user.ini — or backdates one with touch -d/-t/-r; the
-                                                                    tophair.gr webshell terminal's commands, which 310-317
-                                                                    (query string only) never saw. See "Rule 331" below)
-                                       332  rule_php_code_args      (logonly, 2026-11-13: PHP source in the query string —
-                                                                    a call to a file writer / code runner with something
-                                                                    only PHP source carries; the eval RCEs of Fabrik,
-                                                                    ThinkPHP, SPIP, Magento, Drupal. See "Rules 332 and
-                                                                    416" below)
-
-4xx — Upload / malware
-  401  rule_upload_filename            405  rule_script_obfuscation
-  402  rule_upload_content             410  rule_webshell_path
-  403  rule_upload_obfuscation         411  rule_webshell_ping
-  404  rule_php_webshell_body          412  rule_polyglot_upload
-                                       413  rule_webshell_path_known
-                                       414  rule_upload_archive_php
-                                       415  rule_upload_content_deep      (logonly burn-in)
-                                       416  rule_php_file_body            (logonly, 2026-11-13: a PHP file as the
-                                                                         raw POST / PUT / PATCH body; see
-                                                                         "Rules 332 and 416")
-                                       417  rule_php_webshell_body_deep   (logonly, 2026-11-17: 404's scorer over
-                                                                         the whole body; see "Rule 417")
-                                       421  rule_php_split_string_canary
-                                       422  rule_php_dropper_wget_curl
-                                       423  rule_php_dropper_markers
-                                       424  rule_php_filesize_recon
-                                       425  rule_php_touch_antiforensic
-                                       430  rule_htaccess_poisoning
-                                       431  rule_php_char_pool_obfuscation
-                                       432  rule_php_polyglot_full_body
-                                       433  rule_php_eval_loader_b64
-                                       434  rule_php_superglobal_callable
-                                       435  rule_php_concat_funcname_eval
-                                       436  rule_php_decode_chain
-                                       437  rule_php_encoded_opener       (JS \x hex-escape form)
-                                       438  rule_php_encoded_opener_b64   (base64 form)
-
-5xx — Auth abuse
-  501  rule_auth_burst                 510  rule_xmlrpc_multicall
-  502  rule_auth_wp_checks             511  rule_xmlrpc_pingback
-  503  rule_wp_admin_cross_screen      512  rule_xmlrpc_post_burst
-                                       520  (retired 2026-10-08: SP Page Builder contact-form mail relay)
-                                       530  rule_wc_cart_get_crawl (logonly; WooCommerce add-to-cart by GET from a crawler)
-
-6xx — Header / protocol anomaly
-  601  rule_ctrl_chars                 605  rule_crlf_injection
-  602  rule_ip_host                    606  rule_http_smuggling
-  603  rule_header_vulns               607  rule_exploit_methods
-  604  rule_content_type_anomaly       608  rule_smuggling_cl
-                                       609  rule_header_flood
-                                       610  rule_range_abuse
-                                       611  rule_bad_utf8
-                                       612  rule_fetch_metadata_missing (logonly; headless "Sec-Fetch tell")
-
-7xx — SSRF / external interaction
-  701  rule_ssrf
-  702  rule_c2_tunnel
-
-8xx — Info disclosure / debug
-  801  rule_debug_toggles
-```
+The assignments themselves are not copied here (a copy drifted: it showed
+block rules as logonly and missed 439, 440 and the CVE band). List them with
+`cfm webtop waf rules` (`--json` for scripts) or `GET /api/v1/waf/rules`.
 
 ### Where IDs surface
 
@@ -1409,7 +1301,7 @@ The detector checks base64 first, so a base64 opener is attributed to **438** an
 | `PD9waHA…` (base64 opener at a value boundary) in body | 438 |
 | Captured radio.php (PDF magic + char-pool + eval-loader) | **431 + 432 + 433** simultaneously |
 
-Rules 430-436 default to `logonly`; **437 and 438 default to `challenge`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
+Rules 430-436 default to `logonly`; **437 is `challenge_v2` and 438 is `block`** (see their FP notes above). Operators tune per the standard playbook (one week of hit-rate data → promote to `challenge`, one more week → promote to `block`). Per-vhost exclusions apply normally: `cfm webtop waf exclude add /path/here --rule 430`.
 
 ---
 
@@ -1775,11 +1667,10 @@ parts stay with 402 / 415.
 
 ### Both rules
 
-Family `WAF_RCE` is autoblock-armed for block hits only, and
-`WAF_PHP_WEBSHELL_BODY` has no block rule, so neither rule's hit bans or
-alerts. After the burn-in, review the hits (`cfm.waf.log`,
-`detection_history`), then promote per `### Promoting a rule`. A block
-promotion of 332 arms its autoblock: decide that intent in the same change.
+Both are `block` now. 332's family `WAF_RCE` is autoblock-armed, so a 332
+hit bans. 416 holds its own ban (`HoldAutoblock`, `RULE_416 = 0`): the
+`WAF_PHP_WEBSHELL_BODY` family is armed but 416 bans nothing until that hold
+is lifted.
 
 Tests: `scripts/tests/cfm_waf_php_code_args_test.lua`.
 
@@ -2138,7 +2029,7 @@ narrow an exemption that used to need no network at all.
 
 ## Per-vhost rule exclusions
 
-Operators can suppress specific WAF rules on specific hosts/paths without disabling the whole WAF for that scope. This solves the canonical "scraper triggers `WAF_PROXY_HDR` on one site" pattern (3xK Tech / vitolighting from `docs/waf-analysis-2026-05-08.md`) — keep the rest of the ruleset hot, drop just the noisy rule on the affected host.
+Operators can suppress specific WAF rules on specific hosts/paths without disabling the whole WAF for that scope. This solves the canonical "scraper triggers `WAF_PROXY_HDR` on one site" pattern (2026-05: a distributed scraper from AS200373 / 3xK Tech sent malformed `X-Forwarded-For` values to one shop, vitolighting.com, and made a third of the fleet's WAF events) — keep the rest of the ruleset hot, drop just the noisy rule on the affected host.
 
 ### Data model
 
@@ -2218,7 +2109,7 @@ cfm webtop waf exclude list
 
 Wrong answers, for reference:
 - `cfm webtop waf exclude add www.iqdevelopment.gr --type host` — disables the **entire WAF** for that vhost. Way too broad.
-- `cfm webtop waf set rule_bad_ua disabled` — disables rule 201 globally. Worse.
+- `rule_bad_ua = "disabled"` in `cfm_waf_config.lua` — turns rule 201 off for every vhost. Worse.
 - Editing the Lua detector — rule 201's bot signal is correct in general; the fix is operator-side configuration.
 
 ### API
@@ -2438,7 +2329,7 @@ Measured on bench host with the three body-aware rules enabled, running through 
 | 500 KB plain JSON | application/json | 32 KB (capped by `json` budget) | ~87 µs |
 | 30 KB %-encoded | application/json | 30 KB | ~0.6 ms (slow path: two table-driven gsub passes; ~1.5 ms with the per-escape decoder before 2026-10-09) |
 
-End-to-end ceiling in production is bounded by `CFM_WAF_BODY_MAX_LEN` (default 8192); `body_scan_budget.json = 32768` only takes effect once the env var is also raised. Until then, JSON traffic is effectively capped at 8 KB regardless of the table value — still a 4× improvement over the previous 2 KB `max_scan_len`.
+End-to-end ceiling is `CFM_WAF_BODY_MAX_LEN` (default 32768, `cfm_cfg.lua`), so the 32 KB JSON budget applies as is.
 
 `normalize()` short-circuits when input contains no `%`, so the gsub passes only run when actual percent-encoding is present. JSON / multipart bodies almost never carry `%xx`, so the fast path covers the dominant case and dropped baseline cost ~12× vs the previous unconditional double-gsub.
 
@@ -2660,7 +2551,7 @@ edge proxy:
 |-----|---------|---------|-------|
 | `CFM_WAF_AFTER_CLEARANCE_CHALLENGE` | `logonly` | `block`, `logonly` | What a challenge becomes under clearance for noisy reasons. `challenge` is rejected. |
 | `CFM_WAF_AFTER_CLEARANCE_HIGH_RISK` | `block` | `block`, `logonly` | What a challenge becomes under clearance for high-risk reasons. |
-| `CFM_WAF_BODY_MAX_LEN` | `8192` | int bytes | Upstream body-read cap in `cfm.lua`. End-to-end ceiling for body-aware rules — see `body_scan_budget` below. Raise in lockstep with the json/multipart entries to fully exploit the per-Content-Type budget table. |
+| `CFM_WAF_BODY_MAX_LEN` | `32768` | int bytes | Upstream body-read cap (`cfm_cfg.lua`). End-to-end ceiling for body-aware rules — see `body_scan_budget` below. Lowering it below the largest budget shrinks that budget too. |
 
 #### `CFG.body_scan_budget` (Content-Type-keyed body scan budget)
 
@@ -2691,21 +2582,7 @@ document (`vnd.openxmlformats-…`) is a zip and keeps the 2 KB budget.
 
 The `util.body_budget(headers)` helper is hardened against malformed user overrides (non-table values, missing keys, non-positive numbers, non-numeric values) — it falls back to `body_scan_budget.other`, then `CFG.max_scan_len`, then `2048`, so a bad `cfm_waf_config.lua` cannot crash the worker on every body-aware request.
 
-High-risk reason families (matched by `:` prefix) live in `cfm_waf.lua` as `_M.WAF_HIGH_RISK_REASONS`:
-
-```
-WAF_RCE              WAF_PHP_WEBSHELL_BODY
-WAF_UPLOAD_CONTENT   WAF_TRAVERSAL
-WAF_UPLOAD_FNAME     WAF_XXE
-WAF_UPLOAD_OBFUSCATION
-WAF_CMD_PAYLOAD
-WAF_B64_INJECT
-WAF_SHELLSHOCK
-WAF_WEBSHELL
-WAF_CVE
-WAF_DROPPER
-```
-
+High-risk reason families (matched by `:` prefix) are `_M.WAF_HIGH_RISK_REASONS` in `cfm_waf.lua` (the list is not copied here).
 A reason in this list, when fired with `challenge` action under valid clearance, gets converted to `block` instead of `logonly`. Matched against the prefix before the first `:` so `WAF_RCE:REVERSE_SHELL:BASH_TCP` still hits.
 
 ### `IGNORE_IPS` / `IGNORE_NETS` (global allowlist for the Lua self-bypass)
@@ -2714,7 +2591,7 @@ A reason in this list, when fired with `challenge` action under valid clearance,
 
 1. **Loopback / link-local** (`127.0.0.0/8`, `::1`, `169.254.0.0/16`, `fe80::/10`) — hard-coded.
 2. **Local interface IPs** of this box, written by `nft.go:writeSelfIPsLua()` to `/var/lib/cfm/lua/cfm_self_ips.lua`.
-3. **`[global] IGNORE_IPS` / `IGNORE_NETS`** from `cfm.cfg`, written by `detectors.IPIgnore.WriteLuaCache()` to `/var/lib/cfm/lua/cfm_ignore_nets.lua`. Same allowlist the Go challenge engine uses via `SetBypassFunc(ipIgnore.ShouldIgnore)` — wiring them through to the Lua WAF closes the operator-expectation gap where "WAF runs on traffic from my own subnet."
+3. **`[global] IGNORE_IPS` / `IGNORE_NETS`** from `detectors.conf`, written by `detectors.IPIgnore.WriteLuaCache()` to `/var/lib/cfm/lua/cfm_ignore_nets.lua`. Same allowlist the Go challenge engine uses via `SetBypassFunc(ipIgnore.ShouldIgnore)` — wiring them through to the Lua WAF closes the operator-expectation gap where "WAF runs on traffic from my own subnet."
 
 File format (precomputed for fast Lua matching, refresh TTL 30s):
 
@@ -2734,40 +2611,6 @@ return {
 
 ---
 
-## Public API (cfm_waf module)
-
-| Function | Purpose |
-|----------|---------|
-| `_M.check(ctx)` | Run all rules, return highest severity. 6-tuple (hit, reason, ttl, action, hits, waf_rule_id). |
-| `_M.enabled()` | Module-level kill-switch. |
-| `_M.should_push(shdict, ip, reason, action, rule_id)` | Push rate limit, keyed on `(ip, reason family, action tier)`, plus the rule id on the `block` tier — dedups scored-hit floods without letting a non-block hit (F31), or a held block rule's hit, mask an armed block hit's autoblock push. |
-| `_M.get_config()` | Snapshot of CFG (read-only copy). |
-| `_M.set_rule(name, mode)` | Live rule-mode tuning. Per-worker. Used by tests and ops kill-switches. |
-| `_M.get_rule_ids()` | Snapshot of the RULE_IDS table. |
-| `_M.rule_id_for(name)` | Lookup a single rule's stable numeric ID. |
-| `_M.is_high_risk_reason(reason)` | Prefix match against `WAF_HIGH_RISK_REASONS`. |
-| `_M.post_clearance_action(action, reason, after_challenge, after_high_risk)` | Returns `(converted_action, did_convert)`. Pure. |
-
----
-
-## Tests
-
-`scripts/tests/cfm_waf_severity_test.lua` — 69 cases covering severity aggregation, post-clearance gating, rule-id stability + drift detection, per-vhost rule exclusion via `ctx.skip_rule_ids`, and per-detector positive + negative cases for every rule shipped during the rebuild. Run via `make test-lua`.
-
-`scripts/tests/cfm_waf_post_clearance_test.lua` — `_M.post_clearance_action` matrix: prefix match for bare families and family:tag forms, conversion table, defaults, malformed input.
-
-`scripts/tests/cfm_panel_forced_mode_test.lua` — panel dispatch decisions (challenge / origin pass-through / API SSO bypass / internal-endpoint deny). Asserts on captured side effects.
-
-`scripts/tests/cfm_rules_race_test.lua` — `cfm_rules` shdict-state compatibility under concurrent mutation.
-
-`internal/webdetector/waf_rule_ids_test.go` — `TestWAFRuleIDs_LuaParity` parses `cfm_waf.lua`'s `RULE_IDS` table at test time and diffs against the Go `wafRuleIDs` slice. Catches drift between the two source-of-truth lists.
-
-`internal/webdetector/exclude_rule_ids_test.go` and `exclude_store_test.go` — rule-id-spec parsing (`N`, `Nxx`, `N-M`, mixed) and per-vhost rule-exclusion store semantics.
-
-`internal/webdetector/challenge_server_xss_test.go` — `jsStringLiteral`'s HTML-script-context safety: dangerous bytes (`<`, `>`, `&`, U+2028, U+2029) absent from output for representative attack payloads.
-
----
-
 ## SQLi blind-family expansion + body scan (rules 301 / 309, 2026-06-26)
 
 Source workload: a sqlmap scan against the **WHMCS ticket form** (myip.gr
@@ -2782,13 +2625,13 @@ Three changes shipped together:
    (`get_norm_ab()`) on POST requests (`cfm_waf.lua` §21 / §21b).
 2. **Time-based / boolean / error-based blind family** is now detected,
    split across two confidence tiers (`cfm_waf_detectors.lua`):
-   - **Rule 301 `rule_sqli` (`WAF_SQLI`, `challenge`)** — `SQLI_BLIND_TOKENS`,
+   - **Rule 301 `rule_sqli` (`WAF_SQLI`, shipped `challenge`, now `block`)** — `SQLI_BLIND_TOKENS`,
      the **DBMS-unique** primitives that collide with no ordinary word:
      MSSQL `waitfor delay|time`; PostgreSQL `pg_sleep`; Oracle
      `dbms_pipe.receive_message`/`dbms_lock.sleep`; MySQL `now()=sysdate()` /
      `rlike sleep(` / `select sleep(` / `select(sleep(`; error-based `exp(~`;
      plus the boolean tail `=0+0+0+1`.
-   - **Rule 309 `rule_sqli_blind_lexical` (`WAF_SQLI_LEXICAL`, `logonly`)** —
+   - **Rule 309 `rule_sqli_blind_lexical` (`WAF_SQLI_LEXICAL`, shipped `logonly`, now `block`)** —
      `SQLI_LEXICAL_TOKENS`, the tokens that are real SQLi primitives **but
      also collide case-insensitively with legitimate code/content**:
      `benchmark(`, `extractvalue(` (=camelCase `extractValue(` in XML
@@ -2802,7 +2645,7 @@ Three changes shipped together:
 Tests: `scripts/tests/cfm_waf_sqli_test.lua` (captured payloads, per-DBMS
 family, per-rule isolation, FP negatives).
 
-### Rule 319 `rule_sqli_union_variant` (`WAF_SQLI_UNION_VARIANT`, `logonly`) — 2026-07-08
+### Rule 319 `rule_sqli_union_variant` (`WAF_SQLI_UNION_VARIANT`, shipped `logonly`, now `challenge_v2`) — 2026-07-08
 
 Rule 301 catches `union select` only when the two keywords are *adjacent*
 (after `+`/whitespace collapse). Four common obfuscations slip through that
@@ -2931,185 +2774,13 @@ block-path holes — 301 still blocks the adjacent form.
 
 ## Known gaps
 
-These are real and worth addressing, but not blocking:
-
-1. **Body truncation.** `CFM_WAF_BODY_MAX_LEN=8192` (in `cfm.lua`) means uploads/payloads larger than 8 KB skip body-inspection rules silently. The Content-Type-keyed `body_scan_budget` (added in PR #764) raises the WAF-internal cap to 32 KB for JSON / 16 KB for multipart+XML / 8 KB for urlencoded, but the upstream env-var ceiling still bottlenecks effective inspection at 8 KB. Phase W2/W3/W4 won't deliver until `CFM_WAF_BODY_MAX_LEN` is raised in lockstep (or inspection is streamed) for upload endpoints.
-2. **No multipart parser.** Polyglot upload detection (W4), upload context for W2/W3, and X1-in-body assume part-aware inspection. Today the WAF runs literal `has()` over raw bytes — works for finding `<?php` in image content, but can't distinguish multipart parts (claimed CT, filename, content).
-3. ~~**No hit-rate measurement.**~~ DONE — see "Hit-rate measurement" above. `/api/v1/waf/hit-rates`, `cfm webtop waf hit-rates`, plus `cfm.waf.log` (one JSON record per trigger with UA/Referer/CT) for FP investigation.
-4. **shdict pressure.** Auth-burst counters use shdict. Adding more counters scales contention. Per-rule benchmarks needed before Phase 5 lands.
-5. **Per-rule kill-switch audit.** `set_rule()` exists; not every detector is reachable through a `rule_*` CFG key. Audit + fill gaps.
-6. **Push payload uses post-conversion action.** `cfm.lua:1127` pushes `action=logonly` after challenge→logonly conversion. Probably correct (push the effective action) but confirm with Go-side consumers.
-7. **Route log loses post-clearance signal.** The `waf_logonly` / `waf_block` log line at `cfm.lua:1131` after conversion doesn't say "from challenge". The separate `waf_post_clearance_convert` line at `cfm.lua:1089` carries it; correlation is by IP+timestamp. Could be folded into one line.
-8. **Inspector-as-attack-surface follow-ups (2026-05-09 audit).** Quick sweep of the surface that reads attacker bytes (Lua WAF + challenge_server + nginx_bridge) showed strong defences in the high-risk places (no `ngx.re` → no PCRE ReDoS; bridge listener is unix-socket-only with token gate on every endpoint; body cap 8 KB; literal `string.find(s, pat, 1, true)` in the `util.has` hot helper; `cpanelUserExists` regex `^[a-z0-9][a-z0-9_]{0,15}$` blocks path traversal in `/var/cpanel/databases/<user>.json` reads) and one real reflected XSS that's now closed (#565). Items not fully audited: (a) caller traces for the remaining `os.Open`/`os.ReadFile` sites in `cpanel_api_handlers.go` and `challenge_server.go` outside the `cpanelUserExists`-gated path; (b) spot-check of the more exotic Lua patterns in `cfm_waf_detectors.lua` for polynomial-time backtracking (Lua patterns can't catastrophically backtrack but `(.-)*`-style patterns can be slow on crafted input); (c) per-field length bounds in bridge JSON handlers (the body is wrapped in `MaxBytesReader` but individual fields like `host` can still land 16 KB in memory); (d) `dispatchHook` channel-saturation behaviour under load. None block production; worth a dedicated `claude/inspector-audit-*` pass when there's space.
-
----
-
-## Roadmap
-
-The original detector / engine roadmap is shipped end-to-end. Every item is now in production at the `logonly` → `challenge` → `block` stage documented per rule in the [Rule IDs](#rule-ids) table; the **Outstanding** list at the bottom is the only forward-looking work.
-
-### Shipped
-
-| Item | Rule(s) | Notes |
-|---|---|---|
-| File split of `cfm_waf.lua` into `cfm_waf_util.lua` + `cfm_waf_detectors.lua` + engine | — | foundation; lets each detector tag header/uri/body/multipart surface |
-| **C1** Log4Shell (bare `${jndi:` + lookup-syntax evasions) | 320, 328 | bare forms in `detect_rce` at `block`; evasion variants (`${${::-j}…`, `${lower:j}`, `${env:` etc.) in `detect_log4shell`: `challenge_v2` since 2026-11-01 for the Log4Shell-only tags (JNDI in a header, `${::-`, `${lower:`, `${upper:`, RESOLVED: lookups that resolve to `${jndi:` such as `${${env:X:-j}ndi…` / `${${date:'j'}…`, DEEP: lookups nested past the 8-pass unwrap), the template-shaped tags (`${${`, `${env:`, `${sys:`, `${main:`, `${date:`, `${base64:`) logonly |
-| **C2** Java deserialization (`rO0AB…`, `\xac\xed\x00\x05`) | 326 | scans body / Cookie / Authorization / X-Forwarded-* |
-| **R1** Reverse-shell one-liners (`bash -i >& /dev/tcp/`, `python -c 'import socket'`, `socat tcp-connect`, …) | 322 | 24 literal needles |
-| **R2** Persistence (cron / systemd / bashrc / authorized_keys) | 323 | |
-| **R3** Rootkit artifacts (`LD_PRELOAD`, `/etc/ld.so.preload`, `/dev/mem`) | 324 | |
-| **R4** LOLbins (`certutil -urlcache`, `bitsadmin /transfer`, `-EncodedCommand`, `iex(iwr`) | 325 | scores with base64 detector when combined |
-| **W1** Ambiguous webshell path names (`/shell.php`, `/x.php`, `/adminer.php`, `/alfa.php`, …) | 410 | challenge-tier; URI basename match, residual-FP names (generic/short + real-word/brand: `adminer.php`, `alfa.php`) |
-| **W1k** Proper-noun webshell path names (`/c99.php`, `/r57.php`, `/wso.php`, `/b374k.php`, …) | 413 | block-tier split of W1 (2026-07-03); near-zero legit use, so hard-blocked |
-| **W2** Webshell magic strings in body (`b374k`, `WSO 2.5`, `@eval(`, …) | 404 | scored; covers `b374k` / `c99shell` / `r57shell` / `wso 2./4./5.` / `weevelyshell` / `filesman` |
-| **W3** PHP function obfuscation (`\x65val`, `chr().chr()…`, `hex2bin($_POST[`) | 405 | shared scorer across body and upload paths |
-| **W4** Polyglot upload (image CT/ext + `<?php`/`<?=` with a PHP expression/`<script` in first 64 B; `<%` dropped 2026-11-01) | 412 | required a multipart parser; also unblocked W2/W3 in upload context |
-| **X1** C2 tunnel hostnames (pastebin, ngrok, webhook.site, discord cdn, telegram) | 702 | 21 hostnames |
-| **X2** Coinminer (`xmrig --url`, `pool.minexmr.com`, `stratum+tcp://`, monerod, ethminer) | 327 | |
-| **B1** HTTP smuggling (CL+TE coexist / multi-CL / malformed CL / multi-TE) | 608 | header-shape detector |
-| **B3** Single URL segment ≥ 800 B | 102 | with `data:` URI artifact carve-out |
-| **B4** Header bag > 16 KB excluding Cookie / Authorization | 609 | |
-| **B5** POST + empty UA + Content-Length:0 + `.php` / `.phtml` / `.phar` URI | 411 | cheap, high-confidence webshell-ping fingerprint |
-| Bad UTF-8 encoding (Coraza `validateUtf8Encoding` port) | 611 | overlong / surrogate / truncated multibyte in args+body |
-| Range abuse (Apache Killer / `Request-Range` / multi-Range) | 610 | |
-| WooCommerce `add-to-cart` GET from a crawler / no same-site Referer | 530 | logonly, `WAF_CART_CRAWL`; crawl cost, not an attack |
-| **PHP dropper / canary family** (split-string exec-probes, wget+curl fallback droppers, `!success!`/`!ended!` markers, `<fs>` filesize recon, `@touch()` mtime backdating) | 421-425 | new `WAF_DROPPER` reason family; source workload was a 2026-05-19 shared-hosting compromise |
-| Hit-rate counter + sampled hit log | — | see [Hit-rate measurement](#hit-rate-measurement) |
-| Stable rule IDs + per-vhost rule exclusions (`SecRuleRemoveById`-style) | — | see [Rule IDs](#rule-ids) and [Per-vhost rule exclusions](#per-vhost-rule-exclusions); solves the vitolighting/3xK Tech-style FP cleanly without disabling whole-host WAF |
-
-### Outstanding
-
-| Item | Why deferred | Size |
-|---|---|---|
-| **B2** Suspicious method outside expected location (CONNECT to non-proxy, PROPFIND/SEARCH to non-DAV) — fold into the existing exploit-method check, `+2` | Low absolute volume in production; existing `rule_exploit_methods` (607) already covers the common cases | S |
-| **Panel DNAT WAF profile** for cPanel / DirectAdmin file managers, backup restore, plugin/theme editors | Needs panel-session context plumbing; primary trigger is hijacked-panel webshell uploads which are currently caught at the body-inspection layer (404 / 405 / 412) | L |
-
----
-
-## Implementation map
-
-Where each layer lives in the tree:
-
-| Layer | What | Where |
-|---|---|---|
-| Engine | Severity-aggregation `_M.check`, post-clearance conversion, kill-switches, `ctx.skip_rule_ids` gate | `configs/lua/cfm_waf.lua` |
-| Detectors | 48 detector functions invoked from `_M.check` (base set + W1/R1/B5 + W4 polyglot + range/header_flood/long_path + log4shell + bad_utf8) | `configs/lua/cfm_waf_detectors.lua` |
-| Util | `scan_str`, `normalize` (no-`%` fast path), `url_decode_once`, `header_string`, `body_budget` (Content-Type-keyed scan cap), IP literal helpers | `configs/lua/cfm_waf_util.lua` |
-| Rule IDs | Stable 3-digit IDs, log-line plumbing, `/api/v1/waf/rules`, CLI | `configs/lua/cfm_waf.lua` (`RULE_IDS`), `internal/webdetector/waf_rule_ids.go` |
-| Hit-rate | Per-rule rate gating, `/api/v1/waf/hit-rates`, JSON hit log; flush runs in `ngx.timer.at` so the request path never pays RPC latency | `configs/lua/cfm.lua` (`waf_insp_incr` + `maybe_flush_waf_insp`), `internal/webdetector/waf_hit_rates_api_handler.go` |
-| Per-vhost exclusions | `excludeEntry.RuleIDs []int`, `--rule N\|Nxx\|N-M` CLI, `rule_ids` API param, `ctx.skip_rule_ids` Lua gate, vhost-controls panel toggle ignores rule-scoped entries | `internal/webdetector/exclude_store.go`, `exclude_rule_ids.go`, `cli_exclude.go`, `configs/lua/cfm.lua` (`waf_skip_for`) |
-| CI | `Build & Test` job in `.github/workflows/security.yml` runs `go vet`, `make lua`, `make test-lua`, `check_*` shell guards alongside `go build` and `go test -race`. luajit installed explicitly per matrix run. | `.github/workflows/security.yml` |
-| Tests | Severity, post-clearance, rule ID drift, hit-rate aggregation, rule-id parsing, exclude-store match, jsStringLiteral XSS, panel forced-mode dispatch | `scripts/tests/cfm_*_test.lua`, `internal/webdetector/*_test.go` |
-
-## Production data references
-
-- `docs/waf-analysis-2026-05-08.md` — Tier 1/2/3 analysis of three production servers. **Read before adding rules in any family already represented**, to avoid recreating known-FP patterns. Key takeaways: Facebook scrapers hit `/.../<path>` literals (handled in `detect_traversal`'s FB-skip); vitolighting/3xK Tech is the canonical "scraper triggers `WAF_PROXY_HDR`" pattern, solved by per-vhost exclusions; `WAF_BAD_UA` scoring covers most scanner UAs without explicit per-tool literals.
-- `cfm.waf.log` on a running production server — one JSON record per trigger; replay representative attack samples through a new detector before promoting.
-
----
-
-## Detector inventory
-
-Implementation locations and techniques. For the operator-facing Rule IDs
-table, see [§ Rule IDs](#rule-ids) above.
-
-| # | Category | Technique | File:line |
-|---|----------|-----------|-----------|
-| 1 | Traversal | `../` + null + double-encode + sensitive-sink whitelist | `cfm_waf_detectors.lua:64` |
-| 2 | RCE | Substring list (JNDI, `;wget`, `\|bash`, backticks, `base64,`) | `cfm_waf_detectors.lua:102` |
-| 3 | Exploit methods | TRACE / TRACK / CONNECT | `cfm_waf_detectors.lua:127` |
-| 4 | PHP wrappers | `php://`, `phar://`, `data://`, `zip://`, `expect://`, `glob://` | `cfm_waf_detectors.lua:148` |
-| 5 | Control chars | `[\x01-\x08\x0b\x0c\x0e-\x1f]` in args; the same without `0x1E` (framing, FP case 13) in the body, with CT gating | `cfm_waf_detectors.lua` (`detect_ctrl_chars`) |
-| 6 | PHP webshell body | Scored: `<?php`+superglobals+exec-family+dyn-include+webshell-names | `cfm_waf_detectors.lua:241` |
-| 7 | Base64 body scan | Greedy `=([A-Za-z0-9+/]+=*)`, decode, scan decoded for shells/SQL/PHP | `cfm_waf_detectors.lua:401` |
-| 8 | XSS | Substring: `<script`, `=javascript:`, `onerror=`/`onload=`/… with `%f[%w]` anchor | `cfm_waf_detectors.lua:457` |
-| 9 | SQLi | Substring: `union select`, `information_schema`, `or 1=1`, `' or '1'='1` (post comment-strip) | `cfm_waf_detectors.lua:486` |
-| 10 | Auth burst | Endpoint-tagged shdict counter window | `cfm_waf_detectors.lua:547` |
-| 11 | WP login probe | HEAD-burst window + no-UA/Referer POST | `cfm_waf_detectors.lua:581` |
-| 12 | XMLRPC multicall/pingback | Body substring | `cfm_waf_detectors.lua:726` |
-| 13 | XMLRPC POST burst | shdict counter | `cfm_waf_detectors.lua:749` |
-| 14 | cmd param key | `exec=`, `passthru=`, …; `cmd/system/command` value-aware shelly check | `cfm_waf_detectors.lua:880` |
-| 15 | cmd payload | `;wget`, `\|bash`, backtick-cmd, with search-field / `filters=` carve-outs | `cfm_waf_detectors.lua:920` |
-| 16 | Debug toggles | `xdebug` / `debug=1` / `trace=1` by key+value | `cfm_waf_detectors.lua:1045` |
-| 17 | PHP serialize | `O:N:"`/`C:N:"` plain & URL-encoded | `cfm_waf_detectors.lua:1090` |
-| 18 | Bad UA (scored) | INSTANT tool UAs + 6-signal score (UA / method / headers / URI risk) | `cfm_waf_detectors.lua:1123` |
-| 19 | Shellshock | `() {` in any header value (URL-decode once) | `cfm_waf_detectors.lua:1315` |
-| 20 | Header vulns | `Proxy` (httpoxy), CVE-2025-24813; `Lock-Token` / `If` removed 2026-09-29 (FP case 12) | `cfm_waf_detectors.lua` `detect_header_vulns` |
-| 21 | CT anomaly | Charset bypass (IBM037 etc.), boundary count, non-string CT | `cfm_waf_detectors.lua:1384` |
-| 22 | Proxy header SQLi | `'` in XFF / X-Real-IP / Client-IP | `cfm_waf_detectors.lua:1445` |
-| 23 | SSRF proto | `file://`, `gopher://`, `dict://`, `ldap[s]://`, `tftp://`, `stratum+*://`, `sftp/ftp://` + octal/hex/dword IP in `://` ctx | `cfm_waf_detectors.lua:1476` |
-| 24 | JS proto pollution | `__proto__`, `constructor` + `.prototype` / `[prototype` | `cfm_waf_detectors.lua:1517` |
-| 25 | XXE | DOCTYPE / ENTITY + SYSTEM / PUBLIC | `cfm_waf_detectors.lua:1537` |
-| 26 | CRLF | Raw and URL-encoded CRLF + header-keyword | `cfm_waf_detectors.lua:1567` |
-| 27 | HTTP smuggling (body) | VERB SP PATH SP HTTP/N | `cfm_waf_detectors.lua:1598` |
-| 28 | Upload filename | Quoted/single/unquoted multipart `filename=` + ext patterns + special names | `cfm_waf_detectors.lua:1632` |
-| 29 | Upload content | Body substring `<?php`, `<?=` (PHP-context-gated, see `has_php_short_echo`), `<jsp:`, `$_*` superglobals, ImageMagick MVG | `cfm_waf_detectors.lua:1700` |
-
-> **Legit PHP-archive upload carve-out (fixed 2026-06-05).** Rules 401/402/403 and the 431–436 backdoor-content family stand down when `is_known_legit_php_upload_endpoint(uri, args)` matches — the Code Snippets REST flow and, added here, the **WordPress plugin/theme installer** (`/wp-admin/update.php?action=upload-plugin` / `upload-theme`). A plugin/theme `.zip` legitimately contains PHP (often obfuscated in commercial products), so on that authenticated, cookie-auth-gated path the PHP that is the payload must not be flagged — a plugin named e.g. `foo-block.php.zip` also tripped the double-extension filename rule. Media uploads (`async-upload.php`) are **not** exempted: a PHP opener inside a claimed image there is still a polyglot. (437/438 keep their own broader `/wp-admin/` carve-out for snippet-save plugins — with 438's audit-F11 pre-auth `admin-ajax.php`/`admin-post.php` `logonly` exception; see FP case 5.)
-| 30 | Script obfuscation | Shared scorer (long-b64 / decode-helpers / eval / atob / XOR / chr-storm) | `cfm_waf_detectors.lua:1730` + `cfm_waf_util.lua:115` |
-| 31 | Upload obfuscation | Same scorer on multipart | `cfm_waf_detectors.lua:1753` |
-| 32 | Webshell path | URI basename ∈ 32-name set, split by confidence: proper-noun names → rule 413 (block), ambiguous/generic → rule 410 (challenge) | `cfm_waf_detectors.lua` `detect_webshell_path` |
-| 33 | Reverse shell | 24 literal one-liner needles | `cfm_waf_detectors.lua:1897` |
-| 34 | Persistence | crontab / cron.d / systemd / bashrc / authorized_keys with `>>`/`>` | `cfm_waf_detectors.lua:1981` |
-| 35 | Rootkit | `LD_PRELOAD=/`, `/etc/ld.so.preload`, `insmod /tmp/`, `/dev/mem` | `cfm_waf_detectors.lua:2013` |
-| 36 | LOLbin | certutil / bitsadmin, `-EncodedCommand`, IEX, `wget -o /tmp/` | `cfm_waf_detectors.lua:2049` |
-| 37 | Java deserialize | `\xac\xed\x00\x05` raw + `rO0AB` b64 + `aced0005` hex (body/cookie/auth/xff) | `cfm_waf_detectors.lua:2073` |
-| 38 | Webshell ping | POST + empty UA + CL:0 + `.php` / `.phtml` / `.phar` URI | `cfm_waf_detectors.lua:2124` |
-| 39 | C2 tunnel | 21 hostnames (pastebin, ngrok, webhook.site, discord cdn, telegram) | `cfm_waf_detectors.lua:2168` |
-| 40 | Coinminer | xmrig / xmr-stak flags + pool hostnames + monerod / ethminer | `cfm_waf_detectors.lua:2218` |
-| 41 | Smuggling CL/TE | CL+TE coexist / multi-CL / malformed CL / multi-TE | `cfm_waf_detectors.lua:2267` |
-| 42 | Long path segment | ≥ 800 B segment with `data:` URI artifact carve-out | `cfm_waf_detectors.lua:2347` |
-| 43 | Header flood | > 16 KB excluding Cookie / Authorization | `cfm_waf_detectors.lua:2374` |
-| 44 | Polyglot upload | Multipart parser → first 64 B of image-claimed parts checked vs PHP/script openers (ASP/JSP dropped 2026-11-01: `<%` occurs by chance in ~1 in 1 000 real images, and nothing on the fleet runs ASP/JSP) | `cfm_waf_detectors.lua:2423` |
-| 45 | Range abuse | `Request-Range`, multi `Range`, oversized, ≥ 8 ranges | `cfm_waf_detectors.lua:2533` |
-| 46 | IP host | Host header is bare IPv4 / IPv6 literal | `cfm_waf_detectors.lua:162` |
-| 47 | Log4Shell evasion | `${${::-j}…`, `${lower:j}…`, `${env:` / `sys:` / `main:` / `date:` / `base64:` in args+body+headers; lookups resolved like Log4j (`${…:-X}`, `${date:'X'}`, `${lower:X}` → X, ≤ 8 passes): a result holding `${jndi:` is `RESOLVED`, nesting past the passes is `DEEP`; the strongest tag across the whole request wins | `cfm_waf_detectors.lua` (`detect_log4shell`) |
-| 48 | Bad UTF-8 | Overlong / surrogate / truncated multibyte in normalized args+body (Coraza `validateUtf8Encoding` port) | `cfm_waf_detectors.lua` (`detect_bad_utf8`) |
-| 49 | PHP split-string canary (421) | `<?php print "A"."B";exit;` exec-test probe; print/echo/die + quoted-string concat + whole-word `exit`/`die`, no control-flow disqualifiers | `cfm_waf_detectors.lua` (`detect_php_split_string_canary`) |
-| 50 | PHP wget+curl dropper (422) | `wget -O` + `curl -o` fallback pair + `filesize()` integrity + `@touch(`/`file_exists(` | `cfm_waf_detectors.lua` (`detect_php_dropper_wget_curl`) |
-| 51 | PHP dropper markers (423) | `'!success!'` + `'!ended!'` literals + `die(`/`exit(` framing | `cfm_waf_detectors.lua` (`detect_php_dropper_markers`) |
-| 52 | PHP filesize recon (424) | `<fs>` literal tag + `filesize(` + `SCRIPT_FILENAME` reference | `cfm_waf_detectors.lua` (`detect_php_filesize_recon`) |
-| 53 | PHP touch anti-forensic (425) | `@touch(<path>, <literal-unix-ts>)` mtime backdating + paired file-write primitive | `cfm_waf_detectors.lua` (`detect_php_touch_antiforensic`) |
-| 54 | Superglobal override (318) | param KEY = PHP superglobal name (`_GET`/`_SERVER`/`GLOBALS`/…), delimiter-anchored so `db_server=` / value-position do not match; clean-room (NinjaFirewall gap analysis), `challenge_v2` (promoted logonly→challenge_v2 2026-09-23: attack-only, a human's solve passes) | `cfm_waf_detectors.lua` (`detect_superglobal_override`) |
-| — | Body budget by CT | json=32K / multipart=16K / xml=16K / urlencoded=8K / other=2K | `cfm_waf_util.lua:249` |
-| — | Normalize | `url_decode_once × 2` + `lower`, with no-`%` fast path. **No UTF-8 / unicode normalization.** | `cfm_waf_util.lua:211` |
-
-## Coverage matrix vs external projects
-
-Cell values: **stronger** / **equivalent** / **weaker** / **none** / **different-scope**.
-
-Column key — **A** `corazawaf/libinjection-go` (pure-Go libinjection port) · **B** `wasilibs/go-libinjection` (WASM via wazero) · **C** `corazawaf/coraza` (full Go WAF) · **D** `p0pr0ck5/lua-resty-libinjection` (LuaJIT FFI binding, most relevant to CFM) · **E** `bungle/lua-resty-injection` (minimal LuaJIT FFI binding) · **F** OWASP CRS.
-
-| Category | A — libinjection-go | B — wasilibs | C — Coraza | D — p0pr0ck5 | E — bungle | F — CRS |
-|----------|---------------------|--------------|------------|--------------|------------|---------|
-| SQLi | stronger (tokenizer + fingerprint) | stronger (same via WASM) | stronger (wraps A + CRS regex) | **stronger (FFI tokenizer + context variants)** | stronger (FFI, minimal API) | stronger (REQUEST-942) |
-| XSS | stronger (HTML5 state machine) | stronger | stronger | **stronger (context-aware variants)** | stronger | stronger (REQUEST-941) |
-| Traversal | none | none | equivalent (CRS-930 + `validateUrlEncoding`) | none | none | stronger |
-| RCE | none | none | equivalent | none | none | stronger (CRS-932) |
-| PHP wrappers | none | none | equivalent | none | none | equivalent (CRS-933) |
-| Bad UA scoring | none | none | none | none | none | weaker (flat UA lists) |
-| Header vulns | none | none | none | none | none | equivalent (CRS-921 / 944) |
-| CT anomaly | none | none | different-scope (`validateByteRange`, `validateUtf8Encoding`) | none | none | equivalent (CRS-920) |
-| Upload filename/content | none | none | different-scope | none | none | equivalent (CRS-953 / 954) |
-| Polyglot upload | none | none | none | none | none | weaker |
-| Webshell path / ping | none | none | none | none | none | weaker |
-| Reverse shell / persistence / rootkit / lolbin | none | none | none | none | none | equivalent (CRS-932 unix tokens) |
-| Java deserialize | none | none | none | none | none | equivalent (CRS-944) |
-| C2 tunnel / coinminer | none | none | none | none | none | none |
-| HTTP smuggling (CL/TE + body) | none | none | weaker | none | none | weaker |
-| CRLF | none | none | weaker | none | none | equivalent (CRS-921) |
-| Auth / XMLRPC bursts | different-scope | different-scope | different-scope (Coraza has no rate logic) | none | none | different-scope (CRS-DoS plugin) |
-| Long path / header flood / range | none | none | equivalent (partial) | none | none | equivalent (CRS-920) |
-| Normalize / decoding | none | none | **stronger** (`validateUtf8Encoding`, `t:normalizePath`, `t:cmdLine`, `t:cssDecode`, `t:jsDecode`) | none | none | stronger |
-| SSRF proto | none | none | weaker | none | none | weaker (CRS-934) |
-| JS proto pollution | none | none | none | none | none | equivalent (CRS-934) |
-| XXE | none | none | equivalent | none | none | equivalent (CRS-934) |
-| Proxy header SQLi | none | none | none | none | none | none |
-
-**Net read:** the only two columns where any reference is meaningfully
-stronger across CFM's workloads are libinjection (D / E) for SQLi + XSS
-and Coraza's normalization operators (C) for encoding anomalies. The
-rest of CFM's surface is either at parity with CRS or covers categories
-no reference project covers at all (bad-UA scoring, webshell-name set,
-auth / XMLRPC burst logic, C2 tunnel / coinminer fingerprints).
-
+- **Tokenizer-level SQLi / XSS evasions** (`UN/**/ION SE/**/LECT`, HTML5
+  mutation XSS) slip past the substring detectors; libinjection is the
+  [next] item in `docs/ROADMAP.md` §1.
+- **IPv6 CIDRs in `IGNORE_NETS`** are skipped by the Lua self-bypass (exact
+  IPv6 addresses in `IGNORE_IPS` work).
+- **A rule after a short-circuiting `block`** is never evaluated on that
+  request, so it never appears in `also_rule_ids` (cost design; see the
+  autoblock decision record).
+- **Not every detector has a `rule_*` CFG key**, so not every one can be
+  switched off per node from `cfm_waf_config.lua`.

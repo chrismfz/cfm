@@ -445,7 +445,7 @@ past it, so no edge-time keying is safe — see `docs/waf.md` FP case 6). When
 adding/strengthening a
 rule, check it doesn't trip legitimate panel/app traffic, and prefer
 `logonly` → `challenge` → `block` promotion over going straight to block.
-Reference: `docs/waf.md`, `docs/waf-analysis-2026-05-08.md`,
+Reference: `docs/waf.md` (FP case studies, excludes),
 `docs/challenge-waf-release-checklist.md`.
 
 ### Challenge excludes & scoping
@@ -1072,7 +1072,7 @@ because of that. Hard-won points:
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
-`docs/waf-analysis-2026-05-08.md` (FP corpus → `docs/waf.md`) · `WAF_CVE_PLAN.md` (backlog → `WAF_CVE.md`).
+`WAF_CVE_PLAN.md` (backlog → `WAF_CVE.md`).
 
 Comments citing "audit Fnn" (Lua, confs, tests) refer to the closed
 2026-07 edge-Lua audit, deleted 2026-11-18: `git log --diff-filter=D --
