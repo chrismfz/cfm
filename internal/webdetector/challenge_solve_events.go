@@ -142,12 +142,18 @@ func SubscribeChallengeWithheldEvents(fn func(ChallengeSolve)) {
 }
 
 func publishChallengeWithheldEvent(s ChallengeSolve) {
-	if !withheldOnce.putIfAbsent(challengeV2MarkKey(s.IP, s.Host), struct{}{}, time.Now()) {
-		return // this client's withheld solve on this host is already counted
-	}
 	solveSubsMu.RLock()
 	subs := append([]func(ChallengeSolve){}, withheldSubs...)
 	solveSubsMu.RUnlock()
+	// Claim the (ip, host) slot only when someone hears it: in a reload's gap
+	// (subscribers reset, not yet re-added) or with every reader off, a claim
+	// would silence this client's withheld solves for the next hour.
+	if len(subs) == 0 {
+		return
+	}
+	if !withheldOnce.putIfAbsent(challengeV2MarkKey(s.IP, s.Host), struct{}{}, time.Now()) {
+		return // this client's withheld solve on this host is already counted
+	}
 	for _, fn := range subs {
 		fn(s)
 	}

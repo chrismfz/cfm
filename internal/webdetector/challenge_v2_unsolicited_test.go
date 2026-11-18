@@ -10,7 +10,7 @@ import (
 
 const (
 	unsolUA      = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-	unsolFailing = `{"v":1,"wd":true,"ptr":0,"tch":0,"key":0}`          // webdriver + no input: certain, fails
+	unsolFailing = `{"v":1,"wd":true,"ptr":0,"tch":0,"key":0}`           // webdriver + no input: certain, fails
 	unsolClean   = `{"v":1,"wd":false,"ptr":7,"tch":0,"key":2,"mv":180}` // real input: scores clean
 )
 
@@ -122,6 +122,8 @@ func TestVerify_UnsolicitedGrainScope(t *testing.T) {
 // read a client that never got a cookie as one that discarded it). A solve
 // that passes takes only the solve stream.
 func TestVerify_WithheldSolvePublishedToWithheldStreamOnly(t *testing.T) {
+	resetWithheldOnceForTest()
+	t.Cleanup(resetWithheldOnceForTest)
 	ResetChallengeSolveSubscribers()
 	t.Cleanup(ResetChallengeSolveSubscribers)
 	var mu sync.Mutex
@@ -161,6 +163,8 @@ func TestVerify_WithheldSolvePublishedToWithheldStreamOnly(t *testing.T) {
 // toward a returning human audience's. A different host is a new pair. The
 // event says CHALLENGE_WITHHELD, never CHALLENGE_SOLVED.
 func TestPublishChallengeWithheld_OncePerPairAndLabelled(t *testing.T) {
+	resetWithheldOnceForTest()
+	t.Cleanup(resetWithheldOnceForTest)
 	ResetChallengeSolveSubscribers()
 	t.Cleanup(ResetChallengeSolveSubscribers)
 	var got []ChallengeSolve
@@ -182,4 +186,23 @@ func TestPublishChallengeWithheld_OncePerPairAndLabelled(t *testing.T) {
 	if r := got[0].InputEvent().Reason; r != "CHALLENGE_SOLVED" {
 		t.Errorf("solve event reason changed: %q", r)
 	}
+
+	// With no withheld subscriber (a reload's gap), the slot is NOT claimed:
+	// the next solve, once a subscriber is back, is still published.
+	ResetChallengeSolveSubscribers()
+	gap := ChallengeSolve{IP: "198.51.100.78", Host: "dedup-a.example"}
+	publishChallengeWithheldEvent(gap)
+	SubscribeChallengeWithheldEvents(func(s ChallengeSolve) { got = append(got, s) })
+	publishChallengeWithheldEvent(gap)
+	if len(got) != 3 || got[2].IP != "198.51.100.78" {
+		t.Fatalf("after a subscriber-less publish: %d events, want the gap client published once a reader is back", len(got))
+	}
+}
+
+// resetWithheldOnceForTest empties the withheld dedup store, so a test (and a
+// rerun of it in the same process, -count) starts from no published pair.
+func resetWithheldOnceForTest() {
+	withheldOnce.mu.Lock()
+	withheldOnce.m = map[string]time.Time{}
+	withheldOnce.mu.Unlock()
 }
