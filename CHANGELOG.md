@@ -24,14 +24,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **Hardened /cfm-admin path normalisation in the auth middleware**, and in
   the edge configs' `/cfm-admin/` locations, which now also set
   `X-Forwarded-Host` themselves on every hop to the daemon.
-- **Scoped traffic-rule views name only the caller's own sites.** A rule the
-  operator shares across several tenants' sites is listed and simulated for
-  each tenant with that tenant's sites only, as the rules export already did.
-  The Challenge Access-Control list does the same.
-- **The admin SSO cookie gets the same-origin check the session cookie gets**
-  on state-changing requests.
-- **`/api/v1/cpanel/user-info` adds failure detail only when asked**
-  (`X-CFM-Debug: 1`, which the plugin sends in its debug mode).
+- **Tightened the CSRF and auth checks of the cfm-admin API** (defence in
+  depth), and `/api/v1/cpanel/user-info` adds failure detail only for the
+  plugin's own local call with `X-CFM-Debug: 1`.
+- **Scoped traffic-rule and Challenge Access-Control lists name only the
+  caller's own sites.** An entry the operator shares across several tenants'
+  sites shows each tenant only its own, as the rules export already did.
 
 ### Changed
 - **The MCP server's instructions name every tool.** The guidance an MCP

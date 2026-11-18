@@ -424,18 +424,27 @@ func isReplayNonce(nonce string, expUnix, nowUnix int64) bool {
 }
 
 // cfmDebugEnabledForRequest reports whether failure detail is added to the
-// response: only when the caller asks for it (the plugin sends X-CFM-Debug: 1).
-// The route answers unauthenticated callers, so the default is off.
+// response: the plugin asks for it with X-CFM-Debug: 1 on its direct loopback
+// call. A request relayed by the edge (it always adds X-Real-IP /
+// X-Forwarded-For) or from any other address gets none.
 func cfmDebugEnabledForRequest(r *http.Request) bool {
 	if r == nil {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-CFM-Debug"))) {
 	case "1", "true", "yes", "on":
-		return true
 	default:
 		return false
 	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	return strings.TrimSpace(r.Header.Get("X-Real-IP")) == "" &&
+		strings.TrimSpace(r.Header.Get("X-Forwarded-For")) == ""
 }
 
 // cpanelUserExists checks /var/cpanel/users/<user> exists.

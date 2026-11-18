@@ -68,11 +68,10 @@ func setWebdetRoutesHandler(h http.Handler) {
 }
 
 // webdetRoutesProxy serves the engine's routes on the shared apiserver mux.
-// Most of those handlers read "no vhost scope in the context" as the
-// operator's view, so a request with no authenticated identity is refused
-// here as well as by the auth middleware. The exception is the cPanel
-// plugin's actor-assertion lookup, which the handler authenticates itself
-// (apiserver.IsCpanelPluginSelfServicePath, the middleware's own predicate).
+// Defence in depth: a request needs an authenticated identity here as well as
+// in the auth middleware, except the cPanel plugin's actor-assertion lookup,
+// which its handler authenticates (apiserver.IsCpanelPluginSelfServicePath,
+// the middleware's own predicate).
 func webdetRoutesProxy(w http.ResponseWriter, r *http.Request) {
 	if !webdet.IsAdminRequest(r) && !webdet.IsScopedRequest(r) && !apiserver.IsCpanelPluginSelfServicePath(r) {
 		w.Header().Set("Content-Type", "application/json")
