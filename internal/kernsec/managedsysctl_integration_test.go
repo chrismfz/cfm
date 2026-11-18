@@ -188,7 +188,7 @@ func TestVerifyAfterApply_EXTRowsDoNotCountAsFailures(t *testing.T) {
 }
 
 func TestReportCrossComponentConflicts_SurfacedOnForcedOverride(t *testing.T) {
-	// Phase 6 docs/kernsec.md:1117 promises that forced overrides
+	// docs/kernsec.md "Cross-component sysctl ownership" promises that forced overrides
 	// surface a cross-component conflict in apply output. Verify by
 	// running RunApply --dry-run with force on a NetSysctls rule and
 	// asserting the output names the conflict.

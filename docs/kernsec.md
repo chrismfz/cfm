@@ -2,124 +2,100 @@
 
 ## Overview
 
-kernsec is cfm's preemptive kernel attack-surface reduction layer. Rather than
-waiting for a CVE to drop and chasing a patched kernel through the fleet,
-kernsec disables surface that has no business being reachable on a hosting box
-in the first place: dead network protocols, recently-exploited modules with no
-use case, userspace crypto APIs nobody calls, side-channel power telemetry,
-and filesystems no server mounts. The component combines four mechanisms —
-sysctls, boot arguments, module blacklists, and a drift monitor — with a
-tiered config model and host-profile gating so the same ruleset behaves
-correctly on cPanel, DirectAdmin, Proxmox, KVM hypervisors,
-KernelCare-patched kernels, and ZFS storage hosts.
+kernsec reduces kernel attack surface before a CVE lands, instead of chasing
+patched kernels after it. It disables surface a hosting box has no use for:
+dead network protocols, recently exploited modules, userspace crypto APIs,
+power side-channel telemetry, and filesystems no server mounts.
 
-`cfm kernsec` audits and, when requested, applies these reductions across
-sysctls, kernel boot arguments, kernel module blacklists, and periodic drift
-monitoring.
+It has five mechanisms: sysctls, kernel boot arguments, module blacklists,
+mount options, and a drift monitor. A tiered config and host-profile gates let
+the same rule set run on cPanel, DirectAdmin, CloudLinux, Proxmox, KVM
+hypervisors, live-patched kernels and ZFS hosts.
 
-The component currently manages:
+Code: `internal/kernsec/` (rule registry in `profile.go`, `modules.go`,
+`mounts.go`; CLI in `cli.go`). Sysctl ownership across components:
+`internal/managedsysctl`.
 
-- `/etc/sysctl.d/99-cfm-kernsec.conf` for kernsec-owned sysctls.
-- Kernel boot arguments for the detected bootloader backend.
-- `/etc/modprobe.d/cfm-kernsec.conf` for module blacklists.
-- `cfm-kernsec-check.timer` / `.service` for periodic drift checks.
+Managed state:
 
-`/etc/fstab` is **report-only**. kernsec audits mount options and tells the
-operator what is missing, but it never edits fstab because `noexec` and related
-options can break real hosting workflows.
+- `/etc/sysctl.d/99-cfm-kernsec.conf` — kernsec-owned sysctls.
+- Kernel boot arguments, through the detected bootloader backend.
+- `/etc/modprobe.d/cfm-kernsec.conf` — module blacklists.
+- `/etc/fstab` (or a systemd `.mount` drop-in) for `/tmp`, `/var/tmp` and
+  `/dev/shm` mount options, and the explicit `cfm kernsec secure-tmp` verb.
+  `/proc` `hidepid` is audit-only.
+- `cfm-kernsec-check.timer` / `.service` — periodic drift checks.
 
 ## KSPP script relationship
 
-`scripts/kspp.sh` remains in the tree as a standalone hardening script and
-reference. For cfm-managed hosts, use `cfm kernsec`.
-
-kernsec covers the KSPP sysctls, boot arguments, bootloader backends, status
-checks, and Copy Fail mitigation from the standalone script, plus additional
-cfm-managed features such as the rule registry, config model, module blacklist
-writer, fstab audit, and monitor timer.
+`scripts/kspp.sh` stays in the tree as a standalone hardening script and
+reference. On cfm-managed hosts, use `cfm kernsec`. kernsec covers the
+script's KSPP sysctls, boot arguments, bootloader backends, status checks and
+Copy Fail mitigation, and adds the rule registry, config model, module
+blacklists, mount handling and the monitor timer.
 
 ## Relationship to upstream killswitch
 
 Upstream Linux is gaining a `killswitch` primitive
-(`Documentation/admin-guide/killswitch.rst`) that lets a privileged operator
-make a chosen kernel function short-circuit and return a fixed value — a
-temporary "stop calling the buggy code" lever for when a CVE drops but a
-patched kernel isn't yet built or rebooted into. The canonical targets named
-in the patch series are AF_ALG, ksmbd, nf_tables, vsock, and ax25.
-
-kernsec attacks the same problem from the opposite end: it disables the
-surface *before* a CVE drops, so the same code paths are unreachable without
-needing a runtime mitigation. For the modules named as killswitch candidates,
-kernsec already ships rules:
-
-- **ksmbd** → blacklisted (`modules.recent_cves`).
-- **vsock** → blacklisted on bare-metal hosts, skipped on KVM hypervisors so
-  `vhost_vsock` stays available for guest↔host comms (`modules.net.virt`,
-  host-profile gated on `IsKVMHost`). `IsKVMHost` requires the kvm module to
-  be loaded **and** real hypervisor evidence (a `vhost*` backend module
-  loaded, libvirt, a running QEMU process, or Proxmox) — a bare-metal hosting
-  box where `kvm_intel`/`kvm_amd` merely auto-loaded on VT-x/AMD-V is **not**
-  treated as a KVM host, so vsock stays blacklisted there.
-- **ax25** → blacklisted (`modules.net.legacy`).
-- **AF_ALG** → boot-time `initcall_blacklist=algif_aead_init` plus
-  modprobe-blacklisted `algif_hash` / `algif_skcipher` / `algif_rng` /
-  `algif_akcipher` / `algif_aead` (`modules.crypto_userapi`).
-- **nf_tables** → deliberately NOT disabled. cfm's firewall is nftables-based,
-  and disabling the core would brick the firewall itself. This is the one
-  killswitch candidate where the trade-off inverts on a cfm host: the cost of
-  "firewall stops working for the day" is higher than running a known-vulnerable
-  nft path until the fix lands. Operators wanting belt-and-braces coverage can
-  engage upstream killswitch on the specific buggy `nft_*` function once the
-  interface ships.
-
-The two approaches are complementary. When upstream killswitch is widely
-available, cfm can drive it as a fast-rollout lever for the rare module or
-function we *can't* preemptively blacklist (nftables core, NFS client,
-`io_uring` on NVMe hosts).
+(`Documentation/admin-guide/killswitch.rst`): a privileged operator makes a
+chosen kernel function return a fixed value until a patched kernel is booted.
+kernsec removes surface before a CVE drops, and already covers most named
+targets: ksmbd, vsock (except on KVM hosts) and ax25 are blacklisted; AF_ALG
+is cut by `initcall_blacklist=algif_aead_init` plus the `algif_*` blacklist.
+nf_tables is deliberately NOT disabled: cfm's firewall is nftables, and a
+dead firewall costs more than a known-vulnerable nft path until the fix
+lands. Killswitch suits what kernsec cannot blacklist (nftables core, NFS
+client, `io_uring` on NVMe hosts).
 
 ## Commands
 
-`cfm kernsec` with no subcommand opens the interactive TUI on a TTY and falls
-back to text output when stdout is not a terminal.
+`cfm kernsec` with no subcommand opens the TUI on a TTY and prints the text
+audit otherwise.
 
-### CLI surface as shipped
-
-| Command | Purpose | Mutation behavior |
+| Command | Purpose | Writes? |
 |---|---|---|
-| `cfm kernsec` | TUI on a TTY; text audit otherwise. | Read-only. |
-| `cfm kernsec live` | Force the interactive TUI. Aliases: `tui`, `ui`. | Read-only. |
-| `cfm kernsec text` | Plain-text audit output. | Read-only. |
-| `cfm kernsec status --check` | Run the text audit in check mode for automation. | Read-only; check modes do not write. |
-| `cfm kernsec status --json` | Emit machine-readable status output. | Read-only. |
-| `cfm kernsec preview --tier <0|1|2> --group <prefix> --id <ids> --skip <ids> --force-id <ids> --only-apply` | Show what `apply` would select after config, tier, host-profile gates, and per-rule overrides. | Read-only; preview never writes. |
-| `cfm kernsec init` | Write default `/etc/cfm/kernsec.conf` with `tier = 1` if absent. | Mutates only when creating the missing config. |
-| `cfm kernsec apply --dry-run --check --no-refresh --yes` | Render managed sysctl/modprobe state, update boot args, refresh the bootloader unless `--no-refresh`, then apply runtime sysctls per key. `--check` is the drift-check mode used by the monitor timer. | Mutates when not `--dry-run` or `--check`; dry-run and check modes do not write. |
-| `cfm kernsec disable --purge --dry-run --no-refresh --force` | Persist `tier = 0`, strip kernsec-managed boot args, empty managed sysctl/modprobe output, and optionally purge managed files/units. | Mutates when not `--dry-run`; dry-run does not write. |
-| `cfm kernsec rollback --dry-run` | Remove kernsec-managed boot args, restore saved managed values when a managed snapshot exists, and refresh the bootloader. | Mutates when not `--dry-run`; dry-run does not write. |
-| `cfm kernsec monitor enable --interval <OnCalendar> --cfm-binary <path> --dry-run` | Write and enable the periodic systemd drift-check timer using the requested schedule and cfm binary path. | Mutates when not `--dry-run`; dry-run does not write. |
-| `cfm kernsec monitor disable` | Stop and disable the timer while leaving unit files in place. | Mutates systemd timer state. |
-| `cfm kernsec monitor remove` | Stop and disable the timer, remove managed unit files, and reload systemd. | Mutates installed monitor state. |
-| `cfm kernsec monitor status` | Show timer status and recent service runs. | Read-only. |
+| `cfm kernsec` | TUI on a TTY; text audit otherwise. | No (TUI: see below). |
+| `cfm kernsec live` (`tui`, `ui`) | Force the TUI. | No (TUI: see below). |
+| `cfm kernsec text` / `status` | Text audit. `--check` exits non-zero on WARN; `--json` emits JSON; `--skip-af-alg` skips the AF_ALG bind probes. | No. |
+| `cfm kernsec preview` | What `apply` would select after config, tier, host-profile gates and overrides. Flags: `--tier <0-3>`, `--group <prefix>`, `--id <ids>`, `--skip <ids>`, `--force-id <ids>` (ad-hoc, not persisted), `--only-apply`. | No. |
+| `cfm kernsec init` | Write the default `tier = 1` `/etc/cfm/kernsec.conf` if absent. | Only when creating it. |
+| `cfm kernsec apply` | Render managed sysctl/modprobe files, update boot args, refresh the bootloader, apply mount rules, `sysctl -w` per key, unload managed modules. Flags: `--dry-run`, `--check`, `--no-refresh`, `--no-unload`, `--yes`, `--force-unsafe`. | Yes, unless `--dry-run` / `--check`. |
+| `cfm kernsec disable` | Persist `tier = 0` and run apply with it. Flags: `--purge`, `--dry-run`, `--no-refresh`, `--no-unload`, `--force`, `--yes`, `--force-unsafe`. | Yes, unless `--dry-run`. |
+| `cfm kernsec rollback` | Undo managed boot args and remove the managed sysctl drop-in. Flag: `--dry-run`. | Yes, unless `--dry-run`. |
+| `cfm kernsec monitor enable` | Write and enable the drift-check timer. Flags: `--interval <OnCalendar>`, `--dry-run`. | Yes, unless `--dry-run`. |
+| `cfm kernsec monitor disable` | Stop and disable the timer; keep unit files. | Yes. |
+| `cfm kernsec monitor remove` | Stop, disable, remove unit files, daemon-reload. | Yes. |
+| `cfm kernsec monitor status` | Timer status and recent service runs. | No. |
+| `cfm kernsec modules audit` | List loaded modules with a signature-trust verdict. `--check` exits 1 if any is unsigned, signed-untrusted or unknown. | No. |
+| `cfm kernsec secure-tmp --size <N>G` | Carve `/tmp` + `/var/tmp` into a hardened loop filesystem (reboot to activate). `--dry-run` shows the plan. | Yes, unless `--dry-run`. |
 
-Status, preview, check, and dry-run modes are non-mutating: `status`,
-`preview`, `status --check`, `apply --check`, and every `--dry-run` invocation
-do not write files, change boot arguments, refresh bootloaders, apply runtime
-sysctls, or alter systemd state. `apply`, `disable`, `rollback`,
-`monitor enable`, and `monitor remove` mutate managed host state when run without
-their dry-run/check guard.
+Flag notes:
 
-Check-mode exit codes:
+- `--yes` skips the interactive safety preview and confirmation. Use it only
+  for unattended runs whose preview was already reviewed.
+- `--force-unsafe` acknowledges a `state = force` override on a rule the host
+  profile would have skipped. Without it, `apply` and `disable` refuse.
+- `disable --force` proceeds when the existing `kernsec.conf` is malformed or
+  unreadable (its overrides are lost).
+- `monitor enable` writes the path of the running `cfm` binary into the
+  service's `ExecStart`.
+
+The TUI can queue per-rule overrides; committing them writes `kernsec.conf`
+and runs the same apply path (with the unload pass). The flash line carries
+the unload summary, e.g. "applied 7 change(s) — 5 unloaded, 2 busy (will
+clear at reboot)".
+
+Check-mode exit codes (`status --check`, `apply --check`):
 
 | Exit code | Meaning |
 |---|---|
-| `0` | Clean: no drift or audit warnings were found. |
-| `1` | Drift or warnings were found. |
-| `2` | Indeterminate result for `apply --check`. The monitor service treats this as a soft success. |
+| `0` | Clean. |
+| `1` | Drift or warnings found. |
+| `2` | Indeterminate. The monitor service treats this as success. |
 
 ## Config
 
-The config file is `/etc/cfm/kernsec.conf`. It is root-only (`0600`) and uses a
-small sectioned format:
+`/etc/cfm/kernsec.conf` is root-only (`0600`):
 
 ```ini
 # /etc/cfm/kernsec.conf
@@ -132,501 +108,448 @@ state = skip
 state = force
 ```
 
-Top-level `tier` controls the highest tier selected by default:
+`tier` is the highest tier selected by default: `0` (audit only), `1`
+(default), `2` (server-aggressive, opt-in) or `3` (aggressive, explicit
+opt-in). Any other value is a parse error.
 
-- `tier = 0` — audit-only / disabled; apply writes no selected rules.
-- `tier = 1` — default safe-everywhere hardening profile.
-- `tier = 2` — opt-in server-aggressive profile layered on top of Tier 1.
-
-Per-rule `state` values:
+Per-rule `state`:
 
 - `default` — follow tier and host-profile decisions.
-- `skip` — do not apply this rule even when tier/profile would select it.
-- `force` — apply this rule even when a host-profile gate would skip it.
+- `skip` — never apply the rule.
+- `force` — apply the rule regardless of tier and host-profile gate. A force
+  over a host-profile skip needs `--force-unsafe`. A force can also take a
+  sysctl key another cfm component owns; `apply` reports that conflict.
 
-`state = force` can also override cross-component sysctl ownership. When a
-sysctl key is normally owned by another cfm component, forcing a kernsec rule can
-create an ownership conflict; `apply` reports the conflict instead of silently
-hiding it.
+An override for an unknown rule ID is a warning (and makes `status --check`
+fail), so typos surface.
 
 ## Files managed
 
-| Path | Managed by | Notes |
+| Path | Written by | Notes |
 |---|---|---|
-| `/etc/cfm/kernsec.conf` | `init`, `disable`, operator edits | Primary kernsec config. |
-| `/etc/sysctl.d/99-cfm-kernsec.conf` | `apply`, `disable`, `--purge` | kernsec-owned sysctl drop-in. `apply` renders this file, then parses the rendered key/value lines for runtime application. The drop-in persists settings for boot-time loading by the system sysctl service. Unsupported kernel keys are emitted as commented skipped lines. |
-| `/etc/modprobe.d/cfm-kernsec.conf` | `apply`, `disable`, `--purge` | Emits both `blacklist <module>` and `install <module> /bin/false`. |
-| `/etc/default/grub` | GRUB backend | Only `GRUB_CMDLINE_LINUX` is written; `_DEFAULT` is read for audit/drift but not written. |
-| `/etc/kernel/cmdline` | Proxmox/systemd-boot backend | Updated and followed by `proxmox-boot-tool refresh`. |
-| BLS entries via `grubby` | BLS backend | Updated with `grubby --update-kernel`; rescue/debug kernels are excluded. |
+| `/etc/cfm/kernsec.conf` | `init`, `disable`, the TUI, operator | Primary config. |
+| `/etc/sysctl.d/99-cfm-kernsec.conf` | `apply`, `disable`; removed by `rollback` and `--purge` | Unsupported kernel keys are written as commented skipped lines. |
+| `/etc/modprobe.d/cfm-kernsec.conf` | `apply`, `disable`; removed by `--purge` | `blacklist <module>` plus `install <module> /bin/false`. |
+| `/etc/default/grub` | GRUB backend | Only `GRUB_CMDLINE_LINUX` is written; `_DEFAULT` is read for audit/drift only. |
+| `/etc/kernel/cmdline` | Proxmox backend | Followed by `proxmox-boot-tool refresh`. |
+| BLS entries via `grubby` | BLS backend | `grubby --update-kernel`; rescue/debug kernels excluded. |
+| `/etc/fstab`, systemd `tmp.mount` drop-in | `apply` / `disable` (mount rules), `secure-tmp` | See "fstab / mount rules". |
 | `/etc/systemd/system/cfm-kernsec-check.service` | `monitor enable/remove` | Runs `cfm kernsec apply --check`. |
-| `/etc/systemd/system/cfm-kernsec-check.timer` | `monitor enable/remove` | Periodic drift-check timer. |
-| `/run/lock/cfm-kernsec.lock` | mutating commands | Advisory lock to prevent concurrent kernsec writers. |
+| `/etc/systemd/system/cfm-kernsec-check.timer` | `monitor enable/remove` | Drift-check timer. |
+| `/var/lib/cfm/kernsec-{grub,proxmox,bls}-cmdline.cfm-kernsec.bak` | bootloader backends | Pre-apply snapshots of kernsec-managed boot args only. |
+| `/run/lock/cfm-kernsec.lock` | mutating commands | Advisory lock against concurrent writers. |
 
-Runtime sysctl apply:
+Runtime sysctl apply: `apply` renders the drop-in (the persistent source for
+boot), then, after file writes and the bootloader refresh succeed, runs
+`sysctl -w key=value` for each active line. Failures do not stop later keys;
+they are reported together with the drop-in line, key, value and kernel
+error. Commented and malformed lines are not applied.
 
-- `cfm kernsec apply` first renders `/etc/sysctl.d/99-cfm-kernsec.conf`; the rendered drop-in remains the persistent source of truth for boot.
-- After file writes and bootloader refresh succeed, `apply` parses the rendered drop-in and applies each active key at runtime with `sysctl -w key=value`.
-- Runtime sysctl failures are continue-on-error: later keys are still attempted, and failures are accumulated into one report with `/etc/sysctl.d/99-cfm-kernsec.conf:<line>`, key, value, and kernel error context.
-- Commented skipped lines and malformed/non-key lines are not applied at runtime.
+Backups:
+
+- Managed sysctl and modprobe files get a one-shot `.cfm-kernsec.bak` before
+  the first edit. If operator-edited lines are found, kernsec also keeps a
+  timestamped backup and warns.
+- GRUB and Proxmox keep managed-argument snapshots under `/var/lib/cfm/`.
+  Legacy `.cfm-kernsec.bak` bootloader-file backups are fallback data for
+  older rollback records only.
+- The BLS snapshot comes from `grubby --info=ALL`, keyed by kernel image
+  path, and holds only kernsec-managed args.
+- Backups are never removed, `--purge` included.
 
 ## Cross-component sysctl ownership
 
-`internal/managedsysctl` owns the cfm-wide sysctl ownership registry. The
-registry records which cfm component is authoritative for each managed key; it
-is ownership metadata, not a promise that every component uses one shared
-render/apply pipeline.
+`internal/managedsysctl` is the cfm-wide registry of which component owns
+each managed sysctl key. It is ownership metadata, not a shared render
+pipeline.
 
-Current behavior:
-
-- `cfm-sysctl-tweaks` publishes its owned keys by registering its catalog with
-  `internal/managedsysctl`.
-- kernsec consults that registry during rule resolution. If another cfm
-  component owns a key, kernsec marks the row as `EXT`, audits the live value,
-  and reports whether it matches the kernsec recommendation.
-- `EXT` rows are audit-only for kernsec: kernsec does not render them into
-  `/etc/sysctl.d/99-cfm-kernsec.conf` and does not apply them at runtime with
-  `sysctl -w`.
-- `state = force` is the explicit operator override. A forced kernsec rule can
-  take over a key that the registry says is owned by another component, and
-  `apply` reports that ownership conflict rather than hiding it.
-
-The `cfm-sysctl-tweaks` apply-path migration is not part of kernsec behavior.
-kernsec's sysctl path renders and applies the kernsec-owned drop-in described
-above; `cfm-sysctl-tweaks` keeps its own apply path unless its code is changed
-separately.
-
-Backups and rollback snapshots:
-
-- Managed sysctl and modprobe files use one-shot `.cfm-kernsec.bak` backups
-  before the first edit.
-- If operator-edited lines are detected in a managed sysctl or modprobe file,
-  kernsec preserves an additional timestamped backup and warns.
-- GRUB and Proxmox backends store managed-argument snapshots under
-  `/var/lib/cfm/`. Legacy `.cfm-kernsec.bak` bootloader-file backups are used
-  only as fallback data for older rollback records.
-- When legacy byte-restore fallback is considered, kernsec refuses to restore
-  the entire saved file if the current bootloader file contains operator
-  changes since the legacy backup was made.
-- The BLS backend builds its pre-apply snapshot from `grubby --info=ALL`
-  and stores it at `/var/lib/cfm/kernsec-bls-cmdline.cfm-kernsec.bak`.
-  The snapshot contains only kernsec-managed boot arguments, keyed by kernel
-  image path; unmanaged args are intentionally not captured.
-- `disable --purge` removes the config, managed sysctl file, managed modprobe
-  file, and installed monitor units, but intentionally leaves backups in place.
+- `cfm-sysctl-tweaks` (`internal/sysctl`) registers its catalog there.
+- kernsec consults the registry while resolving rules. A key another
+  component owns resolves to `EXT`: kernsec audits the live value against its
+  recommendation but never writes it to its drop-in or with `sysctl -w`.
+- `state = force` is the explicit override. kernsec then writes the key too,
+  and `apply` prints an ownership-conflict line ("last writer wins at
+  runtime") instead of hiding it.
+- If `cfm-sysctl-tweaks` is disabled in the main cfm config, the registry
+  still treats its keys as externally owned.
+- Each component keeps its own files and apply path; kernsec does not change
+  how `cfm-sysctl-tweaks` writes.
 
 ## Rule tiers
 
 | Tier | Meaning | Operator expectation |
 |---|---|---|
-| 0 | Disabled/audit-only | No rule is selected for apply; status still audits. |
-| 1 | Default hardening | Intended to be safe across typical hosting, KVM, cPanel, EL, and Debian hosts. |
-| 2 | Server-aggressive | Opt-in; can affect availability, diagnostics, containers, seccomp-heavy workloads, or hosting panels. Host-profile gates skip known-risk hosts unless forced. |
+| 0 | Audit only | Nothing selected unless forced; status still audits. |
+| 1 | Default | Safe across typical hosting, KVM, cPanel, EL and Debian hosts. |
+| 2 | Server-aggressive | Opt-in; can affect availability, diagnostics, containers or hosting panels. Host-profile gates skip known-risk hosts unless forced. |
+| 3 | Aggressive | Explicit opt-in; measurable cost the operator signs up for. |
 
-Rule status states shown by status/TUI include applied/OK, warning/mismatch,
-skipped by tier, skipped by config, skipped by host profile, missing kernel
-support, and externally managed (`EXT`) for sysctls owned by another cfm
-component.
+Per-rule decisions shown by `status`, `preview` and the TUI: `APPLY`,
+`SKIP-CONF`, `SKIP-TIER`, `SKIP-HOST`, and `EXT` (sysctl owned by another cfm
+component).
 
 ## Rule catalog
 
-Rule IDs are stable and use `KSEC-<class>-<group>-<NNN>`:
-
-- `KSEC-SCT-*` — sysctl rules.
-- `KSEC-BOOT-*` — kernel boot-argument rules.
-- `KSEC-MOD-*` — module blacklist rules.
-- `KSEC-FS-*` — fstab/mount audit rules.
+Rule IDs are stable: `KSEC-<class>-<group>-<NNN>`, class `SCT`, `BOOT`,
+`MOD` or `FS`, plus the one-off `KSEC-LSM-bpf-001`. The registry
+(`profile.go`, `modules.go`, `mounts.go`) is the source; `cfm kernsec
+preview` lists every rule with its ID and decision on this host.
 
 ### Sysctl rules applied by kernsec
 
-| Group | Tier | Rules / settings | Operator impact |
+| Group | Tier | Settings | Operator impact |
 |---|---:|---|---|
-| `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2` (accepts `=1`), `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3` (accepts `=2` for mainline-vanilla kernels and `=4` for hardened forks), `kernel.yama.ptrace_scope=2`, `vm.mmap_min_addr=65536` (accepts `=131072` / `=262144`) | Restricts unprivileged kernel visibility, BPF, perf, and ptrace. Profiling/debug attach generally needs root. Mode 2 of `ptrace_scope` closes the same-uid `pidfd_getfd()` exit-window race against setuid helpers (ssh-keysign / chage `/etc/shadow` disclosure chain — Linus commit `31e62c2ebbfd`); `=1` was previously accepted as also-green but is no longer, because the residual race is a working exploit primitive. Hosts that need same-uid debuggability without sudo must `state = skip` `KSEC-SCT-kspp.kernel-006` in `kernsec.conf`. `vm.mmap_min_addr=65536` blocks NULL-deref-to-userspace exploit primitives and is the default on modern distros. |
-| `kspp.fs` | 1 | `fs.protected_hardlinks=1`, `fs.protected_symlinks=1`, `fs.protected_fifos=2`, `fs.protected_regular=1` | Protects sticky/world-writable directories; normally no production impact. `fs.protected_regular` is **1, not the stricter 2**: 1 still guards world-writable sticky dirs (`/tmp`, `/var/tmp`); 2 also covers group-writable sticky dirs, which breaks cPanel's DNS Zone Editor. A leftover `=2` in a foreign drop-in (the legacy `99-kspp.conf`, an operator file) is **auto-neutralised on apply** — see [Foreign drop-in reconcile](#foreign-drop-in-reconcile). |
-| `kspp.net` | 1 | `net.core.bpf_jit_harden=2` | Minor BPF JIT performance cost. |
-| `sysctl.mem.exploit` | 1 | `vm.unprivileged_userfaultfd=0`, `vm.mmap_rnd_bits=32`, `vm.mmap_rnd_compat_bits=16`, `kernel.warn_limit=10`, `kernel.oops_limit=10`, `fs.suid_dumpable=0` | Removes common LPE primitives; unusual debugging/checkpointing may need overrides. Unsupported keys are skipped. |
-| `tier2.oops` | 2 | `kernel.panic_on_oops=1`, `kernel.panic=10` | Any kernel oops can become a reboot; opt-in only. |
-| `sysctl.kernel.surface` | 1 | `dev.tty.ldisc_autoload=0`, `kernel.sysrq=0` | Disables automatic TTY line-discipline loading and Magic SysRq. |
-| `sysctl.kernel.coredump` | 2 | `kernel.core_pattern=|/bin/false` | Suppresses userspace core dumps globally; skipped for hosting panels, backup agents, and crash-diagnostic monitoring. kdump is independent (kexec/vmcore) and does not gate this rule. |
-| `sysctl.kernel.kexec` | 1 | `kernel.kexec_load_disabled=1` | Locks out the `kexec_load(2)` / `kexec_file_load(2)` syscalls so a compromised process cannot load a replacement kernel post-boot — a long-standing rootkit-persistence vector. Once written non-zero the knob is sticky until reboot (kernel-enforced). **Not** a KernelCare / Ksplice conflict (both live-patch via kernel modules, not kexec) and **not** a standard-kernel-update conflict (`yum`/`dnf` use bootloader entries). The one real conflict is kdump, which preloads a crash kernel via the same syscall; auto-skipped on hosts where `/proc/cmdline` carries `crashkernel=` or `kdump.service` is installed (HasKdump host-profile gate). |
-| `tier2.namespace` | 2 | `user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0` | Breaks rootless containers, bubblewrap, Chromium sandbox, and some hosting isolation; skipped when containers/hosting panels are detected. |
-| `sysctl.net.harden` | 1 | `net.ipv4.icmp_echo_ignore_broadcasts=1`, `net.ipv4.conf.all.accept_source_route=0`, `net.ipv4.conf.default.accept_source_route=0`, `net.ipv4.conf.all.log_martians=1`, `net.ipv4.tcp_rfc1337=1` | Static-IP servers should be unaffected. |
+| `kspp.kernel` | 1 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1`, `kernel.unprivileged_bpf_disabled=2` (accepts `1`), `kernel.randomize_va_space=2`, `kernel.perf_event_paranoid=3` (accepts `2` and `4`), `kernel.yama.ptrace_scope=2`, `vm.mmap_min_addr=65536` (accepts `131072`, `262144`) | Restricts unprivileged kernel visibility, BPF, perf and ptrace. See below for `ptrace_scope`. |
+| `kspp.fs` | 1 | `fs.protected_hardlinks=1`, `fs.protected_symlinks=1`, `fs.protected_fifos=2`, `fs.protected_regular=1` | `protected_regular` is 1, not 2: 2 also covers group-writable sticky dirs and breaks cPanel's DNS Zone Editor. A foreign `=2` is reconciled on apply (below). |
+| `kspp.net` | 1 | `net.core.bpf_jit_harden=2` | Minor BPF JIT cost. |
+| `sysctl.mem.exploit` | 1 | `vm.unprivileged_userfaultfd=0`, `vm.mmap_rnd_bits=32`, `vm.mmap_rnd_compat_bits=16`, `kernel.warn_limit=10`, `kernel.oops_limit=10`, `fs.suid_dumpable=0` | Removes common LPE primitives. Unsupported keys are skipped. |
+| `sysctl.kernel.surface` | 1 | `dev.tty.ldisc_autoload=0`, `kernel.sysrq=0` | No TTY line-discipline autoload, no Magic SysRq. |
+| `sysctl.kernel.kexec` | 1 | `kernel.kexec_load_disabled=1` | Blocks loading a replacement kernel post-boot (rootkit persistence). Sticky until reboot. Not a KernelCare / Ksplice or package-update conflict. Conflicts with kdump only, so it is gated on `HasKdump`. |
+| `sysctl.net.harden` | 1 | `net.ipv4.icmp_echo_ignore_broadcasts=1`, `net.ipv4.conf.{all,default}.accept_source_route=0`, `net.ipv4.conf.all.log_martians=1`, `net.ipv4.tcp_rfc1337=1` | Static-IP servers unaffected. |
+| `tier2.oops` | 2 | `kernel.panic_on_oops=1`, `kernel.panic=10` | Any oops becomes a reboot. |
+| `tier2.namespace` | 2 | `user.max_user_namespaces=0`, `kernel.unprivileged_userns_clone=0` | Breaks rootless containers, bubblewrap, the Chromium sandbox and hosting isolation. |
+| `sysctl.kernel.coredump` | 2 | `kernel.core_pattern=\|/bin/false` | Suppresses userspace core dumps globally. kdump is independent and does not gate it. |
+
+`kernel.yama.ptrace_scope=2`: mode 1 is no longer accepted as green. Mode 2
+closes the same-uid `pidfd_getfd()` exit-window race against setuid helpers
+(the ssh-keysign / chage `/etc/shadow` disclosure chain, Linus commit
+`31e62c2ebbfd`), which is a working exploit primitive under mode 1. A host
+that needs same-uid debugging without sudo sets `state = skip` on
+`KSEC-SCT-kspp.kernel-006`.
+
+`kernel.unprivileged_bpf_disabled=2` pairs with the boot argument of the same
+name: kernels built with `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` (RHEL/Alma 9-10)
+boot the knob at 1 and refuse runtime writes, so only the boot argument
+lands 2.
 
 ### Sysctl rules audited as externally managed
 
-`sysctl.net` rules are audited by kernsec but normally owned by
-`cfm-sysctl-tweaks` through the `internal/managedsysctl` ownership
-registry. They render as `EXT`; kernsec audits their live values but does not
-write persistent or runtime values for them unless the operator explicitly uses
-`state = force` on a rule.
-
-Audited keys are `net.ipv4.conf.all.rp_filter=1`,
-`net.ipv4.conf.all.accept_redirects=0`,
-`net.ipv4.conf.all.send_redirects=0`, `net.ipv4.tcp_syncookies=1`, and
-`net.ipv6.conf.all.accept_redirects=0`.
+Group `sysctl.net` is owned by `cfm-sysctl-tweaks` and renders as `EXT`:
+`net.ipv4.conf.all.rp_filter=1`, `net.ipv4.conf.all.accept_redirects=0`,
+`net.ipv4.conf.all.send_redirects=0`, `net.ipv4.tcp_syncookies=1`,
+`net.ipv6.conf.all.accept_redirects=0`. To change those values, edit the
+`SystemTweaks` fields in `cfm.conf`, not a kernsec override.
 
 ### Foreign drop-in reconcile
 
-kernsec writes its sysctl values to `/etc/sysctl.d/99-cfm-kernsec.conf` and
-relies on the `99-` prefix to win the `sysctl --system` ordering race. But that
-race is **lexical by basename**, so a foreign drop-in that sorts *after*
-`99-cfm-kernsec.conf` — e.g. the legacy `/etc/sysctl.d/99-kspp.conf` the old
-`scripts/kspp.sh` shipped (`k` > `c`) — is applied **last** and silently
-overrides kernsec on the next reboot / `sysctl --system`. kernsec's live
-`sysctl -w` fixes the running kernel immediately, but the stale foreign line
-re-applies its value after a reboot, and `apply --check` (which only compares
-kernsec's own file + cmdline) never sees it.
+kernsec relies on `99-cfm-kernsec.conf` winning the `sysctl --system` order.
+That order is lexical by basename, so a foreign file sorting after it — e.g.
+the legacy `/etc/sysctl.d/99-kspp.conf` from the old `kspp.sh` — re-applies
+its value on the next reboot, and kernsec's own drift check would not see it.
 
-For a small allowlist of keys where that silent revert re-introduces a **known
-breakage**, `apply` reconciles the foreign files too: it scans every other
-sysctl config file in `/etc/sysctl.d/*.conf` plus the legacy `/etc/sysctl.conf`,
-and any active assignment of an allowlisted key whose value diverges from
-kernsec's is **commented out** (with a marker) so the key falls through to
-kernsec's value. The foreign file is backed up once to
-`<file>.cfm-kernsec.bak` before it is edited, and its original permissions are
-preserved. The pass is idempotent (an already-commented line is a no-op) and
-best-effort (a read/write failure on one foreign file is reported but never
-aborts apply). A pending conflict counts as drift, so `apply --check` /
-`cfm kernsec monitor` flag the latent revert until an `apply` defuses it, and
-both the interactive apply confirm prompt and `cfm kernsec preview` name the
-foreign file(s) about to be rewritten (plus their `.cfm-kernsec.bak` backups) so
-the operator never approves blind to a mutation of a file kernsec doesn't own.
-Keys are matched in normalised dotted form, so a foreign drop-in using the
-slash separator `sysctl.conf(5)` also accepts (`fs/protected_regular`) is caught
-too.
+For an allowlist of keys where that revert brings back a known breakage,
+`apply` reconciles foreign files:
 
-Today the allowlist is a single key — **`fs.protected_regular`** — because
-kernsec deliberately ships `=1` (not the KSPP `=2`) for cPanel DNS Zone Editor
-compatibility, and a leftover foreign `=2` re-breaks it after a reboot. This is
-a narrow, curated list (`foreignReconcileKeys` in
-`internal/kernsec/foreign_sysctl.go`), **not** a blanket "kernsec overwrites any
-operator sysctl": only `/etc/sysctl.d/*.conf` and `/etc/sysctl.conf` are scanned
-and edited, and kernsec never rewrites operator values for keys outside the
-allowlist. Vendor-owned directories (`/usr/lib/sysctl.d`, `/run/sysctl.d`) are
-**neither scanned nor edited** — a conflict kernsec would refuse to fix must not
-be reported as never-converging drift, so an override placed there is left for
-the operator to resolve. A symlinked drop-in (Debian/Ubuntu ship
-`/etc/sysctl.d/99-sysctl.conf -> ../sysctl.conf`) is resolved to its real target
-before editing, so the symlink is preserved. `disable` (tier 0) does not run the
-reconcile — it leaves foreign files untouched.
+- It scans `/etc/sysctl.d/*.conf` and `/etc/sysctl.conf`. An active line for
+  an allowlisted key with a different value is commented out with a marker.
+- Each edited file is backed up once to `<file>.cfm-kernsec.bak`; permissions
+  are kept. A symlinked drop-in (Debian's `99-sysctl.conf -> ../sysctl.conf`)
+  is edited at its target.
+- Idempotent and best-effort: a failure on one file is reported, never
+  aborts apply.
+- A pending conflict counts as drift (`apply --check`, the monitor). The
+  confirm prompt and `preview` name the files to be rewritten.
+- Keys match in dotted form, so the slash form (`fs/protected_regular`) is
+  caught too.
+- Vendor directories (`/usr/lib/sysctl.d`, `/run/sysctl.d`) are neither
+  scanned nor edited.
+- `disable` does not run the reconcile.
+
+The allowlist (`foreignReconcileKeys`, `internal/kernsec/foreign_sysctl.go`)
+is one key, `fs.protected_regular`. It is not a licence to overwrite any
+operator sysctl.
 
 ### Boot-argument rules
 
 | Group | Tier | Args | Operator impact |
 |---|---:|---|---|
-| `kspp.boot` | 1 | `slab_nomerge`, `init_on_alloc=1`, `page_alloc.shuffle=1`, `randomize_kstack_offset=on`, `initcall_blacklist=algif_aead_init` | Memory-safety hardening. `init_on_alloc=1` can have modest alloc-heavy overhead. The `initcall_blacklist` entry is a temporary Copy Fail / CVE-2026-31431 mitigation affecting AEAD AF_ALG use. |
-| `boot.bug-detection` | 1 | `kfence.sample_interval=100` | Enables low-overhead KFENCE sampling. |
-| `boot.sidechannel` | 1 | `tsx=off` | Disables Intel TSX side-channel surface; no expected hosting impact. |
-| `boot.bpf` | 1 | `unprivileged_bpf_disabled=2` | Pairs with the `kernel.unprivileged_bpf_disabled=2` sysctl. On kernels built with `CONFIG_BPF_UNPRIV_DEFAULT_OFF=y` (RHEL/Alma 9-10, recent stable) the sysctl is locked at boot — only this boot arg can land the value at 2. |
-| `tier2.oops` | 2 | `oops=panic` | Pairs with Tier 2 panic-on-oops sysctls; can reboot on kernel oops. |
-| `tier3.mempaint` | 3 | `init_on_free=1` | Stacks with Tier 1 `init_on_alloc=1` to fully eliminate UAF-read primitives (the afflicted.sh writeup names `INIT_ON_FREE=off` as the kernel gap that keeps UAF-read viable). Combined perf ceiling ~3-8% in the worst case; brick-safe. Operator opt-in only — `conf.Tier = 3`. |
+| `kspp.boot` | 1 | `slab_nomerge`, `init_on_alloc=1`, `page_alloc.shuffle=1`, `randomize_kstack_offset=on`, `initcall_blacklist=algif_aead_init` | Memory-safety hardening; `init_on_alloc=1` costs a little on alloc-heavy loads. `initcall_blacklist` is the Copy Fail (CVE-2026-31431) mitigation for AEAD AF_ALG. |
+| `boot.bug-detection` | 1 | `kfence.sample_interval=100` | Low-overhead KFENCE sampling. |
+| `boot.sidechannel` | 1 | `tsx=off` | Removes Intel TSX side-channel surface. |
+| `boot.bpf` | 1 | `unprivileged_bpf_disabled=2` | Pairs with the sysctl (see above). |
+| `tier2.oops` | 2 | `oops=panic` | Pairs with the Tier 2 panic sysctls. |
+| `tier3.mempaint` | 3 | `init_on_free=1` | With `init_on_alloc=1`, removes use-after-free read primitives. Brick-safe; combined cost ~3-8% worst case. |
 
-kernsec only owns the managed boot-argument keys listed above. It strips stale
-instances of those keys before appending the desired managed set and preserves
-operator-provided arguments outside the managed set. A per-rule `state = force`
-entry only affects rule IDs that are still present in the kernsec catalog; it
-does not resurrect removed IDs or make kernsec own boot/sysctl/module keys that
-are no longer registered here.
+kernsec owns only the keys in `ManagedBootArgKeys` (`profile.go`). It strips
+stale instances of those keys, appends the desired set, and preserves every
+other argument. `state = force` affects only rule IDs still in the registry;
+it never resurrects a removed rule or key.
+
+`KSEC-LSM-bpf-001` is not tied to a tier: it acts only with
+`[rule "KSEC-LSM-bpf-001"] state = force`. It adds `bpf` to the existing
+`lsm=` argument, keeping the other LSMs (`internal/kernsec/lsm_merge.go`).
+If the cmdline has no `lsm=` argument, it changes nothing. A reboot applies
+it. `status` shows it under `[LSM cmdline merge rule]`. `lsm` is not a
+managed key, so `disable` and `rollback` do not remove `bpf` from it.
 
 ### Module blacklist rules
 
-`apply` writes one `blacklist` line and one `install <module> /bin/false` line
-per selected rule. This prevents both alias-based autoloading and direct
-`modprobe` loads.
+`apply` writes a `blacklist` line and an `install <module> /bin/false` line
+per selected module, blocking both alias autoload and direct `modprobe`.
 
-After the modprobe drop-in is written, `apply` also runs a **default-on
-unload pass**: for every managed module currently in `/proc/modules` it
-invokes `modprobe -r <name>` and prints a per-row status table:
+After writing, `apply` runs an unload pass: `modprobe -r` for every managed
+module in `/proc/modules`, with a per-module status:
 
 ```
 [Modules] unload pass (modprobe -r) over N managed-and-loaded module(s):
             UNLOADED   esp4
-            UNLOADED   esp6
             BUSY       rxrpc            in use by another holder — will clear at reboot
             BUILTIN    sctp             compiled into the kernel — modprobe.d blacklist has no effect; needs kernel rebuild or cmdline change
-[Modules] 2 unloaded, 1 busy (will clear at reboot), 1 builtin (kernel rebuild required). Blacklist on disk persists across reboot.
-          Reboot at convenience to clear any busy modules and sync the initramfs.
 ```
 
-This closes the running-kernel window (Fragnesia / Dirty Frag class) the
-same minute apply runs, while the blacklist on disk guarantees the
-module stays gone across the next boot. Host-profile-gated rules
-(`modules.ipsec` on a host with active IPsec policies, `modules.bus.*`
-on a host with matching hardware, etc.) are filtered out of the apply
-set upstream, so the unload pass never touches a module that the
-profile says is in legitimate use. `BUSY` modules are reported and
-otherwise ignored — apply does not fail on refcount-busy unloads, since
-the blacklist on disk prevents them coming back and reboot finishes the
-job.
+This closes the running-kernel window (Fragnesia / Dirty Frag class) at
+apply time. Host-profile-gated groups are filtered out first, so the pass
+never touches a module the profile says is in use. `BUSY` never fails apply;
+the blacklist keeps it out after reboot. `--no-unload` (on `apply` and
+`disable`) skips the pass.
 
-Operators who need the older "write config, unload manually" behaviour
-can pass `--no-unload` to `cfm kernsec apply` or `cfm kernsec disable`.
-Initramfs rebuild is not run automatically: for the modules shipped
-today none are loaded by the initramfs phase, so `/etc/modprobe.d/`
-alone is sufficient. Operators who want a tidy `lsinitrd | grep
-cfm-kernsec.conf` can run `dracut --force` (RHEL family) or
-`update-initramfs -u` (Debian family) by hand after apply.
+The initramfs is not rebuilt: no shipped module loads in the initramfs phase.
+For a tidy initramfs, run `dracut --force` or `update-initramfs -u` by hand.
 
-The TUI's per-rule / per-group disable action calls the same apply
-path, so the unload pass also runs there. The bottom-bar flash
-includes a one-line summary (e.g. "applied 7 change(s) — 5 unloaded, 2
-busy (will clear at reboot)") so the operator sees the running-kernel
-status without dropping back to the shell.
+All module rules are Tier 1.
 
-| Group | Tier | Modules | Notes |
-|---|---:|---|---|
-| `modules.recent_cves` | 1 | `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | Recently exploited or no normal server use. |
-| `modules.recent_cves.ksmbd` | 1 | `ksmbd` | Kernel SMB server with multiple LPE CVEs 2023-2025. Auto-skipped on hosts running ksmbd deliberately (host-profile gated on `HasKSMBDServer`: module loaded, `/sys/class/ksmbd` populated, or ksmbd-tools / `/etc/ksmbd` installed). |
-| `modules.net.legacy` | 1 | Legacy protocols such as `dccp`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, LLC/SNAP variants, `phonet`, `caif`, `caif_socket`, `hsr`, `smc`, `smc_diag`, `slip`, and similar dead network stacks | Intended to be safe on normal hosting servers. Override per-rule if the host actually uses SMC. |
-| `modules.net.legacy.ppp` | 1 | `slhc` | Van Jacobson header compression — pulled in by `ppp_async`, `pptp`, and `l2tp_ppp`. Auto-skipped on hosts terminating L2TP or PPTP (host-profile gated on `HasL2TPWorkload` or `HasPPTPWorkload`). |
-| `modules.net.legacy.sctp` | 1 | `sctp`, `sctp_diag` | Telecom signalling (SS7 / Diameter / M3UA), K8s Services with `protocol: SCTP`, and lksctp-tools-based monitoring. Auto-skipped on hosts with any SCTP workload evidence (host-profile gated on `HasSCTPWorkload`: sctp module loaded, `/proc/net/sctp` present, `sctp_darn` / Nagios `check_sctp` / `*sctp*.service` installed). WebRTC's usrsctp runs in userspace and is **not** a gate signal. |
-| `modules.net.legacy.tipc` | 1 | `tipc` | Cluster IPC; legitimate users are Pacemaker / Corosync HA clusters and Erlang/OTP distribution. Auto-skipped on hosts with TIPC workload evidence (host-profile gated on `HasTIPCWorkload`: tipc loaded, `/proc/net/tipc`, `tipc-config` from tipcutils, or any `*tipc*.service`). The bare `tipc` binary from iproute2 is **not** a signal — it ships on essentially every host. |
-| `modules.net.legacy.rxrpc` | 1 | `rxrpc` | AFS RPC transport; entry point for CVE-2026-31635 (DirtyDecrypt). Auto-skipped on hosts running AFS clients (host-profile gated on `HasAFS`: rxrpc / kafs / openafs loaded, `/afs` mounted, or OpenAFS tooling). |
-| `modules.net.legacy.l2tp` | 1 | `l2tp_core`, `l2tp_ip`, `l2tp_ip6`, `l2tp_eth`, `l2tp_netlink`, `l2tp_ppp` | L2TP VPN kernel data path. Auto-skipped on hosts terminating L2TP (host-profile gated on `HasL2TPWorkload`: l2tp_* loaded, `/proc/net/l2tp*`, or xl2tpd / kl2tpd / accel-ppp installed). |
-| `modules.net.legacy.pptp` | 1 | `pptp` | PPTP VPN protocol. Auto-skipped on hosts terminating PPTP (host-profile gated on `HasPPTPWorkload`: pptp loaded, `/etc/pptpd.conf`, or pptpd / accel-ppp installed). |
-| `modules.net.legacy.rds` | 1 | `rds` | Oracle RAC interconnect transport. Auto-skipped on hosts running Oracle Database (host-profile gated on `HasRDSWorkload`: rds loaded, `/proc/net/rds*`, or Oracle indicators — `oratab`, `lsnrctl`, `/u01/app/oracle`). |
-| `modules.ipsec` | 1 | `esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`, `af_key` | Kernel XFRM/ESP transforms, the routing-based XFRM virtual interface, and the PF_KEYv2 keying socket family. Mitigates the XFRM/ESP LPE class (CVE-2026-46300 "Fragnesia" and the related "Dirty Frag") and pre-empts future bugs in adjacent transforms. Skipped on hosts with active IPsec policies (host-profile gated on `HasIPsec`). |
-| `modules.net.virt` | 1 | `vsock` | Skipped on KVM hypervisors (host-profile gated on `IsKVMHost`) so `vhost_vsock` remains available for guest↔host comms. |
-| `modules.net.iot` | 1 | `ieee802154`, `mac802154`, `6lowpan` | IEEE 802.15.4 / low-power wireless PAN stack — no 802.15.4 radios on hosting boxes. |
-| `modules.fs.unused` | 1 | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs`, `adfs`, `hpfs`, `minix`, `bfs` | Auto-skipped on hosts where any of these filesystems is currently mounted (`/proc/mounts`) or declared in `/etc/fstab` (host-profile gated on `HasMountedDeadFS`). The skip reason names the matching FS so the audit row identifies the trigger. |
-| `modules.fs.container` | 1 | `erofs` | Skipped on hosts running containers (host-profile gated on `HasContainers`) since some container image layers use it. |
-| `modules.bus.bluetooth` | 1 | `bluetooth`, `btusb`, `bnep`, `hci_uart` | Host-profile gated when Bluetooth hardware is detected. |
-| `modules.bus.firewire` | 1 | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | Auto-skipped on hosts with FireWire hardware (host-profile gated on `HasFirewireHardware`: `/sys/bus/firewire/devices` non-empty). |
-| `modules.bus.thunderbolt` | 1 | `thunderbolt` | Skipped when Thunderbolt devices are detected. |
-| `modules.bus.misc` | 1 | `joydev`, `pcspkr`, `floppy` | No typical server use. |
-| `modules.mctp` | 1 | `mctp`, `mctp-i2c`, `mctp-serial` | In-band MCTP (OpenBMC / NVMe-MI / PCIe VDM sideband). Classic Supermicro IPMI and Dell iDRAC ride their own NIC and do not use this stack. Skipped automatically when in-band MCTP endpoints are registered (host-profile gated on `HasMCTPInBand`), so OpenBMC platforms like the Supermicro H13SRD-F MicroCloud keep the sideband intact. |
-| `modules.input.userspace` | 1 | `uinput`, `uhid` | Userspace virtual input / HID devices — no use case on servers, non-trivial historical exploit surface. |
-| `modules.sidechannel` | 1 | `intel_rapl_common`, `intel_rapl_msr` | Removes RAPL power telemetry to avoid power side-channel surface. |
-| `modules.crypto_userapi` | 1 | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher`, `algif_aead` | Extends the AF_ALG hardening; `algif_aead` is also covered at boot via `initcall_blacklist=algif_aead_init`. |
+| Group | Modules | Skipped when |
+|---|---|---|
+| `modules.recent_cves` | `n_hdlc`, `vivid`, `watch_queue`, `binfmt_aout`, `nfc`, `nfcsim`, `pn533`, `pn533_usb`, `kcm`, `n_gsm`, `n_r3964` | — |
+| `modules.recent_cves.ksmbd` | `ksmbd` | `HasKSMBDServer` |
+| `modules.net.legacy` | `dccp`, `ax25`, `netrom`, `x25`, `rose`, `decnet`, `econet`, `ipx`, `appletalk`, `psnap`, `p8023`, `p8022`, `smc`, `smc_diag`, `slip`, `gtp`, `can`, `atm`, `irda`, `phonet`, `caif`, `caif_socket`, `hsr` | — (skip per rule if the host uses SMC) |
+| `modules.net.legacy.llc` | `llc`, `llc2` | bridge in use: `UsesBridge`, containers, KVM host, libvirt, Proxmox |
+| `modules.net.legacy.ppp` | `slhc` | L2TP or PPTP workload |
+| `modules.net.legacy.sctp` | `sctp`, `sctp_diag` | `HasSCTPWorkload` |
+| `modules.net.legacy.tipc` | `tipc` | `HasTIPCWorkload` |
+| `modules.net.legacy.rxrpc` | `rxrpc` (CVE-2026-31635, DirtyDecrypt) | `HasAFS` |
+| `modules.net.legacy.l2tp` | `l2tp_core`, `l2tp_ip`, `l2tp_ip6`, `l2tp_eth`, `l2tp_netlink`, `l2tp_ppp` | `HasL2TPWorkload` |
+| `modules.net.legacy.pptp` | `pptp` | `HasPPTPWorkload` |
+| `modules.net.legacy.rds` | `rds` | `HasRDSWorkload` |
+| `modules.ipsec` | `esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`, `af_key` | `HasIPsec` |
+| `modules.net.virt` | `vsock` | `IsKVMHost` |
+| `modules.net.iot` | `ieee802154`, `mac802154`, `6lowpan` | — |
+| `modules.fs.unused` | `cramfs`, `freevxfs`, `jffs2`, `hfs`, `hfsplus`, `udf`, `qnx4`, `qnx6`, `omfs`, `befs`, `ufs`, `affs`, `sysv`, `nilfs2`, `gfs2`, `ocfs2`, `coda`, `reiserfs`, `adfs`, `hpfs`, `minix`, `bfs` | `HasMountedDeadFS` (the reason names the FS) |
+| `modules.fs.container` | `erofs` | `HasContainers` |
+| `modules.bus.bluetooth` | `bluetooth`, `btusb`, `bnep`, `hci_uart` | Bluetooth hardware |
+| `modules.bus.firewire` | `firewire-core`, `firewire-ohci`, `firewire-net`, `firewire-sbp2` | FireWire hardware |
+| `modules.bus.thunderbolt` | `thunderbolt` | Thunderbolt hardware |
+| `modules.bus.misc` | `joydev`, `pcspkr`, `floppy` | — |
+| `modules.mctp` | `mctp`, `mctp-i2c`, `mctp-serial` | `HasMCTPInBand` |
+| `modules.input.userspace` | `uinput`, `uhid` | — |
+| `modules.sidechannel` | `intel_rapl_common`, `intel_rapl_msr` | — |
+| `modules.crypto_userapi` | `algif_hash`, `algif_skcipher`, `algif_rng`, `algif_akcipher`, `algif_aead` | — |
 
-NFS, CIFS/SMB clients, `io_uring`, and wifi modules are intentionally not
-blacklisted by the shipped registry. These have legitimate operator-managed use
-cases on some hosts.
+Why some groups exist:
 
-IPsec/XFRM modules (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`,
-`xfrm_interface`) are shipped in `modules.ipsec` and blacklisted by
-default in response to the XFRM/ESP LPE class (CVE-2026-46300
-"Fragnesia" and the related "Dirty Frag"). The AH and IPcomp transforms
-ride the same XFRM data path as ESP and would be reachable by future
-bugs in the same layer; `xfrm_interface` adds net-new XFRM surface with
-no hosting use outside IPsec. The whole group is auto-skipped on hosts
-where the IPsec host-profile gate fires (`/proc/net/xfrm_policy` or
-`/proc/net/pfkey` non-empty), so hosts that actually terminate or
-transit IPsec tunnels keep the kernel data path.
+- `modules.ipsec` answers the XFRM/ESP LPE class (CVE-2026-46300
+  "Fragnesia" and "Dirty Frag"). AH and IPcomp ride the same XFRM path;
+  `xfrm_interface` and `af_key` add XFRM surface with no hosting use.
+- `llc` / `llc2` are dependencies of the `bridge` module (bridge → stp →
+  llc), so any host with bridges keeps them.
+- `slhc` is pulled in by `ppp_async`, `pptp` and `l2tp_ppp`.
+- `modules.mctp` is in-band MCTP (OpenBMC, NVMe-MI, PCIe VDM). Classic
+  Supermicro IPMI and Dell iDRAC use their own NIC and are not affected.
+- `ksmbd` has had multiple LPE CVEs; some operators run it on purpose.
 
-### fstab / mount audit rules
+NFS, CIFS/SMB clients, `io_uring` and wifi modules are intentionally not
+blacklisted: they have legitimate uses on some hosts.
 
-These rules are **audit-only**. kernsec reports missing mount options but never
-edits `/etc/fstab`.
+### fstab / mount rules
 
-| Rule ID | Group | Mount point | Recommendation | Notes |
-|---|---|---|---|---|
-| `KSEC-FS-mount.tmp-001` | `fs.mount.tmp` | `/tmp` | `nodev,nosuid,noexec` | Review before enabling; `noexec` can break composer, pip, and hosting-panel workflows. |
-| `KSEC-FS-mount.tmp-002` | `fs.mount.tmp` | `/var/tmp` | `nodev,nosuid,noexec` | Same compatibility considerations as `/tmp`. |
-| `KSEC-FS-mount.tmp-003` | `fs.mount.tmp` | `/dev/shm` | `nodev,nosuid,noexec` | Usually safe, but review JVM/Python multiprocessing workloads. |
-| `KSEC-FS-mount.proc-001` | `fs.mount.proc` | `/proc` | `hidepid=2` (recipe also sets `gid=<group>`) | Hides other users' `/proc/<pid>` entries from non-root readers — single largest reconnaissance-channel reduction on shared hosting. Strictly audit-only (`CanEnable=false`); operator opts in manually after creating the escape group. The audit checks the `hidepid` token only — the operator-chosen `gid=<group>` resolves to a numeric gid in `/proc/mounts` and is not literally matchable, so kernsec validates the security invariant (hidepid is on) and trusts the recipe for the gid= escape valve. Kernel renderings `hidepid=invisible` (>=5.8), `hidepid=4`, and `hidepid=ptraceable` all satisfy the recommendation. See below for the full recipe. |
+| Rule ID | Mount point | Recommendation | Automated by `apply` |
+|---|---|---|---|
+| `KSEC-FS-mount.tmp-001` | `/tmp` | `nodev,nosuid,noexec` | Yes, persistence only (no live remount). |
+| `KSEC-FS-mount.tmp-002` | `/var/tmp` | `nodev,nosuid,noexec` | Yes, persistence only. |
+| `KSEC-FS-mount.tmp-003` | `/dev/shm` | `nodev,nosuid,noexec` | Yes, fstab edit plus live remount. |
+| `KSEC-FS-mount.proc-001` | `/proc` | `hidepid=2` (recipe also sets `gid=`) | No — audit only (`CanEnable=false`). |
 
-`/home` was previously audited for `nodev,nosuid`. It was removed because operator setups vary too widely (panels with setuid helpers under `/home`, NFS-exported homes, CageFS layouts) for a one-size recommendation to produce more signal than noise.
+All four are Tier 1 with no host-profile gate, so a default `apply` edits
+`/etc/fstab` for the three temp mounts. The direction follows the decision:
+`APPLY` enables, `SKIP-TIER` / `SKIP-CONF` / `SKIP-HOST` reverts what kernsec
+added. `disable` (tier 0) therefore reverts them. `noexec` on `/tmp` can break
+composer, pip and hosting-panel workflows: preview first, or `state = skip`
+the rule.
 
-The mount audit renders one of: `OK` (every recommended option live), `PARTIAL` (some live, some missing — the remediation hint names only the missing options), `MISSING` (mount exists but no recommended options live), or `SKIP` (path is not a separate mount, is a symlink to another audited mount point, or is a bind sibling of another audited mount point). For PARTIAL and MISSING rows the audit prints the exact `mount -o remount,…` command and the matching `/etc/fstab` or systemd `.mount` change.
+The audit renders `OK`, `PARTIAL` (the hint names only the missing options),
+`MISSING`, `PEND` (written, waiting for reboot) or `SKIP` (not a separate
+mount, or a symlink / bind sibling of another audited mount point). PARTIAL
+and MISSING rows print the exact `mount -o remount,…` command and the
+matching fstab or systemd `.mount` change.
 
-For `/tmp` and `/var/tmp` kernsec's Enable is **persistence-only**: it writes an `/etc/fstab` edit (or a systemd `tmp.mount` drop-in) and deliberately **skips the live remount**, because every `PrivateTmp=yes` service (mysqld, named, php-fpm, nginx, exim, …) holds bind mounts rooted in the current `/tmp` namespace and a live remount would break them — so the audit row reports **PEND** until the next reboot converges. Two important carve-outs: (1) `/tmp` on a host with neither an fstab line nor a systemd `.mount` unit (`MountNotSeparate`) is **refused** with a pointer to `cfm kernsec secure-tmp`; (2) on a **cPanel securetmp** host (`/usr/tmpDSK`) kernsec leaves `/var/tmp` to securetmp entirely — it does **not** add a `/tmp /var/tmp none bind` line, because that would generate a systemd `var-tmp.mount` that races securetmp's own bind (an early auto-mount pins the pre-securetmp root `/tmp`, which securetmp then orphans into a dead inode when it rebuilds `/tmp` on its loop device). Operators who want a genuinely separate hardened filesystem can run `cfm kernsec secure-tmp --size <N>G` as a separate explicit step — see the dedicated section below.
+`/tmp` and `/var/tmp` are persistence-only: kernsec writes an fstab edit, or a
+systemd `tmp.mount` drop-in where systemd owns `/tmp`, and skips the live
+remount. Every `PrivateTmp=yes` service (mysqld, named, php-fpm, nginx, exim,
+…) holds bind mounts rooted in the current `/tmp`, and a live remount would
+break them. The rows report `PEND` until reboot. Carve-outs:
+
+- `/tmp` with neither an fstab line nor a `.mount` unit is refused, with a
+  pointer to `cfm kernsec secure-tmp`.
+- When `/var/tmp` is not a separate mount, Enable adds a
+  `/tmp /var/tmp none bind` line. Existing `/var/tmp` content is shadowed,
+  not deleted; use `secure-tmp` if it matters.
+- On a cPanel securetmp host (`/usr/tmpDSK`), `/var/tmp` is left to
+  securetmp. A bind line would create a systemd `var-tmp.mount` that races
+  securetmp's own bind and can pin the old `/tmp` into a dead inode.
+
+`/dev/shm` is tmpfs (no on-disk state; remount keeps contents; `noexec`
+affects only new execs), so it is also remounted live. `size=` and `mode=` are
+kept. An explicit operator `exec` / `suid` / `dev` aborts with an error instead
+of being overwritten. Disable reverts only what kernsec added: systemd already
+mounts `/dev/shm` `nosuid,nodev` (`MountRule.DefaultLiveOptions`), so the
+revert is `mount -o remount,exec /dev/shm`. A line kernsec authored is removed
+whole; on an operator line only kernsec's additions are stripped.
+
+`/home` is not audited: panels with setuid helpers, NFS homes and CageFS
+layouts vary too much for one recommendation.
 
 #### `/proc hidepid=2,gid=<group>` — operator-applied process-table hiding
 
-The `KSEC-FS-mount.proc-001` rule is strictly **audit-only**: kernsec does not auto-edit `/etc/fstab` for `/proc` even at conf.Tier 2/3, because the third-party-monitoring blast radius is uncatalogueable in advance (every site has some `ps`-scraping agent we haven't profiled). The rule's value is the recommendation surfaced in `cfm kernsec status` — operators apply it manually after setting up the escape group.
+kernsec never automates this rule at any tier: every site has some
+`ps`-scraping agent kernsec cannot know in advance.
 
-Why it matters on shared hosting: without `hidepid`, every vhost user can `ps aux` and read other tenants' `/proc/<pid>/cmdline`, `/proc/<pid>/status`, `/proc/<pid>/environ`, `/proc/<pid>/fd`, and `/proc/<pid>/maps`. That leaks sshd command-lines, `mysql -p<password>` arguments, the contents of process address space layouts (KASLR-leak primitive), open file descriptors, and admin sessions. `hidepid=2` makes every `/proc/<other-pid>` directory invisible to non-root non-group-member users; root sees everything regardless.
+Without `hidepid`, every vhost user can read other tenants'
+`/proc/<pid>/{cmdline,status,environ,fd,maps}`: sshd command lines,
+`mysql -p<password>` arguments, address-space layouts (a KASLR leak) and
+admin sessions. `hidepid=2` hides other users' `/proc/<pid>` from non-root
+users outside the escape group.
+
+The audit checks the `hidepid` token only; `gid=` shows as a number in
+`/proc/mounts`. `hidepid=invisible` (kernel 5.8+), `hidepid=4` and
+`hidepid=ptraceable` also satisfy it.
 
 Recipe:
 
-1. **Create the escape group.** Pick any free gid (the convention this doc uses is the symbolic name `cfmprocreaders`, but the gid number is what `/proc` mounts with):
+1. Create the escape group:
    ```
    groupadd --system cfmprocreaders
    ```
-2. **Add monitoring uids to the group** (the agents that legitimately scrape `/proc` as non-root). Common candidates: `netdata`, `munin`, `zabbix`, `nrpe`. Skip cPanel / DirectAdmin / CloudLinux daemons — they all run as root and don't need the group.
+2. Add the non-root monitoring users that read `/proc` (e.g. `netdata`,
+   `munin`, `zabbix`, `nrpe`) and restart them:
    ```
    usermod -aG cfmprocreaders netdata
    usermod -aG cfmprocreaders zabbix
-   # restart the agents so the new supplementary group lands in their session
    systemctl restart netdata zabbix-agent
    ```
-3. **Edit `/etc/fstab`** to mount `/proc` with the options. If a `proc` line already exists, append the options; otherwise add the line:
+3. Set the options in `/etc/fstab` (append to an existing `proc` line, or
+   add one):
    ```
    proc   /proc   proc   defaults,hidepid=2,gid=cfmprocreaders   0 0
    ```
-4. **Apply live without reboot:**
+4. Apply live:
    ```
    mount -o remount,hidepid=2,gid=cfmprocreaders /proc
    ```
-5. **Verify:** as a non-root non-group user, `ps aux` should show only their own processes; as root or as a group member, `ps aux` continues to show everything.
+5. Verify: a non-root, non-group user's `ps aux` shows only their own
+   processes; root and group members see everything.
 
-What stays correct after `hidepid=2`:
-
-- cPanel / WHM "Process Manager" UI: runs as root, sees everything.
-- DirectAdmin's `dataskq`, `directadmin` daemon, mail helpers: all root.
-- cPanel-user-facing "Process Manager" inside the user's cPanel UI: only sees that user's own processes — that IS the intended hardening (previously, vhost A could enumerate vhost B's processes).
-- CageFS-confined users: continue to see only their own; the cage's own `/proc` bind-mount is a separate namespace and is not affected by the host's `hidepid` setting.
-- lve-stats / cl-smart-advice / Imunify360 / KernelCare: all run as root, unaffected.
-
-What needs the escape group (or breaks if you forget):
-
-- Munin's `proc_*` plugins, Netdata's `apps.plugin`, Zabbix-agent's per-process discovery, New Relic / Datadog process metrics — anything that reads `/proc/<pid>/status` for non-self pids as a non-root user.
+Unaffected (all run as root): cPanel/WHM Process Manager, DirectAdmin
+daemons, lve-stats, cl-smart-advice, Imunify360, KernelCare. A cPanel user's
+own Process Manager shows only that user's processes — the intended effect.
+CageFS has its own `/proc` namespace. Needs the escape group: Munin `proc_*`
+plugins, Netdata `apps.plugin`, Zabbix per-process discovery, New Relic /
+Datadog process metrics.
 
 #### `cfm kernsec secure-tmp` — operator-invoked /tmp + /var/tmp hardening
 
-`cfm kernsec secure-tmp --size <N>G` carves `/tmp` and `/var/tmp` out into a dedicated hardened filesystem in one command. It is intentionally a separate verb (not part of `apply`) because activating the new mounts requires a reboot, and that's a decision the operator should make explicitly.
+`cfm kernsec secure-tmp --size <N>G` (1G to 256G) puts `/tmp` and `/var/tmp`
+on a dedicated hardened filesystem. It is a separate verb because activation
+needs a reboot.
 
-What it does:
-
-1. **Pre-flights.** Refuses if `/tmp` or `/var/tmp` is already a separate mount, if `/etc/fstab` already has an entry for either path, if `/var/tmpDSK` already exists, if free space on `/var` is less than `<size> + 1G` headroom, or if `<size>` would consume more than 50% of available free space.
-2. **Creates the backing file.** `fallocate -l <size> /var/tmpDSK` (mode `0600`), then `mkfs.ext4 -F -L cfm-securetmp /var/tmpDSK`.
-3. **Stages `/var/tmp` contents.** Mounts the new filesystem at `/mnt/.cfm-newtmp`, `chmod 1777`, copies every top-level entry of `/var/tmp` into it (skipping `systemd-private-*` directories — those are recreated by systemd when each service restarts after boot). `/tmp` is intentionally *not* copied since `systemd-tmpfiles` wipes `/tmp` on every boot by design.
-4. **Unmounts the scratch path** and removes the empty `/mnt/.cfm-newtmp` directory.
-5. **Appends `/etc/fstab`** with a `BackupOnce` of the original to `/etc/fstab.cfm-kernsec.bak`:
+1. **Pre-flight.** Refuses if `/tmp` or `/var/tmp` is already a separate
+   mount or has an fstab entry, if `/var/tmpDSK` exists, if `/var` has less
+   than `<size> + 1G` free, or if `<size>` exceeds 50% of free space.
+2. **Backing file.** `fallocate` `/var/tmpDSK` (mode `0600`), then
+   `mkfs.ext4 -F -L cfm-securetmp`.
+3. **Stage `/var/tmp`.** Mount at `/mnt/.cfm-newtmp`, `chmod 1777`, copy
+   `/var/tmp`'s top-level entries except `systemd-private-*`. `/tmp` is not
+   copied (it is wiped at boot anyway).
+4. **Unmount** the scratch path and remove it.
+5. **Append `/etc/fstab`**, backing it up once to
+   `/etc/fstab.cfm-kernsec.bak`:
    ```
    /var/tmpDSK  /tmp      ext4  loop,nofail,nodev,nosuid,noexec,rw  0 0
    /tmp         /var/tmp  none  bind,nofail                          0 0
    ```
-   Both lines carry `nofail` deliberately (added 2026-07-19). Without it, a
-   fstab entry is a hard requirement of systemd's `local-fs.target`, so a
-   damaged or deleted `/var/tmpDSK` (its fsck pass is 0 — the embedded ext4 is
-   never checked) would drop the host into **emergency mode at boot** — no
-   SSH, console-only recovery. With `nofail` the host still boots and `/tmp`
-   falls back to a plain root directory: temporarily unhardened (no `noexec`)
-   but reachable, which is the right trade-off for a remote fleet. Hosts where
-   `secure-tmp` ran **before** this change should add `nofail` to both lines
-   by hand (one word per line in `/etc/fstab`; no reboot needed for the edit
-   itself to be safe).
-6. **Stops.** The operator reboots when convenient. Activation is reboot-only; the subcommand never tries to `umount /tmp` on the running host.
+   `nofail` keeps a damaged or missing `/var/tmpDSK` from dropping the host
+   into emergency mode at boot (fsck pass is 0). `/tmp` then falls back to an
+   unhardened root directory, but the host stays reachable. Hosts that ran
+   `secure-tmp` before `nofail` was added should add it to both lines by hand.
+6. **Stop.** The operator reboots. The verb never unmounts the live `/tmp`:
+   `PrivateTmp=yes` services pin it (`EBUSY`), and remounting under them
+   risks stale descriptors.
 
-Why reboot-only: every service with `PrivateTmp=yes` (`mysqld`, `named`, `nginx`, `php-fpm`, `exim`, `memcached`, `dbus-broker`, `chronyd`, `irqbalance`, `systemd-logind`, …) holds a kernel bind mount that pins the live `/tmp` inode. `umount /tmp` returns `EBUSY` until every one of those services is restarted, and remounting under them risks stale file descriptors for in-flight temp files. The reboot is the only clean way to clear both problems at once and pick up the new fstab entries.
+`--dry-run` prints the plan (size, device, fstab lines, staged entry count).
 
-`--dry-run` previews the plan (size, device path, fstab lines, staged entry count) without creating the loop file or editing fstab.
-
-To revert a `secure-tmp` install:
-
-1. `cp /etc/fstab.cfm-kernsec.bak /etc/fstab`
-2. `umount /var/tmp /tmp` (or `systemctl reboot`)
-3. `rm /var/tmpDSK`
-
-`/dev/shm` is the narrow exception: `MountRule.CanEnable=true` lets `cfm kernsec apply` edit `/etc/fstab` and live-remount it. Auto-application is gated on tmpfs (no on-disk state to migrate), preserved options like `size=` and `mode=` are kept untouched, and an explicit `exec`/`suid`/`dev` set by the operator aborts with a clear error rather than being silently overwritten.
-
-Disable for `/dev/shm` reverts only the options kernsec actually added on top of the distro baseline. Every modern distro mounts `/dev/shm` with `nosuid,nodev` already on (systemd PID 1's `mount-setup.c`), so the kernsec-effective addition is `noexec` alone — disable's runtime revert is `mount -o remount,exec /dev/shm`, never `dev,suid,exec` which would land the host below the distro baseline. The set of "already a default" options per rule lives in `MountRule.DefaultLiveOptions`. If kernsec authored the fstab line, the whole line is removed (so PID 1's built-in defaults take over on next boot); if the line is operator-owned, only the kernsec-effective additions are stripped and the operator's other options stay.
+Revert: `cp /etc/fstab.cfm-kernsec.bak /etc/fstab`, then
+`umount /var/tmp /tmp` (or reboot), then `rm /var/tmpDSK`.
 
 ## Intentionally unsupported
 
-`kernel.modules_disabled=1` is intentionally unsupported. It is a one-way
-runtime switch until reboot and requires very careful late-boot orchestration so
-cfm, the kernel, and host-specific services can finish loading required modules
-before module loading is disabled globally.
-
-NFS, CIFS/SMB clients, `io_uring`, and wifi modules are also intentionally not
-blacklisted by the shipped registry. These have legitimate operator-managed use
-cases on some hosts.
+`kernel.modules_disabled=1` is unsupported. It is one-way until reboot and
+needs careful late-boot ordering so every required module loads first.
 
 ## Considered but not shipped
 
-The following three knobs from the afflicted.sh "every kernel mitigation on
-Resolute" writeup were prototyped, reviewed, and **held back** because the
-auto-skip probes that gate them are not yet reliable enough to ship without
-hurting more operators than they help. Each entry below records the rule, the
-probe approach that was tried, and the specific issues that need to be solved
-before re-landing.
+These three knobs (from the afflicted.sh "every kernel mitigation on
+Resolute" writeup) were prototyped and held back because their auto-skip
+probes are not reliable or cheap enough. `TestHeldBackRules_*`
+(`profile_articleborrow_test.go`) keeps them out of the registry.
 
 ### `kernel.io_uring_disabled=2` — Tier 2
 
-Closes the io_uring substitute primitive named in the writeup (once
-`unprivileged_bpf_disabled=2` blocks BPF maps, io_uring's SQE/CQE rings and
-registered-buffer allocations otherwise replace them as a controllable
-kernel-spray primitive). Sysctl added in kernel 6.6.
+Removes io_uring as a kernel-spray substitute once BPF maps are blocked
+(kernel 6.6+).
 
-**Held back because:** the auto-skip probe walked `/proc/[0-9]*/fd/*` on every
-`kernsec` invocation looking for `anon_inode:[io_uring]` symlinks. Correctness
-is fine but the cost runs on every `status`, `apply`, `preview`, and TUI call
-via `DetectHostProfile()`. On a busy host (10k+ pids) that is hundreds of
-thousands of `readlink()` syscalls per invocation.
+**Held back because:** the auto-skip probe walked `/proc/[0-9]*/fd/*` for
+`anon_inode:[io_uring]` on every `DetectHostProfile()` call — every `status`,
+`apply`, `preview` and TUI run. On a host with 10k+ pids that is hundreds of
+thousands of `readlink()` calls.
 
-**Re-land when:** the host-profile probe layer supports lazy / on-demand probes
-(only run the io_uring walk when `tier2.iouring` is actually being decided, not
-on every CLI call), or `DetectHostProfile()` gains a result cache with mtime
-invalidation.
+**Re-land when:** host-profile probes can run on demand (only when the rule
+is decided) or are cached with mtime invalidation.
 
 ### `vsyscall=none` — Tier 3
 
-Disables the legacy fixed-address vsyscall page at `0xffffffffff600000` — a
-small but historically-abused ROP target. The kernel default `vsyscall=xonly`
-still mitigates the worst patterns; `=none` is the strict step.
+Removes the fixed-address legacy vsyscall page (a ROP target); the kernel
+default `xonly` already blocks the worst uses.
 
-**Held back because:** the legacy-binary probe (`legacyBinaryProbe` in the
-prototype) opened up to 4000 ELFs in `/usr/bin` + `/usr/local/bin` per
-`DetectHostProfile()` call and flagged every static binary as "potentially
-legacy." That false-positives on every modern Go binary (`kubectl`, `docker`,
-`runc`, `containerd`, `cfm` itself) because Go statics have no `PT_DYNAMIC`.
-The follow-up plan to "only flag dynamic binaries with pre-2.14 glibc
-references" is also unreliable: binaries reference *all* glibc symbol versions
-they use, so even modern dynamic binaries carry `GLIBC_2.0` strings in their
-`.dynstr`. The probe needs proper `Elf_Verneed` table walking to pick the
-*highest* glibc version each library is bound at — that's the only signal that
-actually correlates with vsyscall-page reliance. Additionally, on cPanel /
-CloudLinux / CageFS hosts the binaries that would actually break live in
-customer chroots (`/home/*/public_html`, CageFS images), not `/usr/bin` — the
-probe missed those entirely.
+**Held back because:** the legacy-binary probe scanned up to 4000 ELFs per
+call and flagged every static binary (all Go binaries, `cfm` included). The
+correct signal needs `Elf_Verneed` parsing for the highest bound glibc
+version, and the binaries that would break on cPanel / CloudLinux / CageFS
+live in customer chroots the probe never scanned.
 
-**Re-land when:** the probe is rewritten to parse `Elf_Verneed` properly, the
-scan paths are extended to cover hosting-panel chroots, and the per-invocation
-cost is bounded (mtime pre-filter, lazy probe, or result cache).
+**Re-land when:** the probe parses `Elf_Verneed`, covers panel chroots, and
+has bounded cost.
 
 ### `debugfs=off` — Tier 3
 
-Refuses to expose the `debugfs` filesystem at all — removes a broad
-kernel-internal attack surface (debug-only hooks across drivers / subsystems
-that have historically harboured info-leak and UAF bugs). `tracefs` at
-`/sys/kernel/tracing` is a separate mount since kernel 4.1 and is not affected.
+Removes the whole `debugfs` surface (`tracefs` is a separate mount).
 
-**Held back because:** the rule was added to `ManagedBootArgKeys` so kernsec
-would strip stale instances on apply. That regresses the contract that
-operator-set boot args outside the managed set are preserved — a host that
-deliberately set `debugfs=` for diagnostics would have it silently stripped on
-the next `kernsec apply`, even when Tier 3 wasn't enabled. The companion
-`debugfsConsumerProbe` was correct but inherited the same
-`DetectHostProfile()` per-invocation cost issue as the io_uring probe.
+**Held back because:** putting `debugfs` in `ManagedBootArgKeys` would strip
+an operator's own `debugfs=` on every apply, even below Tier 3, breaking the
+"unmanaged args are preserved" contract. Its consumer probe had the same
+per-call cost as io_uring's.
 
-**Re-land when:** the apply path can strip a managed key only when its
-governing rule is actually being applied (or the boot-arg writer gains a "this
-rule is held by Tier N — don't touch the key unless tier >= N" flag), and the
-probe is moved to the on-demand path described under io_uring above.
+**Re-land when:** apply can strip a managed key only when its rule is being
+applied, and the probe is on demand.
 
 ## Removed boot arguments
 
 ### `efi=disable_early_pci_dma` — removed 2026-07-19
 
-Shipped as a Tier 1 boot arg (`KSEC-BOOT-dma-001`, group `boot.dma`) that
-cleared PCI bus-master DMA on all bridges at `ExitBootServices` to close the
-pre-IOMMU DMA window. **Removed after it hung a production host at boot.**
+Was Tier 1 (`KSEC-BOOT-dma-001`, group `boot.dma`), closing the pre-IOMMU DMA
+window at `ExitBootServices`.
 
-**Why it was removed:** on a UEFI host whose root filesystem lives on an
-`mdraid` array behind a power-managed PCIe storage controller (the cmdline
-already carried `pcie_aspm=off pcie_port_pm=off` to tame a finicky PCIe link),
-cutting early PCI DMA stopped the controller from doing DMA before the driver
-took over, the root array never assembled, and the machine hung with a black
-screen immediately after the kernel loaded — recoverable only by editing the
-args out at the GRUB prompt. This matches the kernel's own
-`CONFIG_EFI_DISABLE_PCI_DMA` help text, which warns the option "can cause
-failures to boot." Early PCI DMA is exactly what storage/NIC controllers need
-during early boot, so the availability risk outweighs the narrow
-pre-IOMMU-window benefit for a general hosting fleet.
+**Why removed:** it hung a production UEFI host at boot. The root `mdraid`
+array sat behind a power-managed PCIe storage controller; with early PCI DMA
+cut, the array never assembled. The kernel's `CONFIG_EFI_DISABLE_PCI_DMA`
+help warns it "can cause failures to boot". For a hosting fleet the
+availability risk outweighs the narrow benefit.
 
-**Consequences of the removal:**
+**Consequences:**
 
-- kernsec no longer writes `efi=disable_early_pci_dma` on any tier.
-- `efi` was also dropped from `ManagedBootArgKeys`, so kernsec no longer
-  owns the `efi` key and will not strip an operator's own `efi=` argument.
-- Because kernsec no longer owns the key, `cfm kernsec apply` / `disable` /
-  `rollback` will **not** auto-strip an `efi=disable_early_pci_dma` that an
-  earlier kernsec version already wrote to a host. Remove it from already-
-  applied hosts by hand, then regenerate the bootloader config, e.g. on
-  legacy-GRUB EL9:
+- kernsec writes it on no tier, and `efi` is not in `ManagedBootArgKeys`, so
+  an operator's own `efi=` is never stripped.
+- For the same reason, `apply` / `disable` / `rollback` do not remove an
+  `efi=disable_early_pci_dma` an older kernsec wrote. Remove it by hand, e.g.
+  on legacy-GRUB EL9:
 
   ```bash
   cp -a /etc/default/grub /root/grub.$(date +%F).bak
@@ -634,338 +557,197 @@ pre-IOMMU-window benefit for a general hosting fleet.
   grub2-mkconfig -o /boot/grub2/grub.cfg
   ```
 
-  The remaining Tier 1 hardening args are unaffected. A regression guard
-  (`TestHeldBackRules_NotInBootArgRegistry`) keeps the arg and its ID out of
-  the registry and out of `ManagedBootArgKeys` so it cannot silently return.
+- `TestHeldBackRules_NotInBootArgRegistry` keeps the arg, its ID and the key
+  out of the registry.
 
 ## Host-profile gates
 
-Host-profile gates prevent high-risk rules from applying on hosts where they are
-likely to break production workloads. `preview`, `status`, and the TUI show when
-a rule is skipped by host profile. Operators can override with `state = force`
-when they accept the risk.
+A host-profile gate skips a rule group where it would break a workload the
+host evidently runs. A positive signal skips the group (`SKIP-HOST`, with the
+reason); `state = force` plus `--force-unsafe` overrides it. The gates live
+in `HostProfile.SkipReason` (`profile_probe.go`).
 
-The current host profile is a set of detected signals. kernsec treats these
-signals conservatively: a positive signal skips the known-risk rule group, and
-the operator can force a rule only after accepting the workload impact.
-
-| Profile category | Detected signal | Host-profile effect |
-|---|---|---|
-| Containers | Container daemons, shims, runtime sockets, or systemd-nspawn machines (`runc`, `containerd`, `dockerd`, `crio`, `podman`, `kubelet`, LXC/LXD, Kata, gVisor, Docker/CRI-O/containerd/Podman sockets). | Skips Tier 2 namespace kill rules. |
-| cPanel | `/usr/local/cpanel`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules and global coredump suppression. |
-| DirectAdmin | `/usr/local/directadmin`. | Counts as hosting-panel workload; skips Tier 2 namespace kill rules and global coredump suppression. |
-| CloudLinux/LVE | `/proc/lve` or loaded `lve`/`kmodlve` module. | Counts as hosting-panel workload and out-of-tree/vendor module evidence; skips Tier 2 namespace kill rules and global coredump suppression. |
-| CageFS | `/etc/cagefs` or `cagefsctl`. | Counts as hosting-panel workload and CloudLinux-style workload evidence; skips Tier 2 namespace kill rules and global coredump suppression. |
-| Imunify360 | Imunify360 agent, service, config, package, repository, or data paths. | Counts as hosting-panel/vendor workload; skips Tier 2 namespace kill rules and global coredump suppression. |
-| KernelCare | `kcarectl`, KernelCare install/cache/sysconfig paths, or `kcare.service`. | Recorded as live-patching and out-of-tree module evidence. |
-| Ksplice | `uptrack-upgrade`, Uptrack paths, or `uptrack.service`. | Recorded as live-patching and out-of-tree module evidence. |
-| Live-patching modules | Loaded `kcare`, `kpatch`, `kgraft`, `uptrack`, `ksplice`, `livepatch*`, `kpatch_*`, or `ksplice_*` modules. | Recorded as live-patching module evidence. |
-| DKMS/akmods/out-of-tree modules | Non-empty `/var/lib/dkms`, `akmods` binary, `/usr/src/*-dkms*`, or non-empty `/lib/modules/*/{extra,updates}`. | Recorded as out-of-tree module evidence. |
-| ZFS/NVIDIA | Loaded ZFS/NVIDIA modules or ZFS tooling/paths (`/sys/module/zfs`, `/etc/zfs`, `zpool`). | Recorded as out-of-tree module evidence. |
-| Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or Proxmox EFI path. | Recorded as host context. |
-| Backup workloads | Common backup agents or backup-named systemd services, including Veeam, Acronis, JetBackup, Bareos, Bacula, and UrBackup indicators. | Skips global coredump suppression to preserve vendor diagnostics. |
-| Monitoring/crash-diagnostic workloads | Common monitoring or crash-diagnostic agents, including node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, and systemd-coredump indicators. | Skips global coredump suppression. |
-| IPsec | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. | Skips the `modules.ipsec` blacklist (`esp4`, `esp6`, `ah4`, `ah6`, `ipcomp`, `ipcomp6`, `xfrm_interface`, `af_key`) so the kernel XFRM data path stays available on hosts that actually use it. |
-| Bluetooth | Non-empty `/sys/class/bluetooth`. | Skips Bluetooth bus module blacklists. |
-| Thunderbolt | Non-empty `/sys/bus/thunderbolt/devices`. | Skips Thunderbolt module blacklist. |
-| In-band MCTP | Non-empty `/sys/bus/mctp/devices` or `/sys/class/mctp`, or any netdev with `type=290` (ARPHRD_MCTP). | Skips `modules.mctp` (`mctp`, `mctp-i2c`, `mctp-serial`) so OpenBMC platforms (e.g. Supermicro H13SRD-F MicroCloud) and NVMe-MI / PCIe VDM sideband users keep the kernel mctp stack. Classic Supermicro IPMI and Dell iDRAC are out-of-band and not affected. |
-| SCTP workload | `sctp` module loaded in `/proc/modules`, `/proc/net/sctp` present, `sctp.service` / `sctp_darn` binary / Nagios `check_sctp` plugin / any `*sctp*.service` unit installed. | Skips `modules.net.legacy.sctp` (`sctp`, `sctp_diag`) so telecom signalling, K8s `protocol: SCTP` Services, and lksctp-tools-based monitoring keep the kernel SCTP data path. WebRTC's usrsctp is userspace and is intentionally not a gate signal. |
-| TIPC workload | `tipc` loaded, `/proc/net/tipc`, `tipc-config` (tipcutils) tooling, or any `*tipc*.service`. The bare `tipc` binary from iproute2 is **not** a signal (it ships almost everywhere). | Skips `modules.net.legacy.tipc` so Pacemaker / Corosync HA clusters and Erlang/OTP distribution keep the kernel transport. |
-| AFS | `rxrpc` / `kafs` / `openafs` loaded, `/proc/net/rxrpc`, `/afs` mount, or OpenAFS tooling (`/etc/openafs`, `fs`, `pts`, `vos`). | Skips `modules.net.legacy.rxrpc` so AFS clients keep working. |
-| L2TP workload | `l2tp_*` loaded, `/proc/net/l2tp*`, `xl2tpd` / `kl2tpd` / accel-ppp installed. | Skips `modules.net.legacy.l2tp` so hosts terminating L2TP tunnels keep the kernel data path. |
-| PPTP workload | `pptp` loaded, `/etc/pptpd.conf`, or pptpd / accel-ppp installed. | Skips `modules.net.legacy.pptp` so hosts terminating PPTP tunnels keep the kernel data path. |
-| Oracle / RDS workload | `rds` loaded, `/proc/net/rds*`, or Oracle indicators (`/etc/oratab`, `lsnrctl`, `/u01/app/oracle`, `/opt/oracle`). | Skips `modules.net.legacy.rds` so Oracle RAC interconnect keeps working. |
-| Dead-FS in use | Any module from `modules.fs.unused` listed in `/proc/mounts` or `/etc/fstab`. | Skips the entire `modules.fs.unused` group; the audit row names the matching FS. Same defensive flavour as the `llc` / Docker bridge gate. |
-| FireWire | Non-empty `/sys/bus/firewire/devices`. | Skips `modules.bus.firewire` so bare-metal hosts with FireWire hardware keep the transport. |
-| ksmbd in use | `ksmbd` loaded, `/sys/class/ksmbd` non-empty, `ksmbd.mountd` binary or `/etc/ksmbd` present, or `ksmbd.service` installed. | Skips `modules.recent_cves.ksmbd` so operators deliberately running the kernel SMB server keep it. |
-| NFS | Active `nfs` or `nfs4` mounts in `/proc/mounts`. | Recorded as host context; shipped NFS modules are intentionally not blacklisted. |
-| EFI boot | `/sys/firmware/efi`. | Recorded as host context (informational). No boot-arg rule gates on this signal anymore — the only one that did, `efi=disable_early_pci_dma`, was removed (see "Removed boot arguments"). |
-
-Current risky Tier 2 skip reasons:
-
-| Tier 2 group | Current skip reason |
+| Group | Skipped when |
 |---|---|
-| Namespace rules (`tier2.namespace`) | Skip hosting/container workloads because disabling unprivileged user namespaces breaks rootless containers, container sandboxes, cPanel jails, CloudLinux/CageFS isolation, and similar hosting isolation. |
-| Panic-on-oops rules (`tier2.oops`) | Skip multi-tenant and uptime-priority hosts because `oops=panic` + `kernel.panic_on_oops=1` + `kernel.panic=10` turn any kernel oops into a reboot. Auto-skipped on KVM hypervisors, libvirt hosts, Proxmox, container runtimes, hosts with live-patching modules (KernelCare / Ksplice / kpatch / kgraft), and hosts running a hosting panel (cPanel / DirectAdmin / CloudLinux LVE / CageFS / Imunify360). |
-| Coredump suppression (`sysctl.kernel.coredump`) | Skip hosting, backup, and monitoring diagnostics because `kernel.core_pattern=|/bin/false` suppresses userspace coredumps globally and can break vendor troubleshooting. kdump (kexec/vmcore) is independent of `core_pattern` and is not a gate reason. |
+| `tier2.namespace` | Processes in non-init user namespaces; containers; a hosting panel. |
+| `tier2.oops` | KVM host; libvirt; Proxmox; containers; live patching (KernelCare / Ksplice / kpatch / kgraft); a hosting panel. |
+| `sysctl.kernel.coredump` | A hosting panel; backup agents; monitoring / crash-diagnostic agents; KVM host or libvirt; containers. |
+| `sysctl.kernel.kexec` | kdump: `crashkernel=` in `/proc/cmdline` or `kdump.service` installed. |
+| `modules.*` | See the "Skipped when" column of the module table. |
 
-Mutating commands also run a pre-flight safety summary before risky applies.
-Use `--yes` only for unattended runs where that preview has already been
-reviewed operationally.
+"Hosting panel" means cPanel (`/usr/local/cpanel`), DirectAdmin
+(`/usr/local/directadmin`), CloudLinux LVE (`/proc/lve` or a loaded
+`lve`/`kmodlve`), CageFS (`/etc/cagefs` or `cagefsctl`) or Imunify360.
+
+Signals:
+
+| Signal | Detected from |
+|---|---|
+| Containers | Container daemons, shims, runtime sockets or nspawn machines (`runc`, `containerd`, `dockerd`, `crio`, `podman`, `kubelet`, LXC/LXD, Kata, gVisor). |
+| `IsKVMHost` | A loaded `kvm_intel`/`kvm_amd` **and** hypervisor evidence: a `vhost*` module, libvirt, Proxmox, or a running QEMU. A bare-metal box where kvm merely auto-loaded is not a KVM host. |
+| `UsesBridge` | Any `/sys/class/net/*/bridge`. |
+| Proxmox | `/etc/pve`, Proxmox boot UUIDs, `proxmox-boot-tool`, or the Proxmox EFI path. |
+| Live patching | `kcarectl` / KernelCare paths / `kcare.service`; `uptrack-upgrade` / Uptrack paths; loaded `kcare`, `kpatch*`, `kgraft`, `ksplice*`, `livepatch*` modules. |
+| Backup workloads | Veeam, Acronis, JetBackup, Bareos, Bacula, UrBackup and backup-named services. |
+| Monitoring workloads | node_exporter, Zabbix, Datadog, Elastic Agent, Telegraf, ABRT, Apport, systemd-coredump. |
+| `HasIPsec` | Non-empty `/proc/net/xfrm_policy` or `/proc/net/pfkey`. |
+| Bluetooth / Thunderbolt / FireWire | Non-empty `/sys/class/bluetooth`, `/sys/bus/thunderbolt/devices`, `/sys/bus/firewire/devices`. |
+| `HasMCTPInBand` | Non-empty `/sys/bus/mctp/devices` or `/sys/class/mctp`, or a netdev of `type=290` (ARPHRD_MCTP). |
+| `HasSCTPWorkload` | `sctp` loaded, `/proc/net/sctp`, `sctp_darn`, Nagios `check_sctp`, or a `*sctp*.service`. WebRTC's userspace usrsctp is not a signal. |
+| `HasTIPCWorkload` | `tipc` loaded, `/proc/net/tipc`, `tipc-config`, or a `*tipc*.service`. The iproute2 `tipc` binary is not a signal. |
+| `HasAFS` | `rxrpc` / `kafs` / `openafs` loaded, `/afs` mounted, or OpenAFS tooling. |
+| `HasL2TPWorkload` | `l2tp_*` loaded, `/proc/net/l2tp*`, or xl2tpd / kl2tpd / accel-ppp. |
+| `HasPPTPWorkload` | `pptp` loaded, `/etc/pptpd.conf`, or pptpd / accel-ppp. |
+| `HasRDSWorkload` | `rds` loaded, `/proc/net/rds*`, or Oracle indicators (`/etc/oratab`, `lsnrctl`, `/u01/app/oracle`). |
+| `HasMountedDeadFS` | A `modules.fs.unused` filesystem in `/proc/mounts` or `/etc/fstab`. |
+| `HasKSMBDServer` | `ksmbd` loaded, `/sys/class/ksmbd` populated, `ksmbd.mountd` or `/etc/ksmbd`, or `ksmbd.service`. |
+
+Informational only (no gate): DKMS / akmods / out-of-tree modules, ZFS and
+NVIDIA (advisory below), NFS mounts, EFI boot.
 
 ### Advisories — soft warnings on Apply decisions
 
-In addition to the hard-skip `HostProfile.SkipReason` mechanism above,
-kernsec surfaces soft advisories via `HostProfile.Advisories(id, group)`.
-These do NOT change the rule's decision — the rule still applies — but
-they print in `cfm kernsec preview` (`note:` lines) and in the TUI
-detail pane (`Note:` lines) so the operator knows about workload-specific
-side-effects.
-
-Shipped advisories:
+`HostProfile.Advisories(id, group)` adds notes to rules that still apply.
+They print as `note:` lines in `preview`, `Note:` lines in the TUI detail
+pane, and in the per-rule `advisories` field of `status --json`.
 
 | Rule ID | Triggers when | Advisory |
 |---|---|---|
-| `KSEC-SCT-kspp.kernel-003` (`unprivileged_bpf_disabled=2`) | `HasDevTools` (gdb / strace / py-spy / bpftrace / bcc-tools / perf installed) | Developer tooling detected — it runs as root and remains functional; unprivileged eBPF and non-root `bpftool` are blocked. |
-| `KSEC-SCT-kspp.kernel-006` (`yama.ptrace_scope=2`) | `HasDevTools` | Developer tooling detected — `gdb --attach`, `strace -p`, `py-spy`, `bpftrace -p` against your own processes will need sudo. |
-| `KSEC-SCT-kspp.kexec-001` (`kexec_load_disabled=1`) | `HasLivePatchingModules` or `HasKernelCare` or `HasKsplice` | Live-patching active — `kexec_load_disabled` is compatible (live-patches don't use kexec) but doesn't add to live-patching's protection. |
-| `KSEC-BOOT-tier3.mempaint-001` (`init_on_free=1`) | `HasZFS` or `HasNVIDIA` | ZFS / NVIDIA detected — `init_on_free` stacks ~1-3% alloc cost on those subsystems; benchmark before production. |
-
-Advisories appear in the `cfm kernsec status --json` output under the
-per-rule `advisories` field (omitted when empty).
+| `KSEC-SCT-kspp.kernel-003` (`unprivileged_bpf_disabled=2`) | `HasDevTools` | Root tooling keeps working; unprivileged eBPF and non-root `bpftool` are blocked. |
+| `KSEC-SCT-kspp.kernel-006` (`yama.ptrace_scope=2`) | `HasDevTools` | `gdb --attach`, `strace -p`, `py-spy`, `bpftrace -p` on your own processes need sudo. |
+| `KSEC-SCT-kspp.kexec-001` (`kexec_load_disabled=1`) | live patching | Compatible, but adds nothing to live patching's protection. |
+| `KSEC-BOOT-tier3.mempaint-001` (`init_on_free=1`) | `HasZFS` or `HasNVIDIA` | May add measurable alloc cost on those subsystems; benchmark first. |
 
 ### CloudLinux LVE vs. cgroup mode (status advisory)
 
-`cfm kernsec status` emits a `[CloudLinux LVE / cgroup mode]` section on
-CloudLinux LVE / CageFS hosts. It WARNs when the host is running the unified
-**cgroup v2** hierarchy (`systemd.unified_cgroup_hierarchy=1`, the modern
-distro default): LVE needs the cgroup **v1** controllers, and on pure-unified
-v2 it cannot place processes into its cgroups, so per-tenant limits are
-silently NOT enforced — `dmesg` fills with `os_resource_push … rc=-2` and
-hosting panels / LiteSpeed report bogus "resource limit reached". The fix is
-to add `systemd.unified_cgroup_hierarchy=0` to the kernel cmdline and reboot.
+On CloudLinux LVE / CageFS hosts, `status` prints
+`[CloudLinux LVE / cgroup mode]` and WARNs when the host runs pure unified
+cgroup v2. LVE needs the v1 controllers; under pure v2 per-tenant limits are
+silently not enforced (`dmesg` fills with `os_resource_push … rc=-2`). Fix:
+add `systemd.unified_cgroup_hierarchy=0` to the cmdline and reboot.
 
-This is a **read-only advisory**: `systemd.unified_cgroup_hierarchy` is
-operator/distro-owned, not a kernsec-managed boot arg, so kernsec never writes
-it — it only surfaces the mismatch so it is caught in `status` rather than
-after a reboot. Detection: `/sys/fs/cgroup/cgroup.controllers` present at the
-mount root ⇒ pure-unified v2 (legacy v1 and hybrid keep the v1 controllers and
-do not trip the warning). The probe field is `HostProfile.CgroupV2Unified`.
+The argument is operator/distro-owned, not a managed key, so kernsec only
+reports it. Detection: `/sys/fs/cgroup/cgroup.controllers` at the mount root
+means pure v2 (`HostProfile.CgroupV2Unified`); v1 and hybrid do not warn.
 
 ## Bootloader backends
 
-kernsec detects and uses one of these bootloader backends:
+Detected in this order:
 
-| Backend | Detection / write path | Refresh behavior |
+| Backend | Detection | Write and refresh |
 |---|---|---|
-| Proxmox/systemd-boot | `/etc/kernel/cmdline` with `proxmox-boot-tool` | Writes `/etc/kernel/cmdline`, then runs `proxmox-boot-tool refresh`. |
-| BLS/grubby | `/boot/loader/entries` plus `grubby` | Enumerates entries with `grubby --info=ALL` and updates explicit non-rescue/non-debug kernel paths with `grubby --update-kernel`; refresh is a no-op because `grubby` updates entries directly. Rescue/debug kernels are intentionally excluded. |
-| GRUB | `/etc/default/grub` fallback | Rewrites `GRUB_CMDLINE_LINUX`, then runs `update-grub` or equivalent grub-mkconfig path. |
+| Proxmox / systemd-boot | `proxmox-boot-tool` in `PATH`, `/etc/kernel/cmdline`, and Proxmox evidence in `/proc/cmdline` or `proxmox-boot-tool status` | Writes `/etc/kernel/cmdline`, runs `proxmox-boot-tool refresh`. |
+| BLS / grubby | `/boot/loader/entries` and `grubby`; GRUB config references `blscfg` or `GRUB_ENABLE_BLSCFG=true` (`=false` wins) | `grubby --update-kernel` per non-rescue, non-debug kernel from `grubby --info=ALL`; no separate refresh. |
+| GRUB | fallback | Rewrites `GRUB_CMDLINE_LINUX`, regenerates `grub.cfg` (`update-grub` or grub-mkconfig). |
 
-Behavior that matters during operations:
-
-- Existing non-kernsec boot args are preserved.
-- Only managed keys are removed/replaced by kernsec.
-- `GRUB_CMDLINE_LINUX_DEFAULT` is read for status/drift, but kernsec does not
-  write it; managed args found there are reported as drift because kernsec only
-  remediates `GRUB_CMDLINE_LINUX`. Because `_DEFAULT` is operator/distro-owned,
-  it is read **leniently**: EL/CloudLinux `tuned` ships shell expansions there
-  (`${GRUB_CMDLINE_LINUX_DEFAULT:+…}\$tuned_params`), and those tokens are kept
-  verbatim in the next-boot view rather than rejected. The strict
-  round-trip-safe decoder still guards `GRUB_CMDLINE_LINUX` (which kernsec
-  rewrites), so an unencodable shell expansion an operator places *there* is
-  still reported instead of silently mangled.
-- Backends take a pre-change backup/snapshot so `rollback` can restore the
-  previous managed-argument state. These snapshots are scoped to kernsec-managed
-  boot args, not full kernel command lines.
-- If bootloader refresh fails after a write, kernsec attempts to roll the file
-  back to a safe retry state and prints manual recovery steps if rollback also
-  fails.
+- Non-kernsec boot args are preserved; only managed keys change.
+- `GRUB_CMDLINE_LINUX_DEFAULT` is read, never written; managed args found
+  there are reported as drift. It is read leniently: EL/CloudLinux `tuned`
+  puts shell expansions there (`${GRUB_CMDLINE_LINUX_DEFAULT:+…}\$tuned_params`),
+  kept verbatim. `GRUB_CMDLINE_LINUX` keeps the strict decoder, so an
+  unencodable expansion there is reported, not mangled.
+- Rescue and debug BLS entries are excluded from snapshot, apply, drift and
+  rollback, so a bad arg never removes the recovery path.
+- If the refresh fails after a write, kernsec rolls the file back to a safe
+  retry state and prints manual steps if that also fails.
 
 ## Rollback/disable/purge
 
-Use `cfm kernsec rollback` when the last boot-argument apply needs to be undone
-without changing the rest of the kernsec config. Rollback removes
-kernsec-managed boot args first, restores saved managed values when a
-backend-specific managed snapshot exists, and refreshes the bootloader where
-needed. It does **not** replay a full saved default-kernel command line.
+`cfm kernsec rollback` undoes boot-argument changes without touching the
+config:
 
-Backend-specific rollback behavior:
+- Strips kernsec-managed args, then restores the saved managed values when a
+  backend snapshot exists, and refreshes the bootloader. It never replays a
+  whole saved command line.
+- GRUB rewrites `GRUB_CMDLINE_LINUX`; Proxmox rewrites `/etc/kernel/cmdline`;
+  BLS strips managed args from every non-rescue, non-debug kernel and
+  restores saved args for kernels whose image path matches the snapshot.
+- A legacy whole-file `.cfm-kernsec.bak` restore is refused if the current
+  file has operator changes since that backup.
+- Removes `/etc/sysctl.d/99-cfm-kernsec.conf`, so the next boot uses kernel
+  defaults. Live sysctl values stay until reboot.
+- Leaves `kernsec.conf` alone: the next `apply` re-applies everything.
 
-- GRUB rewrites `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, then refreshes
-  `grub.cfg` with `update-grub` or the detected `grub-mkconfig` path.
-- Proxmox rewrites `/etc/kernel/cmdline`, then runs
-  `proxmox-boot-tool refresh`.
-- BLS uses `grubby` to update explicit non-rescue/non-debug kernels. It
-  enumerates kernels with `grubby --info=ALL`, strips kernsec-managed args from
-  every non-rescue/non-debug kernel, then restores the saved managed args for
-  kernels whose image path matches the snapshot.
+`cfm kernsec disable --yes` turns kernsec off persistently:
 
-BLS snapshots are keyed by kernel image path and contain only kernsec-managed
-args; unmanaged per-kernel args are left untouched. Rescue and debug BLS entries
-are intentionally excluded from snapshot, apply, drift, and rollback operations
-so a bad managed arg does not remove the recovery path.
+- Writes `tier = 0` to `/etc/cfm/kernsec.conf` and runs apply with it: strips
+  managed boot args, writes empty managed sysctl and modprobe files, and
+  reverts the automated mount options.
+- Keeps per-rule overrides. A `state = force` rule is still applied at
+  tier 0; remove force stanzas first for a full disable.
+- Refuses a malformed or unreadable `kernsec.conf` unless `--force` or
+  `--purge`.
+- Live sysctl values stay until reboot.
 
-Legacy `.cfm-kernsec.bak` bootloader-file backups are fallback data only for
-older rollback records that predate managed-argument snapshots. kernsec refuses
-the legacy whole-file byte-restore if the current file has operator changes
-relative to the legacy backup, preventing rollback from overwriting unrelated
-bootloader edits.
+`cfm kernsec disable --purge --yes` also removes `/etc/cfm/kernsec.conf`,
+`/etc/sysctl.d/99-cfm-kernsec.conf`, `/etc/modprobe.d/cfm-kernsec.conf` and
+the monitor units. A later `apply` creates a fresh `tier = 1` config.
 
-Rollback only changes next-boot boot arguments. It does not revert live sysctl
-values changed by an earlier `apply`; those remain active until reboot or until
-an operator changes them manually with `sysctl`.
-
-Use `cfm kernsec disable --yes` to persistently turn kernsec apply mode off:
-
-- Writes `tier = 0` to `/etc/cfm/kernsec.conf`.
-- Removes kernsec-managed boot arguments.
-- Writes empty managed sysctl and modprobe files.
-- Leaves backups and snapshots in place.
-
-Use `cfm kernsec disable --purge --yes` for a fuller uninstall:
-
-- Removes `/etc/cfm/kernsec.conf`.
-- Removes `/etc/sysctl.d/99-cfm-kernsec.conf`.
-- Removes `/etc/modprobe.d/cfm-kernsec.conf`.
-- Removes installed monitor units.
-- Leaves backup files in place for manual recovery.
-
-Add `--dry-run` to inspect either operation before writing. Add `--no-refresh`
-only when the bootloader refresh will be handled separately.
+Neither command removes backups or snapshots, nor `bpf` from `lsm=`. Use
+`--dry-run` to inspect first; use `--no-refresh` only when the bootloader
+refresh is handled separately.
 
 ## Monitor timer
 
-`cfm kernsec monitor enable` writes and enables a systemd timer that periodically
-runs:
-
-```sh
-cfm kernsec apply --check
-```
-
-Default interval is `daily`; pass any systemd `OnCalendar` expression with
-`--interval`, for example `hourly`, `weekly`, or `*-*-* 03:00:00`.
-
-Timer management commands:
-
-- `cfm kernsec monitor enable [--interval=daily]` — write unit files,
-  daemon-reload, enable, and start the timer.
-- `cfm kernsec monitor disable` — stop and disable the timer, leaving unit files.
-- `cfm kernsec monitor remove` — stop, disable, remove unit files, and
-  daemon-reload.
-- `cfm kernsec monitor status` — show timer status and recent service runs.
-
-The service treats exit code `2` from `apply --check` as a soft success so
-transient indeterminate checks retry on the next timer fire. Drift remains a
-failure and is visible through `systemctl is-failed` and the journal.
+`cfm kernsec monitor enable` installs a timer that runs
+`cfm kernsec apply --check`. The default interval is `daily`; `--interval`
+takes any systemd `OnCalendar` value (`hourly`, `weekly`,
+`*-*-* 03:00:00`). The service has `SuccessExitStatus=2`, so an
+indeterminate check retries on the next fire; drift fails the unit
+(`systemctl is-failed`, the journal).
 
 ## Coexistence with cfm-lsm
 
-`kernsec` (preemptive kernel-surface reduction) and `cfm-lsm`
-(runtime userspace-behaviour enforcement via BPF LSM) are paired
-defence layers — each catches what the other structurally cannot.
-The two components do not overlap on managed surface:
+kernsec (static kernel-surface reduction) and cfm-lsm (runtime BPF LSM
+enforcement) are paired layers with no overlapping managed surface:
 
-- `kernsec` manages **sysctls, boot args, modules, mounts**. It
-  shapes the kernel ahead of time so that even a successful
-  userspace compromise has less to pivot through.
-- `cfm-lsm` manages **BPF LSM hooks at runtime**. It detects (and
-  in enforce mode blocks) post-exploit patterns — memfd exec,
-  reverse-shell fd patterns — that no sysctl can express.
+- kernsec manages **sysctls, boot args, modules, mounts**: less to pivot
+  through after a userspace compromise.
+- cfm-lsm manages **BPF LSM hooks at runtime**: it detects (or, in enforce
+  mode, blocks) post-exploit patterns such as memfd exec and reverse-shell fd
+  patterns that no sysctl can express.
 
-A few intentional non-overlaps worth recording:
+Intentional non-overlaps:
 
-- `kernel.yama.ptrace_scope=2` is shipped by kernsec (Tier 1). `=1`
-  was previously accepted as also-green but was removed once the
-  ssh-keysign / chage `pidfd_getfd()` exit-window race was confirmed
-  to be a working `/etc/shadow` disclosure primitive against mode 1
-  hosts. Operators who need same-uid debuggability must `state = skip`
-  `KSEC-SCT-kspp.kernel-006` in `kernsec.conf` and accept the
-  residual setuid-helper fd-leak race. The `CFML-OBS-001`
-  ptrace-lockdown idea from cfm-lsm's original scope was dropped
-  specifically because kernsec already covers that ground at a
-  cheaper layer.
-- The `lsm=…,bpf` kernel command-line argument is managed by the
-  opt-in rule `KSEC-LSM-bpf-001` (Tier 2, not forced by default;
-  `[rule "KSEC-LSM-bpf-001"] state = force` in `kernsec.conf`). It
-  merges `bpf` into the existing `lsm=` value without dropping the
-  other LSMs (`internal/kernsec/lsm_merge.go`); a reboot applies it.
-  cfm-lsm's preflight still prints the remediation when `bpf` is
+- `kernel.yama.ptrace_scope=2` is kernsec's (Tier 1). The `CFML-OBS-001`
+  ptrace-lockdown idea was dropped from cfm-lsm because kernsec covers it at
+  a cheaper layer.
+- `lsm=…,bpf` is managed by the opt-in `KSEC-LSM-bpf-001` (see "Boot-argument
+  rules"). cfm-lsm's preflight still prints the remediation when `bpf` is
   missing from `/sys/kernel/security/lsm`.
-- `kernsec`'s module-load lockdown rules (and the broader
-  CFML-SELF-002 idea from the original cfm-lsm draft) are
-  deliberately excluded because they conflict with
-  KernelCare / Ksplice live-patch module reloads. The component
-  boundary is: kernsec hardens what can stay static; cfm-lsm
-  watches what has to stay live.
+- Module-load lockdown (and cfm-lsm's draft `CFML-SELF-002`) is excluded: it
+  conflicts with KernelCare / Ksplice module reloads. kernsec hardens what can
+  stay static; cfm-lsm watches what has to stay live.
 
-Reading order: when both components are active, an operator should
-expect to see kernsec rules in `cfm kernsec status` and cfm-lsm
-state in `cfm lsm status`. Events from cfm-lsm flow through the
-same notify pipeline as outbound and detector events.
-[`docs/cfm-lsm.md`](./cfm-lsm.md) is the design+ops doc for the
-runtime layer.
+kernsec state shows in `cfm kernsec status`, cfm-lsm state in
+`cfm lsm status`; cfm-lsm events use the same notify pipeline as other
+detectors. See [`docs/cfm-lsm.md`](./cfm-lsm.md).
 
 ## Compatibility notes
 
-- Unsupported sysctl keys are commented as skipped in the managed drop-in rather
-  than failing the whole apply. A later kernel that exposes the key can then use
-  the same config intent.
-- kernsec-owned network hardening rules are written by kernsec, but the legacy
-  `sysctl.net` group is normally owned by `cfm-sysctl-tweaks` and shown as
-  `EXT`.
-- If `cfm-sysctl-tweaks` is disabled in the main cfm config, the ownership
-  registry still treats its keys as externally owned. Force individual kernsec
-  rules only if you want kernsec to take over those keys and accept the reported
-  conflict.
-- Tier 2 oops/panic rules trade availability for fail-closed behavior.
-- `kernel.core_pattern=|/bin/false` suppresses core dumps globally.
-- `initcall_blacklist=algif_aead_init` and the `algif_*` module blacklists can
-  affect userspace AF_ALG consumers.
+- Unsupported sysctl keys are commented out as skipped rather than failing
+  apply; a later kernel picks up the same intent.
+- `initcall_blacklist=algif_aead_init` and the `algif_*` blacklist can affect
+  userspace AF_ALG consumers.
 
 ## Operator runbook
 
-1. Inspect current state:
+```sh
+cfm kernsec status                         # 1. current state (--json for tooling)
+sudo cfm kernsec init                      # 2. default tier = 1 config, if absent
+sudo cfm kernsec preview --only-apply      # 3. what apply would do (mount rules edit /etc/fstab)
+                                           # 4. review SKIP-HOST rows; override only with the host owner's OK
+sudo cfm kernsec apply                     # 5. interactive; --yes only for reviewed unattended runs
+                                           # 6. reboot for boot args and /tmp, then:
+cfm kernsec status --check
+sudo cfm kernsec monitor enable --interval=daily   # 7. drift monitoring
+cfm kernsec monitor status
+```
 
-   ```sh
-   cfm kernsec status
-   cfm kernsec status --json
-   ```
-
-2. Create the default config if needed:
-
-   ```sh
-   sudo cfm kernsec init
-   ```
-
-3. Preview the default Tier 1 apply:
-
-   ```sh
-   sudo cfm kernsec preview
-   sudo cfm kernsec preview --only-apply
-   ```
-
-4. Review host-profile skips and add explicit per-rule overrides only where the
-   host owner accepts the compatibility impact.
-
-5. Apply interactively, or use `--yes` only for approved unattended runs:
-
-   ```sh
-   sudo cfm kernsec apply
-   sudo cfm kernsec apply --yes
-   ```
-
-6. Reboot when boot-argument changes need to take effect, then verify:
-
-   ```sh
-   cfm kernsec status --check
-   ```
-
-7. Enable drift monitoring:
-
-   ```sh
-   sudo cfm kernsec monitor enable --interval=daily
-   cfm kernsec monitor status
-   ```
-
-8. To opt into Tier 2, edit `/etc/cfm/kernsec.conf`, set `tier = 2`, then repeat
-   preview and apply. Treat Tier 2 as a per-host change request.
-
-9. If a boot-argument apply must be undone:
-
-   ```sh
-   sudo cfm kernsec rollback --dry-run
-   sudo cfm kernsec rollback
-   ```
-
-10. To disable kernsec-managed state without removing backups:
-
-    ```sh
-    sudo cfm kernsec disable --yes
-    ```
-
-11. To uninstall kernsec-managed config/files while preserving backups:
-
-    ```sh
-    sudo cfm kernsec disable --purge --yes
-    ```
+- Tier 2 or 3: set `tier` in `/etc/cfm/kernsec.conf`, then preview and apply
+  again. Treat it as a per-host change request.
+- Undo a boot-argument apply: `sudo cfm kernsec rollback --dry-run`, then
+  without `--dry-run`.
+- Turn kernsec off, keeping backups: `sudo cfm kernsec disable --yes`.
+- Uninstall config and files, keeping backups:
+  `sudo cfm kernsec disable --purge --yes`.

@@ -44,7 +44,7 @@ type DisableOptions struct {
 // every kernsec-managed boot arg from the next-boot cmdline, empties
 // (or removes, with --purge) the managed sysctl file, refreshes the
 // bootloader. Live sysctl values stay until reboot — see
-// docs/kernsec.md "tier=0 disable semantics".
+// docs/kernsec.md "Rollback/disable/purge".
 //
 // Without --purge: persistent — re-running `cfm kernsec apply` later
 // is a no-op until the operator re-enables a tier in the conf.
