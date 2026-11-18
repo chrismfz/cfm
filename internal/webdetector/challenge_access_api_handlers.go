@@ -49,6 +49,9 @@ func scopeFilterChallengeAccess(entries []ChallengeAccessEntry, r *http.Request)
 			}
 		}
 		if len(own) > 0 {
+			if len(own) < len(e.Scope.Vhosts) {
+				e.Note = "" // free text that may name the other tenants
+			}
 			e.Scope.Vhosts = own // e is a copy; the stored entry is untouched
 			out = append(out, e)
 		}
@@ -88,11 +91,13 @@ func (e *Engine) handleChallengeAccessGet(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusNotFound, challengeAccessResultResponse{Error: "entry not found"})
 		return
 	}
-	if !scopeAllowsVhosts(r, entry.Scope.Vhosts) {
+	// Shown when the list shows it, as the list shows it.
+	rows := scopeFilterChallengeAccess([]ChallengeAccessEntry{entry}, r)
+	if len(rows) == 0 {
 		writeJSON(w, http.StatusForbidden, challengeAccessResultResponse{Error: "entry not in scope"})
 		return
 	}
-	writeJSON(w, http.StatusOK, challengeAccessResultResponse{Entry: entry})
+	writeJSON(w, http.StatusOK, challengeAccessResultResponse{Entry: rows[0]})
 }
 
 // POST /api/v1/challenge/access/add
@@ -229,14 +234,21 @@ func (e *Engine) handleChallengeAccessSimulate(w http.ResponseWriter, r *http.Re
 	// admin entry can span several tenants, and a scoped caller whose host
 	// merely matched it must not learn another tenant's vhost name. Build a NEW
 	// slice — the entry's Scope.Vhosts shares its backing array with the store.
+	// The note goes too once a vhost is cut: free text that may name them. The
+	// entry is copied before either change.
 	if scope := vhostScopeFromContext(r.Context()); scope != nil && res.Entry != nil {
-		inScope := make([]string, 0, len(res.Entry.Scope.Vhosts))
-		for _, h := range res.Entry.Scope.Vhosts {
+		ent := *res.Entry
+		inScope := make([]string, 0, len(ent.Scope.Vhosts))
+		for _, h := range ent.Scope.Vhosts {
 			if vhostAllowed(strings.ToLower(h), scope) {
 				inScope = append(inScope, h)
 			}
 		}
-		res.Entry.Scope.Vhosts = inScope
+		if len(inScope) < len(ent.Scope.Vhosts) {
+			ent.Note = ""
+		}
+		ent.Scope.Vhosts = inScope
+		res.Entry = &ent
 	}
 	writeJSON(w, http.StatusOK, res)
 }

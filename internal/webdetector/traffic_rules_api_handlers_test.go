@@ -578,3 +578,33 @@ func TestRulesScope_SimulateKeepsStarOnly(t *testing.T) {
 		t.Fatalf("scoped simulate vhosts = %v, want [*]", got)
 	}
 }
+
+// rules/get answers a shared rule as the list shows it: own vhosts only and
+// no note (free text that may name the other tenants). A rule wholly another
+// tenant's stays 403.
+func TestRulesScope_GetSharedRuleTrimmed(t *testing.T) {
+	e, mux := newTestEngine(t)
+	shared, err := e.TrafficRuleAdd(TrafficRule{
+		Enabled: true, Priority: 100, Note: "beta.com customer asked for this",
+		Scope:  TrafficRuleScope{Vhosts: []string{"alpha.com", "beta.com"}},
+		Match:  TrafficRuleMatch{UAAny: []string{"*bot*"}},
+		Action: TrafficRuleAction{Type: TrafficActionBlock},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := mustAddRule(t, e, "beta.com", TrafficActionBlock)
+
+	rr := doRequest(mux, scopedCtx("alpha.com"), http.MethodGet, "/api/v1/webdet/rules/get?id="+shared.ID, nil)
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "beta.com") {
+		t.Fatalf("shared get: status %d body %s", rr.Code, rr.Body.String())
+	}
+	rr = doRequest(mux, scopedCtx("alpha.com"), http.MethodGet, "/api/v1/webdet/rules/get?id="+other.ID, nil)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("other tenant's rule: status %d, want 403", rr.Code)
+	}
+	rr = doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/webdet/rules/get?id="+shared.ID, nil)
+	if !strings.Contains(rr.Body.String(), "beta.com customer") {
+		t.Fatalf("admin get lost the note: %s", rr.Body.String())
+	}
+}

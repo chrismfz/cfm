@@ -41,6 +41,10 @@ import (
 // of operators/tools, small enough that scans cannot starve the box's I/O.
 var hostAccessScanSlots = make(chan struct{}, 2)
 
+// hostAccessScopedSlots caps scoped callers at one of the two scan slots, so a
+// tenant can never hold both and lock the operator out.
+var hostAccessScopedSlots = make(chan struct{}, 1)
+
 const hostAccessRetryAfterSec = "30"
 
 func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request) {
@@ -101,14 +105,26 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 	topN, _ := strconv.Atoi(q.Get("top"))
 
 	// Admission: never queue behind another multi-minute scan — fail fast.
-	select {
-	case hostAccessScanSlots <- struct{}{}:
-		defer func() { <-hostAccessScanSlots }()
-	default:
+	busy := func() {
 		w.Header().Set("Retry-After", hostAccessRetryAfterSec)
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "another archival host scan is running on this node; retry shortly",
 		})
+	}
+	if !IsAdminRequest(r) {
+		select {
+		case hostAccessScopedSlots <- struct{}{}:
+			defer func() { <-hostAccessScopedSlots }()
+		default:
+			busy()
+			return
+		}
+	}
+	select {
+	case hostAccessScanSlots <- struct{}{}:
+		defer func() { <-hostAccessScanSlots }()
+	default:
+		busy()
 		return
 	}
 
@@ -123,12 +139,22 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 		ClassifyUA:     NormalizeUA,
 	})
 	if err != nil {
+		if !IsAdminRequest(r) {
+			// The detail names the node's log files; the operator's only.
+			writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "access logs unavailable for this host"})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"ok":             false,
 			"error":          err.Error(),
 			"available_logs": edgelog.AvailableFullLogs(),
 		})
 		return
+	}
+
+	if !IsAdminRequest(r) {
+		// The node's log file names are the operator's, not the tenant's.
+		stripScanFileNames(&res)
 	}
 
 	out := map[string]any{
@@ -282,4 +308,14 @@ func mergeWAFRuleHits(lists ...[]WAFRuleHit) []WAFRuleHit {
 		return out[i].Rule < out[j].Rule
 	})
 	return out
+}
+
+// stripScanFileNames clears every field of a host scan that names one of the
+// node's log files: the main access section and its bad-request section alike.
+func stripScanFileNames(res *edgelog.HostScanResult) {
+	for ; res != nil; res = res.BadRequests {
+		res.LogFile = ""
+		res.FilesScanned = nil
+		res.FilesFailed = nil
+	}
 }

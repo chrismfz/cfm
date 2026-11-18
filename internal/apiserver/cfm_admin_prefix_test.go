@@ -262,3 +262,31 @@ func TestEmbedShellRefusesEveryRegisteredNonPageRoute(t *testing.T) {
 		}
 	}
 }
+
+// Public paths are exact: the routes themselves are public, a path beneath
+// one of them is not.
+func TestPublicPathsAreExact(t *testing.T) {
+	pub := func(p string) bool {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.URL.Path = p
+		return isPublicPath(r)
+	}
+	for _, p := range []string{
+		"/login", "/login/verify", "/login/webauthn/begin", "/login/webauthn/finish", "/logout",
+		"/api/v1/embed/bootstrap", "/api/v1/embed/admin-bootstrap",
+		"/mcp", "/mcp/oauth/token", "/.well-known/openid-configuration",
+		"/cfm-admin/login", "/cfm-admin/mcp",
+	} {
+		if !pub(p) {
+			t.Errorf("%s: not public, want public", p)
+		}
+	}
+	for _, p := range []string{
+		"/login/x", "/logout/x", "/mcp/x", "/mcp/oauth", "/api/v1/embed/bootstrap/x",
+		"/api/v1/embed/code", "/cfm-admin/mcp/x",
+	} {
+		if pub(p) {
+			t.Errorf("%s: public, want auth required", p)
+		}
+	}
+}

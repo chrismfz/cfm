@@ -30,6 +30,31 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **Scoped traffic-rule and Challenge Access-Control lists name only the
   caller's own sites.** An entry the operator shares across several tenants'
   sites shows each tenant only its own, as the rules export already did.
+  Rule get and simulate show the same view, without the entry's free-text
+  note; get no longer refuses a rule the list shows. The exclude, HTTP/3
+  and ClamAV signature-ignore lists likewise show a tenant only its own sites
+  in each entry's `scope_hosts`.
+- **More cfm-admin API checks (defence in depth):** the same-origin check
+  tells ports apart, so another service on the same host is another origin;
+  public routes are matched exactly; every web-detector route requires an
+  admin or scoped identity; a logout another site started ends no session.
+
+### Fixed
+- **A tenant can remove a host exclude on its own site that another account
+  wrote** (a domain that moved between accounts), when its own account holds
+  that host; the operator's ClamAV and challenge host entries stay the
+  operator's to remove. Such an exclude used to keep
+  applying with nobody able to remove it, the operator included, through the
+  challenge and ClamAV endpoints.
+- **Scoped top lists (top-short, suspicious, long-top) return up to the
+  requested number of the tenant's own rows**, instead of filtering a list
+  already cut to that number across all sites.
+- **A tenant's archival host scan can no longer take both scan slots**, and
+  its answers no longer name the node's log files.
+
+### Removed
+- The web detector's unused standalone HTTP server (`ServeHTTP` /
+  `ServeHTTPWithContext`; `API_LISTEN` has been ignored for a long time).
 
 ### Changed
 - **The MCP server's instructions name every tool.** The guidance an MCP

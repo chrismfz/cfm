@@ -251,3 +251,39 @@ func TestCSRFMiddlewareChecksEmbedAdminCookie(t *testing.T) {
 		t.Fatalf("same-origin POST on the admin SSO cookie was refused: status %d", rr.Code)
 	}
 }
+
+// Another port on the same host is another origin: a page on a panel port
+// cannot ride a cookie on the admin UI. The admin UI's own origin, with or
+// without an explicit port, still passes.
+func TestCSRFMiddlewareOriginPort(t *testing.T) {
+	cases := []struct {
+		name, host, xfh, remote, origin string
+		want                             bool
+	}{
+		{"edge, same origin", "node.example", "node.example", "127.0.0.1:4000", "https://node.example", true},
+		{"edge, panel port origin", "node.example", "node.example", "127.0.0.1:4000", "https://node.example:2083", false},
+		{"edge, webmail port origin", "node.example", "node.example", "127.0.0.1:4000", "https://node.example:2096", false},
+		{"edge, explicit 443", "node.example", "node.example", "127.0.0.1:4000", "https://node.example:443", true},
+		{"edge on a custom port", "node.example", "node.example:9443", "127.0.0.1:4000", "https://node.example:9443", true},
+		{"direct :6061", "node.example:6061", "", "198.51.100.7:4000", "https://node.example:6061", true},
+		{"direct :6061, panel origin", "node.example:6061", "", "198.51.100.7:4000", "https://node.example:2087", false},
+		{"proxy sends backend port in Host", "node.example:6060", "", "198.51.100.7:4000", "https://node.example", true},
+		{"XFH ignored from a non-loopback peer", "node.example", "node.example:2083", "198.51.100.7:4000", "https://node.example:2083", false},
+	}
+	for _, c := range cases {
+		called := false
+		h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+		req := httptest.NewRequest(http.MethodPost, "http://"+c.host+"/api/v1/waf/exclude/add", nil)
+		req.Host = c.host
+		req.RemoteAddr = c.remote
+		if c.xfh != "" {
+			req.Header.Set("X-Forwarded-Host", c.xfh)
+		}
+		req.Header.Set("Origin", c.origin)
+		req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismEmbedAdminCookie))
+		h.ServeHTTP(httptest.NewRecorder(), req)
+		if called != c.want {
+			t.Errorf("%s: allowed=%v, want %v", c.name, called, c.want)
+		}
+	}
+}

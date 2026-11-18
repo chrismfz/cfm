@@ -68,17 +68,9 @@ func setWebdetRoutesHandler(h http.Handler) {
 }
 
 // webdetRoutesProxy serves the engine's routes on the shared apiserver mux.
-// Defence in depth: a request needs an authenticated identity here as well as
-// in the auth middleware, except the cPanel plugin's actor-assertion lookup,
-// which its handler authenticates (apiserver.IsCpanelPluginSelfServicePath,
-// the middleware's own predicate).
+// The engine's route table checks the caller's identity itself
+// (webdet.RegisterHTTP / requireIdentity).
 func webdetRoutesProxy(w http.ResponseWriter, r *http.Request) {
-	if !webdet.IsAdminRequest(r) && !webdet.IsScopedRequest(r) && !apiserver.IsCpanelPluginSelfServicePath(r) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
-		return
-	}
 	webdetRoutesMu.RLock()
 	h := webdetRoutesH
 	webdetRoutesMu.RUnlock()

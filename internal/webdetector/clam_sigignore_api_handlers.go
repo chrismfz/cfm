@@ -48,12 +48,14 @@ func logClamSigIgnoreAudit(r *http.Request, action, host, pattern, result string
 
 // validateScopedSigIgnoreWrite enforces the write rules above. Fail-closed:
 // a scoped token gets true only for a non-empty host inside its scope.
+// The unscoped role is the explicit admin role, never a nil scope (as
+// validateScopedExcludeWrite).
 func validateScopedSigIgnoreWrite(r *http.Request, host string) bool {
-	scope := vhostScopeFromContext(r.Context())
-	if scope == nil {
+	if IsAdminRequest(r) {
 		return true // admin: any host, or global (host == "")
 	}
-	if host == "" {
+	scope := vhostScopeFromContext(r.Context())
+	if len(scope) == 0 || host == "" {
 		return false // global entries are admin-only
 	}
 	return vhostAllowed(host, scope)
@@ -69,6 +71,7 @@ func (e *Engine) handleClamSigIgnoreList(w http.ResponseWriter, r *http.Request)
 		filtered := make([]clamSigIgnoreEntry, 0, len(entries))
 		for _, en := range entries {
 			if en.Host != "" && vhostAllowed(en.Host, scope) {
+				en.ScopeHosts = scopeHostsSeenBy(en.ScopeHosts, scope)
 				filtered = append(filtered, en)
 			}
 		}

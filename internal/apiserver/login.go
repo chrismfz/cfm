@@ -235,6 +235,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
+	// The nav's Logout is a plain link (GET), so the method cannot tell a
+	// user's click from another site's link or form. The browser can: a
+	// request another site started is marked Sec-Fetch-Site: cross-site, and
+	// it ends nobody's session. A browser that sends no Sec-Fetch-Site is
+	// served as before. A same-site page (another port of this host, a sibling
+	// subdomain) can still log a browser out: a nuisance, not a takeover.
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		http.Redirect(w, r, cfmBase(r)+"/", http.StatusSeeOther)
+		return
+	}
 	if Auth != nil {
 		Auth.Destroy(r)
 	}

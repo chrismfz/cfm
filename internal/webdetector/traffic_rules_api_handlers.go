@@ -67,7 +67,8 @@ func scopeFilterRules(rules []TrafficRule, r *http.Request) []TrafficRule {
 // scopeTrimRuleVhosts narrows each rule's scope.vhosts to the caller's own
 // vhosts. A rule the operator shares across tenants is visible to each of
 // them (scopeFilterRules keeps it on any intersection), but its scope must not
-// name the other tenants' vhosts. No-op for an unscoped caller. The slice is
+// name the other tenants' vhosts, and its free-text note (which may) is not
+// shown once any vhost was cut. No-op for an unscoped caller. The slice is
 // replaced, never edited in place, so the store's copy is untouched.
 func scopeTrimRuleVhosts(rule TrafficRule, r *http.Request) TrafficRule {
 	scope := vhostScopeFromContext(r.Context())
@@ -79,6 +80,9 @@ func scopeTrimRuleVhosts(rule TrafficRule, r *http.Request) TrafficRule {
 		if vhostAllowed(strings.ToLower(h), scope) {
 			own = append(own, h)
 		}
+	}
+	if len(own) < len(rule.Scope.Vhosts) {
+		rule.Note = ""
 	}
 	rule.Scope.Vhosts = own
 	return rule
@@ -142,7 +146,7 @@ func (e *Engine) handleWebdetRulesList(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/v1/webdet/rules/get?id=<id>
-// Scoped tokens may only retrieve rules that belong to their vhosts.
+// Scoped tokens may retrieve a rule the list shows them, as it shows it.
 func (e *Engine) handleWebdetRulesGet(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusNotFound, trafficRuleResultResponse{Error: "engine unavailable"})
@@ -158,12 +162,14 @@ func (e *Engine) handleWebdetRulesGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, trafficRuleResultResponse{Error: "rule not found"})
 		return
 	}
-	// Scope check: does this rule touch any vhost the caller is allowed to see?
-	if !scopeAllowsVhosts(r, rule.Scope.Vhosts) {
+	// A caller sees the rule when the list shows it (any of its vhosts in
+	// scope), as the list shows it (scopeListRules).
+	rows := scopeListRules([]TrafficRule{rule}, r)
+	if len(rows) == 0 {
 		writeJSON(w, http.StatusForbidden, trafficRuleResultResponse{Error: "rule not in scope"})
 		return
 	}
-	writeJSON(w, http.StatusOK, trafficRuleResultResponse{Rule: rule})
+	writeJSON(w, http.StatusOK, trafficRuleResultResponse{Rule: rows[0]})
 }
 
 // POST /api/v1/webdet/rules/add
