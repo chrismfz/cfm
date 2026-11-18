@@ -247,9 +247,17 @@ challenge-tier rule 501 then; its block rules 510-512 came later.) So:
   and it is a distinct signal source.
 - **Counter granularity:** per-IP per-family thresholds, with `RULE_<id>`
   overrides for rules that behave unlike their family. A rule override
-  replaces the threshold for that rule's hits; the counter stays per
-  `(ip, family)`. Known legit sources are handled by `ALLOW_IPS` /
-  `ALLOW_NETS` / `ALLOW_UA_CONTAINS`.
+  replaces the threshold for that rule's hits. The counter is per
+  `(ip, family)`, except under a `RULE_<id>` above 1: that rule counts its
+  own hits, per `(ip, family, rule)` (2026-11-18). Before, the family's other
+  rules filled it, so `RULE_329 = 2` under `RCE = 5` fired on 329's first hit
+  after one other RCE hit. At 0 and 1 the key changes nothing, so every
+  shipped config behaves as before. Still one alert per IP and family:
+  whichever of the family and rule counters trips first alerts, and neither
+  alerts again for that IP until the family has had no hit, on any of its
+  counters, for a full `WINDOW` (with one shared counter that is exactly
+  "the counter drained"). Known legit
+  sources are handled by `ALLOW_IPS` / `ALLOW_NETS` / `ALLOW_UA_CONTAINS`.
 - **`Kind` granularity:** `WAF/<family>` (one counter and threshold per
   family), `rule_id` in `Extra`; `WAF_CVE` names the CVE in `Kind`.
 - **Soft TTL block, not `permanent`:** `BLOCK = "6h"` self-heals a surprise;

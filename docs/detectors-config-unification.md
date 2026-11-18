@@ -197,8 +197,9 @@ the listening services would be new detector work.
 
 ### 6.4 Undocumented keys that run
 
-`IP403WAF_COUNT` is read (`internal/detectors/webdetector_register.go:674`)
-but appears nowhere in stock. The webdetector folder mode is now documented
+`IP403WAF_COUNT` is read (`internal/detectors/webdetector_register.go:674`;
+0 = off, orion runs 5); stock lists it, commented out at its default, since
+2026-11-18. The webdetector folder mode is now documented
 as commented examples (`configs/detectors.conf:1320-1350`). The other keys the
 audit found live but undocumented are retired and are dead lines on the
 nodes, not stock candidates:
@@ -236,17 +237,17 @@ each with `config_drift` / `detectors_config` before acting.
 
 - **PR 6: global `[leniency]` fallback** (§5). The persisted-token half
   shipped.
-- **Edge-source and modsec auto.** Not built:
-  - `[webdetector]` still defaults to `MODE=file` with the apache tsv path
-    (`internal/detectors/webdetector_register.go:611-612`;
-    `configs/detectors.conf:1359-1360`).
-  - `[modsec]` stock pins `LOG_PATH = /var/log/apache2/error_log`
-    (`configs/detectors.conf:977-978`). That explicit value disables the
-    register's own candidate scan (`internal/detectors/modsec_register.go:103-140`).
+- **Edge-source auto.** Not built: `[webdetector]` still defaults to
+  `MODE=file` with the apache tsv path
+  (`internal/detectors/webdetector_register.go:611-612`). The aim: derive the
+  edge log from the daemon's own edge knowledge (tsv, nginx combined,
+  DirectAdmin folder mode).
 
-  The aim: derive the edge log from the daemon's own edge knowledge (tsv,
-  nginx combined, DirectAdmin folder mode), and drop the hard-coded modsec
-  path from stock.
+  The modsec half shipped on 2026-11-18: stock is `LOG_PATH = auto`, and in
+  `MODE = auto` a concrete path that does not exist falls back to the
+  candidate scan with a warning (`resolveModsecLogPath`, `docs/DETECTORS.md`
+  "Source modes"). The old stock path was cPanel EA4's real one, so the cPanel
+  nodes were fine; 3deers, avglb, saf and watchdog watched nothing.
 - **cfm-admin editor writes an overlay** (§4).
 - **PR 7: stock converged defaults** (§6), one reviewable diff plus
   CHANGELOG. It changes behaviour on hosts that inherit defaults, so it ships

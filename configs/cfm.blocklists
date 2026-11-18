@@ -1,4 +1,8 @@
 MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
+# The fleet blacklist (cfm-web: every node's reported bans, ~270k entries).
+# Opt-in per node, not provisioned by cfm-web: uncomment to enforce it here.
+# Keep the name MYBLOCK, which the docs and the proxied-ipfilter log use.
+#MYBLOCK|BLOCK|3600|0|https://cfm.myip.gr/blacklist.txt
 #SPAMDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/drop.txt
 #SPAMDROPV6|BLOCK|14400|0|https://www.spamhaus.org/drop/dropv6.txt
 #SPAMEDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/edrop.txt

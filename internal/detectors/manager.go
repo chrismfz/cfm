@@ -44,6 +44,10 @@ type manager struct {
 	reprobeAt     time.Time
 	bootRaceUntil time.Time
 
+	// modsecProbes caches each [modsec] section's source probe for the config
+	// signature it was taken under. Poll goroutine only.
+	modsecProbes map[string]cachedProbe
+
 	running bool
 	state   *core.State
 
@@ -72,6 +76,29 @@ const (
 // due (reprobeAt set and reached). Poll-goroutine only, like the debounce state.
 func (m *manager) bootRaceRetryDue(now time.Time) bool {
 	return !m.reprobeAt.IsZero() && !now.Before(m.reprobeAt)
+}
+
+// cachedProbe is one section's source probe and the signature it was taken under.
+type cachedProbe struct {
+	sig uint64
+	ok  bool
+	msg string
+}
+
+// modsecProbe returns the [modsec] source probe, reusing the last one while
+// the config signature is the same. The signature folds in the section's
+// stat-only resolution, so a change of file re-probes; a file that turns
+// unreadable without moving is seen on the next signature change.
+func (m *manager) modsecProbe(section string, kv KV, sig uint64) (bool, string) {
+	if c, ok := m.modsecProbes[section]; ok && c.sig == sig {
+		return c.ok, c.msg
+	}
+	ok, msg := probeModsecSource(kv)
+	if m.modsecProbes == nil {
+		m.modsecProbes = map[string]cachedProbe{}
+	}
+	m.modsecProbes[section] = cachedProbe{sig: sig, ok: ok, msg: msg}
+	return ok, msg
 }
 
 func probeSourceStatus(kv KV) (bool, string) {
@@ -121,6 +148,15 @@ func cfgSig(secs *Sections) uint64 {
 
 	for _, name := range names {
 		kv := secs.ByName[name]
+		if typ, _ := splitTypeInstance(name); typ == "modsec" && kvBool(kv, "ENABLED", true) {
+			// modsec resolves its own file (LOG_PATH = auto, or an explicit
+			// path that is missing): fold in what it would tail, so a log that
+			// appears later, or the first denials in another candidate,
+			// rebuilds it (modsecSigPath).
+			_, _ = h.Write([]byte("modsec="))
+			_, _ = h.Write([]byte(modsecSigPath(kv, time.Now())))
+			_, _ = h.Write([]byte{0})
+		}
 		p := strings.TrimSpace(kvStrClean(kv, "LOG_PATH", ""))
 		if p == "" {
 			continue
@@ -237,6 +273,15 @@ func (m *manager) maybeReload(parent context.Context) {
 		typ, _ := splitTypeInstance(secName)
 		enabled := kvBool(kv, "ENABLED", true)
 		sourceOK, sourceMsg := probeSourceStatus(kv)
+		if typ == "modsec" {
+			// Its own MODE=auto resolution (LOG_PATH=auto, or an explicit
+			// path that is missing): a stat-only resolution, so it names the
+			// first existing candidate; the register scores them and may
+			// tail a busier one (detectors_srcresolve shows that pick). The
+			// result is reused while the config signature (which folds in
+			// that resolution) is unchanged, not redone on every poll.
+			sourceOK, sourceMsg = m.modsecProbe(secName, kv, sig)
+		}
 		if typ == cfmEndpointsType {
 			sourceOK, sourceMsg = true, "in-process control-plane security events"
 		}

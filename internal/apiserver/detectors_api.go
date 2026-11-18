@@ -30,7 +30,8 @@ type DetectorSourceRow struct {
 	// Kind: journal|file|docker (resolved), as-configured (explicit keys /
 	// package-internal resolution used verbatim), provisional targets keep
 	// their resolved kind with provisional=true, disabled (section would
-	// self-disable), unreported (legacy-auto), none.
+	// self-disable), unreported (legacy-auto; modsec reports file/none),
+	// none.
 	Kind         string `json:"kind"`
 	Target       string `json:"target,omitempty"` // unit / path / container
 	Reason       string `json:"reason,omitempty"`

@@ -287,7 +287,6 @@ var sourceConfiguredKeys = []string{
 // mislabelling them "n/a — command/API/collector-based".
 var legacyAutoTypes = map[string]string{
 	"ftpd":         "own autodetect (journal probe + file scoring); resolution in its startup log",
-	"modsec":       "own autodetect (LOG_PATH=auto candidates); resolution in its startup log",
 	"mysql":        "own autodetect (LOG_PATH=auto error-log discovery); resolution in its startup log",
 	"webdetector":  "edge log configured/derived (MODE=file|folder); see its startup log",
 	"custom":       "own MODE/LOG_PATH/JOURNAL_UNIT resolution (per-section); see its startup log",
@@ -350,6 +349,25 @@ func SourceReport(cfgPath string) ([]apiserver.DetectorSourceRow, error) {
 			plan = planEximQueues(name, kv)
 		case "postfix_security", "postfix_relays":
 			plan = planPostfixLogSource(name, kv, probes)
+		case "modsec":
+			// Not srcresolve, but its resolution is a pure function of
+			// MODE/LOG_PATH and the files here: report the real target.
+			mode := strings.ToLower(kvStrClean(kv, "MODE", "auto"))
+			row.Engine = "legacy-auto"
+			if mode != "file" && mode != "auto" {
+				row.Kind, row.Note = "none", "unknown MODE "+mode+"; use MODE=file or MODE=auto"
+				rows = append(rows, row)
+				continue
+			}
+			res := resolveModsecLogPath(mode, kvStrClean(kv, "LOG_PATH", "auto"), modsecStat, scoreFile)
+			row.Reason, row.Note = res.Reason, res.Warn
+			if res.Path == "" {
+				row.Kind = "none"
+			} else {
+				row.Kind, row.Target = "file", res.Path
+			}
+			rows = append(rows, row)
+			continue
 		case "postfix_queues":
 			var total string
 			plan, total, _ = planPostfixQueues(name, kv, probes)

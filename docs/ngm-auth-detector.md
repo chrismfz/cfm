@@ -43,18 +43,40 @@ a new NGM audit verb can never become a false ban:
 | Event | Bucket |
 |---|---|
 | `FAIL`, `RATELIMIT`, `MFA_FAILURE`, `DAV_FAIL`, `PWRESET_FAILURE`, `RECOVERY_VERIFY_FAILURE` | interactive: per IP, per user, and per IP privileged when `role` is `admin` or `reseller` |
+| `PASSWORD_CHANGE_FAIL`, `MFA_DISABLE_FAIL`, `RECOVERY_SET_FAIL` | interactive, as above, except the `account_disabled` / `account_suspended` reasons |
 | `TOKEN_FAIL` | API token: per IP only |
 
 - `RATELIMIT` means NGM's own per-IP throttle already fired: counted. A
   sustained attack turns later attempts from `FAIL` into `RATELIMIT`, so `FAIL`
   alone would under-count it.
+- The `*_FAIL` step-up verbs (NGM's `stepUp` / `mailboxStepUp`) are a
+  logged-in session failing the re-authentication for a password change,
+  turning 2FA off or setting a recovery address: a hijacked session guessing
+  the password. NGM bounds them itself (the panel's on the login form's
+  failed-attempt counter and lockout, the mailbox's on its own step-up
+  budget); this detector counts them like a failed login. Their `account_disabled` /
+  `account_suspended` reasons refuse on account state, not on a guess, and
+  are skipped.
 - `TOKEN_IP_REJECT` (a **valid** token from a source not yet on the token's
   CIDR allowlist) is deliberately not counted: NGM already refused it, and a
   legitimate token retried from a new office or CI egress would otherwise get
   that address banned.
-- The allowlist has to be kept in step with NGM's `authLog` call sites by hand
-  (separate repos, no parity test): a new NGM credential-failure verb is
-  undetected until it is added here.
+- `API_ACCOUNT_DENIED` (a **valid** API token asking for an account it does
+  not own) is not counted: an authorization refusal, not a credential guess,
+  and a misconfigured integration would loop on it.
+- `DYNDNS_DENY` (reason `badauth`) is not counted. NGM writes the same line
+  for a wrong token and for a suspended account's valid one, and the router
+  keeps polling: ddclient updates each hostname separately, so a suspended
+  customer with three hostnames on a one-minute schedule makes 30 a window and
+  would be banned fleet-wide. The tokens are random, so guessing one is not a
+  practical attack. It can count once NGM gives the suspended case its own
+  reason.
+- `internal/detectors/ngmauth/testdata/ngm_auth_events.txt` classifies every
+  event NGM emits. `TestNGMEventFixture` pins it to the allowlist, and with
+  `NGM_SRC=<ngm checkout>` also fails on an NGM event the file does not list
+  (literal `authLog("X")` sites and the step-up `X_FAIL` verbs; an event NGM
+  passes in a variable is listed by hand). Run it against a current ngm checkout when
+  ngm adds an auth event; CI has no ngm checkout, so it does not run there.
 
 ## Buckets, thresholds, alerts
 
@@ -64,7 +86,7 @@ Counts are per `WINDOW`; an alert is gated by `COOLDOWN`.
 |---|---|---|---|---|
 | `AUTHFAIL_IP` | 25 | interactive, per source IP | `NGM/AUTHFAIL` | bucket off |
 | `AUTHFAIL_USER` | 15 | interactive, per username | `NGM/AUTHFAIL` (host-scoped) | bucket off |
-| `ADMIN_IP` | 5 | `role=admin` / `reseller` failures, per IP; these also count toward `AUTHFAIL_IP` | `NGM/ADMIN` | bucket off |
+| `ADMIN_IP` | 5 | `role=admin` / `reseller` failures, per IP; these also count toward `AUTHFAIL_IP` | `NGM/ADMIN` | bucket off (no fallback) |
 | `TOKEN_IP` | 10 | `TOKEN_FAIL`, per IP | `NGM/TOKEN` | falls back to `AUTHFAIL_IP` |
 
 - An IP-bucket alert carries `Extra["ip"]`; the sink bans it per the section's

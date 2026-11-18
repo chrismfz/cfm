@@ -1,9 +1,10 @@
 // Package ngmauth detects abusive NGM control-panel login attempts by tailing
 // NGM's panel auth log (/var/log/ngm/auth.log). NGM writes that file expressly
 // for an external fail2ban-family detector (see NGM internal/web/authfilelog.go),
-// in a stable single-line key=value format:
+// in a stable single-line key=value format: ip= first, user and reason always
+// quoted (ngm authfilelog.go writeAuthFileLine):
 //
-//	2026-08-05T17:30:00Z event=FAIL user="bob" ip=1.2.3.4 role=admin reason=bad_password
+//	2026-08-05T17:30:00Z ip=1.2.3.4 event=FAIL role=admin user="bob" reason="bad_password"
 //
 // The file is a COMBINED auth+audit log, so this detector keys on an allowlist
 // of abuse events and ignores audit verbs (SUCCESS/LOGOUT/MFA_SUCCESS/DAV_*/
@@ -23,12 +24,13 @@ import (
 	core "cfm/internal/detectors/core"
 )
 
-// abuseEvents is the allowlist of auth.log events that count as abuse signal.
-// It is an ALLOWLIST, not "anything not SUCCESS": the log is a combined
-// auth+audit stream, so audit/lifecycle verbs (SUCCESS, LOGOUT, MFA_REQUIRED/
-// SUCCESS/ENABLE/DISABLE, DAV_DISCOVERY/DAV_HOST/DAV_IMPORT_FAIL, CONTAINER_*,
-// PWRESET_REQUEST/SENT/SUCCESS, SERVICE_ENABLE_DENIED, …) are ignored and a new
-// audit verb can never become a false ban. Only genuine credential/brute events:
+// abuseEvents is the allowlist of auth.log events that count as abuse signal,
+// and the bucket each feeds. It is an ALLOWLIST, not "anything not SUCCESS":
+// the log is a combined auth+audit stream, so audit/lifecycle verbs (SUCCESS,
+// LOGOUT, MFA_REQUIRED/SUCCESS/ENABLE/DISABLE, DAV_DISCOVERY/DAV_HOST/
+// DAV_IMPORT_FAIL, CONTAINER_*, PWRESET_REQUEST/SENT/SUCCESS,
+// SERVICE_ENABLE_DENIED, …) are ignored and a new audit verb can never become a
+// false ban. Only genuine credential/brute events:
 //
 //   - FAIL                     interactive login failure (bad_password/lockout/…)
 //   - RATELIMIT                NGM's own per-IP login throttle already fired —
@@ -37,31 +39,76 @@ import (
 //   - DAV_FAIL                 WebDAV/CalDAV/CardDAV mailbox auth failure
 //   - PWRESET_FAILURE          failed password-reset verification (token brute)
 //   - RECOVERY_VERIFY_FAILURE  failed recovery-code verification (code brute)
+//   - PASSWORD_CHANGE_FAIL, MFA_DISABLE_FAIL, RECOVERY_SET_FAIL
+//     a logged-in session failing the step-up re-auth (ngm stepUp /
+//     mailboxStepUp, `<EVENT>_FAIL`): a hijacked session guessing the
+//     password. NGM bounds them itself (the panel's on the login form's
+//     failed-attempt counter and lockout, the mailbox's on its own step-up
+//     budget). Their account_disabled / account_suspended reasons are state
+//     refusals, not guesses, and are not counted (stepUpStateReasons).
 //   - TOKEN_FAIL               API-token auth failure (bad token value; role=token)
 //
 // DAV_FAIL / PWRESET_FAILURE / RECOVERY_VERIFY_FAILURE are role=mailbox credential
 // failures and flow through the interactive path (per-IP + per-user), the same as
 // FAIL — NOT the audit DAV_*/PWRESET_* verbs above.
 //
-// TOKEN_IP_REJECT (a valid token presented from a not-yet-allowlisted source IP)
-// is deliberately NOT counted: NGM already refused the request on its own CIDR
-// gate, and a legitimate token retried from a new office/CI egress would
-// otherwise get that IP banned fleet-wide — a self-inflicted outage from a
-// benign misconfiguration.
+// Deliberately NOT counted:
+//   - TOKEN_IP_REJECT (a valid token presented from a not-yet-allowlisted
+//     source IP): NGM already refused the request on its own CIDR gate, and a
+//     legitimate token retried from a new office/CI egress would otherwise get
+//     that IP banned fleet-wide — a self-inflicted outage from a benign
+//     misconfiguration.
+//   - API_ACCOUNT_DENIED: a VALID API token asking for an account it does not
+//     own. An authorization refusal, not a credential guess; a misconfigured
+//     integration would loop on it.
+//   - DYNDNS_DENY (reason badauth): NGM logs a suspended account's VALID
+//     token as badauth too, and the router keeps its schedule. ddclient
+//     updates each hostname on its own, so one suspended customer with three
+//     hostnames polling every minute makes 30 a window, past AUTHFAIL_IP, and
+//     would get its home IP banned fleet-wide. The tokens are random, so
+//     guessing one is not a practical attack. Count it only once NGM tells a
+//     wrong token from a suspended one.
 //
 // Keep this allowlist in sync with NGM's authLog() call sites (ngm
-// internal/web/authfilelog.go + its callers): the two repos are separate, so
-// there is no automated cross-repo parity test — a new NGM credential-failure
-// verb must be added here by hand or it is silently undetected.
-var abuseEvents = map[string]bool{
-	"FAIL":                    true,
-	"RATELIMIT":               true,
-	"MFA_FAILURE":             true,
-	"DAV_FAIL":                true,
-	"PWRESET_FAILURE":         true,
-	"RECOVERY_VERIFY_FAILURE": true,
-	"TOKEN_FAIL":              true,
+// internal/web/authfilelog.go + its callers). testdata/ngm_auth_events.txt
+// classifies the events NGM's call sites name; TestNGMEventFixture pins it to this map,
+// and with NGM_SRC set to an ngm checkout it also fails on an NGM event the
+// fixture does not list. A new NGM credential-failure verb is otherwise
+// silently undetected.
+var abuseEvents = map[string]eventBucket{
+	"FAIL":                    bucketInteractive,
+	"RATELIMIT":               bucketInteractive,
+	"MFA_FAILURE":             bucketInteractive,
+	"DAV_FAIL":                bucketInteractive,
+	"PWRESET_FAILURE":         bucketInteractive,
+	"RECOVERY_VERIFY_FAILURE": bucketInteractive,
+	"PASSWORD_CHANGE_FAIL":    bucketInteractive,
+	"MFA_DISABLE_FAIL":        bucketInteractive,
+	"RECOVERY_SET_FAIL":       bucketInteractive,
+	"TOKEN_FAIL":              bucketToken,
 }
+
+// eventBucket is where a counted event goes.
+type eventBucket int
+
+const (
+	bucketInteractive eventBucket = iota + 1 // per IP, per user, privileged per IP
+	bucketToken                              // TOKEN|ip
+)
+
+// stepUpEvents are the step-up `<EVENT>_FAIL` verbs; stepUpStateReasons are
+// their reasons that refuse on account state, not on a wrong credential.
+var (
+	stepUpEvents = map[string]bool{
+		"PASSWORD_CHANGE_FAIL": true,
+		"MFA_DISABLE_FAIL":     true,
+		"RECOVERY_SET_FAIL":    true,
+	}
+	stepUpStateReasons = map[string]bool{
+		"account_disabled":  true,
+		"account_suspended": true,
+	}
+)
 
 type AuthConfig struct {
 	// source selection
@@ -74,11 +121,11 @@ type AuthConfig struct {
 	Cooldown    time.Duration
 	SampleLimit int
 
-	// thresholds (0 disables a bucket; ADMIN/TOKEN fall back to AuthFailPerIP)
+	// thresholds (0 disables a bucket; TOKEN falls back to AuthFailPerIP)
 	AuthFailPerIP   int // per source IP (interactive login)
 	AuthFailPerUser int // per targeted username
-	AdminFailPerIP  int // stricter, for role=admin (mirrors cpanel ROOT_IP)
-	TokenFailPerIP  int // API-token brute (TOKEN_FAIL)
+	AdminFailPerIP  int // stricter, for role=admin or reseller (mirrors cpanel ROOT_IP)
+	TokenFailPerIP  int // API-token brute (TOKEN_FAIL); 0 = AuthFailPerIP
 }
 
 type pend struct {
@@ -234,24 +281,28 @@ func (a *Auth) processLine(now time.Time, line string) {
 		return
 	}
 	ev := strings.ToUpper(f["event"])
-	if !abuseEvents[ev] {
+	bucket := abuseEvents[ev]
+	if bucket == 0 {
+		return
+	}
+	if stepUpEvents[ev] && stepUpStateReasons[strings.ToLower(strings.TrimSpace(f["reason"]))] {
 		return
 	}
 	ip := strings.TrimSpace(f["ip"])
 	user := strings.ToLower(strings.TrimSpace(f["user"]))
 	role := strings.ToLower(strings.TrimSpace(f["role"]))
 
-	// API-token brute is its own bucket (role=token; carries no meaningful user).
-	if ev == "TOKEN_FAIL" {
+	if bucket == bucketToken {
+		// API-token brute is its own bucket (role=token; carries no meaningful user).
 		if ip != "" && ip != "-" {
 			a.bump(now, "TOKEN|ip", ip, line)
 		}
 		return
 	}
 
-	// Interactive / credential-verification abuse (all abuseEvents except the
-	// TOKEN_FAIL handled above): FAIL, RATELIMIT, MFA_FAILURE, DAV_FAIL,
-	// PWRESET_FAILURE, RECOVERY_VERIFY_FAILURE.
+	// Interactive / credential-verification abuse: FAIL, RATELIMIT,
+	// MFA_FAILURE, DAV_FAIL, PWRESET_FAILURE, RECOVERY_VERIFY_FAILURE and the
+	// step-up *_FAIL verbs.
 	if ip != "" && ip != "-" {
 		// Every failure counts toward the general per-IP threshold, so a spray
 		// mixing privileged + user logins from one IP cannot hide by splitting
@@ -402,11 +453,9 @@ func (a *Auth) threshold(kindKey string) (limit int, alertKind string) {
 	case "AUTHFAIL|user":
 		return a.cfg.AuthFailPerUser, "NGM/AUTHFAIL"
 	case "ADMIN|ip":
-		lim := a.cfg.AdminFailPerIP
-		if lim <= 0 {
-			lim = a.cfg.AuthFailPerIP
-		}
-		return lim, "NGM/ADMIN"
+		// No fallback: ADMIN_IP = 0 turns the bucket off (processLine never
+		// bumps it), it does not borrow AUTHFAIL_IP.
+		return a.cfg.AdminFailPerIP, "NGM/ADMIN"
 	case "TOKEN|ip":
 		lim := a.cfg.TokenFailPerIP
 		if lim <= 0 {

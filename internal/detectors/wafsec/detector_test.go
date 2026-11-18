@@ -171,3 +171,126 @@ func TestCVEFromReason(t *testing.T) {
 		}
 	}
 }
+
+// A RULE_<id> override above 1 counts that rule's own hits: the family's
+// other rules must not fill it.
+func TestRuleOverrideAboveOneCountsOnlyItsRule(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_RCE": 5},
+		RuleOverrides: map[string]int{"329": 2},
+	})
+	ip := "203.0.113.20"
+	for i := 0; i < 3; i++ {
+		d.Enqueue(ev(ip, "WAF_RCE:CMD", "320")) // family-threshold hits (3 < 5)
+	}
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329")) // first 329 hit: 1 < 2
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("one 329 hit plus other family hits fired %d alerts; want 0", len(got))
+	}
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	got := drain(t, d)
+	if len(got) != 1 || got[0].Extra["rule_id"] != "329" || got[0].Count != 2 {
+		t.Fatalf("second 329 hit: got %+v, want one alert for rule 329 with count 2", got)
+	}
+	// The family's own count is untouched by 329's hits: 3 so far, fires at 5.
+	d.Enqueue(ev(ip, "WAF_RCE:CMD", "320"))
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("family fired at 4 hits: %d alerts", len(got))
+	}
+}
+
+// Once the family has banned an IP this window, a per-rule counter tripping
+// for the same IP does not alert again.
+func TestRuleScopedTripAfterFamilyBanIsQuiet(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_RCE": 1},
+		RuleOverrides: map[string]int{"329": 2},
+	})
+	ip := "203.0.113.21"
+	d.Enqueue(ev(ip, "WAF_RCE:CMD", "320"))
+	if got := drain(t, d); len(got) != 1 {
+		t.Fatalf("family hit: %d alerts, want 1", len(got))
+	}
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("rule trip after the family ban alerted %d times, want 0", len(got))
+	}
+}
+
+// Thresholds 0 and 1 (every shipped config) keep the (ip, family) key: an
+// explicit RULE_<id> = 1 hit after the family fired stays one alert.
+func TestRuleOverrideOfOneSharesTheFamilyKey(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_BACKDOOR": 1},
+		RuleOverrides: map[string]int{"440": 1, "438": 0},
+	})
+	ip := "203.0.113.22"
+	d.Enqueue(ev(ip, "WAF_BACKDOOR:B64", "439"))
+	d.Enqueue(ev(ip, "WAF_BACKDOOR:PLUGIN", "440"))
+	d.Enqueue(ev(ip, "WAF_BACKDOOR:B64PHP", "438"))
+	got := drain(t, d)
+	if len(got) != 1 || got[0].Extra["rule_id"] != "439" {
+		t.Fatalf("got %d alerts (%+v), want exactly the first hit's", len(got), got)
+	}
+	if k := counterKey(ip, "WAF_BACKDOOR", "440", 1, true); k != ip+"|WAF_BACKDOOR" {
+		t.Fatalf("threshold-1 override key = %q, want the family key", k)
+	}
+}
+
+// A rule-scoped trip suppresses a later family trip for the same IP in the
+// window: one alert per IP and family, as with the shared key.
+func TestFamilyTripAfterRuleScopedBanIsQuiet(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_RCE": 5},
+		RuleOverrides: map[string]int{"329": 2},
+	})
+	ip := "203.0.113.23"
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 1 {
+		t.Fatalf("rule trip: %d alerts, want 1", len(got))
+	}
+	for i := 0; i < 5; i++ {
+		d.Enqueue(ev(ip, "WAF_RCE:CMD", "320"))
+	}
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("family trip after the rule ban alerted %d times, want 0", len(got))
+	}
+}
+
+// A campaign that keeps hitting a rule-scoped rule after the family ban stays
+// one alert while it continues (its hits keep the family alive even after the
+// family's own counter drained), and the state is released once the family
+// has been quiet for a full Window.
+func TestRuleScopedHitsKeepFamilyBanAlive(t *testing.T) {
+	d := New(Config{
+		Window:        30 * time.Second,
+		Families:      map[string]int{"WAF_RCE": 1},
+		RuleOverrides: map[string]int{"329": 3},
+	})
+	ip := "203.0.113.24"
+	ago := func(dur time.Duration, reason, rule string) core.InputEvent {
+		e := ev(ip, reason, rule)
+		e.When = time.Now().Add(-dur)
+		return e
+	}
+	// The family hit is already past the 30 s window when pruning runs; the
+	// 329 hit is not.
+	d.Enqueue(ago(40*time.Second, "WAF_RCE:CMD", "320"))
+	d.Enqueue(ago(20*time.Second, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 1 {
+		t.Fatalf("family hit: %d alerts, want 1", len(got))
+	}
+	d.Enqueue(ago(10*time.Second, "WAF_RCE:SHELL", "329"))
+	d.Enqueue(ago(5*time.Second, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("continuing campaign alerted again: %d", len(got))
+	}
+	// Long quiet: everything is released.
+	d.famSeen[ip+"|WAF_RCE"] = time.Now().Add(-time.Minute)
+	drain(t, d)
+	if len(d.fired) != 0 || len(d.famSeen) != 0 {
+		t.Fatalf("state not pruned after a quiet Window: fired=%v famSeen=%v", d.fired, d.famSeen)
+	}
+}

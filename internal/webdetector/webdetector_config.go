@@ -127,7 +127,7 @@ type Config struct {
 
 	// WAF-origin 403s reported via POST /nginx/observe (OpenResty cfm_waf.lua).
 	// Counted separately so a distinct threshold and alert kind (WEB/403WAF) can be used.
-	IP403WAFCount int // IP403WAF_COUNT = 50
+	IP403WAFCount int // IP403WAF_COUNT; 0 = off (the default)
 
 	// 40x combo detector (403+404) with optional unique-path gating.
 	IP40xComboCount       int

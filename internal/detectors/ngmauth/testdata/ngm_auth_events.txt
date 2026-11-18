@@ -1,0 +1,107 @@
+# Every auth.log event NGM (chrismfz/ngm) emits, and what ngm_auth does with it.
+# Format: EVENT <interactive|token|ip|ignore>. TestNGMEventFixture pins the counted
+# ones to abuseEvents; with NGM_SRC=<ngm checkout> it also fails on an event NGM
+# names that this file does not list (literal authLog("X") call sites and the
+# step-up stepUp/mailboxStepUp("X") -> X_FAIL). Events passed in a variable are
+# not seen by the scan; RECOVERY_SET / RECOVERY_CLEAR (webmailreset.go) are
+# listed by hand, and the audit helpers (apiAuditWrite, mcpAudit, php/valkey/pg
+# audits, MAILSYNC tags, auditQuarantine) log authenticated actions only. Snapshot of ngm 2236cd9 2026-11-18.
+
+API_ACCOUNT_DENIED ignore
+CONFIG_RECOVERY ignore
+CONTACT_SET ignore
+CONTAINER_LIFECYCLE_INTENT ignore
+CONTAINER_LIFECYCLE_RESULT ignore
+CONTAINER_LOG_READ ignore
+CONTAINER_MUTATION_INTENT ignore
+CONTAINER_MUTATION_RESULT ignore
+CONTAINER_RECONCILE_INTENT ignore
+CONTAINER_RECONCILE_RESULT ignore
+CONTAINER_RESOURCES_INTENT ignore
+CONTAINER_RESOURCES_RESULT ignore
+CONTAINER_TERMINAL_CLOSE ignore
+CONTAINER_TERMINAL_OPEN ignore
+CONTAINER_UPDATE_ALL_INTENT ignore
+CONTAINER_UPDATE_ALL_RESULT ignore
+DAV_DISCOVERY ignore
+DAV_DISCOVERY_ALL ignore
+DAV_FAIL interactive
+DAV_HOST ignore
+DAV_IMPORT ignore
+DAV_IMPORT_FAIL ignore
+DBADMIN_LOGIN ignore
+DYNDNS_DENY ignore
+DYNDNS_UPDATE ignore
+FAIL interactive
+FTP_GUARD_UNBLOCK ignore
+IMPERSONATE ignore
+IMPERSONATE_END ignore
+IMPERSONATE_MAILBOX ignore
+IMPERSONATE_MAILBOX_END ignore
+IMPERSONATE_MAILBOX_INBOX ignore
+LOGOUT ignore
+MAILSYNC_ADD ignore
+MAILSYNC_DELETE ignore
+MAIL_CLEANUP ignore
+MAIL_CLEANUP_FAILED ignore
+MAIL_GUARD_UNBLOCK ignore
+MAIL_IDENTITY ignore
+MAIL_SENDONLY ignore
+MCP_OAUTH_APPROVE ignore
+MFA_DISABLE ignore
+MFA_DISABLE_FAIL interactive
+MFA_ENABLE ignore
+MFA_FAILURE interactive
+MFA_REQUIRED ignore
+MFA_SUCCESS ignore
+MONGODB_TENANT_BROWSE ignore
+MYSQL_GUARD_UNBLOCK ignore
+PANEL_RESTART ignore
+PASSWORD_CHANGE ignore
+PASSWORD_CHANGE_FAIL interactive
+POSTGRES_DB_CREATE ignore
+POSTGRES_DB_DROP ignore
+POSTGRES_GRANT ignore
+POSTGRES_INSTALL ignore
+POSTGRES_REVOKE ignore
+POSTGRES_ROLE_CREATE ignore
+POSTGRES_ROLE_DROP ignore
+POSTGRES_ROLE_PASSWORD ignore
+POSTGRES_TENANT_BROWSE ignore
+POSTGRES_TENANT_QUERY ignore
+PWRESET_FAILURE interactive
+PWRESET_REQUEST ignore
+PWRESET_SENT ignore
+PWRESET_SUCCESS ignore
+RATELIMIT interactive
+RECOVERY_CLEAR ignore
+RECOVERY_SET ignore
+RECOVERY_SET_FAIL interactive
+RECOVERY_VERIFIED ignore
+RECOVERY_VERIFY_FAILURE interactive
+RECOVERY_VERIFY_SENT ignore
+SERVICE_ENABLE_DENIED ignore
+SERVICE_ENABLE_INTENT ignore
+SERVICE_ENABLE_RESULT ignore
+SETUP_LAUNCH ignore
+SOFTWARE_INSTALL ignore
+SOFTWARE_ROLLBACK ignore
+SOFTWARE_TOGGLE ignore
+SOFTWARE_UNINSTALL ignore
+SOFTWARE_UPDATE ignore
+SUCCESS ignore
+TERMINAL_EXEC ignore
+TMP_CLEAR ignore
+TMP_CLEAR_FAILED ignore
+TMP_CLEAR_REFUSED ignore
+TOKEN_FAIL token
+TOKEN_IP_REJECT ignore
+UPDATE_ACTIVATE ignore
+UPDATE_CHECK ignore
+UPDATE_PREPARE ignore
+USER_TERMINAL_CLOSE ignore
+USER_TERMINAL_OPEN ignore
+VALKEY_TENANT_BROWSE ignore
+WEBMAIL_GROUPWARE_IMPORT ignore
+WEBMAIL_HOST ignore
+WEBMAIL_PLUGINS ignore

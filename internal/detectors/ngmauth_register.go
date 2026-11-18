@@ -37,7 +37,7 @@ func init() {
 
 			AuthFailPerIP:   kvInt(kv, "AUTHFAIL_IP", 25),
 			AuthFailPerUser: kvInt(kv, "AUTHFAIL_USER", 15),
-			AdminFailPerIP:  kvInt(kv, "ADMIN_IP", 5), // stricter for role=admin
+			AdminFailPerIP:  kvInt(kv, "ADMIN_IP", 5), // stricter for role=admin or reseller
 			TokenFailPerIP:  kvInt(kv, "TOKEN_IP", 10),
 		}
 

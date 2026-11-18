@@ -7,8 +7,9 @@
 // reason *family* instead of a global per-IP stage: a family at threshold 1
 // (e.g. WAF_SQLI) blocks on the first hit, while a family at 0 is ignored
 // entirely (edge-only, no autoblock). Per-rule-id overrides win over the
-// family threshold. Blocking, leniency (GR/CY), API reporting and email are
-// all handled downstream by the section sink — this detector only emits alerts.
+// family threshold; one above 1 counts that rule's hits alone (counterKey).
+// Blocking, leniency (GR/CY), API reporting and email are all handled
+// downstream by the section sink — this detector only emits alerts.
 //
 // See docs/waf-autoblock-design.md.
 package wafsec
@@ -57,7 +58,15 @@ type Detector struct {
 	events  []core.InputEvent
 	counts  *core.SlidingCounter
 	samples *core.SampleRing
-	fired   map[string]struct{} // key = ip|family, so we alert once per window
+	// fired: counterKey (ip|family[|rule]) -> its family key (ip|family). One
+	// alert per IP and family until the family goes quiet for a Window.
+	fired map[string]string
+	// famSeen: family key -> the last fed hit of that family from that IP,
+	// whichever counter it went to. A fired entry is pruned only once its
+	// family has been quiet for a full Window, so a campaign that moves to a
+	// rule-scoped rule after the family ban stays one alert, as it was when
+	// every rule shared the family counter.
+	famSeen map[string]time.Time
 
 	allowIPs  map[string]struct{}
 	allowNets []*net.IPNet
@@ -84,7 +93,8 @@ func New(cfg Config) *Detector {
 		cfg:      cfg,
 		counts:   core.NewSlidingCounter(cfg.Window, 256),
 		samples:  core.NewSampleRing(cfg.SampleLimit),
-		fired:    make(map[string]struct{}),
+		fired:    make(map[string]string),
+		famSeen:  make(map[string]time.Time),
 		allowIPs: make(map[string]struct{}),
 	}
 	for _, ip := range cfg.AllowIPs {
@@ -179,16 +189,32 @@ func cveFromReason(reason string) string {
 
 // thresholdFor resolves the block threshold for a (family, ruleID). A per-rule
 // override wins over the family default — including an override of 0, which
-// suppresses autoblock for that rule while the family stays active. Returns
+// suppresses autoblock for that rule while the family stays active.
+// ruleScoped reports that the threshold came from a RULE_<id> override. Returns
 // ok=false when neither is configured (family not fed at all).
-func (d *Detector) thresholdFor(family, ruleID string) (int, bool) {
+func (d *Detector) thresholdFor(family, ruleID string) (limit int, ruleScoped, ok bool) {
 	if ruleID != "" {
 		if ov, ok := d.cfg.RuleOverrides[ruleID]; ok {
-			return ov, true
+			return ov, true, true
 		}
 	}
 	lim, ok := d.cfg.Families[family]
-	return lim, ok
+	return lim, false, ok
+}
+
+// counterKey is the sliding-counter / fired key for a hit. Normally
+// (ip, family): the family's rules share one count. A RULE_<id> override above
+// 1 counts that rule's own hits instead (ip, family, rule), or the other
+// rules of its family would fill its count: RULE_X = 3 under a family at 5
+// fired on X's first hit after two hits of other rules. At thresholds 0 and 1
+// the key does not matter (0 never counts, 1 fires on the first hit), so the
+// shipped configs behave exactly as before.
+func counterKey(ip, family, ruleID string, limit int, ruleScoped bool) string {
+	key := ip + "|" + family
+	if ruleScoped && limit > 1 {
+		key += "|" + ruleID
+	}
+	return key
 }
 
 func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
@@ -211,13 +237,17 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if family == "" {
 			continue
 		}
-		limit, ok := d.thresholdFor(family, ev.Signal)
+		limit, ruleScoped, ok := d.thresholdFor(family, ev.Signal)
 		if !ok || limit <= 0 {
 			continue // family/rule not fed into autoblock
 		}
 
-		key := ev.SrcIP + "|" + family
+		famKey := ev.SrcIP + "|" + family
+		key := counterKey(ev.SrcIP, family, ev.Signal, limit, ruleScoped)
 		count := d.counts.Add(key, ev.When)
+		if ev.When.After(d.famSeen[famKey]) {
+			d.famSeen[famKey] = ev.When
+		}
 		d.samples.Add(key, fmt.Sprintf("[%s] reason=%s rule=%s method=%s host=%s uri=%s ua=%q",
 			ev.Source, ev.Reason, ev.Signal, ev.Method, ev.Scope, ev.Path, ev.UserAgent))
 
@@ -227,7 +257,14 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if _, done := d.fired[key]; done {
 			continue // already alerted this window; the sink owns the live block
 		}
-		d.fired[key] = struct{}{}
+		if _, done := d.fired[famKey]; done {
+			continue // the family (or one of its rules) already banned this IP this window
+		}
+		d.fired[key] = famKey
+		// A rule-scoped trip also marks the family key, so a later family trip
+		// for the same IP does not alert a second time (one ban per IP and
+		// family per window, as with the shared key).
+		d.fired[famKey] = famKey
 
 		// Notification identity. For the WAF_CVE family, surface the concrete
 		// CVE id (WAF_CVE:CVE_2025_34085:... -> "WAF/CVE-2025-34085") so the
@@ -266,12 +303,19 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		out <- alert
 	}
 
-	// Prune per-(ip,family) fired state once its window has fully drained, so a
-	// later campaign from the same IP re-triggers instead of staying silent.
-	for key := range d.fired {
-		if d.counts.Count(key, now) == 0 {
+	// Prune fired state once its family has been quiet for a full Window, so
+	// a later campaign from the same IP re-triggers instead of staying silent.
+	// With one shared key this is exactly "its counter drained": famSeen holds
+	// the newest hit any of the family's counters took.
+	for key, fam := range d.fired {
+		if now.Sub(d.famSeen[fam]) > d.cfg.Window {
 			delete(d.fired, key)
 			d.samples.GetAndClear(key)
+		}
+	}
+	for fam, at := range d.famSeen {
+		if now.Sub(at) > d.cfg.Window {
+			delete(d.famSeen, fam)
 		}
 	}
 	return nil
