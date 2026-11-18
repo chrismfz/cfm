@@ -479,22 +479,11 @@ func (e *Engine) handleWebdetRulesExport(w http.ResponseWriter, r *http.Request)
 			}
 		}
 	}
-	rows := scopeFilterRules(e.TrafficRuleList(), r)
-	if scope := vhostScopeFromContext(r.Context()); scope != nil {
-		// A rule the operator shares with other tenants' vhosts is listed
-		// for this tenant, but its file must carry only the tenant's own
-		// vhosts: it would leak the others, and could not be imported back
-		// by the same tenant (import checks every vhost).
-		for i := range rows {
-			own := make([]string, 0, len(rows[i].Scope.Vhosts))
-			for _, h := range rows[i].Scope.Vhosts {
-				if vhostAllowed(strings.ToLower(h), scope) {
-					own = append(own, h)
-				}
-			}
-			rows[i].Scope.Vhosts = own
-		}
-	}
+	// A rule the operator shares with other tenants' vhosts is exported for
+	// this tenant with only the tenant's own vhosts: the others would leak, and
+	// the file could not be imported back by the same tenant (import checks
+	// every vhost).
+	rows := scopeListRules(e.TrafficRuleList(), r)
 	writeJSON(w, http.StatusOK, exportTrafficRules(rows, vhosts, nodeHostname(), time.Now()))
 }
 

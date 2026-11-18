@@ -20,6 +20,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Security
+- **Hardened /cfm-admin path normalisation in the auth middleware**, and in
+  the edge configs' `/cfm-admin/` locations, which now also set
+  `X-Forwarded-Host` themselves on every hop to the daemon.
+- **Scoped traffic-rule views name only the caller's own sites.** A rule the
+  operator shares across several tenants' sites is listed and simulated for
+  each tenant with that tenant's sites only, as the rules export already did.
+
 ### Changed
 - **The MCP server's instructions name every tool.** The guidance an MCP
   client (Claude) reads when it connects listed only the first ~20 tools;

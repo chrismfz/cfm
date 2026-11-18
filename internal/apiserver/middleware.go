@@ -216,14 +216,24 @@ func authMiddlewarePath(r *http.Request) string {
 	if r == nil || r.URL == nil {
 		return ""
 	}
-	path := r.URL.Path
-	if strings.HasPrefix(path, "/cfm-admin/") {
-		path = strings.TrimPrefix(path, "/cfm-admin")
-		if path == "" || path[0] != '/' {
-			path = "/" + path
+	return stripCfmAdminPrefixes(r.URL.Path)
+}
+
+// hasCfmAdminPrefix reports whether p starts with the /cfm-admin segment.
+func hasCfmAdminPrefix(p string) bool {
+	return p == "/cfm-admin" || strings.HasPrefix(p, "/cfm-admin/")
+}
+
+// stripCfmAdminPrefixes removes every leading /cfm-admin segment, so the auth
+// checks read the same path the router serves.
+func stripCfmAdminPrefixes(p string) string {
+	for hasCfmAdminPrefix(p) {
+		p = strings.TrimPrefix(p, "/cfm-admin")
+		if p == "" {
+			p = "/"
 		}
 	}
-	return path
+	return p
 }
 
 func isPublicAssetPath(r *http.Request, normalizedPath string) bool {
@@ -289,14 +299,7 @@ func isEmbedShellBootstrapRequest(r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		return false
 	}
-	path := r.URL.Path
-	if strings.HasPrefix(path, "/cfm-admin/") {
-		path = strings.TrimPrefix(path, "/cfm-admin")
-		if path == "" || path[0] != '/' {
-			path = "/" + path
-		}
-	}
-	if strings.HasPrefix(path, "/api/") || path == "/login" || strings.HasPrefix(path, "/login/") || path == "/logout" {
+	if !isEmbedShellPagePath(r.URL.Path) {
 		return false
 	}
 	// Primary signal on first load (from embed bootstrap redirect).
@@ -311,6 +314,56 @@ func isEmbedShellBootstrapRequest(r *http.Request) bool {
 	return false
 }
 
+// embedShellNonPageRoots are the first path segments (after the /cfm-admin
+// prefix) the :6060 mux routes to something other than the embedded UI's HTML
+// shell; the iframe shell exemption does not apply to them. /debug/ is a UI
+// page, so only /debug/pprof is listed (embedShellNonPagePrefixes).
+// TestEmbedShellRefusesEveryRegisteredNonPageRoute keeps this list in step
+// with the routes registered in this package.
+var embedShellNonPageRoots = map[string]struct{}{
+	"api":         {},
+	"mcp":         {},
+	"login":       {},
+	"logout":      {},
+	"me":          {},
+	"search":      {},
+	"unblock":     {},
+	".well-known": {},
+	"assets":      {}, // public anyway (isPublicAssetPath); never a page
+}
+
+// embedShellNonPagePrefixes are non-page routes below a root that is a page.
+var embedShellNonPagePrefixes = []string{"/debug/pprof"}
+
+// isEmbedShellPagePath reports whether raw (r.URL.Path) may be served to an
+// iframe page load as the UI shell: a clean path whose first segment (after
+// the /cfm-admin prefix) is not a non-page root. Paths the mux would only
+// redirect or 404 (not clean, or a nested prefix) are refused outright.
+func isEmbedShellPagePath(raw string) bool {
+	if raw == "" || raw[0] != '/' {
+		return false
+	}
+	if strings.Contains(raw, "//") || strings.Contains(raw, "/./") || strings.Contains(raw, "/../") ||
+		strings.HasSuffix(raw, "/.") || strings.HasSuffix(raw, "/..") || strings.ContainsAny(raw, "\\\x00") {
+		return false
+	}
+	if once := strings.TrimPrefix(raw, "/cfm-admin"); once != raw && hasCfmAdminPrefix(once) {
+		return false // the re-dispatcher answers 404
+	}
+	p := stripCfmAdminPrefixes(raw)
+	for _, pre := range embedShellNonPagePrefixes {
+		if p == pre || strings.HasPrefix(p, pre+"/") {
+			return false
+		}
+	}
+	first := strings.TrimPrefix(p, "/")
+	if i := strings.IndexByte(first, '/'); i >= 0 {
+		first = first[:i]
+	}
+	_, nonPage := embedShellNonPageRoots[strings.ToLower(first)]
+	return !nonPage
+}
+
 // cPanel plugin actor-assertion route: allow request through auth middleware
 // and let the endpoint perform strict assertion validation. One credential
 // namespace per header: only X-CFM-Actor-Assertion carries plugin assertions;
@@ -318,6 +371,12 @@ func isEmbedShellBootstrapRequest(r *http.Request) bool {
 // so a Bearer-only request falls through to normal token validation instead
 // of being mistaken for an assertion bearer.
 func isCpanelPluginSelfServicePath(r *http.Request) bool {
+	return IsCpanelPluginSelfServicePath(r)
+}
+
+// IsCpanelPluginSelfServicePath is the exported form, for the web-detector
+// route proxy (internal/detectors), which must let the same request through.
+func IsCpanelPluginSelfServicePath(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
 	}
