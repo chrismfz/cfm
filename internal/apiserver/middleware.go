@@ -190,7 +190,7 @@ func normalizePathPrefix(raw string) string {
 // a path beneath one of them is never public by accident.
 var publicPaths = map[string]struct{}{
 	"/login":                        {},
-	"/login/":                       {}, // edge alias of the login page
+	"/login/":                       {}, // no route of its own: the UI catch-all serves the static shell (public as before)
 	"/login/verify":                 {},
 	"/login/webauthn/begin":         {},
 	"/login/webauthn/finish":        {},

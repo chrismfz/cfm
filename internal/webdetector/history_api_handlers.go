@@ -232,18 +232,23 @@ func dropServerOnlyRows(r *http.Request, rows []HistoryEvent) []HistoryEvent {
 	}
 	out := rows[:0]
 	for _, ev := range rows {
-		drop := false
-		for _, p := range serverOnlyTypePrefixes {
-			if strings.HasPrefix(ev.Type, p) {
-				drop = true
-				break
-			}
-		}
-		if !drop {
+		if !isServerOnlyEventType(ev.Type) {
 			out = append(out, ev)
 		}
 	}
 	return out
+}
+
+// isServerOnlyEventType reports whether a history event type is one of the
+// node's own fault rows (serverOnlyTypePrefixes), which scoped callers never
+// read: dropServerOnlyRows for events, SummarizeTenant for the counts.
+func isServerOnlyEventType(typ string) bool {
+	for _, p := range serverOnlyTypePrefixes {
+		if strings.HasPrefix(typ, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
@@ -312,7 +317,11 @@ func (e *Engine) handleHistorySummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hours, _ := strconv.Atoi(q.Get("hours"))
-	res, err := e.history.Summarize(host, q.Get("ip"), hours)
+	summarize := e.history.Summarize
+	if !IsAdminRequest(r) {
+		summarize = e.history.SummarizeTenant
+	}
+	res, err := summarize(host, q.Get("ip"), hours)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

@@ -436,6 +436,27 @@ func (s *HistoryStore) Summarize(host, ip string, hours int) (HistorySummary, er
 // SummarizeRange is Summarize over an EXPLICIT half-open [fromUnix, toUnix)
 // window. HistorySummary.FromUnix/ToUnix echo exactly these bounds.
 func (s *HistoryStore) SummarizeRange(host, ip string, fromUnix, toUnix int64) (HistorySummary, error) {
+	return s.summarizeRange(host, ip, fromUnix, toUnix, false)
+}
+
+// SummarizeTenant is Summarize for a scoped caller: the node's own fault rows
+// (isServerOnlyEventType: mail_*, backup_*), which a tenant never reads, are
+// not counted in TotalEvents either.
+func (s *HistoryStore) SummarizeTenant(host, ip string, hours int) (HistorySummary, error) {
+	if hours <= 0 {
+		hours = 24
+	}
+	to := time.Now().Unix()
+	return s.summarizeRange(host, ip, to-int64(hours)*3600, to, true)
+}
+
+// SummarizeRangeTenant is SummarizeRange for a scoped caller (see
+// SummarizeTenant).
+func (s *HistoryStore) SummarizeRangeTenant(host, ip string, fromUnix, toUnix int64) (HistorySummary, error) {
+	return s.summarizeRange(host, ip, fromUnix, toUnix, true)
+}
+
+func (s *HistoryStore) summarizeRange(host, ip string, fromUnix, toUnix int64, tenant bool) (HistorySummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r := HistorySummary{FromUnix: fromUnix, ToUnix: toUnix}
@@ -465,6 +486,9 @@ GROUP BY event_type`, args...)
 		var n int
 		if err := rows.Scan(&typ, &n); err != nil {
 			return r, err
+		}
+		if tenant && isServerOnlyEventType(typ) {
+			continue
 		}
 		r.TotalEvents += n
 		switch typ {
