@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.18
+
 ### Fixed
 - **ChallengeV2: a quiet `cpanel.`/`webmail.`/`whm.` subdomain is at v2 from
   its first solve.** The default `CHALLENGE_VHOST` list is wildcards, and the
@@ -61,8 +65,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `MYIP_BLOCK`), and 3deers, avglb, saf and watchdog do not pull it.
 - The stock `[webdetector]` documents `IP403WAF_COUNT` (WAF-origin 403 flood,
   0 = off), commented out at its default.
-
-## 2026.11.18
 
 ### Security
 - **Drupal render-array injection blocked (rule 10030).** A request that
