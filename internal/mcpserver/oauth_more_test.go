@@ -472,3 +472,29 @@ func TestValidRedirect(t *testing.T) {
 		}
 	}
 }
+
+// A client_id signed before the redirect rule tightened still carries its old
+// redirect: authorize re-checks the rule rather than trusting the signature.
+func TestAuthorizeRechecksRedirectOfOlderClient(t *testing.T) {
+	base := "https://panel.example.com/cfm-admin"
+	s := newOAuthServer(func(*http.Request) string { return base }, immediateIPFromRequestMCP, nil, "/mcp",
+		"signing-secret-long-enough-xxxxx", func(string) (string, bool) { return "", true })
+	mux := http.NewServeMux()
+	s.register(mux)
+	for redirect, want := range map[string]int{
+		"https://claude.ai@evil.example/cb": http.StatusBadRequest,
+		"https:claude.ai/cb":                http.StatusBadRequest,
+		testRedirectURI:                     http.StatusOK,
+	} {
+		cid := s.sign(oauthClaims{Kind: "client", Redirects: []string{redirect}, Exp: time.Now().Add(time.Hour).Unix()})
+		q := url.Values{"response_type": {"code"}, "client_id": {cid}, "redirect_uri": {redirect},
+			"code_challenge": {"x"}, "code_challenge_method": {"S256"}}
+		r := httptest.NewRequest(http.MethodGet, "/mcp/oauth/authorize?"+q.Encode(), nil)
+		r.Host = "panel.example.com"
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, r)
+		if rec.Code != want {
+			t.Errorf("authorize with older client redirect %q: %d, want %d", redirect, rec.Code, want)
+		}
+	}
+}

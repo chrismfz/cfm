@@ -281,7 +281,9 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Validate the client + redirect_uri BEFORE trusting either; a bad pair is a
 	// hard 400 (never redirect to an unvalidated URI — open-redirect guard).
 	cl, ok := s.parse(clientID)
-	if !ok || cl.Kind != "client" || oauthExpired(cl) || !contains(cl.Redirects, redirectURI) {
+	// validRedirect again: a client_id is a stateless signed value, so one
+	// registered under an older, looser rule would otherwise keep it.
+	if !ok || cl.Kind != "client" || oauthExpired(cl) || !contains(cl.Redirects, redirectURI) || !validRedirect(redirectURI) {
 		http.Error(w, "invalid client_id or redirect_uri", http.StatusBadRequest)
 		return
 	}

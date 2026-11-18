@@ -3,6 +3,8 @@ package apiserver
 import (
 	"net/http"
 	"strings"
+
+	"cfm/internal/logging"
 )
 
 // Admin-token source-IP binding.
@@ -101,4 +103,37 @@ func adminTokenSourceAllowed(r *http.Request, p adminIPPolicy) bool {
 	}
 	snap := loadAllowedSources(r.Context(), p.cfgDir, p.apiURL)
 	return ipAllowed(clientIP, snap.ExactIPs, snap.CIDRNets)
+}
+
+// refuseForeignAdminToken applies the binding to a request that presented the
+// valid admin token, for both doors that accept it (TokenMiddleware, kind
+// "token"; the /mcp bearer gate, kind "mcp_token"). It reports true when the
+// caller must refuse it (enforce, foreign source), after the audit line, the
+// ADMIN_TOKEN_FOREIGN_IP anomaly and the anomaly reason have been recorded;
+// the caller writes the 403. logonly logs would_block and allows. w may be
+// nil (the reason then travels on the request's anomaly state only).
+func refuseForeignAdminToken(w http.ResponseWriter, r *http.Request, p adminIPPolicy, kind string) bool {
+	if !p.active() || adminTokenSourceAllowed(r, p) {
+		return false
+	}
+	if p.mode != adminIPModeEnforce {
+		// logonly (burn-in): record what enforce WOULD block, then allow.
+		// Unsampled by design — expected volume is ~zero (only cfm-web and
+		// the WHM plugin present the admin token, both allowlisted) and each
+		// line is security evidence.
+		logging.LogfAPI("[apiserver] admin_token_source_ip logonly=would_block src_ip=%s method=%s path=%q",
+			realIPFromRequest(r), r.Method, r.URL.Path)
+		return false
+	}
+	auditAuthAttempt(r, authAttemptAudit{Kind: kind, Result: "blocked_source_ip", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusForbidden})
+	// A structured anomaly (enforce ONLY — logonly stays observe-only so a
+	// burn-in never blocks/challenges the source): a leaked admin token used
+	// even ONCE from a foreign IP alerts, instead of needing a forbidden
+	// burst. classifierReason() lists "admin_token_source_ip" as a direct
+	// event, so the generic burst signal does not count this 403 again.
+	publishRequestAnomaly(r, "ADMIN_TOKEN_FOREIGN_IP", http.StatusForbidden)
+	logging.LogfAPI("[apiserver] event=api_audit reason=admin_token_source_ip src_ip=%s method=%s path=%q status=%d",
+		realIPFromRequest(r), r.Method, r.URL.Path, http.StatusForbidden)
+	setAPIAnomalyReason(w, r, "admin_token_source_ip")
+	return true
 }

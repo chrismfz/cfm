@@ -89,3 +89,23 @@ func TestMCPGateIdentities(t *testing.T) {
 		}
 	}
 }
+
+// The MCP refusal is recorded as a direct auth event, like TokenMiddleware's,
+// so the generic forbidden-burst signal does not count it a second time.
+func TestMCPForeignAdminTokenIsADirectAuthEvent(t *testing.T) {
+	h, _ := mcpGateServer(t, "enforce")
+	var reason string
+	var direct bool
+	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r)
+		reason, direct = anomalyStateFromRequest(r).snapshot()
+	})
+	stack := APISecurityAnomalyMiddleware(probe)
+	rec := mcpToolsList(stack, "203.0.113.9:4000", map[string][]string{"Authorization": {"Bearer " + gateTestAdminTok}})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d, want 403", rec.Code)
+	}
+	if classifierReason(reason, direct) != "direct_auth_event" {
+		t.Errorf("anomaly reason %q is not a direct auth event", reason)
+	}
+}

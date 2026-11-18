@@ -63,16 +63,8 @@ func mcpStaticBearer(r *http.Request, tok, mcpTok, adminTok string, adminIP admi
 		return "", mcpserver.StaticBearerNoMatch
 	}
 	if adminTok != "" && tokenMatch(tok, adminTok) {
-		if adminIP.active() && !adminTokenSourceAllowed(r, adminIP) {
-			if adminIP.mode == adminIPModeEnforce {
-				auditAuthAttempt(r, authAttemptAudit{Kind: "mcp_token", Result: "blocked_source_ip", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusForbidden})
-				publishRequestAnomaly(r, "ADMIN_TOKEN_FOREIGN_IP", http.StatusForbidden)
-				logging.LogfAPI("[apiserver] event=api_audit reason=admin_token_source_ip src_ip=%s method=%s path=%q status=%d",
-					realIPFromRequest(r), r.Method, r.URL.Path, http.StatusForbidden)
-				return string(authnMechanismTokenAdmin), mcpserver.StaticBearerRefused
-			}
-			logging.LogfAPI("[apiserver] admin_token_source_ip logonly=would_block src_ip=%s method=%s path=%q",
-				realIPFromRequest(r), r.Method, r.URL.Path)
+		if refuseForeignAdminToken(nil, r, adminIP, "mcp_token") {
+			return string(authnMechanismTokenAdmin), mcpserver.StaticBearerRefused
 		}
 		return string(authnMechanismTokenAdmin), mcpserver.StaticBearerAccepted
 	}

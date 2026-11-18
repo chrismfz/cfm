@@ -51,9 +51,9 @@ always `www.`), so scope checks matched almost none of the account's traffic.
 
 **Who wins when a browser carries both cookies** (`TokenMiddleware`,
 `internal/apiserver/middleware.go:403`): a bearer token, then the admin SSO
-cookie (cfm-web / WHM SSO, step 2a at `:533`), then the admin login session
-(non-embedded requests only, step 2c at `:548`), then the scoped embed cookie
-(step 2b at `:575`). An admin who has also opened a customer's cPanel CFM on
+cookie (cfm-web / WHM SSO, step 2a at `:513`), then the admin login session
+(non-embedded requests only, step 2c at `:528`), then the scoped embed cookie
+(step 2b at `:555`). An admin who has also opened a customer's cPanel CFM on
 the same host (the embed cookie ignores the port) therefore keeps browsing as
 the admin (order since 2026-11-10). An *embedded* request (below) never uses
 the session, so in the iframe the scoped cookie is the identity.
@@ -86,12 +86,12 @@ PprofWriteTimeout → SessionCookieTransport → goauth LoadAndSave →
   public too (`isPublicAssetPath`, `:256`). The MCP
   paths skip `TokenMiddleware` entirely (`:441`; MCP owns its bearer/OAuth
   gate). On the other public paths a supplied bearer token is still validated
-  first (an invalid one is `401`); with no token the request passes (`:528`).
+  first (an invalid one is `401`); with no token the request passes (`:508`).
   `GET /api/v1/cpanel/user-info` carrying `X-CFM-Actor-Assertion` passes the
   same way (`isCpanelPluginSelfServicePath`, `:390`); its handler checks the
   assertion.
 - **An encoded separator in the path is `404` before any auth decision**
-  (since 2026-11-18; `hasEncodedPathSeparator`, `internal/apiserver/middleware.go:632`,
+  (since 2026-11-18; `hasEncodedPathSeparator`, `internal/apiserver/middleware.go:612`,
   called first in `TokenMiddleware`, `:433`): `%2F` / `%5C` in any case, or a
   raw `\`, in the escaped path. The auth checks below read the decoded path
   and the mux the escaped one; this is the one place the two disagree (`/a%2fb`
@@ -363,7 +363,8 @@ package authenticates. Mounted only when `AUTH_TOKEN` is set, `MCP` is not
   Scoped viewer tokens, the embed and SSO cookies, the session and the
   `X-CFM-Token` / `Token` headers are not accepted here. The admin token
   carries `ADMIN_TOKEN_IP_BINDING` as on `/api/v1` (`mcpStaticBearer`,
-  `internal/apiserver/mcp_wire.go:61`, since 2026-11-18): under `enforce` a
+  `internal/apiserver/mcp_wire.go:61` → `refuseForeignAdminToken`, the one
+  helper both doors call, since 2026-11-18): under `enforce` a
   foreign source gets `403` with an opaque body.
   The tools are read-only: each runs one allow-listed GET in-process with the
   admin token through `TokenMiddleware` (not CSRF/session), so it gets exactly
@@ -372,11 +373,11 @@ package authenticates. Mounted only when `AUTH_TOKEN` is set, `MCP` is not
 - `/mcp/oauth/register` (dynamic client registration), `/mcp/oauth/authorize`
   (consent: the form must be submitted with `MCP_TOKEN`, throttled per source
   IP), `/mcp/oauth/token` (`internal/mcpserver/oauth.go:160-162`, handlers
-  `:210`, `:267`, `:401`) — the OAuth flow itself; unauthenticated by design.
+  `:210`, `:267`, `:403`) — the OAuth flow itself; unauthenticated by design.
   Registration accepts only absolute `https` redirect URIs with a host and no
-  userinfo, or `http` on `localhost` / `127.0.0.1` (`validRedirect`, `:606`);
+  userinfo, or `http` on `localhost` / `127.0.0.1` (`validRedirect`, `:608`; re-checked at authorize);
   PKCE `S256` is required; a code and its refresh tokens are single use and
-  bound to their `client_id` (`clientMatches`, `:525`).
+  bound to their `client_id` (`clientMatches`, `:527`).
 - `/.well-known/oauth-protected-resource`,
   `/.well-known/oauth-authorization-server`,
   `/.well-known/openid-configuration` (`oauth.go:156-158`, handlers `:177`,
