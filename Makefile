@@ -197,6 +197,7 @@ clean:
 	@rm -rf "$(PKGROOT)/lib"
 	@rm -rf "$(PKGROOT)/var/lib/cfm/lua"
 	@rm -f  "$(PKGROOT)/LICENSE"
+	@rm -rf "$(PKGROOT)/usr/share/doc/cfm"
 	@echo "🧹 Cleaned: $(BINARY), staged package payload under $(PKGROOT)"
 
 # Καθαρίζει DEB artifacts (deb πακέτα + staging)
@@ -291,6 +292,8 @@ deb: build
 
 stage-pkgroot: build
 	@echo "→ Staging into $(PKGROOT)"
+	# the .deb's license copy; the rpm ships its own under /usr/share/licenses
+	@rm -rf $(PKGROOT)/usr/share/doc/cfm
 	# binary
 	@mkdir -p $(PKGROOT)/usr/bin
 	@cp -f $(BINARY) $(PKGROOT)/usr/bin/cfm

@@ -10,8 +10,8 @@
 %{!?cfm_changelog_date:%global cfm_changelog_date %(LC_ALL=C date -u +"%%a %%b %%d %%Y")}
 
 Name:           cfm
-Version:        2026.05.14
-Release:        1.201438%{?dist}
+Version:        2026.11.18
+Release:        1.185850%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
 License:        FSL-1.1-ALv2 AND GPL-2.0-only
 URL:            https://nixpal.com
@@ -103,6 +103,11 @@ if [ -f "%{buildroot}/lib/systemd/system/cfm.service" ]; then
   rm -rf "%{buildroot}/lib/systemd"
 fi
 
+# The .deb's copy of the license files (usr/share/doc/cfm) comes along when the
+# deb and rpm share one staged pkgroot (make release builds both). The rpm
+# ships them under usr/share/licenses/cfm only, so drop that copy here: an
+# installed file the files list does not name fails the build.
+rm -rf "%{buildroot}/usr/share/doc/cfm"
 install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENSE
 install -Dm644 %{projectroot}/NOTICE %{buildroot}/usr/share/licenses/cfm/NOTICE
 install -Dm644 %{projectroot}/LICENSES/GPL-2.0-only.txt %{buildroot}/usr/share/licenses/cfm/GPL-2.0-only.txt
