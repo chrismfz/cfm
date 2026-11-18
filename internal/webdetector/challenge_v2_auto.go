@@ -337,8 +337,8 @@ func (t vhostV2Tier) via() string {
 // vhost challenge covering host, else the first noted one (reported,
 // unarmed). vhost_config also counts while host is on the CHALLENGE_VHOST
 // list itself (noted or not). With no live vhost challenge, or no live note
-// or list match, there is no automatic source — the entry's own sticky Reason is never used to arm (it
-// can outlive the source that wrote it). Every source, Under-Attack included,
+// or list match, there is no automatic source — the entry's own sticky
+// Reason is never used to arm (it can outlive the source that wrote it). Every source, Under-Attack included,
 // is re-noted by the tick on each cycle it is active and dropped the cycle it
 // turns off; a note nobody drops lives no longer than the challenge entry it
 // rode (an hour at most), so the tier cannot outlive the vhost challenge.
@@ -381,13 +381,13 @@ func (e *Engine) autoV2Trigger(host string) string {
 	return ""
 }
 
-// mergeAutoSources unions two noted-source lists into autoSourceOrder.
 // cfgListsVhost reports whether host is on the CHALLENGE_VHOST config list —
 // the tick's own vhost_config note condition (challenge_rules.go).
 func (e *Engine) cfgListsVhost(host string) bool {
 	return len(e.cfg.ChallengeVHost) > 0 && hostMatchAny(host, e.cfg.ChallengeVHost)
 }
 
+// mergeAutoSources unions two noted-source lists into autoSourceOrder.
 func mergeAutoSources(a, b []string) []string {
 	if len(b) == 0 {
 		return a
