@@ -77,11 +77,11 @@ func validateCSRFSameOrigin(r *http.Request) (bool, string) {
 		return false, "host_unavailable"
 	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
-		host, err := hostFromURL(origin)
+		host, port, err := hostPortFromURL(origin)
 		if err != nil {
 			return false, "origin_invalid"
 		}
-		if _, ok := allowed[strings.ToLower(host)]; ok {
+		if allowed.match(host, port) {
 			return true, ""
 		}
 		return false, "origin_mismatch"
@@ -90,28 +90,92 @@ func validateCSRFSameOrigin(r *http.Request) (bool, string) {
 	if ref == "" {
 		return false, "origin_missing"
 	}
-	host, err := hostFromURL(ref)
+	host, port, err := hostPortFromURL(ref)
 	if err != nil {
 		return false, "referer_invalid"
 	}
-	if _, ok := allowed[strings.ToLower(host)]; ok {
+	if allowed.match(host, port) {
 		return true, ""
 	}
 	return false, "referer_mismatch"
 }
 
-func csrfAllowedHosts(r *http.Request) map[string]struct{} {
-	out := map[string]struct{}{}
+// csrfHosts maps each host a same-origin request may name to the explicit,
+// non-default ports it arrived on.
+type csrfHosts map[string]map[string]struct{}
+
+// match reports whether a source origin (host, port; "" = default port) is
+// this request's own. A source with a default port matches on the host alone,
+// as it always has (a proxy in front may send Host with the daemon's port).
+// A source with an explicit other port must have arrived on that port: the
+// other services on the same host (the panel ports, webmail) are other
+// origins.
+func (c csrfHosts) match(host, port string) bool {
+	ports, ok := c[host]
+	if !ok {
+		return false
+	}
+	if port == "" {
+		return true
+	}
+	_, ok = ports[port]
+	return ok
+}
+
+func (c csrfHosts) add(hostport string) {
+	host, port := splitCanonicalHostPort(hostport)
+	if host == "" {
+		return
+	}
+	if c[host] == nil {
+		c[host] = map[string]struct{}{}
+	}
+	if port != "" {
+		c[host][port] = struct{}{}
+	}
+}
+
+// csrfAllowedHosts collects the request's own host[:port] values: Host, and
+// the browser's own Host (port included) the edge passes as X-Forwarded-Host
+// from loopback; the edge's Host carries no port.
+func csrfAllowedHosts(r *http.Request) csrfHosts {
+	out := csrfHosts{}
 	if r == nil {
 		return out
 	}
-	if h := strings.ToLower(hostOnly(r.Host)); h != "" {
-		out[h] = struct{}{}
-	}
-	if h := strings.ToLower(hostOnly(trustedForwardedHost(r))); h != "" {
-		out[h] = struct{}{}
-	}
+	out.add(r.Host)
+	out.add(trustedForwardedHost(r))
 	return out
+}
+
+// splitCanonicalHostPort lowercases host[:port] and drops a default port
+// (80/443), which browsers leave out of Origin and Host alike.
+func splitCanonicalHostPort(hostport string) (string, string) {
+	hostport = strings.ToLower(strings.TrimSpace(hostport))
+	if hostport == "" {
+		return "", ""
+	}
+	host, port := hostport, ""
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		host, port = h, p
+	}
+	host = strings.Trim(host, "[]")
+	if port == "80" || port == "443" {
+		port = ""
+	}
+	return host, port
+}
+
+func hostPortFromURL(raw string) (string, string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", err
+	}
+	if u.Host == "" {
+		return "", "", errInvalidCSRFSource
+	}
+	host, port := splitCanonicalHostPort(u.Host)
+	return host, port, nil
 }
 
 func trustedForwardedHost(r *http.Request) string {
@@ -131,17 +195,6 @@ func trustedForwardedHost(r *http.Request) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.Split(xfh, ",")[0])
-}
-
-func hostFromURL(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", err
-	}
-	if u.Host == "" {
-		return "", errInvalidCSRFSource
-	}
-	return hostOnly(u.Host), nil
 }
 
 func hostOnly(hostport string) string {
