@@ -292,13 +292,15 @@ func forwardConfirmsWith(ctx context.Context, lookup func(context.Context, strin
 
 // countsTowardRateOutlier reports whether a request feeds Signal C's per-IP
 // dynamic counter (bucketSW.ipsDyn): not a static asset (a pageview's asset
-// fan-out), and not a machine endpoint (isMachineStyleEndpointGo, the list the
-// no-UA rule exempts: WooCommerce REST, webhooks, payment callbacks), whose
-// integrations poll a quiet shop far above its visitors' rate on purpose.
-// Both are read on the PATH only: the query is the client's to write, and
-// with it "/shop/?x=/api" or "/shop/?x=/a.css" would hide a scraper's every
-// page from the counter.
+// fan-out), and not a server-to-server endpoint (isChallengeExemptEndpoint:
+// WooCommerce REST, payment webhooks, courier tracking), whose integrations
+// poll a quiet shop far above its visitors' rate on purpose. That is the
+// NARROW list on purpose: Signal C is a would-be enforcement signal, and the
+// broad isMachineStyleEndpointGo (/api, /rest/, /wp-json/, /upload…) would
+// hide a scraper on any of them. Both are read on the PATH only: the query is
+// the client's to write, and with it "/shop/?x=/a.css" would hide every page
+// a scraper fetches.
 func countsTowardRateOutlier(uri string) bool {
 	path, _, _ := strings.Cut(uri, "?")
-	return !isStaticAssetPath(path) && !isMachineStyleEndpointGo(path)
+	return !isStaticAssetPath(path) && !isChallengeExemptEndpoint(path)
 }

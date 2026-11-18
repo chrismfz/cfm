@@ -312,8 +312,8 @@ func (e *Engine) fpCandidates(host string, snap *fpSnapshot) (cands []fpCandidat
 	// dyn_frac is a reported signal only (never a candidate). ipsDyn is populated
 	// solely when AbuseShadow + AbuseShadowRateOutlier are on, so it logs n/a
 	// otherwise — acceptable, the path/UA candidates do not depend on it. It
-	// counts neither static assets nor machine endpoints
-	// (countsTowardRateOutlier), so a campaign on /wp-json/ reads low here.
+	// counts neither static assets nor server-to-server endpoints
+	// (countsTowardRateOutlier), so a campaign on /wp-json/wc/ reads low here.
 	dynFrac = -1.0
 	if snap.reqAll > 0 && snap.reqDyn > 0 {
 		dynFrac = float64(snap.reqDyn) / float64(snap.reqAll)

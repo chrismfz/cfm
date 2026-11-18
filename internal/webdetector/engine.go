@@ -204,8 +204,8 @@ type bucketSW struct {
 	// static requests, so counting them made a normal shopper read as a rate
 	// outlier (the 2026-08 FP — Greek residential IPs on small WooCommerce shops
 	// logged at 300-900× the vhost median, almost entirely .css). The enforced
-	// uniqIP path deliberately keeps using ips (all requests). Machine endpoints
-	// (isMachineStyleEndpointGo: WooCommerce REST, webhooks, payment callbacks)
+	// uniqIP path deliberately keeps using ips (all requests). Server-to-server
+	// endpoints (isChallengeExemptEndpoint: WooCommerce REST, payment webhooks)
 	// are left out too (countsTowardRateOutlier): an integration polling a quiet
 	// shop read as a 24-31x outlier every hour (vol2.gr, 2026-11-18).
 	ipsDyn map[string]int
@@ -1778,8 +1778,8 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		// signal that reads it is enabled (off by default), so it adds no map
 		// and no per-request work on the hot path otherwise. isStaticAssetPath
 		// tolerates a query string, so rec.URI (== p below) is safe here.
-		// Machine endpoints (WooCommerce REST, webhooks, payment callbacks)
-		// are left out like the no-UA rule leaves them out: an integration's
+		// Server-to-server endpoints (WooCommerce REST, payment webhooks: the
+		// narrow isChallengeExemptEndpoint list) are left out: an integration's
 		// steady sync out-rates a quiet shop's visitors by design (the vol2.gr
 		// e|connect bridge read as a 24-31x outlier every hour, 2026-11-18).
 		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && countsTowardRateOutlier(rec.URI) {

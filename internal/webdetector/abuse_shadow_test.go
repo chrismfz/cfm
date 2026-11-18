@@ -190,9 +190,12 @@ func TestIngest_IpsDynExcludesMachineEndpoints(t *testing.T) {
 	e.ingest(LogRec{TS: now + 1, IP: ip, Host: host, Method: "get",
 		URI: "/product/some-item/", Status: 200}, "raw")
 	// The query is the client's: a page dressed as an API call or an asset
-	// still counts.
+	// still counts. So does a broad "machine-style" path a scraper can hit
+	// (/wp-json/wp/v2/: content, not an integration).
 	e.ingest(LogRec{TS: now + 1.1, IP: ip, Host: host, Method: "get",
-		URI: "/product/other/?x=/api/v1", Status: 200}, "raw")
+		URI: "/product/other/?x=/wp-json/wc/v3/", Status: 200}, "raw")
+	e.ingest(LogRec{TS: now + 1.15, IP: ip, Host: host, Method: "get",
+		URI: "/wp-json/wp/v2/posts?per_page=100", Status: 200}, "raw")
 	e.ingest(LogRec{TS: now + 1.2, IP: ip, Host: host, Method: "get",
 		URI: "/shop/?x=/a.css", Status: 200}, "raw")
 	// The injected-outcome path (an edge 403) feeds the same counter.
@@ -209,10 +212,10 @@ func TestIngest_IpsDynExcludesMachineEndpoints(t *testing.T) {
 		ipsTotal += hs.buckets[i].ips[ip]
 		ipsDyn += hs.buckets[i].ipsDyn[ip]
 	}
-	if ipsTotal != len(machine)+4 {
-		t.Errorf("ips (all requests) = %d, want %d", ipsTotal, len(machine)+4)
+	if ipsTotal != len(machine)+5 {
+		t.Errorf("ips (all requests) = %d, want %d", ipsTotal, len(machine)+5)
 	}
-	if ipsDyn != 3 {
-		t.Errorf("ipsDyn = %d, want 3 (the three pages): machine endpoints leaked into Signal C's counter, or a query hid a page", ipsDyn)
+	if ipsDyn != 4 {
+		t.Errorf("ipsDyn = %d, want 4 (the four pages): machine endpoints leaked into Signal C's counter, or a query hid a page", ipsDyn)
 	}
 }

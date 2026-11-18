@@ -25,9 +25,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   outlier.** `rate_outlier` (log-only) counted every dynamic request, so a
   stock or ERP bridge polling a quiet shop's WooCommerce REST API logged
   `verdict=would_challenge` every hour (vol2.gr's e|connect bridge, 24-31× the
-  shop's median). Machine endpoints (WooCommerce REST, webhooks, payment
-  callbacks: the list the empty-UA rule already exempts) no longer count
-  toward it. Nothing was ever blocked; this keeps the measurement honest
+  shop's median). Server-to-server endpoints (WooCommerce REST, payment
+  webhooks, courier tracking: the narrow list a vhost challenge already
+  exempts) no longer count toward it. Nothing was ever blocked; this keeps the measurement honest
   before the signal is considered for enforcement.
 
 ## 2026.11.18
