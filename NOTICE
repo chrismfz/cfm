@@ -1,0 +1,36 @@
+CFM (Configurable Firewall Manager)
+Copyright 2025-2026 Christos Panagiotakis
+
+Licensing
+=========
+
+CFM is licensed under the Functional Source License, Version 1.1, ALv2 Future
+License (SPDX: FSL-1.1-ALv2), in the file LICENSE, with the exceptions below.
+Each version of CFM becomes available under the Apache License, Version 2.0
+on the second anniversary of the date it was made available.
+
+Exceptions
+----------
+
+- The cfm-lsm BPF programs under internal/lsm/bpf/ (and the BPF objects built
+  from them, internal/lsm/*_bpfel.o) are licensed under the GNU General Public
+  License, version 2 only (SPDX: GPL-2.0-only), in LICENSES/GPL-2.0-only.txt.
+  The Linux kernel lets BPF programs call its GPL-only helpers only when they
+  declare a GPL-compatible license.
+
+- Third-party files bundled with CFM keep their own licenses, stated in each
+  file. Among them, under internal/webui/static/assets/vendor/: Vue (MIT) and
+  Apache ECharts (Apache-2.0).
+
+Earlier versions
+----------------
+
+Versions of CFM released before the switch to FSL-1.1-ALv2 (2026-11-18) were
+licensed under the Apache License, Version 2.0, and remain available under
+it.
+
+Commercial licensing
+--------------------
+
+A use that the FSL does not permit (a Competing Use) needs a separate
+commercial license from the copyright holder.

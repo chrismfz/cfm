@@ -240,6 +240,7 @@ deb: build
 		"$(PKGROOT)/usr/share/cfm/configs" \
 		"$(PKGROOT)/usr/share/cfm/scripts" \
 		"$(PKGROOT)/usr/share/cfm/plugins" \
+		"$(PKGROOT)/usr/share/doc/cfm" \
 		"$(PKGROOT)/var/lib/cfm/lua" \
 		"$(PKGROOT)/etc/cfm" \
 		"$(OUTDIR)"
@@ -251,6 +252,9 @@ deb: build
 
 	# payload
 	@install -m0755 "$(BIN)" "$(PKGROOT)/usr/bin/cfm"
+	@install -m0644 LICENSE "$(PKGROOT)/usr/share/doc/cfm/LICENSE"
+	@install -m0644 NOTICE "$(PKGROOT)/usr/share/doc/cfm/NOTICE"
+	@install -m0644 LICENSES/GPL-2.0-only.txt "$(PKGROOT)/usr/share/doc/cfm/GPL-2.0-only.txt"
 	@install -m0640 "$(CONFIG_DIR)/cfm.service"   "$(PKGROOT)/lib/systemd/system/cfm.service"
 	@install -m0640 "$(CONFIG_DIR)/cfm.conf"      "$(PKGROOT)/etc/cfm/cfm.conf"
 	@install -m0640 "$(CONFIG_DIR)/detectors.conf"      "$(PKGROOT)/etc/cfm/detectors.conf"
