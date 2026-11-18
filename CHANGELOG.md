@@ -39,7 +39,10 @@ back-filled here — see the git/PR history for that period.
   titan, virgo: ~107 M requests) adds 45 seen on all four at 100-300 IPs each:
   more service-account / `.env`-style files, CI build specs, shell and git
   dotfiles, private keys, monorepo manifests and build-tool directories
-  (`/.vercel/`, `/.netlify/`, `/.turbo/`, `/.output/`, …). 169 new entries in all;
+  (`/.vercel/`, `/.netlify/`, `/.turbo/`, `/.output/`, …). A fourth read (orion,
+  qualityweb: ~104 M requests) adds 25: more key / token / mail-relay files,
+  editor backups of `index.php`, and the `/.bod/` and `/.trash…/` webshell
+  stashes. 194 new entries in all (346 lines);
   every 200 on them was a site's catch-all page. Generic names a site may
   really serve (`/config.json`, `/settings.json`, `/phpmyadmin`,
   `/server-status`, `/cgi-bin/`) stay out, and so do Duplicator's

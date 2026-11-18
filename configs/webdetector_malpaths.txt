@@ -387,3 +387,35 @@ phpinfo.php
 /.huggingface/
 /.cache/
 /.composer/
+
+# ─── FOURTH READ: 9 DAYS OF ORION + QUALITYWEB (added 2026-11-18) ────────────
+# ~104 M edge requests. 75-85 distinct IPs on orion (and ~50 on qualityweb)
+# for the first group; the second is one key-hunting campaign seen on
+# qualityweb (47 IPs) whose names no site serves. No real 200 on any.
+/keys.json
+/credentials.tfrc.json
+/debug.log
+/private.key
+/s3.json
+/settings.php.bak
+# Webshell stash directories (orion 80-85 IPs; virgo 33-62, e.g. /.trash7309/)
+/.bod/
+/.trash
+/privkey.pem
+/keys.txt
+/api-keys.txt
+/tokens.txt
+/secrets.txt
+/.msmtprc
+/ssmtp.conf
+/.claude.json
+/.windsurf/
+/.chef/
+/.terraformrc
+/.aider.conf.yml
+/.yarnrc.yml
+/mongoid.yml
+/development.log
+# Editor / manual backups of the front controller: the PHP source as text
+/index.php.bak
+/index.php~
