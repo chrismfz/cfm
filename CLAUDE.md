@@ -1056,6 +1056,7 @@ because of that. Hard-won points:
 | Traffic Rules UX review & redesign proposal (cfm-admin rules builder / recipes) | `docs/traffic-rules-ux-proposal.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 | Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
+| ClamAV upload scanning (scope, inline mode, signature excludes) | `docs/clamav.md` |
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |
 | Mail abuse findings (hacked site / contact form, mailbox spike, hijacked mailbox → detection_history) | `docs/mail-abuse.md` |
 | Alert log (every notifier event + its delivery outcome → `/var/lib/cfm/alerts.db`, `/api/v1/alerts`, cfm-admin Alerts, MCP `alerts`) | `docs/alerts.md` |
