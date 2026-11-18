@@ -426,6 +426,14 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Every decision below reads the DECODED path; the mux routes on
+			// the ESCAPED one. An encoded separator is the one place they
+			// split ("/a%2fb" is one segment to the mux, two to us), so it
+			// is refused before any of them.
+			if hasEncodedPathSeparator(r) {
+				http.NotFound(w, r)
+				return
+			}
 			embedded := isCpanelEmbeddedRequest(r)
 
 			// MCP owns its bearer/OAuth namespace. Its gate performs the canonical
@@ -460,34 +468,14 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 					// presented server-to-server (cfm-web at the API_URL host) or
 					// over loopback (WHM plugin). A match from any other IP is a
 					// leaked-token signal.
-					if mwCfg.adminIP.active() && !adminTokenSourceAllowed(r, mwCfg.adminIP) {
-						if mwCfg.adminIP.mode == adminIPModeEnforce {
-							auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "blocked_source_ip", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusForbidden})
-							// Publish a structured anomaly (enforce ONLY — logonly must
-							// stay observe-only so burn-in never blocks/challenges the
-							// source) so a leaked admin token used even ONCE from a foreign
-							// IP alerts, instead of needing a 5-in-30s forbidden burst.
-							// classifierReason() lists "admin_token_source_ip" as a direct
-							// event so the generic burst signal does not double-count this.
-							publishRequestAnomaly(r, "ADMIN_TOKEN_FOREIGN_IP", http.StatusForbidden)
-							logging.LogfAPI("[apiserver] event=api_audit reason=admin_token_source_ip src_ip=%s method=%s path=%q status=%d",
-								realIPFromRequest(r), r.Method, r.URL.Path, http.StatusForbidden)
-							setAPIAnomalyReason(w, r, "admin_token_source_ip")
-							setAuthIdentityNoCacheHeaders(w) // identity-sensitive rejection
-							w.Header().Set("Content-Type", "application/json")
-							w.WriteHeader(http.StatusForbidden)
-							// Opaque body (matches rejectIP) — do not confirm to the caller
-							// that the token they presented is the valid admin token.
-							_, _ = w.Write(mustJSON(map[string]string{"error": "forbidden: source IP not allowed"}))
-							return
-						}
-						// logonly (burn-in): record what enforce WOULD block, then allow.
-						// Unsampled by design — expected volume is ~zero (only cfm-web and
-						// the WHM plugin present the admin token, both allowlisted) and each
-						// line is security evidence; a leaked-token spray in logonly is the
-						// one case that could make this chatty.
-						logging.LogfAPI("[apiserver] admin_token_source_ip logonly=would_block src_ip=%s method=%s path=%q",
-							realIPFromRequest(r), r.Method, r.URL.Path)
+					if refuseForeignAdminToken(w, r, mwCfg.adminIP, "token") {
+						setAuthIdentityNoCacheHeaders(w) // identity-sensitive rejection
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusForbidden)
+						// Opaque body (matches rejectIP) — do not confirm to the caller
+						// that the token they presented is the valid admin token.
+						_, _ = w.Write(mustJSON(map[string]string{"error": "forbidden: source IP not allowed"}))
+						return
 					}
 					auditAuthAttempt(r, authAttemptAudit{Kind: "token", Result: "success", AuthMech: string(authnMechanismTokenAdmin), Status: http.StatusOK})
 					ctx := context.WithValue(r.Context(), webdet.CtxAuthnKey{}, true)
@@ -614,6 +602,42 @@ func TokenMiddleware(adminToken string, store *TokenStore, opts ...TokenMiddlewa
 			http.Error(w, `{"error":"authorization required"}`, http.StatusUnauthorized)
 		})
 	}
+}
+
+// hasEncodedPathSeparator reports whether the request path carries an encoded
+// "/" (%2F) or "\" (%5C), or a raw backslash (which EscapedPath reports as
+// %5C), in any letter case. No CFM client (UI, cPanel plugin, cfm-web, CLI,
+// MCP) puts one in a path: their parameters travel in the query. The edge
+// passes the client's encoding through or decodes it; it never adds one.
+func hasEncodedPathSeparator(r *http.Request) bool {
+	if r == nil || r.URL == nil {
+		return false
+	}
+	// RequestURI is the target as sent; EscapedPath covers a request built
+	// in-process (no RequestURI) and reports a raw backslash as %5C.
+	return hasEncodedSeparator(requestURIPath(r.RequestURI)) || hasEncodedSeparator(r.URL.EscapedPath())
+}
+
+// hasEncodedSeparator reports whether p holds %2F or %5C, in any case.
+func hasEncodedSeparator(p string) bool {
+	for i := 0; i+2 < len(p); i++ {
+		if p[i] != '%' {
+			continue
+		}
+		switch hi, lo := p[i+1], p[i+2]|0x20; {
+		case hi == '2' && lo == 'f', hi == '5' && lo == 'c':
+			return true
+		}
+	}
+	return false
+}
+
+// requestURIPath is the path part of a raw request target (no query).
+func requestURIPath(uri string) string {
+	if i := strings.IndexByte(uri, '?'); i >= 0 {
+		return uri[:i]
+	}
+	return uri
 }
 
 func tokenMatch(a, b string) bool {

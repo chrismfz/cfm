@@ -351,12 +351,28 @@ WHERE event_type IN ('waf_observe', 'waf_trigger') AND ts_unix >= ?`, fromUnix).
 	return n, nil
 }
 
+// maxHistoryQueryLimit caps one events query. The query holds s.mu, which
+// every history write also takes, and the limit comes from the request (any
+// caller the endpoint admits, scoped tenants included): unbounded, one call
+// could stall the node's history writes. It applies to every caller, admin
+// included (the UI asks for 500 at most; the CLI's --limit and the MCP tool
+// are cut here too, without a marker in the response).
+const maxHistoryQueryLimit = 5000
+
+func clampHistoryQueryLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return 100
+	case limit > maxHistoryQueryLimit:
+		return maxHistoryQueryLimit
+	}
+	return limit
+}
+
 func (s *HistoryStore) QueryEvents(host, ip, typ string, limit int) ([]HistoryEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if limit <= 0 {
-		limit = 100
-	}
+	limit = clampHistoryQueryLimit(limit)
 
 	clauses := make([]string, 0, 3)
 	args := make([]interface{}, 0, 4)

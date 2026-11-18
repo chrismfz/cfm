@@ -235,6 +235,7 @@ func (s *oauthServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 	clientID := s.sign(oauthClaims{
 		Kind:      "client",
 		Redirects: req.RedirectURIs,
+		Nonce:     oauthNonce(), // two registrations are two clients, even within one second
 		Exp:       time.Now().Add(s.clientTTL).Unix(),
 	})
 	oauthWriteJSON(w, http.StatusCreated, map[string]any{
@@ -280,7 +281,9 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// Validate the client + redirect_uri BEFORE trusting either; a bad pair is a
 	// hard 400 (never redirect to an unvalidated URI — open-redirect guard).
 	cl, ok := s.parse(clientID)
-	if !ok || cl.Kind != "client" || oauthExpired(cl) || !contains(cl.Redirects, redirectURI) {
+	// validRedirect again: a client_id is a stateless signed value, so one
+	// registered under an older, looser rule would otherwise keep it.
+	if !ok || cl.Kind != "client" || oauthExpired(cl) || !contains(cl.Redirects, redirectURI) || !validRedirect(redirectURI) {
 		http.Error(w, "invalid client_id or redirect_uri", http.StatusBadRequest)
 		return
 	}
@@ -364,6 +367,7 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	code := s.sign(oauthClaims{
 		Kind:      "code",
+		Client:    clientBinding(clientID),
 		Redirect:  redirectURI,
 		Challenge: challenge,
 		Nonce:     oauthNonce(), // makes the code single-use (see grantAuthorizationCode)
@@ -433,6 +437,10 @@ func (s *oauthServer) grantAuthorizationCode(w http.ResponseWriter, r *http.Requ
 		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "redirect_uri mismatch")
 		return
 	}
+	if !clientMatches(c, r.PostForm.Get("client_id")) {
+		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "code was issued to another client")
+		return
+	}
 	if verifier == "" || !pkceMatches(verifier, c.Challenge) {
 		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 		return
@@ -446,7 +454,7 @@ func (s *oauthServer) grantAuthorizationCode(w http.ResponseWriter, r *http.Requ
 		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "authorization code already used")
 		return
 	}
-	s.issueTokens(w, r)
+	s.issueTokens(w, r, c.Client)
 }
 
 func (s *oauthServer) grantRefresh(w http.ResponseWriter, r *http.Request) {
@@ -455,13 +463,17 @@ func (s *oauthServer) grantRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "bad or expired refresh_token")
 		return
 	}
+	if !clientMatches(c, r.PostForm.Get("client_id")) {
+		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "refresh_token was issued to another client")
+		return
+	}
 	// Rotation with reuse detection: a refresh token is single-use, so a replay of
 	// an already-rotated refresh token is rejected here.
 	if !s.consumed.consume(c.Nonce, c.Exp) {
 		oauthWriteErr(w, http.StatusBadRequest, "invalid_grant", "refresh token already used")
 		return
 	}
-	s.issueTokens(w, r)
+	s.issueTokens(w, r, c.Client)
 }
 
 // issueTokens mints a fresh access+refresh pair bound to this request's resource.
@@ -469,11 +481,11 @@ func (s *oauthServer) grantRefresh(w http.ResponseWriter, r *http.Request) {
 // grantRefresh) consumes that nonce, so the previous refresh token is invalidated
 // on rotation. Note tokens cannot be revoked individually before expiry other
 // than by rotating MCP_TOKEN (which invalidates ALL artifacts); see MCP.md.
-func (s *oauthServer) issueTokens(w http.ResponseWriter, r *http.Request) {
+func (s *oauthServer) issueTokens(w http.ResponseWriter, r *http.Request, client string) {
 	now := time.Now()
 	resource := s.resource(r)
 	access := s.sign(oauthClaims{Kind: "access", Aud: resource, Exp: now.Add(s.accessTTL).Unix()})
-	refresh := s.sign(oauthClaims{Kind: "refresh", Aud: resource, Exp: now.Add(s.refreshTTL).Unix(), Nonce: oauthNonce()})
+	refresh := s.sign(oauthClaims{Kind: "refresh", Aud: resource, Client: client, Exp: now.Add(s.refreshTTL).Unix(), Nonce: oauthNonce()})
 	oauthWriteJSON(w, http.StatusOK, map[string]any{
 		"access_token":  access,
 		"token_type":    "Bearer",
@@ -494,6 +506,33 @@ type oauthClaims struct {
 	Challenge string   `json:"cc,omitempty"`  // code: PKCE S256 challenge
 	Redirects []string `json:"rds,omitempty"` // client: registered redirect_uris
 	Nonce     string   `json:"n,omitempty"`   // uniqueness (refresh rotation)
+	Client    string   `json:"cl,omitempty"`  // code/refresh: clientBinding of the client_id it was issued to
+}
+
+// clientBinding is a short, non-secret digest of a client_id (the id itself is
+// a long signed value), carried in a code and its refresh tokens.
+func clientBinding(clientID string) string {
+	if clientID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(clientID))
+	return oauthB64.EncodeToString(sum[:16])
+}
+
+// clientMatches reports whether a token request's client_id may redeem c. A
+// public client sends its client_id (OAuth 2.1 §4.1.3; the MCP SDKs do); one
+// that names a different client is refused. A request that names none is not
+// refused: a code is still bound by its redirect_uri and PKCE verifier, which
+// only the client that started the flow holds; a refresh token relies on its
+// single use and rotation (requiring client_id there would first need every
+// connector to send it on refresh). Tokens minted before the binding carry no
+// client and are accepted.
+func clientMatches(c oauthClaims, presented string) bool {
+	presented = strings.TrimSpace(presented)
+	if presented == "" || c.Client == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(clientBinding(presented)), []byte(c.Client)) == 1
 }
 
 var oauthB64 = base64.RawURLEncoding
@@ -571,7 +610,10 @@ func hostnameOnly(hostport string) string {
 
 func validRedirect(raw string) bool {
 	u, err := url.Parse(raw)
-	if err != nil || u.Fragment != "" {
+	// An absolute URL with a host and no userinfo: the consent page shows the
+	// host the code goes to, and "https://good@evil/" or a host-less "https:x"
+	// would make that line say something other than where the browser goes.
+	if err != nil || u.Fragment != "" || u.Host == "" || u.User != nil || u.Opaque != "" {
 		return false
 	}
 	if u.Scheme == "https" {

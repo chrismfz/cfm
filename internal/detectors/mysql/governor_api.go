@@ -634,10 +634,12 @@ func filterGovernorState(s GovernorState, users, dbs []string) GovernorState {
 		}
 	}
 
-	// ── Lock graph — keep only lock groups where the blocker matches ──────────
-	// Waiters inherit the blocker's inclusion: if you own the blocking query
-	// you see the full fan-out (helps the user understand their impact).
-	// Waiter query text is also stripped.
+	// ── Lock graph — the caller's own blocker and the caller's own waiters ────
+	// Every waiter is filtered on its own user/db, never inherited from the
+	// blocker: the graph is a heuristic that groups by DB name alone, so a
+	// blocker's group can hold other accounts' connections (all DB-less
+	// connections on the server share one group). A group left with none of
+	// the caller's waiters is dropped. Query text is stripped throughout.
 	for _, lg := range s.LockGraph {
 		if !userDBMatch(lg.Blocker.User, lg.Blocker.DB, users, dbs) {
 			continue
@@ -645,9 +647,15 @@ func filterGovernorState(s GovernorState, users, dbs []string) GovernorState {
 		safeLG := LockGroup{Blocker: lg.Blocker}
 		safeLG.Blocker.Info = "" // strip
 		for _, w := range lg.Waiters {
+			if !userDBMatch(w.User, w.DB, users, dbs) {
+				continue
+			}
 			sw := w
 			sw.Info = "" // strip
 			safeLG.Waiters = append(safeLG.Waiters, sw)
+		}
+		if len(safeLG.Waiters) == 0 {
+			continue
 		}
 		out.LockGraph = append(out.LockGraph, safeLG)
 	}

@@ -171,9 +171,10 @@ for this (`oauth.go`).
    `authorization_code` + `refresh_token`, PKCE `S256`, token auth method `none`
    and scope `mcp`.
 4. The client registers dynamically (`POST /mcp/oauth/register`, RFC 7591).
-   Registration is open to anyone. Every `redirect_uris` entry must be `https`, or
-   `http` on `localhost` / `127.0.0.1`. The `client_id` is itself a signed value
-   (10-year expiry), so nothing is stored.
+   Registration is open to anyone. Every `redirect_uris` entry must be an
+   absolute `https` URL with a host and no userinfo, or `http` on `localhost` /
+   `127.0.0.1`. The `client_id` is itself a signed value (10-year expiry, unique
+   per registration), so nothing is stored.
 5. The browser opens the consent page, `/cfm-admin/mcp/oauth/authorize`. Paste
    `MCP_TOKEN` (never `AUTH_TOKEN`; the consent check accepts only `MCP_TOKEN`) and
    click **Approve**.
@@ -192,7 +193,11 @@ two tokens, each compared in constant time:
   as cfm-web, which already holds each node's `AUTH_TOKEN` for `/api/v1`, speak
   MCP without a second per-node secret. It does not widen anything. The `/mcp`
   surface is read-only whichever token authenticated, and an `AUTH_TOKEN` holder
-  can already do everything through `/api/v1`.
+  can already do everything through `/api/v1`. The admin token keeps its
+  source-IP binding here: with `ADMIN_TOKEN_IP_BINDING = enforce` it opens
+  `/mcp` only from the sources it opens `/api/v1` from, and anywhere else gets
+  `403` (`logonly` logs `would_block`), with the same audit line and the same
+  `ADMIN_TOKEN_FOREIGN_IP` anomaly.
 
 ```bash
 # Claude Code: a remote MCP server with an auth header
@@ -255,7 +260,13 @@ is `docs/security/control-plane.md`. This section covers what is specific to MCP
   channel secrets or tokens.
 - **OAuth.** PKCE `S256` is mandatory: a missing `code_challenge` or another
   method is refused. A `resource` whose host differs from the request host is
-  refused (`invalid_target`). Access tokens are checked against the exact
+  refused (`invalid_target`). A code, and every refresh token descended from
+  it, records the `client_id` it was issued to, and a token request that
+  names another `client_id` gets `invalid_grant`. A request that names none
+  is not refused: a code is still bound by its `redirect_uri` and PKCE
+  verifier, while a refresh token's protection is its single use and rotation
+  (a stolen refresh token stays usable until rotated or `MCP_TOKEN` changes).
+  Refresh tokens minted before this check carry no client. Access tokens are checked against the exact
   `https://<host>/cfm-admin/mcp` audience. The authorize endpoint validates the
   `client_id` + `redirect_uri` pair before any redirect (open-redirect guard). The
   consent page is never framed (`X-Frame-Options: DENY`,

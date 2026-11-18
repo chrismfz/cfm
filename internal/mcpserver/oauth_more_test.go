@@ -402,3 +402,99 @@ func TestAuthCorpusRouting(t *testing.T) {
 		t.Errorf("query = %v", fd.lastQuery)
 	}
 }
+
+// A code and its refresh tokens belong to the client the flow was started
+// for: a token request naming another client_id is refused, one naming the
+// right client (or none: PKCE + redirect_uri still bind it) is served.
+func TestOAuthCodeAndRefreshAreBoundToTheirClient(t *testing.T) {
+	ts := newTestServer(t, nil)
+	client := noRedirectClient(ts)
+	clientA := oauthRegisterClient(t, ts, client)
+	clientB := oauthRegisterClient(t, ts, client)
+	if clientA == clientB {
+		t.Fatal("two registrations returned the same client_id")
+	}
+	post := func(form url.Values) (int, map[string]any) {
+		res, err := client.PostForm(ts.URL+"/mcp/oauth/token", form)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		var m map[string]any
+		json.NewDecoder(res.Body).Decode(&m)
+		return res.StatusCode, m
+	}
+	verifier, challenge := pkcePair("verifier-client-binding-0123456789-abc")
+	code := oauthGetCode(t, ts, client, clientA, challenge)
+	codeForm := func(cid string) url.Values {
+		return url.Values{"grant_type": {"authorization_code"}, "code": {code}, "code_verifier": {verifier},
+			"redirect_uri": {testRedirectURI}, "client_id": {cid}}
+	}
+	if st, m := post(codeForm(clientB)); st != http.StatusBadRequest || m["error"] != "invalid_grant" {
+		t.Fatalf("code redeemed by another client: %d %v", st, m)
+	}
+	// The refused attempt must not have consumed the code.
+	st, tok := post(codeForm(clientA))
+	if st != http.StatusOK {
+		t.Fatalf("code redeemed by its own client: %d %v", st, tok)
+	}
+	refresh, _ := tok["refresh_token"].(string)
+	if st, m := post(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientB}}); st != http.StatusBadRequest || m["error"] != "invalid_grant" {
+		t.Fatalf("refresh by another client: %d %v", st, m)
+	}
+	st, tok = post(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientA}})
+	if st != http.StatusOK {
+		t.Fatalf("refresh by its own client: %d %v", st, tok)
+	}
+	// The rotated refresh token is still bound to client A.
+	next, _ := tok["refresh_token"].(string)
+	if st, _ := post(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {next}, "client_id": {clientB}}); st != http.StatusBadRequest {
+		t.Fatalf("rotated refresh by another client: %d", st)
+	}
+}
+
+func TestValidRedirect(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://claude.ai/api/mcp/auth_callback": true,
+		"http://localhost:33418/callback":         true,
+		"http://127.0.0.1/cb":                     true,
+		"http://example.com/cb":                   false,
+		"https://claude.ai/cb#frag":               false,
+		"https:claude.ai/cb":                      false, // no host
+		"https:///cb":                             false,
+		"https://claude.ai@evil.example/cb":       false, // userinfo hides the real host
+		"https://user:pw@claude.ai/cb":            false,
+		"javascript:alert(1)":                     false,
+		"http://localhost.evil.example/cb":        false,
+	} {
+		if got := validRedirect(raw); got != want {
+			t.Errorf("validRedirect(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
+// A client_id signed before the redirect rule tightened still carries its old
+// redirect: authorize re-checks the rule rather than trusting the signature.
+func TestAuthorizeRechecksRedirectOfOlderClient(t *testing.T) {
+	base := "https://panel.example.com/cfm-admin"
+	s := newOAuthServer(func(*http.Request) string { return base }, immediateIPFromRequestMCP, nil, "/mcp",
+		"signing-secret-long-enough-xxxxx", func(string) (string, bool) { return "", true })
+	mux := http.NewServeMux()
+	s.register(mux)
+	for redirect, want := range map[string]int{
+		"https://claude.ai@evil.example/cb": http.StatusBadRequest,
+		"https:claude.ai/cb":                http.StatusBadRequest,
+		testRedirectURI:                     http.StatusOK,
+	} {
+		cid := s.sign(oauthClaims{Kind: "client", Redirects: []string{redirect}, Exp: time.Now().Add(time.Hour).Unix()})
+		q := url.Values{"response_type": {"code"}, "client_id": {cid}, "redirect_uri": {redirect},
+			"code_challenge": {"x"}, "code_challenge_method": {"S256"}}
+		r := httptest.NewRequest(http.MethodGet, "/mcp/oauth/authorize?"+q.Encode(), nil)
+		r.Host = "panel.example.com"
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, r)
+		if rec.Code != want {
+			t.Errorf("authorize with older client redirect %q: %d, want %d", redirect, rec.Code, want)
+		}
+	}
+}

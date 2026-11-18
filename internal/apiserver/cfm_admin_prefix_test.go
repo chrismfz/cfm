@@ -290,3 +290,77 @@ func TestPublicPathsAreExact(t *testing.T) {
 		}
 	}
 }
+
+// An encoded "/" or "\" in the path is refused (404) before any auth
+// decision, whatever the credential: the auth checks read the decoded path,
+// the mux the escaped one, and the two disagree only there.
+func TestEncodedPathSeparatorIsRefusedBeforeAuth(t *testing.T) {
+	h := prefixTestServer()
+	targets := []string{
+		"/api%2fv1/embed/bootstrap",
+		"/api%2Fv1/embed/bootstrap",
+		"/api/v1%2fembed/admin-bootstrap",
+		"/cfm-admin/api%2fv1/embed/bootstrap",
+		"/cfm-admin%2fapi/v1/webdet/top",
+		"/cfm-admin/cfm-admin%2Fapi/v1/webdet/top",
+		"/mcp%2foauth/token",
+		"/.well-known%2foauth-authorization-server",
+		"/login%2f..%2fapi/v1/webdet/top",
+		"/api%5cv1/webdet/top",
+		"/api%5Cv1/webdet/top",
+		"/assets%2f..%2fapi/v1/webdet/top.js",
+		"/api/v1/webdet/top%2f",
+	}
+	type variant struct {
+		name string
+		mk   func(string) *http.Request
+	}
+	variants := []variant{
+		{"anon-get", func(u string) *http.Request { return httptest.NewRequest(http.MethodGet, u, nil) }},
+		{"anon-post", func(u string) *http.Request { return httptest.NewRequest(http.MethodPost, u, nil) }},
+		{"iframe", iframeGet},
+		{"embedded", func(u string) *http.Request {
+			r := httptest.NewRequest(http.MethodGet, u, nil)
+			r.Header.Set("X-CFM-Embedded", "1")
+			return r
+		}},
+		{"admin-token", func(u string) *http.Request {
+			r := httptest.NewRequest(http.MethodGet, u, nil)
+			r.Header.Set("Authorization", "Bearer secret")
+			return r
+		}},
+	}
+	for _, target := range targets {
+		for _, v := range variants {
+			rec := serve(h, v.mk(target))
+			if rec.Code != http.StatusNotFound || strings.Contains(rec.Body.String(), "reached:") {
+				t.Errorf("%s %s: status=%d body=%q, want a bare 404", v.name, target, rec.Code, rec.Body.String())
+			}
+		}
+	}
+}
+
+func TestHasEncodedPathSeparator(t *testing.T) {
+	for target, want := range map[string]bool{
+		"/api/v1/webdet/top":             false,
+		"/api/v1/webdet/top?next=%2Ffoo": false, // the query is not the path
+		"/cfm-admin/unblock?ip=1.2.3.4":  false,
+		"/api/v1/webdet/a%20b":           false,
+		"/api/v1/webdet/a%252fb":         false, // a literal "%2f" after one decode: both layers agree
+		"/a%2fb":                         true,
+		"/a%2Fb":                         true,
+		"/a%5cb":                         true,
+		"/a%5Cb":                         true,
+	} {
+		if got := hasEncodedPathSeparator(httptest.NewRequest(http.MethodGet, target, nil)); got != want {
+			t.Errorf("hasEncodedPathSeparator(%q) = %v, want %v", target, got, want)
+		}
+	}
+	// A request built in-process (no RequestURI) is judged on its URL.
+	r := httptest.NewRequest(http.MethodGet, "/x", nil)
+	r.RequestURI = ""
+	r.URL.Path, r.URL.RawPath = "/a/b", "/a%2Fb"
+	if !hasEncodedPathSeparator(r) {
+		t.Error("RawPath with %2F not detected")
+	}
+}
