@@ -23,8 +23,8 @@ defence-in-depth across five layers, from the HTTP edge down to the kernel:
 The in-path edge proxy is **OpenResty** (default) or **Angie**; the daemon,
 Lua decision files, and sslcollector socket are identical for both.
 
-Authoritative reference: `README.md` (large; use its Table of Contents to
-jump). Deep-dive docs live under `docs/`.
+`README.md` is the short overview (install, config files, feature tour with
+links); the reference for each subsystem is its doc under `docs/` (§7).
 
 ---
 
@@ -1053,7 +1053,11 @@ because of that. Hard-won points:
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
-| Traffic Rules UX review & redesign proposal (cfm-admin rules builder / recipes) | `docs/traffic-rules-ux-proposal.md` |
+| Traffic rules: match fields, semantics, examples, API | `docs/traffic-rules.md` · UX review + open proposals: `docs/traffic-rules-ux-proposal.md` |
+| Panel DNAT (cPanel / WHM / DirectAdmin ports through the edge) | `docs/panel-dnat.md` |
+| CLI commands no topic doc owns (`webtop`, `bots`, `firewall status/path`, `health`) | `docs/cli.md` |
+| MySQL Governor | `docs/mysql-governor.md` |
+| Outbound Abuse Sentinel (per-uid outbound SMTP / scan / HTTP abuse) | `docs/outbound-sentinel.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 | Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
 | ClamAV upload scanning (scope, inline mode, signature excludes) | `docs/clamav.md` |
