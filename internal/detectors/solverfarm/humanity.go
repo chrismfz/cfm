@@ -22,10 +22,13 @@ import (
 // Greek audience at hs 0); this lets the operator see that on the alert
 // instead of acting on the fingerprint blind.
 //
-// PASSED SOLVES ONLY. The detector is fed from the solve event stream, and a
-// Rung-1 reject returns before that event is published, so under a
-// challenge_v2 arm the failing population never reaches it. The rejected side
-// is detection_history type=challenge_v2_reject.
+// PASSED AND WITHHELD SOLVES. The detector is fed from the solve event stream
+// and, since 2026-11-18, the withheld stream (SubscribeChallengeWithheldEvents:
+// a solve no challenge covered that failed Rung 1, v2=unsolicited, sent on
+// with no cookie — before that day those solves took the solved path unarmed
+// and came here anyway). A Rung-1 reject under any other arm returns before
+// either is published, so that failing population never reaches it: it is
+// detection_history type=challenge_v2_reject.
 
 // hsBucket is a solve's humanity bucket. The zero value is hsUnscored, so a
 // record built without a reading can never claim a score.

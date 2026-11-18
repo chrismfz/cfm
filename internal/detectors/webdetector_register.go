@@ -1063,6 +1063,11 @@ func init() {
 		// ResetChallengeSolveSubscribers.
 		if cfg.AbuseShadow {
 			webdet.SubscribeChallengeSolveEvents(engine.RecordChallengeScoreSolve)
+			// The withheld solves too (v2=unsolicited): the farms' pre-solves
+			// carry exactly the tells that open a score (UA-lie, a solver-farm
+			// vhost), and it is evidence only — a withheld solve cleared
+			// nothing, but it was still solved by that client.
+			webdet.SubscribeChallengeWithheldEvents(engine.RecordChallengeScoreSolve)
 		}
 
 		// Persist ClamAV scan events (infections) into the webdetector history

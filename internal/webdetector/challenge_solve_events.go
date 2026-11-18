@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"sync"
+	"time"
 
 	core "cfm/internal/detectors/core"
 )
@@ -54,9 +55,38 @@ func (s ChallengeSolve) InputEvent() core.InputEvent {
 	}
 }
 
+// WithheldInputEvent is InputEvent for a WITHHELD solve (the withheld stream,
+// SubscribeChallengeWithheldEvents): Reason CHALLENGE_WITHHELD, so evidence
+// built from it never reads as a client that cleared the vhost.
+func (s ChallengeSolve) WithheldInputEvent() core.InputEvent {
+	ev := s.InputEvent()
+	ev.Reason = "CHALLENGE_WITHHELD"
+	return ev
+}
+
+// withheldOnce publishes a withheld solve once per (ip, host) per
+// withheldDedupTTL. A withheld client gets no cookie, so a farm exit that
+// comes back pre-solves again on every visit, where the cookie used to spare
+// it the repeat for its lifetime (60m, the default clearance TTL). Counting
+// each repeat would lift the solver-farm finding's solves-per-IP — the
+// documented farm tell, ~1.0 for a farm — toward a returning human audience's.
+// Full store: putIfAbsent reads "seen", so a flood publishes less, never more.
+const withheldDedupTTL = 60 * time.Minute
+
+var withheldOnce = pairTTLStore[struct{}]{
+	m:          map[string]time.Time{},
+	ttl:        withheldDedupTTL,
+	maxKeys:    50000,
+	sweepEvery: 5 * time.Second,
+	fullMsg:    "[challenge] withheld-solve dedup store full (%d): repeat withheld solves are not re-published until pressure drops",
+}
+
 var (
 	solveSubsMu sync.RWMutex
 	solveSubs   []func(ChallengeSolve)
+	// withheldSubs hear the WITHHELD solves (SubscribeChallengeWithheldEvents);
+	// guarded by solveSubsMu with solveSubs.
+	withheldSubs []func(ChallengeSolve)
 )
 
 // SubscribeChallengeSolveEvents registers a callback invoked for every solved
@@ -83,7 +113,50 @@ func SubscribeChallengeSolveEvents(fn func(ChallengeSolve)) {
 func ResetChallengeSolveSubscribers() {
 	solveSubsMu.Lock()
 	solveSubs = nil
+	withheldSubs = nil
 	solveSubsMu.Unlock()
+}
+
+// SubscribeChallengeWithheldEvents registers a callback for every WITHHELD
+// solve: a valid PoW under the unsolicited grain (v2=unsolicited, no challenge
+// covered the client) that failed Rung 1, so it got no cookie and was sent on
+// to next (challenge_server.go). Same contract as SubscribeChallengeSolveEvents
+// (cheap, non-blocking, inline on verify; dropped by
+// ResetChallengeSolveSubscribers).
+//
+// A separate stream, not the solve stream: a withheld solve cleared nothing,
+// so the subscribers that read "this client now holds clearance" must not see
+// it (challenge_cookie_discard would read a client that never got a cookie as
+// one that threw it away). Evidence readers that count WHO solves — the
+// solver-farm detector and the challenge_score shadow scorer — subscribe to
+// both. Published once per (ip, host) per withheldDedupTTL (withheldOnce). Until 2026-11-18 these solves took
+// the solved path unarmed and reached the solver-farm detector anyway: the
+// farms' pre-solves on fresh IPs are the very traffic it convicts.
+func SubscribeChallengeWithheldEvents(fn func(ChallengeSolve)) {
+	if fn == nil {
+		return
+	}
+	solveSubsMu.Lock()
+	withheldSubs = append(withheldSubs, fn)
+	solveSubsMu.Unlock()
+}
+
+func publishChallengeWithheldEvent(s ChallengeSolve) {
+	solveSubsMu.RLock()
+	subs := append([]func(ChallengeSolve){}, withheldSubs...)
+	solveSubsMu.RUnlock()
+	// Claim the (ip, host) slot only when someone hears it: in a reload's gap
+	// (subscribers reset, not yet re-added) or with every reader off, a claim
+	// would silence this client's withheld solves for the next hour.
+	if len(subs) == 0 {
+		return
+	}
+	if !withheldOnce.putIfAbsent(challengeV2MarkKey(s.IP, s.Host), struct{}{}, time.Now()) {
+		return // this client's withheld solve on this host is already counted
+	}
+	for _, fn := range subs {
+		fn(s)
+	}
 }
 
 func publishChallengeSolveEvent(s ChallengeSolve) {

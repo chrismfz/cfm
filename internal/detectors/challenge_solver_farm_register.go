@@ -97,6 +97,13 @@ func init() {
 		webdetector.SubscribeChallengeSolveEvents(func(s webdetector.ChallengeSolve) {
 			d.Enqueue(s.InputEvent())
 		})
+		// The withheld solves too (v2=unsolicited, failed Rung 1, no cookie):
+		// a farm pre-solving the page on fresh IPs is exactly the cluster this
+		// detector convicts. Until 2026-11-18 those solves reached it as plain
+		// unarmed solves; withholding their cookie must not hide them from it.
+		webdetector.SubscribeChallengeWithheldEvents(func(s webdetector.ChallengeSolve) {
+			d.Enqueue(s.WithheldInputEvent())
+		})
 		return d, nil
 	})
 }
