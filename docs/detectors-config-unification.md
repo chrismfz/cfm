@@ -259,7 +259,7 @@ Legend: **bold** = change stock; ⚠ = needs operator sign-off in review;
 | `[exim_security] RCPT_REJECT` | 12 | 0 / 0 / 6 / 0 | **0 (off)** ⚠ — same pattern |
 | `[exim_security] SESSION_ALL_FAILED` | 6 | 50 / (typo) / (typo) / 50 | **50** ⚠ — earth+titan are the only heavy nodes where the knob works; both raised it deliberately |
 | `[exim_security] SLOW_FAIL_BLOCK` | 6 | 20 / (typo) / (typo) / 20 | **20** ⚠ |
-| `[api_abuse]` → `[cfm_endpoints]` | stock ships `[cfm_endpoints]` | `[api_abuse]` live on 3deers/titan/virgo | **do NOT add `[api_abuse]` to stock — it is deprecated** (superseded by the built-in `cfm_endpoints` detector, which runs with staged defaults even with no config section and merges legacy `[api_abuse]` in memory; see CHANGELOG Unreleased). Migration: move the 3 hosts' `ALLOW_IPS`/`ALLOW_NETS`/`PATH_EXCEPTIONS`/threshold overrides into `[cfm_endpoints]` overlay keys and delete `[api_abuse]`. |
+| `[api_abuse]` → `[cfm_endpoints]` | stock ships `[cfm_endpoints]` | `[api_abuse]` live on 3deers/titan/virgo | **do NOT add `[api_abuse]` to stock — it is deprecated** (superseded by the built-in `cfm_endpoints` detector, which runs with staged defaults even with no config section and merges legacy `[api_abuse]` in memory; `docs/DETECTORS.md` "cfm_endpoints"). Migration: move the 3 hosts' `ALLOW_IPS`/`ALLOW_NETS`/`PATH_EXCEPTIONS`/threshold overrides into `[cfm_endpoints]` overlay keys and delete `[api_abuse]`. |
 | `[health] CONN_EST/SYN/TOTAL_SPIKE` | 5.0 | 5.0 / 5.0 / 3.0 / 5.0 | keep **5.0** (orion 3.0 → overlay) |
 | `[leniency]` (new global) | — | 15m/15m dominant (earth+titan dovecot 1h/30m) | **MATCH_COUNTRY=GR,CY · BLOCK=15m · BLOCK_COOLDOWN=15m · SEND_TO_API=yes · SEND_TO_BLOCKLIST=lenient** |
 

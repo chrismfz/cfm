@@ -303,7 +303,8 @@ DRYRUN=1 stops after 6.0. Everything below is TTL'd and vhost-scoped.
   surfaces — `state` field on `cfm webtop`, `/api/v1/challenge/vhosts`, MCP
   `challenge_vhosts`/`host_drilldown`, and the cfm-admin badge — plus the
   `cfm webtop attack on|off` CLI wiring onto `SetVhostAttackOverride`
-  (CHANGELOG, "Under-Attack Mode (I1b)").
+  (release 2026.08.22, "Under-Attack Mode (I1b)"; in the GitHub release notes
+  and the CHANGELOG's git history).
 - **I2** — fingerprinter in the abuse-shadow harness: candidate predicates +
   coverage/collision logged, nothing enforced. Validate on e-athlos live.
   **Landed** (`under_attack_fingerprint.go`, shadow-only): rolling per-vhost

@@ -386,7 +386,7 @@ surface the coexistence status per build.
 
 - **`sp.upload_validation`** runs an external script per upload; non-zero exit
   blocks the file. `CLAM_SCAN_MODE=inline` already ships at the edge (see
-  `docs/roadmaps/clam-scan-modes.md`), so this is **not** needed for inline
+  `docs/clamav.md`), so this is **not** needed for inline
   upload blocking on OpenResty/Angie fleets — consider it only as a fallback
   for deployments where the edge proxy is not in path (pure-DNAT hosts), and
   only with the same fail-open rule: clamd down/timeout ⇒ exit 0.

@@ -644,7 +644,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 	// per-vhost override; set CLAM_SCAN_DEFAULT = 0 to disable server-wide.
 	cfg.Clam.ScanDefault = true
 	// CLAM_SCAN_SCOPE defaults to archives — a DELIBERATE coverage change
-	// (announced in the CHANGELOG): fleet-scale scanning of every image/video/pdf
+	// (shipped 2026-07-21; operator guide docs/clamav.md): fleet-scale scanning of every image/video/pdf
 	// upload is not viable on shared hosting, and the class the WAF can't inspect
 	// is compressed containers. "all" restores full coverage.
 	cfg.Clam.ScanScope = "archives"

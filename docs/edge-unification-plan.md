@@ -188,7 +188,7 @@ guards. Deploy note: pure package upgrade; no config migration.
   load-bearing before wholesale namespace deletion, and rehome them if so.
 - **PR 1c** (this PR): reporting/docs sweep — `printChallengeStatus`, firewall-status
   challenge probes, `setinventory`/`ipquery` rows, README §challenge,
-  `docs/roadmaps/firewall_backend.md`. (The `challenge/list` endpoint +
+  the firewall-backend roadmap (since deleted). (The `challenge/list` endpoint +
   `challenge_ip_status` MCP tool retirement and the
   `endpoint_scope_inventory.md`/`MCP.md` updates, originally slated here,
   landed early with 1b.)

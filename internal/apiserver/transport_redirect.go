@@ -11,7 +11,7 @@ import (
 
 // AdminTransportRedirect upgrades direct external plaintext :6060 browser admin
 // traffic to the HTTPS :6061 listener (audit R01 / Step 5). See
-// docs/security/direct-6060-transport-policy.md.
+// docs/security/control-plane.md §5.
 //
 // It runs PRE-AUTH (outside TokenMiddleware) so a doomed request is redirected or
 // rejected before any credential is processed. It acts ONLY on a request that

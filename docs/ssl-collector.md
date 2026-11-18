@@ -423,7 +423,6 @@ tmpfs path (root-only, lost on reboot) would achieve this.
 | `/var/lib/cfm/lua/cfm_token.lua` | Auto-generated bearer token (0640 root:cfm) |
 | `/var/lib/cfm/lua/cfm_sslcollector_config.lua` | Auto-generated runtime flags (0640 root:cfm) |
 | `/var/lib/cfm/sslcollector/dump.json` | Offline snapshot (0640 root:cfm, contains key material) |
-| `docs/security/root_compromise_audit_2026-04-15.md` | Privilege audit with Finding 1 (socket key access) |
 
 ---
 

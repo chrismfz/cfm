@@ -23,8 +23,8 @@ defence-in-depth across five layers, from the HTTP edge down to the kernel:
 The in-path edge proxy is **OpenResty** (default) or **Angie**; the daemon,
 Lua decision files, and sslcollector socket are identical for both.
 
-Authoritative reference: `README.md` (large; use its Table of Contents to
-jump). Deep-dive docs live under `docs/`.
+`README.md` is the short overview (install, config files, feature tour with
+links); the reference for each subsystem is its doc under `docs/` (§7).
 
 ---
 
@@ -1037,7 +1037,6 @@ because of that. Hard-won points:
 | BPF LSM | `docs/cfm-lsm.md` · Kernel hardening: `docs/kernsec.md` |
 | Detectors (incl. leniency §6) | `docs/DETECTORS.md` |
 | Detectors config unification (design: srcresolve / detectors.d overlays / converged defaults) | `docs/detectors-config-unification.md` |
-| Web detector history (as-built) | `docs/webdetector-history-design.md` |
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
 | Abuse defense (challenge / classifier / fingerprint) — **PLAN OF RECORD** | `docs/abuse-defense-master-plan.md` (the one roadmap + decision log, both repos) |
@@ -1054,9 +1053,14 @@ because of that. Hard-won points:
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
 | Endpoint scope inventory | `docs/endpoint_scope_inventory.md` |
-| Traffic Rules UX review & redesign proposal (cfm-admin rules builder / recipes) | `docs/traffic-rules-ux-proposal.md` |
+| Traffic rules: match fields, semantics, examples, API | `docs/traffic-rules.md` · UX review + open proposals: `docs/traffic-rules-ux-proposal.md` |
+| Panel DNAT (cPanel / WHM / DirectAdmin ports through the edge) | `docs/panel-dnat.md` |
+| CLI commands no topic doc owns (`webtop`, `bots`, `firewall status/path`, `health`) | `docs/cli.md` |
+| MySQL Governor | `docs/mysql-governor.md` |
+| Outbound Abuse Sentinel (per-uid outbound SMTP / scan / HTTP abuse) | `docs/outbound-sentinel.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 | Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
+| ClamAV upload scanning (scope, inline mode, signature excludes) | `docs/clamav.md` |
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |
 | Mail abuse findings (hacked site / contact form, mailbox spike, hijacked mailbox → detection_history) | `docs/mail-abuse.md` |
 | Alert log (every notifier event + its delivery outcome → `/var/lib/cfm/alerts.db`, `/api/v1/alerts`, cfm-admin Alerts, MCP `alerts`) | `docs/alerts.md` |
@@ -1068,10 +1072,18 @@ because of that. Hard-won points:
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
-`docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·
-`docs/waf-gap-analysis-ninjafirewall.md` (decision record) · `WAF_CVE_PLAN.md` (→ `WAF_CVE.md`) ·
-`docs/webdetector-history-design.md` (as-built → `history_store.go`). Folded away: `Detectors.Leniency.md` → `docs/DETECTORS.md` §6;
-`docs/roadmaps/edge-shared-loaders.md` → `docs/edge-unification-plan.md` §10. Also: `docs/archive/fleet-fingerprint-reputation.md` (idea note → `cfm-web:docs/fingerprint-reputation.md`) · `docs/archive/solver-farm-cross-host-phase2.md`, `docs/archive/solver-farm-fingerprint-concentration.md` (shipped → `docs/traffic-classifier.md`).
+`docs/waf-analysis-2026-05-08.md` (FP corpus → `docs/waf.md`) · `WAF_CVE_PLAN.md` (backlog → `WAF_CVE.md`).
+
+Comments citing "audit Fnn" (Lua, confs, tests) refer to the closed
+2026-07 edge-Lua audit, deleted 2026-11-18: `git log --diff-filter=D --
+docs/edge-lua-audit-2026-07-08.md` finds the commit; read it at that
+commit's parent. Its two open items are in `docs/ROADMAP.md` §1.
+
+**Docs policy.** A doc earns its place by being current or by holding a
+decision that would otherwise be reopened. Finished audits, closed plans and
+"as-built" notes the code now states are deleted, not archived: git history
+keeps them, and a stale doc read as current misleads (code moves on, the doc
+does not). A standing "no" goes into `docs/ROADMAP.md` as a `[decided]` line.
 
 ---
 

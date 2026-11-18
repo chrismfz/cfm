@@ -5,7 +5,6 @@ This guide explains how to configure CFM detectors safely in production, startin
 - Main runtime file: `/etc/cfm/detectors.conf`
 - Reference template/examples: [`../configs/detectors.conf`](../configs/detectors.conf)
 - Leniency companion sections: [§6](#6-leniency-companion-sections)
-- Web UI / detectors settings page: [`cfm-admin-webtop.md`](cfm-admin-webtop.md)
 
 ---
 
@@ -300,6 +299,36 @@ Typical defaults below are representative from the shipped template and should b
 | `challenge_solver_farm` | distributed challenge-solving botnets, by solver spread per vhost | `MIN_SUBNETS`, `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `PREFIX_V4/V6`, allowlists | `EVERY=30s`, `WINDOW=180s`, `MIN_SUBNETS=30`, `MIN_SOLVES=15`, **alert-only** |
 | `challenge_cookie_discard` | clients that re-solve the challenge while still holding valid clearance | `MIN_SOLVES`, `WINDOW`, `COOLDOWN`, `MAX_TRACKED_IPS`, allowlists, `BLOCK` | `EVERY=30s`, `WINDOW=10m`, `MIN_SOLVES=8`, **alert-only unless `BLOCK` is set** |
 | `login_bruteforce` | login brute force from the web detector's login column: one site, or a spray over many sites | `SITE_FAILS`, `SITES`, `WINDOW`, `BLOCK`, allowlists; `[login_bruteforce.leniency]` | `WINDOW=1h`, `SITE_FAILS=4`, `SITES=3`, `BLOCK=3d`, armed (`DRY_RUN=0`); GR/CY `10m`, not reported. **Built in**: a config without the section runs these |
+
+### `cfm_endpoints` — protecting CFM's own API
+
+Built in and on even with no `[cfm_endpoints]` section; a section only
+overrides the built-in values, and `ENABLED = 0` is the explicit opt-out. The
+old `[api_abuse]` name is a deprecated alias. It counts apiserver auth and
+probe anomalies per source IP and escalates in three stages.
+
+- **Defaults:** 10 direct invalid-token events in 2 minutes → stage 1
+  (observe), 12 → stage 2 (challenge), 16 → stage 3 (15-minute TTL block
+  candidate). A stale automation token reaches those numbers quickly.
+- **Before arming:** look at the control-plane traffic for uptime monitors
+  and trusted automation and add only their stable addresses to `[global]`
+  `IGNORE_IPS` / `IGNORE_NETS` or the section's `ALLOW_IPS` / `ALLOW_NETS`
+  (avoid broad shared-cloud ranges); allowed sources are dropped before
+  counting. Run the first week with `BLOCK = dryrun` (covers stages 2 and 3)
+  or `BLOCK = no`.
+- `ALLOW_UA_CONTAINS` is attacker-controlled. The old shipped
+  `uptime,healthcheck,prometheus` list is removed on load unless
+  `ALLOW_UA_CONTAINS_EXPLICIT = 1` acknowledges it. `PATH_EXCEPTIONS` only
+  mutes generic unauthorized-burst noise on an exact path; direct auth
+  failures, fuzz and method probes still count.
+- Stage 2 needs the webdetector bridge: with no readable `detectors.conf`,
+  stage 1 and the stage-3 policy work but a challenge is recorded as failed
+  until the config loads.
+- The edge replaces control-plane `X-Forwarded-For` with one normalized
+  client address. If another reverse proxy sits in front, add only that proxy
+  to the edge's real-IP trust; the multi-hop chain is not kept.
+- A rate-limit trip on the API (`docs/security/control-plane.md` §6) is a
+  `429`, never fed into this detector.
 
 ### `dovecot_auth` — logins refused as `user_disabled`
 
@@ -1070,7 +1099,6 @@ Mitigation path:
 
 - Reference config and inline presets: [`../configs/detectors.conf`](../configs/detectors.conf)
 - Leniency companion sections: [§6](#6-leniency-companion-sections)
-- Web UI / detector settings docs: [`cfm-admin-webtop.md`](cfm-admin-webtop.md)
 
 ---
 

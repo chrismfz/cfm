@@ -992,7 +992,6 @@ thresholds, 16/20 against the then-shipped 40/40); the orphan
 | Under-attack state machine design — increments frozen | `docs/under-attack-mode.md` |
 | Targeted challenges (audience floor + under-attack confirm step) — design; the confirm step built (S4, manual `attack on`) | `docs/targeted-challenge-design.md` |
 | Historical context for the abuse_shadow signals | `docs/webdetector-refactor.md` |
-| Archived (superseded, kept for archaeology) | `docs/archive/solver-farm-fingerprint-concentration.md` · `docs/archive/solver-farm-cross-host-phase2.md` · `docs/archive/fleet-fingerprint-reputation.md` |
 
-`docs/ROADMAP.md` §9 is an index pointer to this file — per the CLAUDE.md
+`docs/ROADMAP.md` §8 is an index pointer to this file — per the CLAUDE.md
 rule, never a second copy of this checklist.

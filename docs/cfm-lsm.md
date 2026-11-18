@@ -1722,8 +1722,6 @@ pick up the new policy with no further changes.
 
 - [`docs/kernsec.md`](./kernsec.md) — preemptive kernel-surface
   reduction (sibling component).
-- [`docs/webdetector-history-design.md`](./webdetector-history-design.md)
-  — upstream consumer of LSM events.
 - [`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md)
   — the PHP-VM layer above this one (CFM-managed Snuffleupagus).
 - `internal/outbound/analyzer.go` — existing per-uid NFLOG outbound

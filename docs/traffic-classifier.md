@@ -20,8 +20,8 @@
 > AUTOMATICALLY. Since 2026-09-19 (master plan E3 node slice) the one
 > enforcement path is the OPERATOR-armed per-fingerprint policy pulled from
 > cfm-web (`internal/webdetector/fppolicy.go` + `configs/lua/cfm_fppolicy.lua`).
-> Superseded design notes folded into this hub: `docs/archive/solver-farm-cross-host-phase2.md`,
-> `docs/archive/solver-farm-fingerprint-concentration.md`, `docs/archive/fleet-fingerprint-reputation.md`.
+> The earlier solver-farm and fleet-reputation design notes were folded into
+> this hub and deleted (git history keeps them).
 
 > **Status:** WORKING NOTES (not a frozen spec). Accumulating the Phase-0 audit
 > and a grounded design before we commit to weights/actions. Authorised to live
@@ -1567,7 +1567,7 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   payload is unchanged.
   `challenge_solved` is the highest-volume row type, so these keys add ~50-80
   bytes each and the history DB grows accordingly at unchanged retention (it
-  is bounded by row count, not bytes) — see the CHANGELOG storage note.
+  is bounded by row count, not bytes; release 2026.09.22).
   Every humanity key is gated on the scorer having actually run, so an
   unscored solve carries none of them rather than a default-looking `hs:0`. Every humanity key is omitted
   entirely when the rung is off: there is no `-1` sentinel to look for, so the
