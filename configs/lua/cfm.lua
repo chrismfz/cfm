@@ -1705,7 +1705,11 @@ local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
 -- 10027 / 10028 (CVE-2026-48356, Magento PolyShell) gate themselves on a
 -- Magento cart-save request, and their exploit can arrive as a SOAP body the
 -- edge reads in burn-in (waf_should_read_body_or_soap).
-local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true }
+-- 10030 (Drupal render-array callback keys, Drupalgeddon2) is keyed on a
+-- field name or JSON key Drupal alone builds, and its POST /user/register
+-- can come chunked or large (not on the POST allowlist), so in burn-in.
+local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true,
+                             ["10030"] = true }
 
 -- Set by a logonly WAF hit, which records and pushes it, then goes on through
 -- Steps 2b-4 like a clean request (it used to route to the origin there and

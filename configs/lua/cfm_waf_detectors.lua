@@ -870,12 +870,18 @@ end
 -- `[#pre_render](...)` all carry them in a VALUE):
 --   * a request-field NAME, as PHP splits the query and a urlencoded or
 --     multipart body (each_request_field): `name[#post_render][0]`;
---   * a JSON object key, `"#key":` (or `"\u0023key":`, which json_decode turns
---     into the same), in a JSON body or in a field value that is a JSON
---     document (`rows={"r1":{"#region_callback":...}}`, the lab-route probe).
+--   * a JSON object key, `"#key":`, read as json_decode reads it (`"\u0023key":`
+--     and escaped letters too), in a JSON body (POST, PUT, PATCH: JSON:API and
+--     REST updates), and `#region_callback` alone in a field value that is a
+--     JSON document (`rows={"r1":{"#region_callback":...}}`, the lab-route
+--     probe; a render array pasted whole into a field is not an attack);
+--   * Drupal 7's `destination`, which it parses as a URL, so a key in its
+--     query is a field name (`destination=node?q[%2523post_render][]=...`,
+--     the node-delete Drupalgeddon2).
 -- A 7-day read of all 8 edge nodes' access.log (2026-11-18) found these keys
 -- only in attacks: the `#region_callback` probe and a Drupalgeddon2 payload
 -- that reached a site with a 200.
+-- region_callback first: a JSON field value is read for that one alone
 _M._DRUPAL_RENDER_KEYS = { "region_callback", "post_render", "pre_render", "lazy_builder", "access_callback" }
 
 do  -- own block: the module is at Lua's 200-locals limit
@@ -910,17 +916,18 @@ local function json_unescape(j)
   end))
 end
 
--- the key, when JSON text `j` holds `"#key"` as an object key: the quoted
+-- the key, when JSON text `j` holds `"#key"` (the first `nkeys` keys, or
+-- all) as an object key: the quoted
 -- key, its opening quote not escaped, then `:`. Only text that writes a `#`,
 -- a letter or `_` as `\u00XX` pays the unescape (WordPress and page builders
 -- escape `<`, `>`, `&`, `'` and accents, never those).
-local function drupal_render_key_in_json(j)
+local function drupal_render_key_in_json(j, nkeys)
   if not (j:find("#", 1, true) or j:find("\\u", 1, true)) then return nil end
   local raw = not (j:find("\\u0023") or j:find("\\u00[4-7]%x"))
   j = lower(raw and j or json_unescape(j))
   if not j:find("#", 1, true) then return nil end
   local keys = _M._DRUPAL_RENDER_KEYS
-  for i = 1, #keys do
+  for i = 1, nkeys or #keys do
     local lit = '"#' .. keys[i] .. '"'
     local init = 1
     while true do
@@ -955,23 +962,39 @@ do
   end
 end
 
+-- a JSON body sent without a JSON Content-Type still gets the JSON budget
+local JSON_CT = { ["Content-Type"] = "application/json" }
+
 function _M.detect_cve_drupal_render_callback(method, args, body, headers)
   local hit
   each_request_field(method, args, body, headers, function(k, v, _, enc)
     if hit then return end
     hit = drupal_render_key_in_name(k)
-    if hit then return end
-    if v and v:find("[#%%\\]") then
-      if enc and v:find("[%%+]") then v = _form_unescape(v) end
-      if v:find("%", 1, true) then v = _form_unescape(v) end   -- double-encoded
-      if json_doc(v) then hit = drupal_render_key_in_json(v) end
+    if hit or not v then return end
+    if enc and v:find("[%%+]") then v = _form_unescape(v) end   -- as PHP: once
+    if lower(k) == "destination" then
+      -- Drupal 7 reads `destination` as a URL (drupal_parse_url), so its query
+      -- registers fields: the node-delete Drupalgeddon2 sends
+      -- `destination=node?q[%2523post_render][]=passthru`
+      hit = drupal_render_key_in_name(v)
+      return
     end
+    -- a value that is a JSON document: only the Field UI row key, the one
+    -- request data reaches as JSON (the lab-route probe); the others there are
+    -- a pasted render array as often as an attack
+    if not v:find("[#%%\\]") then return end
+    -- a value double-encoded whole (no quote left after PHP's decode)
+    if not v:find('"', 1, true) and v:find("%%22") then v = _form_unescape(v) end
+    if json_doc(v) then hit = drupal_render_key_in_json(v, 1) end
   end, drupal_render_skip)
-  if not hit and method == "post" and body and body ~= "" then
+  if not hit and (method == "post" or method == "put" or method == "patch")
+     and body and body ~= "" then
     local mt = php_media_type(php_content_type(headers)) or ""
-    if mt:find("json", 1, true) or (mt ~= "multipart/form-data"
-       and mt ~= "application/x-www-form-urlencoded" and json_doc(body)) then
+    if mt:find("json", 1, true) then
       hit = drupal_render_key_in_json(cap(body, body_budget(headers)))
+    elseif mt ~= "multipart/form-data" and mt ~= "application/x-www-form-urlencoded"
+       and json_doc(body) then
+      hit = drupal_render_key_in_json(cap(body, body_budget(JSON_CT)))
     end
   end
   return hit and hit:upper() or nil

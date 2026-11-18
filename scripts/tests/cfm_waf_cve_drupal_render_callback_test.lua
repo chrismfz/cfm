@@ -81,6 +81,26 @@ fires(post("/x", string.rep("a=b&", 1100) .. "rows=" .. '{"r1":{"\\u0023\\u0072e
       "WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK", "escaped letters past the large-source prefilter")
 fires(post("/x", '{"t":"a\\\\","#pre_render":["x"]}', "application/json"),
       "WAF_CVE:CVE_2018_7600:DRUPAL:PRE_RENDER", "a key after an escaped backslash")
+-- the independent final review (2026-11-18)
+-- Drupal 7's node-delete Drupalgeddon2: `destination` is parsed as a URL
+fires(get("/", "q=node/1/delete&destination=node?q[%2523post_render][]=passthru%26q[%2523type]=markup%26q[%2523markup]=id"),
+      "WAF_CVE:CVE_2018_7600:DRUPAL:POST_RENDER", "D7 destination variant (query)")
+do
+  local c = post("/", "form_id=node_delete_confirm&_triggering_element_name=form_id")
+  c.args = "q=node/1/delete&destination=node?q[%2523post_render][]=passthru"
+  fires(c, "WAF_CVE:CVE_2018_7600:DRUPAL:POST_RENDER", "D7 destination variant (POST)")
+end
+local function method(m, uri, body, ct)
+  local c = post(uri, body, ct); c.method = m; return c
+end
+fires(method("PATCH", "/jsonapi/node/article/1", '{"data":{"attributes":{"x":{"#pre_render":["exec"]}}}}', "application/vnd.api+json"),
+      "WAF_CVE:CVE_2018_7600:DRUPAL:PRE_RENDER", "JSON:API PATCH body")
+fires(method("PUT", "/node/1", '{"x":{"#lazy_builder":["exec",[]]}}', "application/json"),
+      "WAF_CVE:CVE_2018_7600:DRUPAL:LAZY_BUILDER", "REST PUT body")
+fires(post("/x", '{"p":"' .. string.rep("a", 2100) .. '","r":{"#region_callback":"system"}}', "text/plain"),
+      "WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK", "JSON body without a JSON type, key past 2 KB")
+fires(get("/poc/fieldui", "rows=%257B%2522r1%2522%253A%257B%2522%2523region_callback%2522%253A%2522system%2522%257D%257D"),
+      "WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK", "a JSON value double-encoded whole")
 
 -- ── Negatives ───────────────────────────────────────────────────────────────
 clean(get("/search", "q=how+to+use+%23post_render+in+drupal"), "the word in a search")
@@ -122,6 +142,16 @@ clean(post("/wp-admin/admin-ajax.php", "action=elementor_ajax&actions=" .. enc('
       "an escaped key inside a JSON field value")
 clean(post("/api", '{"t":"a\\\\\\"#pre_render\\": 1"}', "application/json"), "an escaped quote after an escaped backslash")
 clean(post("/api", '{"#header":{"color":"red"},"#footer":{}}', "application/json"), "CSS-selector keys")
+-- a URL with %22 inside a JSON value: decoded once (as PHP does), multipart not at all
+clean(post("/wp-admin/admin-ajax.php", "action=track&data=" .. enc('{"url":"https://example.com/?s=%22%23pre_render%22%3A+drupal","w":"50%"}'), U),
+      "a search URL inside beacon JSON")
+clean(post("/x", table.concat({ "--b", 'Content-Disposition: form-data; name="meta"', "",
+      '{"ref":"https://x/?q=%22%23lazy_builder%22%3A"}', "--b--", "" }, "\r\n"), "multipart/form-data; boundary=b"),
+      "a search URL inside a multipart JSON value")
+-- a pasted render array that is a whole field value (pastebin, JSON formatter)
+clean(post("/paste", "lang=json&code=" .. enc('{\n  "#pre_render": ["my_module_pre_render"],\n  "#markup": "Hello"\n}'), U),
+      "a render array pasted as JSON")
+clean(get("/user/login", "destination=/node/5%23comments"), "a destination with a fragment")
 
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " check(s) failed in cfm_waf_cve_drupal_render_callback_test.lua\n")
