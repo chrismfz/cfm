@@ -20,7 +20,7 @@ Last full review: 2026-11-18.
 
 Behaviour + FP runbooks: **`docs/waf.md`**, `docs/challenge-waf-release-checklist.md`.
 WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
-(backlog: `WAF_CVE_PLAN.md`). Pre-merge numbers: `make waf-corpus` (BlazeHTTP).
+(as-built, backlog, "CVE hunting" recipe). Pre-merge numbers: `make waf-corpus` (BlazeHTTP).
 
 - **WAF false-positive tuning** — [track, never "done"]. Against real apps
   (Joomla K2/elFinder, `/.well-known/`, WP migration/backup imports). Promote
@@ -92,7 +92,7 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
 
 ## 2. Panel enforcement (edge unification follow-up)
 
-Edge unification is done (as-built: `docs/edge-unification-plan.md`): panel
+Edge unification is done (decisions + open items: `docs/edge-unification-plan.md`): panel
 WAF + bridge decision enforce by default (`PANEL_WAF_MODE` /
 `PANEL_DECISION_MODE`), the blanket panel challenge is kept on purpose.
 
