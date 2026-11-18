@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.18
+
 ### Fixed
 - **Abuse shadow: an integration's API calls no longer read as a rate
   outlier.** `rate_outlier` (log-only) counted every dynamic request, so a
@@ -29,8 +33,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   webhooks, courier tracking: the narrow list a vhost challenge already
   exempts) no longer count toward it. Nothing was ever blocked; this keeps the measurement honest
   before the signal is considered for enforcement.
-
-## 2026.11.18
 
 ### Fixed
 - **ChallengeV2: a quiet `cpanel.`/`webmail.`/`whm.` subdomain is at v2 from
