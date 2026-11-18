@@ -18,15 +18,19 @@
 -- overrides, as on a node with no local overrides.
 --
 -- What it emulates from nginx: ngx.var.uri (percent-decoded, slashes merged,
--- dot segments resolved; a bad %-escape or a path above the root is a 400, so
--- the request never reaches the WAF: reported as `nginx_400`), lowercased
--- header names with repeated headers as a list, and header names nginx drops
--- by default (ignore_invalid_headers on, underscores_in_headers off).
+-- dot segments resolved; a bad %-escape, an escaped NUL or a path above the
+-- root is a 400, so the request never reaches the WAF: reported as
+-- `nginx_400`), lowercased header names with repeated headers as a list, and
+-- header names nginx drops by default (ignore_invalid_headers on,
+-- underscores_in_headers off). Content-Length is what BlazeHTTP sends: the
+-- body's length when there is one, absent otherwise. A sample that is not an
+-- HTTP/1.x request is `parse_error`, shown on its own row and never a miss.
 --
 -- Options:
 --   --out FILE        per-sample TSV: path label outcome action headline_rule rule_ids
 --   --baseline FILE   a previous --out file: list the samples whose outcome changed
---   --keep-host       keep each sample's Host header. By default it is set to
+--   --keep-host       keep each sample's Host header (and use it as the host the
+--                     WAF is told about). By default both are
 --                     waf-corpus.example: BlazeHTTP's attacks mostly name an IP
 --                     literal (10.10.3.128) and its benign samples a hostname,
 --                     so the IP-host rule (602) would "detect" the corpus layout.
@@ -76,12 +80,11 @@ local function decode_base64(s)
   return table.concat(out)
 end
 
-local LOGS = 0
 _G.ngx = _G.ngx or {
   now = function() return 1000 end,
   time = function() return 1000 end,
   decode_base64 = decode_base64,
-  log = function() LOGS = LOGS + 1 end,
+  log = function() end,
   ERR = 0, WARN = 1, INFO = 2, DEBUG = 3,
 }
 
@@ -96,7 +99,9 @@ local function hexval(c)
   return nil
 end
 
--- ngx.var.uri for a raw request path: nil when nginx answers 400.
+-- ngx.var.uri for a raw request path: nil when nginx answers 400 (a bad
+-- %-escape, an escaped NUL, a path above the root), as
+-- ngx_http_parse_complex_uri does.
 function M.nginx_uri(raw)
   local out, i, n = {}, 1, #raw
   while i <= n do
@@ -104,7 +109,9 @@ function M.nginx_uri(raw)
     if c == 37 then -- %
       local h1, h2 = hexval(raw:byte(i + 1) or 0), hexval(raw:byte(i + 2) or 0)
       if not (h1 and h2) then return nil end
-      out[#out + 1] = string.char(h1 * 16 + h2)
+      local v = h1 * 16 + h2
+      if v == 0 then return nil end
+      out[#out + 1] = string.char(v)
       i = i + 3
     else
       out[#out + 1] = string.char(c)
@@ -136,12 +143,9 @@ end
 
 -- Parse one raw request. Returns a table or nil, err.
 function M.parse(raw)
-  local head_end, body_start = raw:find("\r\n\r\n", 1, true)
-  local sep = "\r\n"
-  if not head_end then
-    head_end, body_start = raw:find("\n\n", 1, true)
-    sep = "\n"
-  end
+  -- The head ends at the first empty line (CRLF or LF); with none, the whole
+  -- sample is the head (a bodiless request saved without its final CRLF).
+  local head_end, body_start = raw:find("\r?\n\r?\n")
   local head, body
   if head_end then
     head, body = raw:sub(1, head_end - 1), raw:sub(body_start + 1)
@@ -149,10 +153,13 @@ function M.parse(raw)
     head, body = raw, ""
   end
   local lines = {}
-  for line in (head .. sep):gmatch("(.-)" .. sep) do lines[#lines + 1] = line end
-  local method, target, proto = (lines[1] or ""):match("^(%S+) (.+) (HTTP/%d%.%d)$")
+  for line in (head .. "\n"):gmatch("([^\n]*)\n") do
+    line = line:gsub("\r$", "")
+    if line ~= "" or #lines == 0 then lines[#lines + 1] = line end
+  end
+  local method, target = (lines[1] or ""):match("^(%S+) (.+) HTTP/%d%.%d$")
   if not method then return nil, "bad request line" end
-  local headers, order = {}, {}
+  local headers = {}
   for i = 2, #lines do
     local name, value = lines[i]:match("^([^:]+):%s*(.-)%s*$")
     if name then
@@ -161,7 +168,6 @@ function M.parse(raw)
         local cur = headers[k]
         if cur == nil then
           headers[k] = value
-          order[#order + 1] = k
         elseif type(cur) == "table" then
           cur[#cur + 1] = value
         else
@@ -175,7 +181,7 @@ function M.parse(raw)
   if t == "" then t = "/" end
   local raw_path, args = t:match("^([^?]*)%??(.*)$")
   return { method = method, raw_uri = t, raw_path = raw_path, args = args or "",
-           proto = proto, headers = headers, body = body }
+           headers = headers, body = body }
 end
 
 -- In-memory stand-in for an ngx.shared dict (one per sample: the burst rules
@@ -203,19 +209,31 @@ function M.evaluate(waf, req, opts, seq)
   local uri = M.nginx_uri(req.raw_path)
   if not uri then return { outcome = "nginx_400", ids = {} } end
   local headers = req.headers
-  if not opts.keep_host then headers.host = "waf-corpus.example" end
+  local host = "waf-corpus.example"
+  if opts.keep_host then
+    -- ngx.var.host: the Host header, lowercased, without the port.
+    local h = headers.host
+    if type(h) == "table" then h = h[1] end
+    h = tostring(h or ""):lower():gsub(":%d*$", "")
+    if h ~= "" then host = h end
+  else
+    headers.host = host
+  end
+  -- Content-Length as BlazeHTTP sends it (CalculateContentLength): the body's
+  -- real length when there is a body, on any method, and no header without one.
+  local full = req.body or ""
+  headers["content-length"] = (#full > 0) and tostring(#full) or nil
+  -- The edge hands the WAF a body on POST / PUT / PATCH only.
   local body = ""
   local m = req.method:lower()
   if m == "post" or m == "put" or m == "patch" then
-    body = req.body or ""
+    body = full
     if #body > opts.max_body then body = body:sub(1, opts.max_body) end
-    -- BlazeHTTP rewrites Content-Length to the body it sends; so does this.
-    if #(req.body or "") > 0 then headers["content-length"] = tostring(#req.body) end
   end
   local ip = ("198.18.%d.%d"):format(math.floor(seq / 250) % 250, seq % 250 + 1)
   local ctx = {
     uri = uri, args = req.args, method = req.method, raw_uri = req.raw_uri,
-    host = "waf-corpus.example", ip = ip, peer = ip,
+    host = host, ip = ip, peer = ip,
     cookie = type(headers.cookie) == "table" and table.concat(headers.cookie, "; ") or (headers.cookie or ""),
     shdict = newdict(), headers = headers, body = body, self_origin = false,
   }
@@ -278,6 +296,15 @@ end
 
 local function pct(a, b) if b == 0 then return "  -  " end return ("%5.2f%%"):format(100 * a / b) end
 
+local function num(v, name)
+  local n = tonumber(v)
+  if not n or n < 0 then
+    io.stderr:write(name .. " needs a number, got " .. tostring(v) .. "\n")
+    os.exit(2)
+  end
+  return n
+end
+
 local function main(argv)
   local opts = { max_body = tonumber(os.getenv("CFM_WAF_BODY_MAX_LEN") or "") or 32768, top = 25 }
   local dir
@@ -287,9 +314,9 @@ local function main(argv)
     if a == "--out" then opts.out = argv[i + 1]; i = i + 1
     elseif a == "--baseline" then opts.baseline = argv[i + 1]; i = i + 1
     elseif a == "--keep-host" then opts.keep_host = true
-    elseif a == "--max-body" then opts.max_body = tonumber(argv[i + 1]); i = i + 1
-    elseif a == "--limit" then opts.limit = tonumber(argv[i + 1]); i = i + 1
-    elseif a == "--top" then opts.top = tonumber(argv[i + 1]); i = i + 1
+    elseif a == "--max-body" then opts.max_body = num(argv[i + 1], a); i = i + 1
+    elseif a == "--limit" then opts.limit = num(argv[i + 1], a); i = i + 1
+    elseif a == "--top" then opts.top = num(argv[i + 1], a); i = i + 1
     elseif a:sub(1, 2) == "--" then io.stderr:write("unknown option " .. a .. "\n"); os.exit(2)
     else dir = a end
     i = i + 1
@@ -340,7 +367,9 @@ local function main(argv)
     end
     if r.outcome == "error" then errors[#errors + 1] = path .. "  " .. (r.err or ""):gsub("\n.*", "") end
     local rel = path:sub(#dir + 2)
-    if label == "black" and not ENFORCE[r.outcome] and r.outcome ~= "nginx_400" then missed[#missed + 1] = rel end
+    if label == "black" and not ENFORCE[r.outcome] and r.outcome ~= "nginx_400" and r.outcome ~= "parse_error" then
+      missed[#missed + 1] = rel
+    end
     if label == "white" and ENFORCE[r.outcome] then
       local tag = body_tag(r)
       fps[#fps + 1] = rel .. "  rule " .. tostring(r.headline) .. " " .. tostring(names[r.headline] or "")
@@ -371,7 +400,10 @@ local function main(argv)
   line("%-22s %7d %8s %7d %8s", "any (incl. logonly)", any(b), pct(any(b), b.n), any(w), pct(any(w), w.n))
   line("%-22s %7d %8s %7d %8s", "nginx 400 (no WAF)", b.nginx_400 or 0, pct(b.nginx_400 or 0, b.n), w.nginx_400 or 0, pct(w.nginx_400 or 0, w.n))
   line("%-22s %7d %8s %7d %8s", "WAF raised", b.error or 0, "", w.error or 0, "")
-  if parse_errors > 0 then line("%-22s %7d", "unparseable samples", parse_errors) end
+  if parse_errors > 0 then
+    line("%-22s %7d %8s %7d %8s", "unparseable (no WAF)", b.parse_error or 0, pct(b.parse_error or 0, b.n),
+         w.parse_error or 0, pct(w.parse_error or 0, w.n))
+  end
   if (w.fp_body_ct or 0) + (w.fp_body_list or 0) > 0 then
     line("benign enforcing hits that need the body: %d read on any path (Content-Type), %d only on cfm.lua's dynamic-endpoint list",
          w.fp_body_ct or 0, w.fp_body_list or 0)

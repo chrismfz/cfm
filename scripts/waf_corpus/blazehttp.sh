@@ -30,6 +30,7 @@ if [ -z "$dir" ]; then
     echo "fetching BlazeHTTP $BLAZEHTTP_REV into $dir" >&2
     tmp="$dir.tmp.$$"
     rm -rf "$tmp"
+    trap 'rm -rf "$tmp"' EXIT
     mkdir -p "$tmp"
     git -C "$tmp" init -q
     git -C "$tmp" fetch -q --depth 1 "$BLAZEHTTP_REPO" "$BLAZEHTTP_REV"
@@ -42,6 +43,7 @@ if [ -z "$dir" ]; then
     fi
     rm -rf "$dir"
     mv "$tmp" "$dir"
+    trap - EXIT
   fi
 fi
 [ -d "$dir/testcases" ] || { echo "no testcases/ under $dir" >&2; exit 1; }

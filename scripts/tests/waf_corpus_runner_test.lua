@@ -28,6 +28,8 @@ eq(M.nginx_uri("/../etc/passwd"), nil, "above the root is a 400")
 eq(M.nginx_uri("/a%zz"), nil, "bad %-escape is a 400")
 eq(M.nginx_uri("/a%2"), nil, "truncated %-escape is a 400")
 eq(M.nginx_uri("/a+b"), "/a+b", "+ is not a space in the path")
+eq(M.nginx_uri("/index.php%00.jpg"), nil, "an escaped NUL is a 400 (ngx_http_parse_complex_uri)")
+eq(M.nginx_uri("/a%2fb/%2e"), "/a/b/", "an escaped / and . take part in normalization")
 
 -- ── base64 stand-in (ngx.decode_base64: nil on bad input) ──────────────────
 eq(M.decode_base64("PD9waHA="), "<?php", "base64 with padding")
@@ -61,6 +63,12 @@ eq(r.body, "q=1\r\nz=2", "body is everything after the blank line")
 local r2 = assert(M.parse("GET /p HTTP/1.1\nHost: x\n\n"))
 eq(r2.raw_path, "/p", "LF-only sample parses")
 check(M.parse("garbage") == nil, "a non-HTTP sample does not parse")
+local r3 = M.parse("GET /q HTTP/1.1\r\nHost: x\r\n")
+check(r3 and r3.raw_path == "/q" and r3.headers.host == "x", "CRLF request saved without the final blank line parses")
+local r4 = M.parse("GET /q HTTP/1.1\r\nHost: x")
+check(r4 and r4.headers.host == "x", "CRLF request with no line ending after the last header parses")
+local r5 = assert(M.parse("POST /p HTTP/1.1\nHost: x\n\nbody\r\n"))
+eq(r5.body, "body\r\n", "LF head, body kept byte for byte")
 
 -- ── evaluate: the real WAF on a parsed sample ──────────────────────────────
 local opts = { max_body = 32768 }
@@ -96,6 +104,26 @@ local getbody = run("GET /x HTTP/1.1\r\nHost: a.example\r\n" .. UA ..
                     "Content-Type: application/x-www-form-urlencoded\r\n\r\n" ..
                     "id=1%27%20union%20select%201,2,3--%20")
 eq(getbody.outcome, "clean", "a GET body is not inspected")
+
+-- Content-Length as BlazeHTTP sends it: the body's length, or no header.
+local cl0 = assert(M.parse("POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"))
+M.evaluate(waf, cl0, opts, 1)
+eq(cl0.headers["content-length"], nil, "no body: Content-Length removed")
+local clx = assert(M.parse("POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 99\r\n\r\nabc"))
+M.evaluate(waf, clx, opts, 1)
+eq(clx.headers["content-length"], "3", "a stale Content-Length is set to the body's length")
+local clg = assert(M.parse("GET /p HTTP/1.1\r\nHost: x\r\n\r\nabcd"))
+M.evaluate(waf, clg, opts, 1)
+eq(clg.headers["content-length"], "4", "a GET with a body gets its length too")
+
+-- --keep-host tells the WAF the sample's host (lowercased, no port).
+local seen_host
+local spy = { check = function(ctx) seen_host = ctx.host; return false end }
+M.evaluate(spy, assert(M.parse("GET / HTTP/1.1\r\nHost: WWW.Example.COM:8080\r\n\r\n")),
+           { max_body = 32768, keep_host = true }, 1)
+eq(seen_host, "www.example.com", "--keep-host: ctx.host is the Host header")
+M.evaluate(spy, assert(M.parse("GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n")), opts, 1)
+eq(seen_host, "waf-corpus.example", "default: ctx.host is the neutral host")
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")

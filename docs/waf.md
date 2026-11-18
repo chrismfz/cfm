@@ -2231,14 +2231,18 @@ comparable.
 **What it measures.** The engine, `cfm_waf.check()`, under LuaJIT with the
 shipped rule modes (plus `configs/lua/cfm_waf_config.lua`), given what the edge
 would hand it: `ngx.var.uri` emulated (percent-decoded, slashes merged, dot
-segments resolved; a bad `%`-escape or a path above the root is nginx's 400 and
-reported as such), lowercased header names with repeats as a list, header names
-nginx drops by default (`_` and other invalid characters) dropped, every
-POST/PUT/PATCH body given to the WAF up to `waf_body_max_len`. Each sample is a
-different client with a fresh shared dict. The `Host` header is replaced by
-`waf-corpus.example` (`--keep-host` keeps it): the corpus's attacks name an IP
-literal and its benign samples a hostname, so rule 602 would otherwise "detect"
-the layout.
+segments resolved; a bad `%`-escape, an escaped NUL or a path above the root is
+nginx's 400 and reported as such), lowercased header names with repeats as a
+list, header names nginx drops by default (`_` and other invalid characters)
+dropped, Content-Length as BlazeHTTP sends it (the body's length, or no header
+without a body), every POST/PUT/PATCH body given to the WAF up to
+`waf_body_max_len`. Each sample is a different client with a fresh shared dict,
+so the per-IP counting rules (501, 512) cannot fire. The `Host` header, and the
+host the WAF is told about, are `waf-corpus.example` (`--keep-host` uses the
+sample's): the corpus's attacks name an IP literal and its benign samples a
+hostname, so rule 602 would otherwise "detect" the layout (31.9% → 85.6%). A
+file that is not an HTTP/1.x request is `parse_error`, its own row, never a
+miss.
 
 **What it does not model** (`cfm.lua` is not run): the bypass lists, per-vhost
 exclusions, clearance, traffic rules, IP / vhost decisions, and the body read
@@ -2262,9 +2266,11 @@ only the headline, so a rule that only fires behind a stronger one shows.
 | any, incl. logonly | 214 (32.5%) | 204 (0.61%) |
 
 - **False positives** are almost all rule 601 (`rule_ctrl_chars`,
-  challenge_v2): 178 of 199, every one a binary analytics/telemetry POST body
-  sent without a Content-Type, which the edge does read (an empty Content-Type
-  is inspectable). Then 302 (`rule_xss`) 17. The two block FPs are arguable
+  challenge_v2): 178 of 199, all analytics / telemetry POST bodies carrying
+  binary or compressed bytes, which the edge reads: 113 declared `text/plain`,
+  36 sent no Content-Type, 28 `application/x-www-form-urlencoded`, 1
+  `application/json`. A fix keyed on "no Content-Type" would clear only the
+  36. Then 302 (`rule_xss`) 17. The two block FPs are arguable
   labels: a `HEAD /?protocol=authentication` from an MSIE 8 UA (201) and a URL
   carrying `%00` (101).
 - **Misses** by DVWA module: reflected XSS 59 / 243 detected, SQLi 53 / 118,

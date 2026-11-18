@@ -25,8 +25,8 @@ back-filled here — see the git/PR history for that period.
   per rule what it caught, what it flagged on benign traffic and which attacks
   passed. `--out` / `--baseline` list the samples a change moved. Baseline
   today: 31.9% of attacks met with a block or challenge, 0.60% of benign
-  requests (178 of those 199 are rule 601 on binary telemetry bodies sent
-  without a Content-Type). Hit-rates on live traffic cannot show what the WAF
+  requests (178 of those 199 are rule 601 on binary or compressed telemetry
+  bodies, most declared `text/plain`). Hit-rates on live traffic cannot show what the WAF
   misses; this can. `docs/waf.md` "Labelled corpus (BlazeHTTP)".
 
 ## 2026.11.18
