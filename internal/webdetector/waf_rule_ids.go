@@ -18,7 +18,7 @@
 //   7xx SSRF / external interaction
 //   8xx info disclosure / debug
 //   9xx reserved (behavioural rules)
-//   10xxx named-vulnerability (CVE) detectors — see WAF_CVE_PLAN.md (the 9xx
+//   10xxx named-vulnerability (CVE) detectors — see WAF_CVE.md (the 9xx
 //         band is too small for long-term CVE coverage). rule_log4shell keeps
 //         its historical 328; new CVE rules use 10000+.
 //

@@ -708,7 +708,7 @@ local RULE_IDS = {
   -- 8xx info disclosure / debug
   rule_debug_toggles           = 801,
 
-  -- 10xxx named-vulnerability (CVE) detectors — see WAF_CVE_PLAN.md. The 9xx
+  -- 10xxx named-vulnerability (CVE) detectors — see WAF_CVE.md. The 9xx
   -- band is too small for long-term CVE coverage, so CVE rules use 10000+.
   -- (rule_log4shell keeps its historical 328; new CVE rules start here.)
   rule_cve_simple_file_list_upload = 10001,

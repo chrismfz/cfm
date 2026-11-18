@@ -4360,7 +4360,7 @@ end
 --   (preceded by action=nf_fu_get_new_nonce to mint the nonce.)
 --
 -- Keyed on the SPECIFIC action `nf_fu_upload` — a bare admin-ajax.php match is
--- deliberately NOT enough (WAF_CVE_PLAN.md: form submissions are common). The
+-- deliberately NOT enough (WAF_CVE.md §6: form submissions are common). The
 -- action alone is a legitimate upload handler, so we additionally require an
 -- exploit marker: (A) a php-executable upload filename (a contact form never
 -- accepts a .php), or (B) path traversal in the `image_jpg` dest-path param

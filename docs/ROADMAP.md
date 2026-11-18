@@ -166,8 +166,9 @@ per-ability tokens.
 Design: `docs/detectors-config-unification.md`. Shipped: `srcresolve` (auto
 source detection) and `detectors.d` overlays (`detconf` layering).
 
-- **Global `[leniency]` fallback + persisted auto-tokens** — [next] (doc §9 PR 6).
-- **Stock `detectors.conf` converged defaults** — [next] (doc §9 PR 7). A
+- **Global `[leniency]` fallback** — [next] (doc §8 PR 6; the persisted tokens
+  shipped, `internal/hostsecrets`).
+- **Stock `detectors.conf` converged defaults** — [next] (doc §8 PR 7). A
   behaviour change on hosts that inherit defaults: ships alone.
 - **Fleet migration** — [track, operator]. Move each node's deltas to an
   overlay; `config_drift` reports a clean base.

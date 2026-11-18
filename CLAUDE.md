@@ -648,7 +648,7 @@ Per-CVE in-path detectors live in the `10000+` rule-id band and emit the
 autoblock notifier turns into a `WAF/CVE-YYYY-NNNN` alert automatically
 (`cveFromReason` in `wafsec/detector.go`). **Read `WAF_CVE.md` before adding
 one** — it carries the as-built reference and a step-by-step "CVE hunting"
-recipe; `WAF_CVE_PLAN.md` is the original design + candidate backlog. Hard-won
+recipe, plus the candidate backlog and the design decisions (§5–§6). Hard-won
 points:
 - **Never write a CVE signature from memory.** The assistant's knowledge cutoff
   predates most target CVEs — get the exact method/endpoint/marker from a public
@@ -1052,7 +1052,7 @@ because of that. Hard-won points:
 | Scope/host-bound clearance model | `docs/security/challenge-scope-mapping.md` |
 | sslcollector (cert discovery + socket API) | `docs/ssl-collector.md` |
 | WAF → autoblock (`waf_security`) | `docs/waf-autoblock-design.md` |
-| WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + "CVE hunting" recipe) · `WAF_CVE_PLAN.md` (design + backlog) |
+| WAF CVE detectors (`WAF_CVE`) | `WAF_CVE.md` (as-built + backlog + design decisions + "CVE hunting" recipe) |
 | Admin/WebUI API | `docs/webui-api-curl-recipes.md` (recipes + sample responses) |
 | DNAT bypass | `docs/dnat-bypass.md` · Debug capture: `docs/debug-capture-runbook.md` |
 | Proxy latency: measuring & origin keepalive | `docs/proxy-performance.md` |
@@ -1074,9 +1074,6 @@ because of that. Hard-won points:
 | Imunify360 vs CFM: what Imunify catches that CFM does not (measured on earth; status of each gap) | `docs/imunify360-gap-analysis.md` (WebShield included) |
 | PHP runtime defense (CFM-managed Snuffleupagus; CFM writes no PHP extension of its own) | `docs/roadmaps/php-runtime-defense.md` |
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
-
-**Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
-`WAF_CVE_PLAN.md` (backlog → `WAF_CVE.md`).
 
 Comments citing "audit Fnn" (Lua, confs, tests) refer to the closed
 2026-07 edge-Lua audit, deleted 2026-11-18: `git log --diff-filter=D --
