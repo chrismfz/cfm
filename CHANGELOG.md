@@ -17,6 +17,10 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.18
+
 ### Security
 - **A solve that nothing asked for no longer banks a clearance cookie.**
   - The case: the solver farms open the challenge page on each new IP while
@@ -80,8 +84,6 @@ back-filled here — see the git/PR history for that period.
   requests (178 of those 199 are rule 601 on binary or compressed telemetry
   bodies, most declared `text/plain`). Hit-rates on live traffic cannot show what the WAF
   misses; this can. `docs/waf.md` "Labelled corpus (BlazeHTTP)".
-
-## 2026.11.18
 
 ### Added
 - **The malpath list catches the dev-tool and credential probes it missed.**
