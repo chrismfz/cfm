@@ -923,8 +923,8 @@ func reportUnsafeForces(w io.Writer, unsafe []ResolvedRule) {
 //     they're getting (kernsec will write the key on top of whatever
 //     sys_tweaks writes; the last writer wins).
 //
-// Honouring docs/kernsec.md:1117 — Phase 6 promises this surfaces in
-// apply output.
+// docs/kernsec.md "Cross-component sysctl ownership" promises this
+// surfaces in apply output.
 func reportCrossComponentConflicts(w io.Writer, applySysctls []SysctlRule) {
 	any := false
 	for _, c := range managedsysctl.Default().Conflicts() {
