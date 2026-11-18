@@ -1131,15 +1131,16 @@ clean-room against BPF LSM hooks.
 
 ## Related future work
 
-A complementary future component — a CFM-built Zend PHP extension that
-intercepts dangerous PHP function calls at the VM layer, for hosts
-without Imunify360 Proactive Defense — is described separately in
-[`cfm-php.md`](./cfm-php.md). It is out of scope for `cfm-lsm` because
-it operates at a different layer (PHP Zend VM, not kernel LSM hooks)
-and is a different project on a different timeline. It is recorded
-here only to answer the inevitable "why doesn't `cfm-lsm` block
-dangerous PHP functions directly?" That work, if it happens, lives in
-`cfm-php`, not here.
+The PHP-VM layer (dangerous PHP function calls, for hosts without
+Imunify360 Proactive Defense) is planned as CFM-managed
+**Snuffleupagus**: [`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md).
+CFM renders its rules and modes; it does not write its own PHP
+extension (an earlier `cfm-php` seed for one was dropped on 2026-11-18
+in favour of Snuffleupagus). It is out of scope for `cfm-lsm` because it
+operates at a different layer (PHP Zend VM, not kernel LSM hooks). It
+is recorded here only to answer the inevitable "why doesn't `cfm-lsm`
+block dangerous PHP functions directly?"
+
 
 ## Architecture
 
@@ -1623,8 +1624,8 @@ calls only. `cfm-lsm` operates at LSM hooks one layer below; they are
 complementary, not redundant. PD blocks the call that launches a
 reverse shell; `cfm-lsm` blocks the resulting process if PD missed it
 or was not loaded into that SAPI. The forward-looking analogue of
-Imunify PD for non-Imunify hosts has its own design doc — see
-[`cfm-php.md`](./cfm-php.md).
+Imunify PD for non-Imunify hosts is CFM-managed Snuffleupagus — see
+[`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md).
 
 **CageFS / LVE.** CageFS namespaces away most FS-write vectors for
 PHP-FPM workers on CloudLinux. `CFML-EXEC-001` / `CFML-EXEC-003` /
@@ -1723,8 +1724,8 @@ pick up the new policy with no further changes.
   reduction (sibling component).
 - [`docs/webdetector-history-design.md`](./webdetector-history-design.md)
   — upstream consumer of LSM events.
-- [`cfm-php.md`](./cfm-php.md) — future complementary component
-  (PHP Zend extension), separate project.
+- [`roadmaps/php-runtime-defense.md`](./roadmaps/php-runtime-defense.md)
+  — the PHP-VM layer above this one (CFM-managed Snuffleupagus).
 - `internal/outbound/analyzer.go` — existing per-uid NFLOG outbound
   observer; rightful owner of the network-policy problem space.
 - `internal/kernsec/profile.go` — host-profile detection reused by

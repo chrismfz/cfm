@@ -52,6 +52,41 @@ Behaviour + FP runbooks: **`docs/waf.md`**, `docs/waf-analysis-2026-05-08.md`,
   `10000+` band. As-built + "CVE hunting" recipe: **`WAF_CVE.md`**; design +
   candidate backlog: `WAF_CVE_PLAN.md`. Never write a signature from memory.
 - **Gap analysis follow-ups** — [idea]. See `docs/waf-gap-analysis-ninjafirewall.md`.
+- **No Coraza / OWASP CRS in-path** — [decided 2026-11-18]. Its anomaly
+  score has nothing to bind to (per-rule modes, autoblock families, scoped
+  excludes, edge ban), it brings a second exclusion system and CRS's FP load on
+  WordPress / Joomla / cPanel, and cPanel origins often run ModSecurity behind
+  the edge already (the `modsec` detector reads it). The 2026-05 reference audit
+  (`docs/waf.md`, external-reference table) found only two places a reference
+  is meaningfully stronger; the next two items take those, as CFM rules with
+  stable ids and modes. UUSEC WAF, SafeLine and BunkerWeb were reviewed the same
+  day: closed engines (UUSEC, SafeLine) or CRS itself (BunkerWeb), so no rules
+  to borrow; their usable ideas are the items below.
+- **libinjection SQLi / XSS tokenizer** — [next]. LuaJIT FFI binding
+  (`lua-resty-libinjection`-style) as a new detector beside 301 / 302,
+  shipping `logonly`. Measured with the corpus below before merge and with
+  `cfm webtop waf hit-rates` on the fleet before any promotion.
+- **Decoding / normalization transforms** — [next]. `cmdLine`-style
+  normalization for the RCE rules, unicode / fullwidth folding and
+  `normalizePath` in `cfm_waf_util.lua` (today: `url_decode_once` × 2 + lower,
+  no unicode normalization). Scope each to the variables it belongs to: the
+  strict UTF-8 walker applied to the whole args+body buffer flagged legacy
+  ISO-8859-7 Greek forms (`docs/waf.md`).
+- **Labelled pre-merge corpus (BlazeHTTP)** — [next]. chaitin/blazehttp:
+  ~33 k benign and ~650 attack raw-HTTP samples. Run from outside against a
+  staging edge and report detection and FP rate per rule, so a WAF change has
+  before / after numbers. It complements the production hit-rates, which see
+  how often a rule fires but never what it misses. GPLv3: run it, never vendor
+  the corpus or code into this repo.
+- **cfm-admin WAF / ban UX** — [idea].
+  - Hit-rates view: `/api/v1/waf/hit-rates` and its promotion hint
+    (`ok_to_promote` / `silent` / `review` / `noisy`) are CLI/API only today.
+  - Per-vhost protection presets (BunkerWeb's low / medium / high idea) that
+    only WRITE the existing knobs (WAF modes, challenge tier, rate rules), never
+    a second copy of the settings.
+  - Ban evidence: check that every ban, not only `waf_security`'s, carries
+    the requests that caused it in `detection_history`, and show it beside
+    the ban.
 - **Login brute-force signals in the web detector** — [next]. The edge counts
   login *submissions* (rule 501: 8 per IP in 20 s, across sites), so a slow or
   distributed attack never trips it: vol2.gr (titan) took 2 787 failed
@@ -214,6 +249,18 @@ request so the IP can be banned.
   monitor-only) and the `php_drops` MCP aggregates. A fleet count gates every
   later phase (scan → suspect alerts/quarantine opt-in → autoblock); kernel deny
   is not planned.
+
+## 11. PHP runtime defense (CFM-managed Snuffleupagus)
+
+Design: `docs/roadmaps/php-runtime-defense.md`. The PHP-VM layer Imunify
+Proactive Defense covers on Imunify hosts: CFM renders Snuffleupagus rules,
+monitor/enforce modes and per-vhost excludes, and never writes its own PHP
+extension (the `cfm-php` extension seed was dropped on 2026-11-18: one engine
+for one purpose). Pairs with §10 at the kernel boundary.
+
+- **P0a `cfm php-inventory`** — done (2026-07-22).
+- **P0b per-vhost PHP handler mapping (alt-php vs ea-php)** — next; it picks
+  the beachhead adapter for P1 (monitor-only, one server).
 
 ---
 

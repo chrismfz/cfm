@@ -214,8 +214,10 @@ exposure, not by headline.
 Proactive Defense blocked 39 executions in 30 days. 28 of them were
 "Malware drop/interaction blocked", and one was an auto-immunity rule it
 generated itself on 2026-11-12, the day of the Fabrik compromise. CFM has no
-PHP-runtime layer. **Proposal:** the FS-009 design (`lsm-php-drop-detection.md`)
-is the path at the kernel boundary; its count-only phase can be sized against
+PHP-runtime layer yet. **Proposal:** two layers, no third. Inside the PHP VM,
+CFM-managed Snuffleupagus (`roadmaps/php-runtime-defense.md`; CFM writes no PHP
+extension of its own). At the kernel boundary, the FS-009 design
+(`lsm-php-drop-detection.md`), whose count-only phase can be sized against
 these 39.
 
 ### G6. Malware at rest
