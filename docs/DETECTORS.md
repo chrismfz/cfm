@@ -34,7 +34,24 @@ An unknown type is logged and skipped (`[detectors] unknown section type: …`).
 shared resolver (`internal/detectors/srcresolve`). `ftpd`, `modsec` and `mysql`
 keep their own older autodetects with different semantics; `proxmox_auth`,
 `custom` and `ngm_auth` read only what is configured. More detectors migrate
-per `docs/detectors-config-unification.md`. The shared resolver:
+per `docs/detectors-config-unification.md`.
+
+`modsec` (`resolveModsecLogPath`, `internal/detectors/modsec_register.go`):
+`MODE = auto` with `LOG_PATH = auto` (stock) scans the known Apache / nginx
+error and audit logs (cPanel, cPanel EA4's `/var/log/apache2/error_log`, EL /
+DirectAdmin `/var/log/httpd/error_log`, Debian `/var/log/apache2/error.log`,
+nginx) and tails the one with the most ModSecurity denials in its last 2 MiB,
+else the first that exists. A concrete `LOG_PATH` that exists is used as
+given. In `MODE = auto` a concrete `LOG_PATH` that does NOT exist is logged
+and the scan runs instead (the path is kept only if no candidate exists
+either). That covers the old stock line `LOG_PATH = /var/log/apache2/error_log`,
+which a live `detectors.conf` keeps across upgrades: it is cPanel EA4's real
+path, but DirectAdmin, Debian and nginx hosts have no such file, and before
+2026-11-18 their `[modsec]` watched nothing. `MODE = file` pins `LOG_PATH`
+verbatim. `detectors_srcresolve` reports the file it would tail; the source
+probe (`detectors_status`) only checks that a candidate is readable.
+
+The shared resolver:
 
 - **Explicit values win.** A concrete `DOCKER_CONTAINER`, `JOURNAL_UNIT` or
   `LOG_PATH` (in that precedence) short-circuits auto; postfix
@@ -270,7 +287,7 @@ key runs the code default, which can differ (notably `BLOCK`: see §1).
 | `postfix_security` | Postfix auth / reject / RBL / TLS anomalies | `MODE` (auto), thresholds | `MODE=auto`, `WINDOW=30m`, `BLOCK=permanent` |
 | `postfix_relays` | Postfix relay-style abuse | `MODE` (auto), thresholds like exim relays | `MODE=auto`, `WINDOW=15m`, no `BLOCK` (alert-only) |
 | `postfix_queues` | Postfix queue saturation | `TOTAL_CMD`, `LIST_CMD` (auto), thresholds | `EVERY=60s`, alert-only; publishes the queue count like `exim_queues` |
-| `modsec` | ModSecurity denial bursts per IP | `MODE`, `LOG_PATH`, `MODSEC_IP` | `MODE=auto`, `WINDOW=15m`, `MODSEC_IP=20`, `BLOCK=permanent` |
+| `modsec` | ModSecurity denial bursts per IP | `MODE`, `LOG_PATH`, `MODSEC_IP` | `MODE=auto`, `LOG_PATH=auto` (see Source modes), `WINDOW=15m`, `MODSEC_IP=20`, `BLOCK=permanent` |
 | `health` | host health: CPU / RAM / disk / temperature / connection spikes, RAID / SMART / ZFS / ECC, backups, `/tmp` | `%` thresholds, spike multipliers, `*_ALERT`, `BACKUP_*`, `TMP_PCT`, `TMP_CLEAN_OLDER` | `EVERY=20s`, alert-only; `/tmp` at `TMP_PCT=85`% alerts and deletes regular files older than `TMP_CLEAN_OLDER=12h` (`TMP_PCT=0` turns it off). Backups: `docs/backup-check.md` |
 | `custom` | your own regex rules (§3) | `FAIL_REGEX`, `MATCH_TARGET`, thresholds | none shipped |
 

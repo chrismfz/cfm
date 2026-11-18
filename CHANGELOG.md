@@ -29,6 +29,36 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   on two nodes. The tier resolver now reads the list itself: a listed host
   under a live vhost challenge is `vhost_config` with or without a note. A v1
   pin still decides, and the list alone, with no live challenge, arms nothing.
+- **`[modsec]` no longer watches a file that isn't there.** The stock
+  `LOG_PATH = /var/log/apache2/error_log` is cPanel EA4's real path, but
+  DirectAdmin, Debian and nginx hosts have no such file, and because the path
+  was explicit the candidate scan never ran: on 3deers, avglb, saf (Apache
+  running) and watchdog the ModSecurity detector tailed nothing. In
+  `MODE = auto` a `LOG_PATH` that does not exist is now logged and the scan
+  (now including EA4's path) runs instead, so a live `detectors.conf` that
+  kept the old line is fixed by the upgrade. The stock line is now
+  `LOG_PATH = auto`, and a quiet host with no denials yet tails the first
+  error log that exists instead of nothing. `MODE = file` still pins the path
+  as given. `detectors_srcresolve` now reports the file it tails.
+- **`ngm_auth` counts the NGM credential failures it was missing.** The
+  step-up re-auth failures (`PASSWORD_CHANGE_FAIL`, `MFA_DISABLE_FAIL`,
+  `RECOVERY_SET_FAIL`: a logged-in session guessing the password) now count
+  like a failed login, except their account-disabled / suspended refusals.
+  `DYNDNS_DENY` and `API_ACCOUNT_DENIED` stay uncounted: NGM logs a suspended
+  account's valid dyn-DNS token as `badauth` too. A fixture of NGM's event
+  names pins the allowlist.
+- **`[waf_security]`: a `RULE_<id>` above 1 counts that rule's own hits.**
+  The other rules of its family used to fill its count, so `RULE_329 = 2`
+  under a family at 5 fired on 329's first hit after one other RCE hit. Still
+  one alert per IP and family per window. Thresholds 0 and 1, which
+  every shipped config uses, behave as before.
+
+### Changed
+- `configs/cfm.blocklists` lists the fleet blacklist `MYBLOCK`, commented
+  out. It was never provisioned: 8 nodes added it by hand (speedhost as
+  `MYIP_BLOCK`), and 3deers, avglb, saf and watchdog do not pull it.
+- The stock `[webdetector]` documents `IP403WAF_COUNT` (WAF-origin 403 flood,
+  0 = off), commented out at its default.
 
 ## 2026.11.18
 

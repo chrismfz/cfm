@@ -171,3 +171,90 @@ func TestCVEFromReason(t *testing.T) {
 		}
 	}
 }
+
+// A RULE_<id> override above 1 counts that rule's own hits: the family's
+// other rules must not fill it.
+func TestRuleOverrideAboveOneCountsOnlyItsRule(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_RCE": 5},
+		RuleOverrides: map[string]int{"329": 2},
+	})
+	ip := "203.0.113.20"
+	for i := 0; i < 3; i++ {
+		d.Enqueue(ev(ip, "WAF_RCE:CMD", "320")) // family-threshold hits (3 < 5)
+	}
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329")) // first 329 hit: 1 < 2
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("one 329 hit plus other family hits fired %d alerts; want 0", len(got))
+	}
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	got := drain(t, d)
+	if len(got) != 1 || got[0].Extra["rule_id"] != "329" || got[0].Count != 2 {
+		t.Fatalf("second 329 hit: got %+v, want one alert for rule 329 with count 2", got)
+	}
+	// The family's own count is untouched by 329's hits: 3 so far, fires at 5.
+	d.Enqueue(ev(ip, "WAF_RCE:CMD", "320"))
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("family fired at 4 hits: %d alerts", len(got))
+	}
+}
+
+// Once the family has banned an IP this window, a per-rule counter tripping
+// for the same IP does not alert again.
+func TestRuleScopedTripAfterFamilyBanIsQuiet(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_RCE": 1},
+		RuleOverrides: map[string]int{"329": 2},
+	})
+	ip := "203.0.113.21"
+	d.Enqueue(ev(ip, "WAF_RCE:CMD", "320"))
+	if got := drain(t, d); len(got) != 1 {
+		t.Fatalf("family hit: %d alerts, want 1", len(got))
+	}
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("rule trip after the family ban alerted %d times, want 0", len(got))
+	}
+}
+
+// Thresholds 0 and 1 (every shipped config) keep the (ip, family) key: an
+// explicit RULE_<id> = 1 hit after the family fired stays one alert.
+func TestRuleOverrideOfOneSharesTheFamilyKey(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_BACKDOOR": 1},
+		RuleOverrides: map[string]int{"440": 1, "438": 0},
+	})
+	ip := "203.0.113.22"
+	d.Enqueue(ev(ip, "WAF_BACKDOOR:B64", "439"))
+	d.Enqueue(ev(ip, "WAF_BACKDOOR:PLUGIN", "440"))
+	d.Enqueue(ev(ip, "WAF_BACKDOOR:B64PHP", "438"))
+	got := drain(t, d)
+	if len(got) != 1 || got[0].Extra["rule_id"] != "439" {
+		t.Fatalf("got %d alerts (%+v), want exactly the first hit's", len(got), got)
+	}
+	if k := counterKey(ip, "WAF_BACKDOOR", "440", 1, true); k != ip+"|WAF_BACKDOOR" {
+		t.Fatalf("threshold-1 override key = %q, want the family key", k)
+	}
+}
+
+// A rule-scoped trip suppresses a later family trip for the same IP in the
+// window: one alert per IP and family, as with the shared key.
+func TestFamilyTripAfterRuleScopedBanIsQuiet(t *testing.T) {
+	d := New(Config{
+		Families:      map[string]int{"WAF_RCE": 5},
+		RuleOverrides: map[string]int{"329": 2},
+	})
+	ip := "203.0.113.23"
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	d.Enqueue(ev(ip, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 1 {
+		t.Fatalf("rule trip: %d alerts, want 1", len(got))
+	}
+	for i := 0; i < 5; i++ {
+		d.Enqueue(ev(ip, "WAF_RCE:CMD", "320"))
+	}
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("family trip after the rule ban alerted %d times, want 0", len(got))
+	}
+}

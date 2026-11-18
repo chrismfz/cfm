@@ -51,7 +51,7 @@ kept where they size a gap or justify a decision.
 PAM locked **8 824** mail/FTP logins in 7 days because the source was on
 Imunify's **global** RBL (`[IM360_RBL] The IP … has been locked`), before any
 password was tried. **0 of 25** sampled RBL-locked IPs were on CFM's fleet
-blacklist (`MYBLOCK`): the reputation comes from Imunify's whole customer
+blacklist (`MYBLOCK`, the opt-in `cfm.blocklists` feed): the reputation comes from Imunify's whole customer
 base, not our nodes. And PAM hides them from CFM: 19 of those 25 appear in
 the maillog only as dovecot `Login aborted … (user_disabled)`, so no detector
 saw an auth failure, banned them or reported them.

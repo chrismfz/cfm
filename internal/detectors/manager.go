@@ -237,6 +237,13 @@ func (m *manager) maybeReload(parent context.Context) {
 		typ, _ := splitTypeInstance(secName)
 		enabled := kvBool(kv, "ENABLED", true)
 		sourceOK, sourceMsg := probeSourceStatus(kv)
+		if typ == "modsec" {
+			// Its own MODE=auto resolution (LOG_PATH=auto, or an explicit
+			// path that is missing): a stat-only resolution, so it names the
+			// first existing candidate; the register scores them and may
+			// tail a busier one (detectors_srcresolve shows that pick).
+			sourceOK, sourceMsg = probeModsecSource(kv)
+		}
 		if typ == cfmEndpointsType {
 			sourceOK, sourceMsg = true, "in-process control-plane security events"
 		}

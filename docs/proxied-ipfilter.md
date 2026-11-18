@@ -8,7 +8,9 @@ blocked).
 
 nft drops by source address, and a visitor behind a trusted proxy reaches the
 node from the proxy's address. So none of CFM's IP lists applied to that
-visitor: not the fleet blacklist (cfm-web's `MYBLOCK` feed, ~268 k addresses),
+visitor: not the fleet blacklist (cfm-web's `MYBLOCK` feed, ~268 k addresses;
+an opt-in line in `/etc/cfm/cfm.blocklists`, which the stock file ships
+commented out and cfm-web does not provision),
 not the node's own bans (`block_v4`: `cfm.deny`, detector TTL bans), not the
 allows. On earth (2026-11-17) addresses other nodes had fleet-banned for WAF
 hits reached the origin through Cloudflare with 200 / 301 / 404.

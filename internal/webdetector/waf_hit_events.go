@@ -15,10 +15,13 @@ import (
 // Reason is the raw cfm_waf reason string, e.g. "WAF_SQLI:UNION_SELECT" — the
 // family is its prefix before ':'. Signal is the numeric rule id as a string
 // (e.g. "301"); it is "" when the edge could not supply one (older Lua clients
-// send waf_rule_id=0). Action is the edge action (logonly/challenge/block) and
-// is informational only — the persistent-block decision is family-threshold
-// driven and independent of the per-request edge action (see
-// docs/waf-autoblock-design.md, "Two orthogonal decisions").
+// send waf_rule_id=0). Action is the verbatim edge action (logonly / challenge /
+// challenge_v2 / block). The persistent block and the per-request edge action
+// are still two decisions (docs/waf-autoblock-design.md, "Two orthogonal
+// decisions"), but in Phase 1 the waf_security subscriber feeds ONLY hits
+// whose Action is "block" (the gate in detectors/waf_security_register.go);
+// past that gate the detector scores by family / rule threshold alone, so
+// Action is not carried into core.InputEvent.
 type WAFHitEvent struct {
 	When      time.Time
 	Source    string // "waf"
@@ -33,8 +36,8 @@ type WAFHitEvent struct {
 }
 
 // InputEvent converts to the generic detector envelope. Action is intentionally
-// not mapped: core.InputEvent has no such field and the waf_security detector
-// scores by family threshold regardless of edge action.
+// not mapped: core.InputEvent has no such field, and the Phase 1 block-only
+// gate runs on the WAFHitEvent before this conversion.
 func (e WAFHitEvent) InputEvent() core.InputEvent {
 	return core.InputEvent{
 		When:      e.When,
