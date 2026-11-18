@@ -261,7 +261,16 @@ func (e *Engine) handleTopShort(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows := decorateDCFracShort(decorateCostShort(decorateFacetShort(decorateShadowShort(decorateSolverFarmShort(applyShortFilter(e.TopShort(limit), parseVhostFilter(r)))))))
+	// A vhost filter (a scoped caller's, or ?vhosts=) applies before the
+	// limit: the caller gets up to limit of its own rows, and the row count
+	// says nothing about where its hosts rank among everyone else's.
+	filter := parseVhostFilter(r)
+	rows := e.TopShort(limitUnlessFiltered(limit, filter))
+	rows = applyShortFilter(rows, filter)
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	rows = decorateDCFracShort(decorateCostShort(decorateFacetShort(decorateShadowShort(decorateSolverFarmShort(rows)))))
 
 	resp := topShortResponse{
 		WindowSec:      e.cfg.Window.Seconds(),
@@ -307,8 +316,27 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	if minScore <= 0 {
 		minScore = 0.50
 	}
-	rows := decorateDCFracSuspicious(decorateCostSuspicious(decorateFacetSuspicious(decorateShadowSuspicious(decorateSolverFarmSuspicious(applySuspiciousFilter(e.longwin.SuspiciousTop(limit, minScore), parseVhostFilter(r)))))))
-	writeJSON(w, http.StatusOK, rows)
+	writeJSON(w, http.StatusOK, e.suspiciousRows(r, limit, minScore))
+}
+
+// suspiciousRows is the long-window top list for r: the vhost filter applies
+// before the limit (see handleTopShort).
+func (e *Engine) suspiciousRows(r *http.Request, limit int, minScore float64) []SuspiciousRow {
+	filter := parseVhostFilter(r)
+	rows := applySuspiciousFilter(e.longwin.SuspiciousTop(limitUnlessFiltered(limit, filter), minScore), filter)
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return decorateDCFracSuspicious(decorateCostSuspicious(decorateFacetSuspicious(decorateShadowSuspicious(decorateSolverFarmSuspicious(rows)))))
+}
+
+// limitUnlessFiltered is limit, or 0 (no limit) when a vhost filter will
+// narrow the rows afterwards.
+func limitUnlessFiltered(limit int, filter map[string]struct{}) int {
+	if filter != nil {
+		return 0
+	}
+	return limit
 }
 
 // longTopResponse: scored long-window rows χωρίς minScore threshold.
@@ -333,7 +361,7 @@ func (e *Engine) handleLongTop(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows := decorateDCFracSuspicious(decorateCostSuspicious(decorateFacetSuspicious(decorateShadowSuspicious(decorateSolverFarmSuspicious(applySuspiciousFilter(e.longwin.SuspiciousTop(limit, 0), parseVhostFilter(r)))))))
+	rows := e.suspiciousRows(r, limit, 0)
 	resp := longTopResponse{
 		LongHorizonSec: e.cfg.LongHorizon().Seconds(),
 		Rows:           rows,

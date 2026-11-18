@@ -32,3 +32,13 @@ func TestRegisterHTTPRequiresIdentityOnEveryRoute(t *testing.T) {
 		t.Fatalf("cpanel/user-info without an assertion: 200")
 	}
 }
+
+// With a vhost filter the whole list is read and filtered before the limit.
+func TestLimitUnlessFiltered(t *testing.T) {
+	if got := limitUnlessFiltered(10, nil); got != 10 {
+		t.Fatalf("unfiltered: %d, want 10", got)
+	}
+	if got := limitUnlessFiltered(10, map[string]struct{}{"a.com": {}}); got != 0 {
+		t.Fatalf("filtered: %d, want 0 (no limit before the filter)", got)
+	}
+}
