@@ -198,7 +198,11 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 		// The rule breakdown uses the OBSERVATION-only universe so its total
 		// reconciles with summary.waf_observed (a physical hit that emitted
 		// trigger+observation is not counted twice).
-		s, serr := e.history.SummarizeRange(h, "", res.WindowFromUnix, res.WindowToUnix)
+		summarize := e.history.SummarizeRange
+		if !IsAdminRequest(r) {
+			summarize = e.history.SummarizeRangeTenant
+		}
+		s, serr := summarize(h, "", res.WindowFromUnix, res.WindowToUnix)
 		rs, rerr := e.history.WAFObservedByRuleRange(h, res.WindowFromUnix, res.WindowToUnix)
 		if serr != nil || rerr != nil {
 			v.failed = true
