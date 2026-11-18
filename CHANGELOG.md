@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.18
+
 ### Security
 - **A `--` in one query parameter no longer hides the next ones from the
   SQLi rules.** `?x=--&id=1'+union+select+1,2,3` read as clean, because the
@@ -56,8 +60,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   - A file that fails to load (a syntax error, no `return`, not a table)
     now logs `[cfm_waf] cfm_waf_config.lua ignored, WAF overrides NOT
     applied: …` in the edge error log. It used to be skipped silently.
-
-## 2026.11.18
 
 ### Security
 - **A solve that nothing asked for no longer banks a clearance cookie.**
