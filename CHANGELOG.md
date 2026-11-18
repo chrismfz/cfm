@@ -17,7 +17,22 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The subnet challenge (`CHALLENGE_SUBNET`) no longer re-issues the same
+  challenge every 10 seconds.**
+  - What happened: while a /24 stayed over its thresholds, every member IP
+    was challenged again on every 10-second pass, although each challenge
+    lasts `CHALLENGE_SUBNET_TTL` (20–30 min). Each pass wrote a history row
+    and an alert per IP. On qualityweb (2026-11-18) two Baidu /24s on two
+    sites made about 31 000 `challenge_issued` rows an hour for the same 200
+    IPs, and the webdetector run timed out about 270 times a day.
+  - Why it matters beyond the noise: a run that times out stops refreshing
+    the automatic v2 tier of challenged sites, so for a few minutes at a
+    time their challenge was held only to v1. A farm IP was rejected at v2
+    and passed three seconds later.
+  - Now: a new member of a hot subnet is still challenged within about 10
+    seconds. One already challenged is refreshed only once half its
+    challenge has run.
 
 ## 2026.11.18
 

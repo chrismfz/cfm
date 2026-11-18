@@ -2366,6 +2366,12 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				}
 				continue
 			}
+			// The pair cooldown above re-evaluates the subnet every 10s so a NEW
+			// member is challenged quickly; an IP already challenged is
+			// re-emitted only once its challenge is half spent.
+			if !e.subnetIPEmitDue(ip+"|"+a.host, now, ttl) {
+				continue
+			}
 
 			samples := e.ipSamples(ip, 8)
 
@@ -2402,6 +2408,32 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 			}
 		}
 	}
+}
+
+// subnetIPEmitDue reports whether the subnet challenge should (re-)emit for
+// key (ip|host) now, and records the emit when it should: a key it has never
+// emitted, or one whose last emit is at least half the challenge TTL ago (the
+// refresh that keeps the challenge alive while the subnet stays hot).
+//
+// Without it, every member of a hot subnet was re-emitted on every 10s pair
+// cooldown for as long as the subnet stayed over its thresholds, each emit a
+// synchronous history INSERT, a store write and a WEB/CHALLENGE alert. On
+// qualityweb (2026-11-18) two Baidu /24s on two vhosts made ~31 000
+// challenge_issued rows an hour for the same 200 IPs (each held a 20m
+// challenge), and the webdetector run timed out ~270 times a day: a run that
+// never finishes re-notes no auto-v2 source, so the vhost tier lapsed to v1
+// mid-challenge.
+func (e *Engine) subnetIPEmitDue(key string, now time.Time, ttl time.Duration) bool {
+	e.emitMu.Lock()
+	defer e.emitMu.Unlock()
+	if last, ok := e.subnetIPLastChalEmit[key]; ok && now.Sub(last) < ttl/2 {
+		return false
+	}
+	if e.subnetIPLastChalEmit == nil {
+		e.subnetIPLastChalEmit = make(map[string]time.Time)
+	}
+	e.subnetIPLastChalEmit[key] = now
+	return true
 }
 
 func minInt(a, b int) int {
