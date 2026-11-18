@@ -29,6 +29,11 @@ package agent
 // are narrowed down by halving, not one lint per file. Problems that were
 // already there (a dcc_* line with the DCC plugin off) do not block, and a
 // lint that cannot run backs off instead of retrying every tick.
+//
+// After a spamd action the agent checks spamd is active again (runAction). If
+// it is not and this sync wrote SpamAssassin files, those are rolled back and
+// parked and spamd is restarted on the old ones; an action that still fails
+// is retried on later syncs (runActions, retryPendingActions).
 
 import (
 	"bytes"
@@ -113,7 +118,14 @@ type fileSyncState struct {
 	// instead of starting another multi-minute lint on every tick.
 	lintRetryAt time.Time
 	lintBackoff time.Duration
+	// pendingActions: post-update actions (id → argv) that failed and are
+	// retried at the start of a later sync, at most every actionRetryEvery
+	// (a node with no spamd at all must not restart-fail every 20 s).
+	pendingActions map[string][]string
+	actionRetryAt  time.Time
 }
+
+const actionRetryEvery = 5 * time.Minute
 
 const (
 	lintBackoffMin = time.Minute
@@ -152,6 +164,7 @@ type applyResult struct {
 	RolledBack []string // paths written, then restored after a failed lint
 	Deferred   []string // SpamAssassin paths not written because no lint could run
 	Ran        []string // post-update action ids run
+	Failed     []string // post-update action ids that did not succeed (retried later)
 	Refused    []string // post-update commands not in the allowlist
 }
 
@@ -246,24 +259,129 @@ func (st *fileSyncState) applyUpdates(ctx context.Context, updates []ConfigUpdat
 			delete(actions, redundant)
 		}
 	}
+	var keptSA []pendingWrite
+	for _, w := range kept {
+		if isSpamassassinFile(w.path) {
+			keptSA = append(keptSA, w)
+		}
+	}
+	st.runActions(actions, keptSA, &res)
+	return res
+}
+
+// runActions runs each action and checks the service came back. A spamd action
+// that leaves spamd down, while this sync wrote SpamAssassin files, rolls those
+// files back (and parks them: lint passed but spamd would not start with
+// them) and restarts spamd again. An action that still fails is kept in
+// pendingActions and retried on the next syncs, since the files on disk now
+// match cfm-web and no later update would trigger it again.
+func (st *fileSyncState) runActions(actions map[string][]string, sa []pendingWrite, res *applyResult) {
 	ids := make([]string, 0, len(actions))
 	for id := range actions {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		// Not under ctx: Stop must not cancel a restart half-way.
-		cctx, cancel := context.WithTimeout(context.Background(), postUpdateTimeout)
-		out, err := runSyncCommand(cctx, actions[id])
-		cancel()
-		if err != nil {
-			logging.LogfAPI("[files] post-update %s (%s) failed: %v: %s", id, strings.Join(actions[id], " "), err, clipOutput(out))
-		} else {
-			logging.LogfAPI("[files] post-update %s done", id)
-		}
 		res.Ran = append(res.Ran, id)
+		if runAction(id, actions[id]) {
+			delete(st.pendingActions, id)
+			continue
+		}
+		if isSpamdAction(id) && len(sa) > 0 {
+			paths := make([]string, 0, len(sa))
+			for _, w := range sa {
+				paths = append(paths, w.path)
+			}
+			logging.LogfAPI("[files] spamd is not running after %s; rolling back %s and restarting it", id, strings.Join(paths, ", "))
+			rollback(sa, res)
+			for _, w := range sa {
+				st.parked[w.path] = w.u.Hash
+				res.Written = without(res.Written, w.path)
+			}
+			sa = nil
+			restart := postUpdateActions["systemctl restart spamd"]
+			if runAction(restart.id, restart.argv) {
+				delete(st.pendingActions, id)
+				continue
+			}
+			id, actions[id] = restart.id, restart.argv
+		}
+		if st.pendingActions == nil {
+			st.pendingActions = map[string][]string{}
+		}
+		st.pendingActions[id] = actions[id]
+		st.actionRetryAt = now().Add(actionRetryEvery)
+		res.Failed = append(res.Failed, id)
+		logging.LogfAPI("[files] post-update %s did not succeed; retrying on the next sync", id)
 	}
-	return res
+}
+
+// retryPendingActions reruns the actions that failed on an earlier sync.
+func (st *fileSyncState) retryPendingActions() {
+	if len(st.pendingActions) == 0 || now().Before(st.actionRetryAt) {
+		return
+	}
+	pending := st.pendingActions
+	st.pendingActions = nil
+	var res applyResult
+	st.runActions(pending, nil, &res)
+}
+
+// runAction runs one post-update action with its own timeout (not the sync
+// context: Stop must not cancel a restart half-way) and, for spamd, waits for
+// the service to be active again. It reports whether both succeeded.
+func runAction(id string, argv []string) bool {
+	cctx, cancel := context.WithTimeout(context.Background(), postUpdateTimeout)
+	out, err := runSyncCommand(cctx, argv)
+	cancel()
+	if err != nil {
+		logging.LogfAPI("[files] post-update %s (%s) failed: %v: %s", id, strings.Join(argv, " "), err, clipOutput(out))
+		return false
+	}
+	if isSpamdAction(id) && !waitActive("spamd") {
+		logging.LogfAPI("[files] post-update %s ran but spamd is not active", id)
+		return false
+	}
+	logging.LogfAPI("[files] post-update %s done", id)
+	return true
+}
+
+func without(list []string, v string) []string {
+	out := list[:0]
+	for _, x := range list {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+func isSpamdAction(id string) bool { return id == actionRestartSpamd || id == actionReloadSpamd }
+
+// activePolls / activePollDelay bound the wait for a unit still "activating"
+// after its restart returned. Vars for tests.
+var (
+	activePolls     = 15
+	activePollDelay = 2 * time.Second
+)
+
+// waitActive reports whether systemd has unit active, waiting out a short
+// "activating" phase.
+func waitActive(unit string) bool {
+	for i := 0; i < activePolls; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		out, _ := runSyncCommand(ctx, []string{"systemctl", "is-active", unit})
+		cancel()
+		switch strings.TrimSpace(string(out)) {
+		case "active", "reloading":
+			return true
+		case "activating", "deactivating":
+			time.Sleep(activePollDelay)
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // applySpamassassin writes the SpamAssassin files behind a lint gate and

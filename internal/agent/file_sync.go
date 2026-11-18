@@ -66,6 +66,10 @@ func (r *Runner) syncConfigs(ctx context.Context) {
 	}
 	api := &APIClient{BaseURL: cfg.BaseURL, Token: cfg.Token, HTTP: r.client}
 
+	// A restart that failed on an earlier sync: the files already match, so
+	// nothing below would trigger it again.
+	r.files.retryPendingActions()
+
 	tracked, err := api.ListTrackedFiles()
 	if err != nil {
 		logging.LogfAPI("[files] list failed: %v", err)

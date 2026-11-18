@@ -48,7 +48,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   plugin off, a missing Hashcash plugin), do not block it, and a lint that
   cannot run (a timeout on a loaded box) defers the change, and the files
   not judged yet, with a growing delay (1 min doubling to 1 h) instead of
-  judging it; they are not downloaded again meanwhile. The sync now runs off
+  judging it; they are not downloaded again meanwhile. After a spamd action
+  the agent checks that spamd is active again: if it is not and the sync
+  wrote SpamAssassin files, those are rolled back and parked and spamd is
+  restarted on the old ones; an action that still fails is retried on later
+  syncs (at most every 5 min) instead of being forgotten once the files
+  match. The sync now runs off
   the work loop, so a lint and restart never delay unblocks or policy pulls.
 - **WAF rule overrides in `/etc/cfm/cfm_waf_config.lua` now apply.** The docs
   and several release notes (2026.09.22, 2026.10.09, 2026.11.14) told

@@ -31,6 +31,9 @@ type syncFixture struct {
 	cmds               [][]string
 	lintCalls          int
 	lint               func(n int) (string, error)
+	// active answers `systemctl is-active` (n-th call); nil means "active".
+	activeCalls int
+	active      func(n int) string
 }
 
 func newSyncFixture(t *testing.T) *syncFixture {
@@ -53,10 +56,23 @@ func newSyncFixture(t *testing.T) *syncFixture {
 			}
 			return nil, nil
 		}
+		if len(argv) == 3 && argv[1] == "is-active" {
+			n := f.activeCalls
+			f.activeCalls++
+			if f.active != nil {
+				return []byte(f.active(n) + "\n"), nil
+			}
+			return []byte("active\n"), nil
+		}
 		f.cmds = append(f.cmds, argv)
 		return nil, nil
 	}
-	t.Cleanup(func() { spamassassinDir, spamassassinBins, runSyncCommand = prevDir, prevBins, prevRun })
+	prevPolls, prevDelay := activePolls, activePollDelay
+	activePollDelay = time.Millisecond
+	t.Cleanup(func() {
+		spamassassinDir, spamassassinBins, runSyncCommand = prevDir, prevBins, prevRun
+		activePolls, activePollDelay = prevPolls, prevDelay
+	})
 	return f
 }
 
@@ -504,6 +520,9 @@ func TestPostUpdateNotCancelledByStop(t *testing.T) {
 		if len(argv) == 2 && argv[1] == "--lint" {
 			return nil, nil
 		}
+		if len(argv) == 3 && argv[1] == "is-active" {
+			return []byte("active\n"), nil
+		}
 		cmdCtxErr = ctx.Err()
 		f.cmds = append(f.cmds, argv)
 		return nil, nil
@@ -581,5 +600,86 @@ func TestApplyUpdatesBisectStopsOnLintFailure(t *testing.T) {
 		if st.isParked(u.TargetPath, u.Hash) {
 			t.Errorf("%s parked without a verdict", u.TargetPath)
 		}
+	}
+}
+
+// spamd that does not come back after the restart: the SpamAssassin files
+// this sync wrote are rolled back and parked, and spamd is restarted on the
+// old ones. A "activating" phase is waited out, not treated as a failure.
+func TestPostUpdateRollsBackWhenSpamdStaysDown(t *testing.T) {
+	f := newSyncFixture(t)
+	f.seed(t, f.saDir+"myip.cf", "old\n", 0o644)
+	f.active = func(n int) string {
+		switch n {
+		case 0:
+			return "activating"
+		case 1:
+			return "failed" // with the new myip.cf
+		default:
+			return "active" // after the rollback restart
+		}
+	}
+	var st fileSyncState
+	u := f.update(f.saDir+"myip.cf", "new\n", "systemctl restart spamd")
+	other := f.update(f.other+"cfm.conf", "x=1\n", "")
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{u, other}, f.allowed())
+
+	if readFile(t, f.saDir+"myip.cf") != "old\n" || !st.isParked(f.saDir+"myip.cf", u.Hash) {
+		t.Fatal("the SpamAssassin file that kept spamd down was not rolled back and parked")
+	}
+	if len(f.cmds) != 2 || len(res.Failed) != 0 || len(st.pendingActions) != 0 {
+		t.Fatalf("want two restarts and no pending retry: cmds=%v %+v pending=%v", f.cmds, res, st.pendingActions)
+	}
+	if len(res.Written) != 1 || res.Written[0] != f.other+"cfm.conf" {
+		t.Fatalf("written %v", res.Written)
+	}
+}
+
+// A restart that fails is retried on the next sync even though the files
+// already match, until it succeeds.
+func TestPostUpdateFailedActionIsRetried(t *testing.T) {
+	f := newSyncFixture(t)
+	failures := 2
+	runSyncCommand = func(_ context.Context, argv []string) ([]byte, error) {
+		if len(argv) == 2 && argv[1] == "--lint" {
+			return nil, nil
+		}
+		if len(argv) == 3 && argv[1] == "is-active" {
+			return []byte("active\n"), nil
+		}
+		f.cmds = append(f.cmds, argv)
+		if failures > 0 {
+			failures--
+			return []byte("Job for spamd.service failed"), errors.New("exit status 1")
+		}
+		return nil, nil
+	}
+	var st fileSyncState
+	// a non-SpamAssassin file: nothing to roll back, the restart just fails
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.other+"cfm.conf", "x=1\n", "systemctl restart spamd")}, f.allowed())
+	if len(res.Failed) != 1 || len(st.pendingActions) != 1 {
+		t.Fatalf("failed restart not remembered: %+v pending=%v", res, st.pendingActions)
+	}
+	clock := time.Now()
+	prevNow := now
+	now = func() time.Time { return clock }
+	defer func() { now = prevNow }()
+	st.retryPendingActions() // too soon: not retried
+	if len(f.cmds) != 1 {
+		t.Fatalf("retried before actionRetryEvery: %v", f.cmds)
+	}
+	clock = clock.Add(actionRetryEvery + time.Second)
+	st.retryPendingActions() // fails again
+	if len(st.pendingActions) != 1 {
+		t.Fatal("pending action dropped after a second failure")
+	}
+	clock = clock.Add(actionRetryEvery + time.Second)
+	st.retryPendingActions() // succeeds
+	if len(st.pendingActions) != 0 || len(f.cmds) != 3 {
+		t.Fatalf("pending=%v cmds=%v", st.pendingActions, f.cmds)
+	}
+	st.retryPendingActions() // nothing left
+	if len(f.cmds) != 3 {
+		t.Fatal("retried an action that had succeeded")
 	}
 }
