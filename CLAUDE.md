@@ -531,9 +531,9 @@ Turns in-path WAF hits into a persistent nft block via the detector framework
 `docs/waf-autoblock-design.md`. Hard-won points:
 - **Phase 1 feeds edge-`block` hits ONLY** (the subscribe callback drops any
   hit whose action != `block`). Do **not** key autoblock on reason-family
-  alone: a family spans edge tiers — `WAF_BACKDOOR` mixes block 440 with
-  logonly/challenge 430-439, and `WAF_RCE` mixes block 320 with logonly
-  322-327, so family-only keying autoblocks logonly recon. Families with an edge-`block`
+  alone: a family spans edge tiers — `WAF_BACKDOOR` mixes block 438/440 with
+  logonly/challenge_v2 430-439, and `WAF_RCE` mixes block 320/329/332 with
+  challenge_v2 322-327, so family-only keying autoblocks lower-tier recon. Families with an edge-`block`
   rule today (the Go registry, `DefaultMode: "block"`, is the source — check it
   before editing this list): `WAF_SQLI` (301), `WAF_SQLI_LEXICAL` (309, since
   2026-08-23), `WAF_RCE` (320, 329, 332 since 2026-11-17), `WAF_UPLOAD_FNAME` (401, 414),

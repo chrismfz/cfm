@@ -243,7 +243,7 @@ func collectFirewallStatus(be fwDiagBackend, cfgDir, engine, source string, verb
 	r.Features["feeds"] = true
 	// Edge mode is the only mode (OPENRESTY_MODE deprecated/ignored), so the
 	// edge feature is always expected and the legacy per-IP challenge redirect
-	// is never armed — the daemon force-disables and cleans it up on start.
+	// is never armed — EnsureBase removes any legacy remnant.
 	r.Features["dnat_edge"] = true
 
 	// Probe only for capability: the boolean result is unused (edge DNAT health

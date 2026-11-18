@@ -3143,7 +3143,7 @@ function _M.should_push(shdict, ip, reason, action, rule_id)
   --     sweeping many URIs from one IP escaped the 60s cooldown entirely and
   --     emitted a cfm.waf.log record + ip_push RPC per hit (audit F31).
   --   * ACTION tier is essential and must NOT be dropped: WAF families mix
-  --     enforcement tiers (e.g. WAF_RCE = block rule 320 + logonly 322-327),
+  --     enforcement tiers (e.g. WAF_RCE = block rules 320/329/332 + challenge_v2 322-327),
   --     and the Go waf_security autoblock feeds on `action=block` pushes only.
   --     A family+ip-only key would let a cheap logonly recon hit consume the
   --     window and SUPPRESS the later block hit's push, so the IP is never
@@ -3152,8 +3152,8 @@ function _M.should_push(shdict, ip, reason, action, rule_id)
   --     while same-tier score/tag floods still collapse to one push per window.
   --   * RULE ID for the block tier (when the caller passes it): a family can
   --     have several block rules with different autoblock arming — WAF_CVE has
-  --     the armed 10018 next to 10019/10020, which are held per rule
-  --     (RULE_<id> = 0). A family-keyed block window let a held rule's hit
+  --     the armed 10018/10019 next to 10020, which is held per rule
+  --     (HoldAutoblock, RULE_<id> = 0). A family-keyed block window let a held rule's hit
   --     swallow the armed rule's push for push_cooldown_sec: send the held
   --     request first, then the real one, and no ban or alert followed. One
   --     push per (block rule, ip) per window is still bounded by the number of
