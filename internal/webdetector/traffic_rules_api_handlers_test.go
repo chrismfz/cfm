@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -483,5 +484,97 @@ func TestRulesBodySizeLimit(t *testing.T) {
 	// Should be 400 (bad JSON / body too large), never 200.
 	if rr.Code == http.StatusOK {
 		t.Fatal("oversized body was accepted — size limit not enforced")
+	}
+}
+
+// A rule the operator shares across tenants is shown to each tenant with only
+// that tenant's vhosts, in the list, in simulate (matched and disabled-matched)
+// and in export alike; the admin still sees every vhost.
+func TestRulesScope_SharedRuleNamesOnlyOwnVhosts(t *testing.T) {
+	e, mux := newTestEngine(t)
+	for _, enabled := range []bool{true, false} {
+		if _, err := e.TrafficRuleAdd(TrafficRule{
+			Enabled:  enabled,
+			Priority: 100,
+			Scope:    TrafficRuleScope{Vhosts: []string{"alpha.com", "beta.com"}},
+			Match:    TrafficRuleMatch{UAAny: []string{"*sharedbot*"}},
+			Action:   TrafficRuleAction{Type: TrafficActionBlock},
+		}); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	}
+	leaks := func(where, body string) {
+		t.Helper()
+		if strings.Contains(body, "beta.com") {
+			t.Fatalf("%s: scoped alpha caller sees beta.com: %s", where, body)
+		}
+		if !strings.Contains(body, "alpha.com") {
+			t.Fatalf("%s: scoped alpha caller lost its own vhost: %s", where, body)
+		}
+	}
+
+	rr := doRequest(mux, scopedCtx("alpha.com"), http.MethodGet, "/api/v1/webdet/rules", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("list status=%d", rr.Code)
+	}
+	leaks("list", rr.Body.String())
+
+	rr = doRequest(mux, scopedCtx("alpha.com"), http.MethodGet, "/api/v1/webdet/rules/export", nil)
+	leaks("export", rr.Body.String())
+
+	sim := []byte(`{"host":"alpha.com","ua":"sharedbot/1","path":"/","method":"GET"}`)
+	rr = doRequest(mux, scopedCtx("alpha.com"), http.MethodPost, "/api/v1/webdet/rules/simulate", sim)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("simulate status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	leaks("simulate", rr.Body.String())
+
+	// Disabled-only match: remove the enabled rule and simulate again.
+	for _, r := range e.TrafficRuleList() {
+		if r.Enabled {
+			e.TrafficRuleRemove(r.ID)
+		}
+	}
+	rr = doRequest(mux, scopedCtx("alpha.com"), http.MethodPost, "/api/v1/webdet/rules/simulate", sim)
+	var res TrafficRuleEvalResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil || res.DisabledMatch == nil {
+		t.Fatalf("simulate (disabled match) status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	leaks("simulate disabled_match", rr.Body.String())
+
+	// The admin view and the stored rule are untouched.
+	rr = doRequest(mux, adminCtx(), http.MethodGet, "/api/v1/webdet/rules", nil)
+	if !strings.Contains(rr.Body.String(), "beta.com") {
+		t.Fatalf("admin list lost beta.com: %s", rr.Body.String())
+	}
+	if got := e.TrafficRuleList()[0].Scope.Vhosts; len(got) != 2 {
+		t.Fatalf("stored rule scope changed: %v", got)
+	}
+}
+
+// A matched "*" rule keeps its "*" in a scoped simulate result (it names no
+// tenant), and only "*" plus the caller's own vhosts are shown.
+func TestRulesScope_SimulateKeepsStarOnly(t *testing.T) {
+	e, mux := newTestEngine(t)
+	if _, err := e.TrafficRuleAdd(TrafficRule{
+		Enabled:  true,
+		Priority: 100,
+		Scope:    TrafficRuleScope{Vhosts: []string{"*", "beta.com"}},
+		Match:    TrafficRuleMatch{UAAny: []string{"*starbot*"}},
+		Action:   TrafficRuleAction{Type: TrafficActionBlock},
+	}); err != nil {
+		t.Skipf("store refuses a \"*\" scope: %v", err)
+	}
+	sim := []byte(`{"host":"alpha.com","ua":"starbot/1","path":"/","method":"GET"}`)
+	rr := doRequest(mux, scopedCtx("alpha.com"), http.MethodPost, "/api/v1/webdet/rules/simulate", sim)
+	var res TrafficRuleEvalResult
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rr.Body.String())
+	}
+	if !res.Matched {
+		t.Skipf("\"*\" rule did not match alpha.com: %s", rr.Body.String())
+	}
+	if got := res.Rule.Scope.Vhosts; len(got) != 1 || got[0] != "*" {
+		t.Fatalf("scoped simulate vhosts = %v, want [*]", got)
 	}
 }

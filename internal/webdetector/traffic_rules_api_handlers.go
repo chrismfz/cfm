@@ -64,6 +64,58 @@ func scopeFilterRules(rules []TrafficRule, r *http.Request) []TrafficRule {
 	return out
 }
 
+// scopeTrimRuleVhosts narrows each rule's scope.vhosts to the caller's own
+// vhosts. A rule the operator shares across tenants is visible to each of
+// them (scopeFilterRules keeps it on any intersection), but its scope must not
+// name the other tenants' vhosts. No-op for an unscoped caller. The slice is
+// replaced, never edited in place, so the store's copy is untouched.
+func scopeTrimRuleVhosts(rule TrafficRule, r *http.Request) TrafficRule {
+	scope := vhostScopeFromContext(r.Context())
+	if scope == nil {
+		return rule
+	}
+	own := make([]string, 0, len(rule.Scope.Vhosts))
+	for _, h := range rule.Scope.Vhosts {
+		if vhostAllowed(strings.ToLower(h), scope) {
+			own = append(own, h)
+		}
+	}
+	rule.Scope.Vhosts = own
+	return rule
+}
+
+// scopeListRules is scopeFilterRules followed by scopeTrimRuleVhosts: what a
+// caller may see of the rule list.
+func scopeListRules(rules []TrafficRule, r *http.Request) []TrafficRule {
+	rows := scopeFilterRules(rules, r)
+	if vhostScopeFromContext(r.Context()) == nil {
+		return rows
+	}
+	out := make([]TrafficRule, len(rows))
+	for i := range rows {
+		out[i] = scopeTrimRuleVhosts(rows[i], r)
+	}
+	return out
+}
+
+// simulateTrimRuleVhosts is scopeTrimRuleVhosts that also keeps a bare "*":
+// it names no tenant, and a matched "*" rule must not read as scoped to
+// nothing. (Export does not keep it: a tenant cannot import a "*" rule.)
+func simulateTrimRuleVhosts(rule TrafficRule, r *http.Request) TrafficRule {
+	star := false
+	for _, h := range rule.Scope.Vhosts {
+		if strings.TrimSpace(h) == "*" {
+			star = true
+			break
+		}
+	}
+	rule = scopeTrimRuleVhosts(rule, r)
+	if star && vhostScopeFromContext(r.Context()) != nil {
+		rule.Scope.Vhosts = append(rule.Scope.Vhosts, "*")
+	}
+	return rule
+}
+
 // ── Response types ───────────────────────────────────────────────────────────
 
 type trafficRuleListResponse struct {
@@ -78,13 +130,14 @@ type trafficRuleResultResponse struct {
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 // GET /api/v1/webdet/rules
-// Scoped tokens receive only rules that touch their allowed vhosts.
+// Scoped tokens receive only rules that touch their allowed vhosts, each
+// naming only those vhosts (scopeListRules).
 func (e *Engine) handleWebdetRulesList(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusOK, trafficRuleListResponse{Rows: nil})
 		return
 	}
-	rows := scopeFilterRules(e.TrafficRuleList(), r)
+	rows := scopeListRules(e.TrafficRuleList(), r)
 	writeJSON(w, http.StatusOK, trafficRuleListResponse{Rows: rows})
 }
 
@@ -235,7 +288,8 @@ func (e *Engine) handleWebdetRulesRemove(w http.ResponseWriter, r *http.Request)
 }
 
 // POST /api/v1/webdet/rules/simulate
-// Scoped tokens may only simulate against hosts in their allowlist.
+// Scoped tokens may only simulate against hosts in their allowlist, and the
+// matched (or disabled-matched) rule names only their own vhosts.
 func (e *Engine) handleWebdetRulesSimulate(w http.ResponseWriter, r *http.Request) {
 	if e == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "traffic rules store unavailable"})
@@ -264,5 +318,12 @@ func (e *Engine) handleWebdetRulesSimulate(w http.ResponseWriter, r *http.Reques
 	}
 
 	res := e.TrafficRuleSimulateForAPI(r.Context(), req)
+	if len(res.Rule.Scope.Vhosts) > 0 {
+		res.Rule = simulateTrimRuleVhosts(res.Rule, r)
+	}
+	if res.DisabledMatch != nil {
+		dm := simulateTrimRuleVhosts(*res.DisabledMatch, r)
+		res.DisabledMatch = &dm
+	}
 	writeJSON(w, http.StatusOK, res)
 }

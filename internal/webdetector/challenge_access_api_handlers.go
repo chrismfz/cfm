@@ -32,7 +32,9 @@ type challengeAccessResultResponse struct {
 }
 
 // scopeFilterChallengeAccess returns only entries whose scope.vhosts intersect
-// the token's allowlist. nil scope (admin / loopback) returns all entries.
+// the token's allowlist, each naming only the caller's own vhosts (an entry
+// the operator shares across tenants must not name the others). nil scope
+// (admin) returns all entries unchanged.
 func scopeFilterChallengeAccess(entries []ChallengeAccessEntry, r *http.Request) []ChallengeAccessEntry {
 	scope := vhostScopeFromContext(r.Context())
 	if scope == nil {
@@ -40,11 +42,15 @@ func scopeFilterChallengeAccess(entries []ChallengeAccessEntry, r *http.Request)
 	}
 	out := make([]ChallengeAccessEntry, 0, len(entries))
 	for _, e := range entries {
+		own := make([]string, 0, len(e.Scope.Vhosts))
 		for _, h := range e.Scope.Vhosts {
 			if vhostAllowed(strings.ToLower(h), scope) {
-				out = append(out, e)
-				break
+				own = append(own, h)
 			}
+		}
+		if len(own) > 0 {
+			e.Scope.Vhosts = own // e is a copy; the stored entry is untouched
+			out = append(out, e)
 		}
 	}
 	return out

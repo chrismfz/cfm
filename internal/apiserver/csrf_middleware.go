@@ -35,6 +35,8 @@ var (
 //     customer's challenge with the customer's own browser (slice-D
 //     security review I2). The iframe's own XHRs are same-origin to the
 //     daemon and pass the Origin/Referer validation unchanged.
+//   - The admin SSO cookie (cfm-embed-admin) is an ambient browser
+//     credential like the session cookie, so it is checked the same way.
 //   - Public auth routes (for example POST /login) are naturally exempt because
 //     TokenMiddleware treats them as public and does not mark session authn.
 func CSRFMiddleware(next http.Handler) http.Handler {
@@ -65,7 +67,8 @@ func csrfRequiresCheck(r *http.Request) bool {
 		return false
 	}
 	mech := authnMechanismFromContext(r.Context())
-	return mech == authnMechanismSession || mech == authnMechanismEmbedCookie
+	return mech == authnMechanismSession || mech == authnMechanismEmbedCookie ||
+		mech == authnMechanismEmbedAdminCookie
 }
 
 func validateCSRFSameOrigin(r *http.Request) (bool, string) {

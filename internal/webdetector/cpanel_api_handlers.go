@@ -2,7 +2,8 @@
 //
 // GET /api/v1/cpanel/user-info?user=X
 //
-// Admin-only endpoint used by the cPanel plugin (bootstrap.php) to
+// Assertion-only endpoint (X-CFM-Actor-Assertion; admin and scoped tokens
+// cannot use it) used by the cPanel plugin (bootstrap.php) to
 // discover the domains and DB users belonging to a cPanel account. The
 // domains it returns become the scoped token's vhosts: each domain plus its
 // www. name and cPanel ServerAlias names (panelmap.WithWebAliases).
@@ -422,17 +423,28 @@ func isReplayNonce(nonce string, expUnix, nowUnix int64) bool {
 	return false
 }
 
+// cfmDebugEnabledForRequest reports whether failure detail is added to the
+// response: the plugin asks for it with X-CFM-Debug: 1 on its direct loopback
+// call. A request relayed by the edge (it always adds X-Real-IP /
+// X-Forwarded-For) or from any other address gets none.
 func cfmDebugEnabledForRequest(r *http.Request) bool {
 	if r == nil {
-		return true
-	}
-	raw := strings.ToLower(strings.TrimSpace(r.Header.Get("X-CFM-Debug")))
-	switch raw {
-	case "0", "false", "no", "off":
 		return false
-	default:
-		return true
 	}
+	switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-CFM-Debug"))) {
+	case "1", "true", "yes", "on":
+	default:
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	return strings.TrimSpace(r.Header.Get("X-Real-IP")) == "" &&
+		strings.TrimSpace(r.Header.Get("X-Forwarded-For")) == ""
 }
 
 // cpanelUserExists checks /var/cpanel/users/<user> exists.

@@ -223,3 +223,31 @@ func TestCSRFMiddlewareAllowsEmbedCookieSameOrigin(t *testing.T) {
 		t.Fatalf("GET under embed-cookie auth must not be CSRF-checked")
 	}
 }
+
+// The admin SSO cookie is an ambient credential: a mutating request it
+// authenticates needs a same-origin Origin/Referer like a session one.
+func TestCSRFMiddlewareChecksEmbedAdminCookie(t *testing.T) {
+	nextCalled := false
+	h := CSRFMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "http://cfm.local/cfm-admin/api/v1/waf/exclude/add", nil)
+	req.Header.Set("Origin", "https://other.example")
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismEmbedAdminCookie))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if nextCalled || rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin POST on the admin SSO cookie: status %d, handler called=%v", rr.Code, nextCalled)
+	}
+
+	nextCalled = false
+	req = httptest.NewRequest(http.MethodPost, "http://cfm.local/cfm-admin/api/v1/waf/exclude/add", nil)
+	req.Header.Set("Origin", "http://cfm.local")
+	req = req.WithContext(withAuthnMechanism(req.Context(), authnMechanismEmbedAdminCookie))
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if !nextCalled {
+		t.Fatalf("same-origin POST on the admin SSO cookie was refused: status %d", rr.Code)
+	}
+}

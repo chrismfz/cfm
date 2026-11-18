@@ -390,3 +390,28 @@ func TestChallengeAccessLoad_OverCapFrozen(t *testing.T) {
 		t.Fatalf("over-cap entry was erased by the next save:\n%s", b)
 	}
 }
+
+// A shared Access-Control entry is listed for each tenant with only that
+// tenant's vhosts; the admin sees the entry unchanged, and so does the store.
+func TestScopeFilterChallengeAccessTrimsSharedEntries(t *testing.T) {
+	entries := []ChallengeAccessEntry{
+		{ID: "shared", Scope: TrafficRuleScope{Vhosts: []string{"alpha.com", "beta.com"}}},
+		{ID: "other", Scope: TrafficRuleScope{Vhosts: []string{"beta.com"}}},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/challenge/access", nil)
+
+	got := scopeFilterChallengeAccess(entries, req.WithContext(scopedCtx("alpha.com")))
+	if len(got) != 1 || got[0].ID != "shared" {
+		t.Fatalf("scoped alpha: got %+v, want only the shared entry", got)
+	}
+	if v := got[0].Scope.Vhosts; len(v) != 1 || v[0] != "alpha.com" {
+		t.Fatalf("scoped alpha sees vhosts %v, want [alpha.com]", v)
+	}
+	if v := entries[0].Scope.Vhosts; len(v) != 2 {
+		t.Fatalf("input entry changed: %v", v)
+	}
+
+	if got := scopeFilterChallengeAccess(entries, req.WithContext(adminCtx())); len(got) != 2 || len(got[0].Scope.Vhosts) != 2 {
+		t.Fatalf("admin view changed: %+v", got)
+	}
+}

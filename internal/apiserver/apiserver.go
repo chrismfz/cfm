@@ -181,17 +181,8 @@ func Start(
 	//   /cfm-admin/assets/...  → strips → /assets/...  → webui.Handler
 	//   /cfm-admin/login       → strips → /login        → login handler
 	//
-	m.HandleFunc("/cfm-admin/", func(w http.ResponseWriter, r *http.Request) {
-		r2 := r.Clone(r.Context())
-		r2.URL.Path = strings.TrimPrefix(r.URL.Path, "/cfm-admin")
-		if r2.URL.Path == "" || r2.URL.Path[0] != '/' {
-			r2.URL.Path = "/" + r2.URL.Path
-		}
-		if r2.URL.RawPath != "" {
-			r2.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, "/cfm-admin")
-		}
-		m.ServeHTTP(w, r2)
-	})
+	// One prefix is stripped (see cfmAdminPrefixHandler).
+	m.Handle("/cfm-admin/", cfmAdminPrefixHandler(m))
 
 	// ── Firewall action endpoints ─────────────────────────────────────────────
 	RegisterUnblock(m, be, cfgDir)
@@ -687,6 +678,31 @@ var mysqlScopedRoutes = []string{
 	"/api/v1/mysql/user-kills",
 	"/api/v1/mysql/user-history",
 	"/api/v1/mysql/user-kill",
+}
+
+// cfmAdminPrefixHandler strips one /cfm-admin prefix and re-dispatches on mux.
+// A path that still carries the prefix is not one the UI uses: 404.
+func cfmAdminPrefixHandler(mux http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/cfm-admin")
+		if p == "" || p[0] != '/' {
+			p = "/" + p
+		}
+		if hasCfmAdminPrefix(p) {
+			http.NotFound(w, r)
+			return
+		}
+		r2 := r.Clone(r.Context())
+		r2.URL.Path = p
+		if r.URL.RawPath != "" {
+			raw := strings.TrimPrefix(r.URL.RawPath, "/cfm-admin")
+			if raw == "" || raw[0] != '/' {
+				raw = "/" + raw
+			}
+			r2.URL.RawPath = raw
+		}
+		mux.ServeHTTP(w, r2)
+	})
 }
 
 // adminOnlyHandler wraps h and returns 403 unless middleware explicitly marked
