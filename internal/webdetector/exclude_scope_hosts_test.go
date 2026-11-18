@@ -88,3 +88,18 @@ func TestHostExcludeAnyScopeRemoveSparesOperatorEntries(t *testing.T) {
 		t.Fatal("the operator could not remove its own entry")
 	}
 }
+
+// A tenant holding only a wildcard alias (*.d.com) cannot use the any-scope
+// removal on x.d.com: another account may own that name.
+func TestHostExcludeAnyScopeRemoveNeedsTheHostItself(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	if !s.Add("host", "x.d.com", scopeSet("x.d.com", "other.com")) {
+		t.Fatal("add")
+	}
+	if s.Remove("host", "x.d.com", scopeSet("*.d.com", "d.com")) {
+		t.Fatal("a wildcard alias removed another account's host exclude")
+	}
+	if !s.Remove("host", "x.d.com", scopeSet("x.d.com")) {
+		t.Fatal("the host's owner could not remove it")
+	}
+}

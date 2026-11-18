@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"cfm/internal/edgelog"
 )
 
 // Every engine route refuses a request with no admin or scoped identity,
@@ -40,5 +42,24 @@ func TestLimitUnlessFiltered(t *testing.T) {
 	}
 	if got := limitUnlessFiltered(10, map[string]struct{}{"a.com": {}}); got != 0 {
 		t.Fatalf("filtered: %d, want 0 (no limit before the filter)", got)
+	}
+}
+
+// A scoped host scan names none of the node's log files, in the main section
+// or the bad-request one.
+func TestStripScanFileNames(t *testing.T) {
+	res := edgelog.HostScanResult{
+		LogFile: "/var/log/a", FilesScanned: []string{"/var/log/a"},
+		FilesFailed: []edgelog.HostFileError{{}},
+		BadRequests: &edgelog.HostScanResult{
+			LogFile: "/var/log/b", FilesScanned: []string{"/var/log/b"},
+			FilesFailed: []edgelog.HostFileError{{}},
+		},
+	}
+	stripScanFileNames(&res)
+	for _, r := range []*edgelog.HostScanResult{&res, res.BadRequests} {
+		if r.LogFile != "" || r.FilesScanned != nil || r.FilesFailed != nil {
+			t.Fatalf("file names left: %+v", r)
+		}
 	}
 }

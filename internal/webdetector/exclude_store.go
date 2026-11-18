@@ -171,7 +171,7 @@ func (s *excludeStore) RemoveWithRuleIDs(t, v string, scope map[string]struct{},
 	k := s.key(t, v, scopeHosts, ruleIDs)
 	if _, exists := s.entries[k]; exists {
 		delete(s.entries, k)
-	} else if !s.removeHostAnyScopeLocked(t, v, ruleIDs) {
+	} else if !s.removeHostAnyScopeLocked(t, v, scope, ruleIDs) {
 		return false
 	}
 	s.rebuildCompiledLocked()
@@ -188,11 +188,18 @@ func (s *excludeStore) RemoveWithRuleIDs(t, v string, scope map[string]struct{},
 // exact-scope match fails once that set changes (a domain moved to another
 // account, or the writer's account gained one): the entry kept applying and
 // nobody could remove it. The caller has already checked that it may manage
-// this host (validateScopedExcludeWrite). Path excludes keep the exact match:
+// this host (validateScopedExcludeWrite). A scoped caller (non-nil scope)
+// must also hold the host itself, not only a wildcard alias that matches it:
+// another account may own that name. Path excludes keep the exact match:
 // their scope_hosts is the set of sites the exclude applies to.
-func (s *excludeStore) removeHostAnyScopeLocked(t, v string, ruleIDs []int) bool {
+func (s *excludeStore) removeHostAnyScopeLocked(t, v string, scope map[string]struct{}, ruleIDs []int) bool {
 	if t != "host" {
 		return false
+	}
+	if scope != nil {
+		if _, own := scope[v]; !own {
+			return false
+		}
 	}
 	want := ruleIDsKey(ruleIDs)
 	removed := false

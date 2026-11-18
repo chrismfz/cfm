@@ -41,8 +41,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ### Fixed
 - **A tenant can remove a host exclude on its own site that another account
-  wrote** (a domain that moved between accounts); entries the operator wrote
-  stay the operator's to remove. Such an exclude used to keep
+  wrote** (a domain that moved between accounts), when its own account holds
+  that host; the operator's ClamAV and challenge host entries stay the
+  operator's to remove. Such an exclude used to keep
   applying with nobody able to remove it, the operator included, through the
   challenge and ClamAV endpoints.
 - **Scoped top lists (top-short, suspicious, long-top) return up to the

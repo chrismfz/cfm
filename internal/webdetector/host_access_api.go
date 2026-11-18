@@ -154,8 +154,7 @@ func (e *Engine) handleHostAccessHistory(w http.ResponseWriter, r *http.Request)
 
 	if !IsAdminRequest(r) {
 		// The node's log file names are the operator's, not the tenant's.
-		res.LogFile = ""
-		res.FilesScanned = nil
+		stripScanFileNames(&res)
 	}
 
 	out := map[string]any{
@@ -309,4 +308,14 @@ func mergeWAFRuleHits(lists ...[]WAFRuleHit) []WAFRuleHit {
 		return out[i].Rule < out[j].Rule
 	})
 	return out
+}
+
+// stripScanFileNames clears every field of a host scan that names one of the
+// node's log files: the main access section and its bad-request section alike.
+func stripScanFileNames(res *edgelog.HostScanResult) {
+	for ; res != nil; res = res.BadRequests {
+		res.LogFile = ""
+		res.FilesScanned = nil
+		res.FilesFailed = nil
+	}
 }
