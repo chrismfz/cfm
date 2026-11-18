@@ -12,7 +12,7 @@ The edge only adds a header that **cannot change how a working site
 behaves**, and only when the origin did not send one (`add_if_missing`, never
 replace). Opt-in per vhost, default off. Applied in the HTTPS server's header
 filter, next to the existing ones (`configs/openresty.conf` /
-`configs/angie.conf`, both confs byte-identical).
+`configs/angie.conf`; keep the two header-filter blocks identical).
 
 ## In
 

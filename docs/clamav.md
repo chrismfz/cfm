@@ -15,7 +15,7 @@ scan(host) = CLAMD_ENABLED && CLAMD_NGINX_HOOK_ENABLED
 
 | Knob | Default | Meaning |
 |---|---|---|
-| `CLAMD_ENABLED` | 1 | The scanner runs and connects to clamd. Off = nothing is scanned |
+| `CLAMD_ENABLED` | 1 in the shipped conf (an absent key = off) | The scanner runs and connects to clamd. Off = nothing is scanned |
 | `CLAMD_NGINX_HOOK_ENABLED` | 1 | The edge intercepts uploads. Off keeps `cfm clam scan <file>` working |
 | `CLAM_SCAN_DEFAULT` | 1 | Global policy. A vhost in the override list flips it (opt out when on, opt in when off) |
 | `CLAM_SCAN_SCOPE` | `archives` | Decided by **magic bytes** in the scanner, not by extension: `archives` = zip (incl. docx/xlsx/jar), gzip, rar, 7z, xz, bzip2, the one class the WAF cannot look inside; `all` = every file part |

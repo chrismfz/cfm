@@ -18,7 +18,7 @@ the "Outbound Abuse Sentinel" block of `/etc/cfm/cfm.conf`. **Off by default.**
   | SMTP | 25, 465, 587 (`OUTBOUND_SMTP_PORTS`) | compromised CMS sending spam |
   | SCAN | 22, 23, 3389 (`OUTBOUND_SCAN_PORTS`) | brute-forcer running on the box |
   | HTTP | 80, 443, 8080, 8443 (`OUTBOUND_HTTP_PORTS`) | POST flood, botnet C2 |
-  | UNIQ_DST | any port, many distinct destination IPs | horizontal scanner |
+  | UNIQ_DST | many distinct destination IPs, counted over the three groups above | horizontal scanner |
 
 - Per-uid sliding window (`OUTBOUND_WINDOW_SECONDS`) with per-signal dedup
   (`OUTBOUND_LOG_DEDUP_SECONDS`), so a runaway account does not flood the log.
@@ -30,7 +30,9 @@ the "Outbound Abuse Sentinel" block of `/etc/cfm/cfm.conf`. **Off by default.**
 - HTTP signals report destination IP/port samples only: the collector sees
   connection metadata, never the URL, path or Host.
 
-Nothing is throttled or suspended. The nft chain is `policy accept`: if cfm
+Only those port groups reach the collector (the nft rules NFLOG nothing
+else), so a scanner on another port is not seen. Nothing is throttled or
+suspended. The nft chain is `policy accept`: if cfm
 crashes, outbound traffic is unaffected.
 
 ## How it is wired
