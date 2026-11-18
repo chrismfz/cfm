@@ -388,12 +388,6 @@ func isEmbedShellPagePath(raw string) bool {
 // so a Bearer-only request falls through to normal token validation instead
 // of being mistaken for an assertion bearer.
 func isCpanelPluginSelfServicePath(r *http.Request) bool {
-	return IsCpanelPluginSelfServicePath(r)
-}
-
-// IsCpanelPluginSelfServicePath is the exported form, for the web-detector
-// route proxy (internal/detectors), which must let the same request through.
-func IsCpanelPluginSelfServicePath(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
 	}

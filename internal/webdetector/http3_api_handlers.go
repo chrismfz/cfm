@@ -46,10 +46,15 @@ func filterHTTP3ListForScope(entries []http3OverrideEntry, scope map[string]stru
 	return out
 }
 
+// validateScopedHTTP3Write: the explicit admin role writes any host; anyone
+// else only a host in a non-empty scope (as validateScopedExcludeWrite).
 func validateScopedHTTP3Write(r *http.Request, host string) bool {
-	scope := vhostScopeFromContext(r.Context())
-	if scope == nil {
+	if IsAdminRequest(r) {
 		return true
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if len(scope) == 0 {
+		return false
 	}
 	return scopedExcludeHostAllowed(host, scope)
 }

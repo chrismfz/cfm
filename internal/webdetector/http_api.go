@@ -2,12 +2,8 @@
 package webdetector
 
 import (
-	"cfm/internal/logging"
-	"context"
 	"encoding/json"
-	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -147,7 +143,30 @@ func (e *Engine) RegisterHTTP(mux *http.ServeMux) {
 		return
 	}
 	for _, rt := range e.apiRoutes() {
-		mux.HandleFunc(rt.path, rt.handler)
+		h := rt.handler
+		if _, ok := selfAuthenticatingRoutes[rt.path]; !ok {
+			h = requireIdentity(h)
+		}
+		mux.HandleFunc(rt.path, h)
+	}
+}
+
+// selfAuthenticatingRoutes are the engine routes whose handler authenticates
+// the caller itself: the cPanel plugin's actor-assertion lookup.
+var selfAuthenticatingRoutes = map[string]struct{}{
+	"/api/v1/cpanel/user-info": {},
+}
+
+// requireIdentity refuses a request the auth middleware did not mark admin or
+// scoped. Many handlers read "no vhost scope in the context" as the operator's
+// view, so the route table checks the identity itself rather than relying on
+// every way into the mux being gated upstream.
+func requireIdentity(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !RequireScopedOrAdmin(w, r) {
+			return
+		}
+		h(w, r)
 	}
 }
 
@@ -174,61 +193,6 @@ func requirePOST(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
-}
-
-// ServeHTTPWithContext starts a small standalone HTTP server for webdetector API.
-// Prefer RegisterHTTP when running under the shared apiserver.
-func (e *Engine) ServeHTTPWithContext(ctx context.Context, addr string) error {
-	mux := http.NewServeMux()
-	e.RegisterHTTP(mux)
-
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	// Shutdown on ctx cancel.
-	go func() {
-		<-ctx.Done()
-		ctx2, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx2)
-	}()
-
-	// If addr looks like "unix:/path", listen on unix socket instead.
-	if len(addr) > 5 && addr[:5] == "unix:" {
-		path := addr[5:]
-		_ = os.Remove(path)
-		l, err := net.Listen("unix", path)
-		if err != nil {
-			logging.Logf("[webdetector] HTTP listen (unix %s) failed: %v", path, err)
-			return err
-		}
-		defer func() {
-			_ = l.Close()
-			_ = os.Remove(path)
-		}()
-		logging.Logf("[webdetector] HTTP API listening on unix:%s", path)
-		if err := srv.Serve(l); err != nil && err != http.ErrServerClosed {
-			logging.Logf("[webdetector] HTTP server error: %v", err)
-			return err
-		}
-		return nil
-	}
-
-	logging.Logf("[webdetector] HTTP API listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logging.Logf("[webdetector] HTTP server error: %v", err)
-		return err
-	}
-	return nil
-}
-
-// ServeHTTP starts the webdetector API server without a cancelable context.
-// Prefer ServeHTTPWithContext when running under a manager that supports reload.
-func (e *Engine) ServeHTTP(addr string) {
-	_ = e.ServeHTTPWithContext(context.Background(), addr)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
