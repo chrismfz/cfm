@@ -8,7 +8,7 @@
 # BlazeHTTP (github.com/chaitin/blazehttp, GPL-3.0) ships ~33 k benign and
 # ~650 attack raw-HTTP samples. It is fetched at a pinned commit into a cache
 # outside this repository and only read from there: never vendor its samples
-# or code into CFM (Apache-2.0). Bump BLAZEHTTP_REV deliberately; a different
+# or code into CFM (FSL-1.1-ALv2). Bump BLAZEHTTP_REV deliberately; a different
 # corpus makes earlier --out files incomparable.
 #
 # Env: BLAZEHTTP_DIR  an existing checkout to use instead of fetching

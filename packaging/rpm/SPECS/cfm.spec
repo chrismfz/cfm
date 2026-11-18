@@ -13,7 +13,7 @@ Name:           cfm
 Version:        2026.05.14
 Release:        1.201438%{?dist}
 Summary:        Local nftables manager (block/allow with TTL), plus simple list/unlist/flush
-License:        MIT
+License:        FSL-1.1-ALv2 AND GPL-2.0-only
 URL:            https://nixpal.com
 BuildArch:      x86_64
 Requires(post): systemd
@@ -104,11 +104,15 @@ if [ -f "%{buildroot}/lib/systemd/system/cfm.service" ]; then
 fi
 
 install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/cfm/LICENSE
+install -Dm644 %{projectroot}/NOTICE %{buildroot}/usr/share/licenses/cfm/NOTICE
+install -Dm644 %{projectroot}/LICENSES/GPL-2.0-only.txt %{buildroot}/usr/share/licenses/cfm/GPL-2.0-only.txt
 
 
 
 %files
 %license /usr/share/licenses/cfm/LICENSE
+%license /usr/share/licenses/cfm/NOTICE
+%license /usr/share/licenses/cfm/GPL-2.0-only.txt
 %{_bindir}/cfm
 %{_unitdir}/cfm.service
 %attr(0700,root,root) %dir /etc/cfm

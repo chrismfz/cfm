@@ -26,6 +26,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the edge, host, MySQL, mail, cfm-lsm, Site Cache and log tools were
   missing, so a model had to discover them by listing. It now names all 62
   by group. The tools themselves are unchanged.
+- **License: CFM moves from Apache 2.0 to the Functional Source License,
+  Version 1.1, ALv2 Future License (FSL-1.1-ALv2).** Running CFM on your own
+  servers, including to protect your hosting customers, stays free; offering it
+  to others as a competing commercial product or service needs a commercial
+  license. Each version becomes Apache 2.0 two years after its release, and
+  every version released before this change stays Apache 2.0. The cfm-lsm BPF
+  programs are GPL-2.0-only, now stated explicitly. The packages ship
+  `LICENSE`, `NOTICE` and the GPL text (`/usr/share/doc/cfm/` in the .deb,
+  `/usr/share/licenses/cfm/` in the .rpm), and the rpm's `License:` field,
+  which wrongly said MIT, now names both licenses. See `NOTICE` and README §9.
 
 ## 2026.11.18
 

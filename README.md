@@ -38,6 +38,7 @@ runs with no iptables, no kernel module and no agent.
 6. [API, web UI and MCP](#6-api-web-ui-and-mcp)
 7. [Security notes](#7-security-notes)
 8. [Documentation index](#8-documentation-index)
+9. [License](#9-license)
 
 ---
 
@@ -310,3 +311,27 @@ edge health checks ([`docs/edge-health.md`](docs/edge-health.md)), and the
 
 [`CLAUDE.md`](CLAUDE.md) §7 lists every doc by topic, and §6 the areas where
 changes have historically gone wrong. Release history: [`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
+## 9. License
+
+CFM is **source-available** under the [Functional Source License, Version 1.1,
+ALv2 Future License](LICENSE) (FSL-1.1-ALv2). Each version becomes **Apache
+2.0** two years after its release. The BPF programs under
+`internal/lsm/bpf/` are GPL-2.0-only, as the kernel requires. Details and the
+exceptions: [`NOTICE`](NOTICE).
+
+What the license allows, in short (the [`LICENSE`](LICENSE) text decides):
+
+- **Allowed, free of charge:** running CFM on your own servers, including to
+  protect the sites and mail of your hosting customers; changing it for your
+  own use; education and research; installing and running it for a client
+  who uses it under these terms.
+- **Not allowed without a commercial license:** offering CFM, or a product or
+  service built on it, to others as a commercial firewall / WAF / server
+  security product or service that substitutes for it (a "Competing Use").
+  Commercial licensing: chrismfz [at] gmail [dot] com.
+
+Versions released before 2026-11-18 were licensed under Apache 2.0 and remain
+so.
