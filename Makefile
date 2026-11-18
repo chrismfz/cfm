@@ -263,7 +263,6 @@ deb: build
 	@install -m0640 "$(CONFIG_DIR)/cfm.dyndns"    "$(PKGROOT)/etc/cfm/cfm.dyndns"
 	@install -m0640 "$(CONFIG_DIR)/cfm-admin.htpasswd" "$(PKGROOT)/etc/cfm/cfm-admin.htpasswd"
 	@install -m0640 "$(CONFIG_DIR)/webdetector_malpaths.txt"      "$(PKGROOT)/etc/cfm/webdetector_malpaths.txt"
-	@install -m0640 "$(CONFIG_DIR)/webdetector_challenge_paths.txt"      "$(PKGROOT)/etc/cfm/webdetector_challenge_paths.txt"
 	@install -m0640 "$(CONFIG_DIR)/webdetector_challenge_exclude.txt"      "$(PKGROOT)/etc/cfm/webdetector_challenge_exclude.txt"
 
 
@@ -273,7 +272,7 @@ deb: build
 	@rsync -a --delete --exclude "__pycache__/" "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/cfm/scripts/"
 	@rsync -a --delete "$(PLUGINS_DIR)/" "$(PKGROOT)/usr/share/cfm/plugins/"
 	# executables
-	@chmod 0755 "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
+	@chmod 0755 "$(PKGROOT)/DEBIAN/preinst" "$(PKGROOT)/DEBIAN/postinst" "$(PKGROOT)/DEBIAN/prerm" "$(PKGROOT)/DEBIAN/postrm" 2>/dev/null || true
 
 	# build artifact -> build/deb/
 	@fakeroot dpkg-deb --build "$(PKGROOT)" "$(OUTDIR)/cfm_$(VERSION)-1_$(ARCH).deb"
@@ -306,7 +305,6 @@ stage-pkgroot: build
 	@[ -f $(PKGROOT)/etc/cfm/cfm.dyndns ]     || cp -f $(CONFIG_DIR)/cfm.dyndns     $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/cfm-admin.htpasswd ] || cp -f $(CONFIG_DIR)/cfm-admin.htpasswd $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/webdetector_malpaths.txt ]       || cp -f $(CONFIG_DIR)/webdetector_malpaths.txt       $(PKGROOT)/etc/cfm/
-	@[ -f $(PKGROOT)/etc/cfm/webdetector_challenge_paths.txt ]       || cp -f $(CONFIG_DIR)/webdetector_challenge_paths.txt       $(PKGROOT)/etc/cfm/
 	@[ -f $(PKGROOT)/etc/cfm/webdetector_challenge_exclude.txt ]       || cp -f $(CONFIG_DIR)/webdetector_challenge_exclude.txt       $(PKGROOT)/etc/cfm/
 
 

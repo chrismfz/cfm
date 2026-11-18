@@ -47,6 +47,16 @@ chmod 0700 /etc/cfm/detectors.d
 # same lock-down as kernsec.conf.
 [ -f /etc/cfm/lsm.conf ] && chmod go-rwx /etc/cfm/lsm.conf || true
 
+# webdetector_challenge_paths.txt is retired (2026-11-18): CHALLENGE_PATHS has
+# read webdetector_malpaths.txt since 2026-03-12 and the package no longer
+# ships it. dpkg's own helper drops the conffile (an edited copy is kept as
+# .dpkg-bak); the same call is in preinst and postrm, as rm_conffile requires.
+# A config that still names the file reads the malpath list instead
+# (webdetector.ResolveChallengePathsFile).
+if command -v dpkg-maintscript-helper >/dev/null 2>&1; then
+    dpkg-maintscript-helper rm_conffile /etc/cfm/webdetector_challenge_paths.txt 2026.11.19~ cfm -- "$@"
+fi
+
 # Per-server API/MaxMind secrets overlay. Seed an editable 0600 template on
 # first install only; never overwrite an operator's existing file. It is
 # deliberately NOT a dpkg conffile, so upgrades leave it untouched.

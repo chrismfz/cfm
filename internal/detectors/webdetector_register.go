@@ -680,7 +680,7 @@ func init() {
 
 			// Challenge-only paths (like MALPATH but for CHALLENGE action)
 			ChallengePathsEnabled: kvBool(kv, "CHALLENGE_PATHS", false),
-			ChallengePathsFile:    kvStrClean(kv, "CHALLENGE_PATHS_FILE", "/etc/cfm/webdetector_challenge_paths.txt"),
+			ChallengePathsFile:    kvStrClean(kv, "CHALLENGE_PATHS_FILE", webdet.DefaultMalPathFile),
 			ChallengePathsCount:   kvInt(kv, "CHALLENGE_PATHS_COUNT", 1),
 			ChallengePathsTTL:     kvDur(kv, "CHALLENGE_PATHS_TTL", 30*time.Minute),
 
@@ -958,7 +958,17 @@ func init() {
 			}
 		}
 
-		// CHALLENGE_PATHS_FILE (one entry per line; supports comments with #)
+		// CHALLENGE_PATHS_FILE (one entry per line; supports comments with #).
+		// Always resolved, so a value that cleans to "" (`= "" ; note`) gets
+		// the default here too, not only later in FillDefaults (after the list
+		// would already have been skipped). A config that still names the
+		// retired list reads the malpath list.
+		if p, redirected := webdet.ResolveChallengePathsFile(cfg.ChallengePathsFile); p != cfg.ChallengePathsFile {
+			if redirected && cfg.ChallengePathsEnabled {
+				logging.Logf("[webdetector] CHALLENGE_PATHS_FILE %s is retired; reading %s instead (point the key there, or drop it)", cfg.ChallengePathsFile, p)
+			}
+			cfg.ChallengePathsFile = p
+		}
 		if cfg.ChallengePathsEnabled && cfg.ChallengePathsFile != "" {
 			f, err := os.Open(cfg.ChallengePathsFile)
 			if err != nil {

@@ -1,32 +1,15 @@
+# One substring per line, matched case-insensitively against the request path
+# (query cut off); the first matching line wins. A line that contains another
+# line is dead weight, so /.env covers every /.env.* variant and /c99.php any
+# directory's c99.php. Read by CHALLENGE_PATHS and MALPATH (detectors.conf).
 /.env
-/.env.
-/.env.bak
-/.env.old
-/.env.local
-/.env.prod
-/.env.dev
-/.env.example
-/.env.save
-/.aws/credentials
-/.env.backup
-/.env.copy
-/.env.orig
-/.env.original
-/.env.staging
-/.env.testing
-/.env.uat
-/.env.swp
 /config.yml
 /config.yaml
 /secrets.yml
 /secrets.yaml
-/.git/config
-/.git/HEAD
 /.gitignore
 /.htpasswd
-/.htaccess.bak
 /web.config
-/web.config.bak
 /database.yml
 /database.yaml
 /storage.yml
@@ -46,14 +29,8 @@
 /wp-config.php.save
 /wp-config.bak
 /wp-config.old
-/wp-content/uploads/shell.php
-/wp-content/uploads/cmd.php
-/wp-content/uploads/wso.php
-/wp-content/uploads/c99.php
-/wp-content/uploads/r57.php
 /wp-content/uploads/upload.php
 /wp-content/uploads/up.php
-/wp-content/uploads/bypass.php
 /wp-content/themes/twentytwentyone/index.php
 /wp-content/themes/twentytwenty/index.php
 /wp-content/themes/twentynineteen/index.php
@@ -64,8 +41,6 @@
 /wp-admin/maint/repair.php
 /wp-includes/js/jquery/jquery.php
 /wp-includes/Requests/about.php
-/wp-content/plugins/hellopress/wp_filemanager.php
-/wp-content/plugins/wp_filemanager/wp_filemanager.php
 /wp_filemanager.php
 
 # hidden stash
@@ -77,8 +52,6 @@
 /c99shell.php
 /r57shell.php
 /indoxploit.php
-/Indoxploit.php
-/IndoXploit.php
 /locus7shell.php
 /b374k.php
 /priv8.php
@@ -98,10 +71,8 @@
 /alfa2.php
 /alfa-rex.php
 /alfanew.php
-/Alfa.php
 /galex.php
 /NIX.php
-/nix.php
 /symlink.php
 /bypass.php
 /bypass403.php
@@ -131,7 +102,6 @@
 /filemanager.php
 
 # ─── PHP INFO / RECON PROBES ──────────────────────────────────────────────────
-/phpinfo.php
 /php.php
 /info.php
 /test.php
@@ -160,7 +130,6 @@
 # DB schema and a config template that named the admin user. A 15-hour read
 # of the fleet's edges: ~700 IPs asking for these on hundreds of vhosts, never
 # a real file (every 200 was a site's catch-all HTML page).
-/wp-content/debug.log
 /cache/default.log
 /doc/update_db/
 /backup.sql
@@ -175,3 +144,249 @@
 # would trip the malpath flood BAN), .php.example / .php.dist (a WebDAV sync
 # client walking a dev tree cannot solve a challenge). Matching is a substring
 # of the path, so /db.sql also covers /db.sqlite.
+
+# ─── VCS / DEV-TOOL / CI / CLOUD-CREDENTIAL PROBES (added 2026-11-18) ────────
+# One day of titan's edge log: 55-145 distinct IPs each asking for these
+# (~1 870 requests for /.git/ paths besides config/HEAD alone), and every 200
+# was a site's catch-all page (same byte size for every path on the host).
+# None is a URL a browser fetches. Directory entries keep both slashes, so
+# /.git/ does not match /.github/ or /.gitignore.
+/.git/
+/.github/
+/.svn/
+/.hg/
+/.bzr/
+/.ssh/
+/.aws/
+/.azure/
+/.docker/
+/.kube/
+/.terraform/
+/.config/
+/.vscode/
+/.idea/
+# AI-tool key stashes (shell_gpt, llm, aichat ... read their keys from these)
+/.claude/
+/.cursor/
+/.codex/
+/.continue/
+/.anthropic/
+/.openai/
+/.git-credentials
+/.npmrc
+/.pypirc
+/.netrc
+/.pgpass
+/.my.cnf
+/.s3cfg
+/.boto
+/.dockercfg
+/.ds_store
+/sftp-config.json
+/docker-compose.
+/.travis.yml
+/.gitlab-ci.yml
+/.drone.yml
+/bitbucket-pipelines.yml
+/azure-pipelines.yml
+/serverless.yml
+/serverless.yaml
+/parameters.yml
+/actuator/
+/laravel.log
+/wp-config.php.swp
+/config.php.bak
+/configuration.php.bak
+/configuration.php.old
+/server.key
+/master.key
+/privatekey.key
+# No leading slash: covers /phpinfo.php, /_phpinfo.php and /old_phpinfo.php.
+phpinfo.php
+# From orion's retired webdetector_challenge_paths.txt.
+/wso1337.php
+
+# ─── SECOND READ: 9 DAYS OF RIGEL + SPEEDHOST (added 2026-11-18) ──────────────
+# ~35 M edge requests. Counts are distinct IPs per node; no 200 below was a real
+# file (every one a catch-all / 404 page of one size per host). Generic names a
+# site can legitimately serve are left out on purpose: /config.json and
+# /settings.json (SPA runtime config), /env.json, /auth.json, /openapi.json,
+# /package.json, /phpmyadmin (cPanel's own /cpsess<N>/3rdparty/phpMyAdmin/),
+# /server-status (monitoring), /cgi-bin/ (old FormMail sites), /xmlrpc.php.
+# Cloud service-account / API key files (275-420 IPs each)
+/key.json
+/gcp-key.json
+/gcp-sa.json
+/sa.json
+/keyfile.json
+/google-key.json
+/google-credentials.json
+/application_default_credentials.json
+/firebase-key.json
+/serviceaccountkey.json
+/client_secrets.json
+/secrets.json
+/credentials.yml
+/credentials.ini
+/aws.yml
+/aws.json
+/config.env
+/sendgrid.env
+/env.txt
+/env.bak
+/env.old
+/.dev.vars
+/key.pem
+/id_rsa
+/litellm.yaml
+/.amplifyrc
+/.firebaserc
+/firebase.json
+/google-services.json
+/vercel.json
+/compose.yaml
+/.gitmodules
+/.streamlit/
+/.gemini/
+/.cargo/
+/.gem/
+/.dbeaver/
+/.codeium/
+/.llm/
+# A webshell stash next to the real .well-known (82 IPs on rigel). Does not
+# match /.well-known/ itself (the slash after "known").
+/.well-knownold/
+# .NET / Java probes: nothing on a cPanel node runs them (139-188 IPs)
+/appsettings
+/elmah.axd
+/trace.axd
+/web-inf/
+# Composer manifests: an exact version list of the site's packages
+/composer.json
+/composer.lock
+/vendor/composer/installed.json
+# Laravel / Node build trees that should never be web-served
+/_ignition/
+/storage/framework/
+/.next/
+/.vite/
+# cPanel PHP error log, written INTO the docroot (paths, queries, secrets)
+/error_log
+# WordPress backup / log directories the owner never browses to directly
+/wp-content/uploads/wc-logs/
+/wp-content/updraft/
+/wp-config.txt
+# Also NOT, for the same reason (a site owner's own workflow, cut off by the
+# challenge and the cookie revoke that follow its first logged hit):
+# /ai1wm-backups/ (All-in-One WP Migration's Download button is a direct
+# link to the file: the canyoning.gr backup on orion was its owner),
+# /wp-admin/install.php and /wp-admin/setup-config.php (every fresh
+# WordPress install, by hand or by Softaculous / WP Toolkit), /adminer (an
+# operator's DB tool). /.cache/ is out as too generic a substring.
+# NOT /installer.php or /dup-installer/: Duplicator's own migration runs
+# them (titan, 2026-11-18: ~allcan's dup-installer, 52 AJAX POSTs from one
+# GR address). The malpath challenge lands after the first logged hit and
+# revokes the cookie, so the installer's next AJAX calls would get the
+# challenge page instead of JSON and the migration would die mid-way.
+# Whole-site archives
+/backup.zip
+/backup.tar.gz
+/backup.tgz
+/site.zip
+/www.zip
+/public_html.zip
+/wwwroot.zip
+# Shell history, PHP config, sync configs
+/.mysql_history
+/.bash_history
+/.htaccess
+/.user.ini
+/php.ini
+/.ftpconfig
+/.remote-sync.json
+
+# ─── THIRD READ: 9 DAYS OF EARTH + MARS + TITAN + VIRGO (added 2026-11-18) ───
+# ~107 M edge requests; each line below had 100-300 distinct IPs on EVERY one
+# of the four nodes and no real 200. Left out again: generic JSON names an app
+# can serve (/admin.json, /database.json, /production.json, /local.json,
+# /default.json, /environment.json, /init.json, /app-config.json, /meta.json,
+# /manifest.json, /swagger.json), Nuxt's real /_payload.json and Angular's
+# /ngsw.json, /values.yaml, /application.yml.
+/firebase-admin.json
+/firebase-config.json
+/firebase-credentials.json
+/firebase-service-account.json
+/google-service-account.json
+/gcp-service.json
+/gc-service.json
+/service_account.json
+/client_secret.json
+/custom-environment-variables.json
+/dockerrun.aws.json
+/buildspec.yml
+/buildspec.yaml
+/railway.json
+/secrets.env
+/ses.env
+/process.env
+/aws_credentials.env
+/.vault-token
+/rclone.conf
+/settings.local.yml
+/compose.yml
+/localhost.key
+/host.key
+/.terraform.rc
+/.terraform.lock.hcl
+# Shell / git dotfiles of a home directory published as a docroot
+/.gitconfig
+/.dockerenv
+/.bashrc
+/.zshrc
+/.profile
+/.bash_profile
+# Monorepo / build-tool trees and manifests
+/nx.json
+/lerna.json
+/rush.json
+/turbo.json
+/pnpm-workspace.yaml
+/.changeset/
+/.turbo/
+/.vercel/
+/.netlify/
+/.output/
+/.huggingface/
+/.composer/
+
+# ─── FOURTH READ: 9 DAYS OF ORION + QUALITYWEB (added 2026-11-18) ────────────
+# ~104 M edge requests. 75-85 distinct IPs on orion (and ~50 on qualityweb)
+# for the first group; the second is one key-hunting campaign seen on
+# qualityweb (47 IPs) whose names no site serves. No real 200 on any.
+/keys.json
+/credentials.tfrc.json
+/debug.log
+/private.key
+/s3.json
+/settings.php.bak
+# Webshell stash directories (orion 80-85 IPs; virgo 33-62, e.g. /.trash7309/)
+/.bod/
+/.trash
+/privkey.pem
+/keys.txt
+/api-keys.txt
+/tokens.txt
+/secrets.txt
+/.msmtprc
+/ssmtp.conf
+/.claude.json
+/.windsurf/
+/.chef/
+/.terraformrc
+/.aider.conf.yml
+/.yarnrc.yml
+/mongoid.yml
+/development.log
+# Editor / manual backups of the front controller: the PHP source as text
+/index.php.bak
+/index.php~

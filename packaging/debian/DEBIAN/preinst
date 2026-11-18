@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+# Retired conffile (see postinst): dpkg's rm_conffile starts here, so an
+# aborted upgrade can put the file back.
+if command -v dpkg-maintscript-helper >/dev/null 2>&1; then
+    dpkg-maintscript-helper rm_conffile /etc/cfm/webdetector_challenge_paths.txt 2026.11.19~ cfm -- "$@"
+fi
+
+exit 0
