@@ -153,3 +153,33 @@ func TestVerify_WithheldSolvePublishedToWithheldStreamOnly(t *testing.T) {
 		t.Errorf("withheld subscribers after reset = %d, want 0", n)
 	}
 }
+
+// A withheld client gets no cookie, so a farm exit that comes back pre-solves
+// again; the cookie used to spare that repeat for its lifetime. The withheld
+// stream publishes once per (ip, host) per withheldDedupTTL, so the evidence
+// (the solver-farm finding's solves-per-IP, ~1.0 for a farm) is not lifted
+// toward a returning human audience's. A different host is a new pair. The
+// event says CHALLENGE_WITHHELD, never CHALLENGE_SOLVED.
+func TestPublishChallengeWithheld_OncePerPairAndLabelled(t *testing.T) {
+	ResetChallengeSolveSubscribers()
+	t.Cleanup(ResetChallengeSolveSubscribers)
+	var got []ChallengeSolve
+	SubscribeChallengeWithheldEvents(func(s ChallengeSolve) { got = append(got, s) })
+
+	s := ChallengeSolve{IP: "198.51.100.77", Host: "dedup-a.example"}
+	publishChallengeWithheldEvent(s)
+	publishChallengeWithheldEvent(s) // the same exit back on the same host
+	s2 := s
+	s2.Host = "dedup-b.example"
+	publishChallengeWithheldEvent(s2)
+
+	if len(got) != 2 || got[0].Host != "dedup-a.example" || got[1].Host != "dedup-b.example" {
+		t.Fatalf("published %d (%v), want one per (ip, host)", len(got), got)
+	}
+	if r := got[0].WithheldInputEvent().Reason; r != "CHALLENGE_WITHHELD" {
+		t.Errorf("withheld event reason=%q, want CHALLENGE_WITHHELD", r)
+	}
+	if r := got[0].InputEvent().Reason; r != "CHALLENGE_SOLVED" {
+		t.Errorf("solve event reason changed: %q", r)
+	}
+}

@@ -22,3 +22,24 @@ func TestSolverFarmSubscribesToSolvedAndWithheld(t *testing.T) {
 		}
 	}
 }
+
+// challenge_score (the ABUSE_SHADOW per-IP solver-abuse scorer) reads the
+// withheld stream too: the farms' pre-solves carry the tells that open its
+// score, and it is evidence only. The withheld events reach solver-farm as
+// CHALLENGE_WITHHELD (WithheldInputEvent), never as solves.
+func TestChallengeScoreAndSolverFarmWithheldWiring(t *testing.T) {
+	reg, err := os.ReadFile("webdetector_register.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(reg), "SubscribeChallengeWithheldEvents(engine.RecordChallengeScoreSolve)") {
+		t.Error("webdetector_register.go: challenge_score does not read the withheld stream")
+	}
+	sf, err := os.ReadFile("challenge_solver_farm_register.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(sf), "d.Enqueue(s.WithheldInputEvent())") {
+		t.Error("challenge_solver_farm_register.go: withheld solves are not enqueued as CHALLENGE_WITHHELD")
+	}
+}

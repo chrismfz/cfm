@@ -102,7 +102,7 @@ func init() {
 		// detector convicts. Until 2026-11-18 those solves reached it as plain
 		// unarmed solves; withholding their cookie must not hide them from it.
 		webdetector.SubscribeChallengeWithheldEvents(func(s webdetector.ChallengeSolve) {
-			d.Enqueue(s.InputEvent())
+			d.Enqueue(s.WithheldInputEvent())
 		})
 		return d, nil
 	})

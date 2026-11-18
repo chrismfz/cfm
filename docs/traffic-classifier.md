@@ -1145,14 +1145,19 @@ human-entry challenge is not in the snapshot, so every panel solve reads
 (abuse_shadow, two to three days, four nodes): 6 333 web-scope would_v2
 solves with `src=-`, 97% `c28caa00`/`95070673`, three GR/CY (two of them the
 farm's Cytanet profile, one a webdriver). Knob `CHALLENGE_V2_UNSOLICITED`.
-A withheld solve is a reject: it never takes the solve stream, so
-`challenge_score`, the Under-Attack solve rate and `challenge_cookie_discard`
-(which would read a client that never got a cookie as one that discarded it)
-do not see it. It is published on its own stream instead
-(`SubscribeChallengeWithheldEvents`), which the solver-farm detector reads
-next to the solves: the farms' pre-solves on fresh IPs are the clusters it
-convicts, and until the grain existed they reached it as plain unarmed
-solves. Its humanity evidence therefore covers passed AND withheld solves.
+A withheld solve is a reject: it never takes the solve stream, so the
+Under-Attack solve rate and `challenge_cookie_discard` (which would read a
+client that never got a cookie as one that discarded it) do not see it. It is
+published on its own stream instead (`SubscribeChallengeWithheldEvents`),
+labelled `CHALLENGE_WITHHELD`, which the evidence readers take next to the
+solves: the solver-farm detector (the farms' pre-solves on fresh IPs are the
+clusters it convicts; its humanity evidence covers passed AND withheld
+solves) and the `challenge_score` shadow scorer (they carry the tells that
+open its score). Until the grain existed these solves reached both as plain
+unarmed solves. The stream publishes once per (ip, host) per hour, the
+default clearance TTL: a withheld exit that comes back re-solves where the
+cookie used to spare it, and counting every repeat would lift the finding's
+solves-per-IP (~1.0 for a farm) toward a returning audience's.
 
 **The note lapse.** An automatic source's note lived 2–10 minutes and was
 renewed by each webdetector run. A run that timed out renewed nothing, so a
