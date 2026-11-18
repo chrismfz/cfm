@@ -316,6 +316,12 @@ var wafRuleIDs = []WAFRule{
 	// (14 days on 8 nodes: EVAL_ZERO only from real users, EVAL_ARG only
 	// from the attacker); armed, so the first probe bans before a payload.
 	{ID: 10029, Name: "rule_cve_fabrik_listfilter_eval", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10030: Drupal render-array callback keys sent as request data:
+	// CVE-2026-108097 (SA-CORE-2026-014, #region_callback) and CVE-2018-7600
+	// (Drupalgeddon2, #post_render / #pre_render / #lazy_builder /
+	// #access_callback). Drupal builds those keys server-side; a 7-day read of
+	// all 8 edge nodes found them only in attacks. Armed.
+	{ID: 10030, Name: "rule_cve_drupal_render_callback", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

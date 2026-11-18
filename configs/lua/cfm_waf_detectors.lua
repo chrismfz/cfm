@@ -876,6 +876,39 @@ end
 -- It walks each_request_field (the reader under php_request_fields) itself,
 -- not php_request_fields: that one registers `x[eval]` under `x`
 -- (php_var_name), and the `[eval]` index is the whole signal here.
+-- Rule 10030 — a Drupal render-array callback key sent as request data
+-- (WAF_CVE:CVE_2026_108097:DRUPAL:REGION_CALLBACK,
+--  WAF_CVE:CVE_2018_7600:DRUPAL:<KEY>)
+-- A render array's `#`-keys name PHP callables Drupal calls while it renders.
+-- Request data that lands in one is code execution: Drupalgeddon2
+-- (CVE-2018-7600, Drupal 7/8: `name[#post_render][0]=array_map&name[#suffix]=
+-- eval(...)`) and SA-CORE-2026-014 (CVE-2026-108097, Field UI, every Drupal
+-- before 10.6.19 / 11.3.19 / 11.4.10: a row's `#region_callback` goes to
+-- call_user_func_array). No form, API or link sends such a key: Drupal builds
+-- them server-side. So the marker is the key itself, as a request-field key
+-- (`[#post_render]`) or a JSON key (`"#region_callback"`), never the word in
+-- text. `s` is a decoded, lowercased surface (path + query, or args + body).
+-- A 7-day read of all 8 edge nodes' access.log (2026-11-18) found these keys
+-- only in attacks: the `#region_callback` lab-route probe and a Drupalgeddon2
+-- payload that reached a site with a 200.
+_M._DRUPAL_RENDER_KEYS = { "region_callback", "post_render", "pre_render", "lazy_builder", "access_callback" }
+function _M.detect_cve_drupal_render_callback(s)
+  if not s or not (s:find("#", 1, true) or s:find("\\u0023", 1, true)) then return nil end
+  local keys = _M._DRUPAL_RENDER_KEYS
+  for i = 1, #keys do
+    local k = keys[i]
+    -- (not `'#key'`: that is how Drupal's own PHP writes them, so a code
+    -- sample in a post would match; the exploits send a field or JSON key)
+    -- (and `"\u0023key"`: json_decode gives PHP the same `#key`)
+    if s:find("[#" .. k .. "]", 1, true) or s:find('"#' .. k .. '"', 1, true)
+       or s:find('"\\u0023' .. k .. '"', 1, true)
+       or s:find("%5b%23" .. k .. "%5d", 1, true) then
+      return k:upper()
+    end
+  end
+  return nil
+end
+
 function _M.detect_cve_fabrik_listfilter_eval(uri, method, args, body, headers, _nab)
   -- value_word = true: a multipart field name is not url-encoded, so `eval`
   -- shows in _nab there too, and a multipart POST is not parsed blind.
