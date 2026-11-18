@@ -329,6 +329,7 @@ What the license allows, in short (the [`LICENSE`](LICENSE) text decides):
 - **Not allowed without a commercial license:** offering CFM, or a product or
   service built on it, to others as a commercial firewall / WAF / server
   security product or service that substitutes for it (a "Competing Use").
+  Commercial licensing: chrismfz [at] gmail [dot] com.
 
 Versions released before 2026-11-18 were licensed under Apache 2.0 and remain
 so.
