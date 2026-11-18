@@ -297,3 +297,20 @@ func TestMonitoring_ScopedHostVhostInjectionRejected(t *testing.T) {
 		})
 	}
 }
+
+// A scoped caller holds at most one of the two scan slots: with one scoped
+// scan running, another scoped scan waits, the operator's does not.
+func TestMonitoring_HostAccessHistory_ScopedSlotCap(t *testing.T) {
+	_, mux := newMonitoringTestEngine(t)
+	hostAccessScopedSlots <- struct{}{} // a scoped scan is running
+	defer func() { <-hostAccessScopedSlots }()
+
+	rr := get(mux, scopedCtx("example.com"), "/api/v1/webdet/host-access-history?host=example.com")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("second scoped scan: status %d, want 429", rr.Code)
+	}
+	rr = get(mux, adminCtx(), "/api/v1/webdet/host-access-history?host=example.com")
+	if rr.Code == http.StatusTooManyRequests {
+		t.Fatalf("admin scan refused while one scoped scan runs")
+	}
+}
