@@ -1,7 +1,8 @@
 # Sketch — the `ngm_auth` detector (CFM side)
 
 > As-built reference for the first code slice (the detector shipped in
-> `internal/detectors/ngmauth/`). Companion to `docs/ngm-integration-map.md` §D.
+> `internal/detectors/ngmauth/`). The wider CFM ⇄ NGM integration is documented on the NGM side
+> (`ngm/docs/cfm-integration-map.md`).
 > The smallest, lowest-risk, immediately-useful CFM slice of the NGM integration:
 > a log-tail detector for **abusive NGM control-panel logins**, because NGM
 > already writes the input file *for us*. The code blocks below are illustrative;
@@ -271,6 +272,5 @@ BLOCK         = dryrun     ; watch-first; flip to a TTL ban after burn-in
   (no edge Lua), so no `waf_rule_ids` parity; still carries a `[Unreleased]`
   CHANGELOG entry and the pre-PR adversarial review per CLAUDE.md §3/§9.
 
-> See also: `docs/ngm-integration-map.md` (§D detectors, the rspamd/php-fpm gaps),
-> `docs/DETECTORS.md`, `internal/detectors/cpanel/login.go` (the template),
+> See also: `ngm/docs/cfm-integration-map.md` (the NGM side), `docs/DETECTORS.md`, `internal/detectors/cpanel/login.go` (the template),
 > `internal/detectors/registry.go` (`kv*` helpers, `Factory`).

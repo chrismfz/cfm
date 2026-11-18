@@ -348,8 +348,9 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	// "panel" is the panel-neutral alias of "cpanel": the underlying chain
 	// (inet cfm_panel_redirect), the Lua guard (cfm_panel.lua), the edge var
 	// ($cfm_panel_challenge_mode) and the DNAT scope are already panel-agnostic,
-	// and the shipped port map covers cPanel + DirectAdmin panel ports. (NGM
-	// panel-port coverage is a follow-up that parameterises PanelDNATMappings.)
+	// and the shipped port map covers cPanel + DirectAdmin panel ports. NGM's
+	// panel port is deliberately not mapped (decided 2026-09-09: NGM stays the
+	// TLS front door; see docs/ROADMAP.md).
 	if sub == "cpanel" || sub == "panel" {
 		return runPanelCLI(fs.Args(), backend)
 	}

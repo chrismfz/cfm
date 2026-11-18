@@ -108,14 +108,21 @@ per-ability tokens.
 ## 6. Control plane & operator housekeeping
 
 - **Roll `ADMIN_TOKEN_IP_BINDING = enforce` per node** — [next, operator].
-  Shipped default `off`; design + rollout note:
-  `docs/security/admin-token-source-ip-binding.md`.
+  Shipped default `off`; rollout + caveats: `docs/security/control-plane.md` §4.
+- **Scoped embed cookie key off `AUTH_TOKEN`** — [next]. The scoped
+  `cfm-embed-scope` cookie is still HMAC'd with an HKDF of `AUTH_TOKEN`
+  (`embed_bootstrap.go`), so a cfm-web database leak can forge a scoped viewer
+  cookie. Give it a random per-node key like the admin one
+  (`embed_admin_cookie_key.go`); open cPanel iframe sessions re-login once.
 - **Rotate `MCP_TOKEN` + remove `MCPGODEBUG`** — [next, operator].
   Post-rollout hygiene on the live nodes.
 - **Retire `internal/apiserver/auth_autoblock.go`** — [next]. Still started
   in `apiserver.go`; the `cfm_endpoints` detector is meant to replace it.
   Remove only after showing the detector bans the same login brute force
   (keep the login throttle / account lock).
+- **No CSP / frame policy / HSTS on the admin UI** — [decided 2026-08-25].
+  Inline scripts, the cPanel iframe and per-host HSTS; reasons in
+  `docs/security/control-plane.md` §7.
 - **Pre-auth challenge in front of the direct admin login** — [idea]. Design:
   `docs/security/challenge-login-gate-design.md` (test both edge and DNAT
   mode).
@@ -164,6 +171,31 @@ at the kernel boundary. `cfm php-inventory` is shipped.
 
 - **P0b per-vhost PHP handler mapping (alt-php vs ea-php)** — [next]. It picks
   the beachhead adapter for P1 (monitor-only, one server).
+
+## 11. Edge-added response headers per vhost
+
+Proposal: `docs/roadmaps/security_headers.md`.
+
+- **Shared-hosting-safe subset** — [idea]. Per vhost, opt-in, add only when
+  the origin sent none: `Referrer-Policy`, `nosniff`, strip `X-Powered-By`.
+- **No HSTS / CSP / frame policy / COOP-COEP / edge CORS on tenant vhosts** —
+  [decided 2026-11-18]. They change how a tenant's site behaves, and HSTS
+  cannot be taken back. Reasons in the proposal.
+
+## 12. Other decided items
+
+- **No per-tenant futex-PI seccomp filter (GhostLock, CVE-2026-43499)** —
+  [decided 2026-11-18]. It could only apply to bare-metal / custom installs;
+  on cPanel / DirectAdmin / CloudLinux tenant confinement is CageFS / LVE's
+  job. Patched kernel or KernelCare is the fix; kernsec's
+  `randomize_kstack_offset=on` and cfm-lsm `CFML-FS-008` are the shipped
+  defence in depth.
+- **NGM integration is done on the NGM side** — [decided]. NGM mints scoped
+  tokens and admin SSO codes with `AUTH_TOKEN` and proxies `/cfm-admin/`
+  itself; no `panelauth` provider or NGM metadata endpoint in CFM. NGM stays
+  the TLS front door (2026-11-12), so its panel port is not in CFM's panel
+  DNAT map (2026-09-09). As-built: `ngm/docs/cfm-integration-map.md`. CFM
+  side: the `ngm_auth` detector (`docs/ngm-auth-detector.md`).
 
 ---
 

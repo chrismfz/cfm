@@ -16,12 +16,13 @@ import (
 //
 // This gate is a fail-safe control: it lives in the API itself, so a leaked
 // AUTH_TOKEN used from a foreign IP is rejected even if the firewall is disabled
-// or the admin port is opened. See docs/security/admin-token-source-ip-binding.md.
+// or the admin port is opened. See docs/security/control-plane.md §4.
 //
-// NOTE: this closes direct-API use and SSO-code minting from a foreign IP. It does
-// NOT by itself stop cookie forgery, because the embed cookies are signed with a
-// key derived from AUTH_TOKEN — that needs the companion change (decouple the
-// cookie signing key from AUTH_TOKEN). See the doc.
+// NOTE: this closes direct-API use and SSO-code minting from a foreign IP. The
+// admin SSO cookie is signed with a random per-node key (embed_admin_cookie_key.go),
+// so a leaked AUTH_TOKEN cannot forge it. Not covered: /mcp also accepts
+// AUTH_TOKEN (read-only), and the SCOPED embed cookie key is still derived from
+// AUTH_TOKEN (embed_bootstrap.go), so a leak can forge a scoped viewer cookie.
 
 const (
 	adminIPModeOff     = "off"     // default — no source-IP check (behaviour unchanged)

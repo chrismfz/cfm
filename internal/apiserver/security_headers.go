@@ -32,7 +32,7 @@ import "net/http"
 //     that remains a supported/degraded admin surface (audit R01 / Step 5). Adding
 //     it is a deliberate decision for once :6060's transport end-state is settled.
 //
-// See docs/security/control-plane-headers.md.
+// See docs/security/control-plane.md §7.
 //
 // Values are set only when absent, so a specific handler may still choose a
 // stricter policy for its own response.

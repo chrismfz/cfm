@@ -17,7 +17,7 @@ import (
 // (secure-fleet posture: protects on upgrade with no cfm.conf change); every trip
 // is logged/API-visible; a trip is a self-healing 429 + alert, NEVER an nft block
 // of the caller's IP (the admin token is the fleet controller). See
-// docs/security/control-plane-rate-limiting.md.
+// docs/security/control-plane.md §6.
 
 type rateLimitMode int
 
