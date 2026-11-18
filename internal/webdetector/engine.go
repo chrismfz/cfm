@@ -479,6 +479,12 @@ type Engine struct {
 
 	adapter  LogFormatAdapter
 	malRules []malRule
+	// malMatch / chalMatch find the first matching malRules / chalRules index
+	// in one pass (path_matcher.go). They are the same matcher when both lists
+	// compile to the same patterns (MALPATH_FILE == CHALLENGE_PATHS_FILE, the
+	// default), and ingest then scans the path once for both checks.
+	malMatch  *pathMatcher
+	chalMatch *pathMatcher
 
 	// accessRing retains the last N parsed access lines (edge_access_tail) for
 	// WAF false-positive triage — the raw request context around a hit.
@@ -738,6 +744,12 @@ func NewEngine(cfg Config) *Engine {
 	// Compile CHALLENGE rules (paths). Supports "N:substring" override syntax.
 	if cfg.ChallengePathsEnabled {
 		e.chalRules = compileChalRules(cfg.ChallengePathsList, cfg.ChallengePathsCount)
+	}
+	e.malMatch = newPathMatcher(malRuleSubs(e.malRules))
+	if chalSubs := chalRuleSubs(e.chalRules); e.malMatch.sameSubs(chalSubs) {
+		e.chalMatch = e.malMatch
+	} else {
+		e.chalMatch = newPathMatcher(chalSubs)
 	}
 
 	e.ipLastChalEmit = make(map[string]time.Time)
@@ -2106,32 +2118,32 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		}
 	}
 
+	// Malpath matching (CHALLENGE_PATHS + the MALPATH flood counter): one
+	// lower-cased path, one scan per distinct matcher (path_matcher.go).
+	pm := pathMatchOnce{p: p}
+
 	// Challenge-only rule checks (paths)
-	e.trackChallengePaths(rec, p, b)
+	e.trackChallengePaths(rec, &pm, b)
 
 	// Now that we have normalized path `p`, count malicious probes per IP.
 	if rec.IP != "" && e.cfg.MalPathCount > 0 && len(e.cfg.MalPathList) > 0 {
 
 		if rec.IP != "" && len(e.malRules) > 0 && !isCpanelSessionPath(p) {
-			pl := strings.ToLower(p)
-			for ridx, r := range e.malRules {
-				if r.sub != "" && strings.Contains(pl, r.sub) {
-					if b.ipsMalPath == nil {
-						b.ipsMalPath = make(map[string]int)
-					}
-					b.ipsMalPath[rec.IP]++ // total MALPATH hits (for stats)
-
-					if b.ipsMalRule == nil {
-						b.ipsMalRule = make(map[string]map[int]int)
-					}
-					m := b.ipsMalRule[rec.IP]
-					if m == nil {
-						m = make(map[int]int)
-						b.ipsMalRule[rec.IP] = m
-					}
-					m[ridx]++
-					break // count only the first matching rule per request (prevents double-count inflation)
+			if ridx := pm.first(e.malMatch); ridx >= 0 && ridx < len(e.malRules) {
+				if b.ipsMalPath == nil {
+					b.ipsMalPath = make(map[string]int)
 				}
+				b.ipsMalPath[rec.IP]++ // total MALPATH hits (for stats)
+
+				if b.ipsMalRule == nil {
+					b.ipsMalRule = make(map[string]map[int]int)
+				}
+				m := b.ipsMalRule[rec.IP]
+				if m == nil {
+					m = make(map[int]int)
+					b.ipsMalRule[rec.IP] = m
+				}
+				m[ridx]++ // only the first matching rule per request (prevents double-count inflation)
 			}
 		}
 
@@ -4185,6 +4197,14 @@ func compileMalRules(list []string, def int) []malRule {
 		rules = append(rules, malRule{sub: strings.ToLower(s), count: c})
 	}
 	return rules
+}
+
+func malRuleSubs(rules []malRule) []string {
+	out := make([]string, len(rules))
+	for i, r := range rules {
+		out[i] = r.sub
+	}
+	return out
 }
 
 // SetBypassFunc wires an IP-level predicate (IGNORE_IPS / IGNORE_NETS).
