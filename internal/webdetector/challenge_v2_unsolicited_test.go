@@ -3,6 +3,7 @@ package webdetector
 import (
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -113,4 +114,42 @@ func TestVerify_UnsolicitedGrainScope(t *testing.T) {
 			t.Fatal("knob off still rejected")
 		}
 	})
+}
+
+// A withheld solve reaches the WITHHELD stream (the solver-farm detector's
+// evidence: a farm pre-solving on fresh IPs is the cluster it convicts) and
+// never the solve stream (it cleared nothing: challenge_cookie_discard would
+// read a client that never got a cookie as one that discarded it). A solve
+// that passes takes only the solve stream.
+func TestVerify_WithheldSolvePublishedToWithheldStreamOnly(t *testing.T) {
+	ResetChallengeSolveSubscribers()
+	t.Cleanup(ResetChallengeSolveSubscribers)
+	var mu sync.Mutex
+	var solved, withheld []string
+	SubscribeChallengeSolveEvents(func(s ChallengeSolve) { mu.Lock(); solved = append(solved, s.IP); mu.Unlock() })
+	SubscribeChallengeWithheldEvents(func(s ChallengeSolve) { mu.Lock(); withheld = append(withheld, s.IP); mu.Unlock() })
+
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	base, _ := startVerifyServerWithBridge(t, b)
+	postVerify(t, base, "203.0.113.20", "shop.example", unsolUA, unsolFailing)
+	postVerify(t, base, "203.0.113.21", "shop.example", unsolUA, unsolClean)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(withheld) != 1 || withheld[0] != "203.0.113.20" {
+		t.Errorf("withheld stream = %v, want only the failing 203.0.113.20", withheld)
+	}
+	if len(solved) != 1 || solved[0] != "203.0.113.21" {
+		t.Errorf("solve stream = %v, want only the passing 203.0.113.21", solved)
+	}
+
+	// The manager's reload reset drops withheld subscribers too (else every
+	// reload would add one, feeding retired detectors' buffers forever).
+	ResetChallengeSolveSubscribers()
+	solveSubsMu.RLock()
+	n := len(withheldSubs)
+	solveSubsMu.RUnlock()
+	if n != 0 {
+		t.Errorf("withheld subscribers after reset = %d, want 0", n)
+	}
 }

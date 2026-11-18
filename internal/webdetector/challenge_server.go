@@ -1160,6 +1160,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 						challengeV2RejectHook(solve)
 					}
 					if v2Grain == v2GrainUnsolicited {
+						// Evidence readers still hear it (the solver-farm
+						// detector): a farm pre-solving on fresh IPs is what it
+						// convicts. Not the solve stream: it cleared nothing.
+						publishChallengeWithheldEvent(solve)
 						// Nothing challenges this client now, so there is
 						// nothing to retry: withhold the cookie and send it on
 						// to next, exactly as a solve would go — minus the

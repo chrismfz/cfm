@@ -30,6 +30,11 @@ back-filled here — see the git/PR history for that period.
     fails gets no cookie and goes on to the page it asked for. Nothing is
     challenging it, so a person who lands there (an expired challenge, an old
     tab) sees no difference. The panel ports are not affected.
+  - The solver-farm detector still counts these withheld solves: the farms'
+    pre-solves are the clusters it convicts, and its `humanity` evidence
+    covers passed and withheld solves. The other solve readers
+    (`challenge_score`, the Under-Attack solve rate,
+    `challenge_cookie_discard`) see only solves that earned a cookie.
   - Knob: `[webdetector] CHALLENGE_V2_UNSOLICITED = 0` turns it off.
 - **An automatic v2 challenge no longer drops to v1 while it is still being
   served.**

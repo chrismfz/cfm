@@ -57,6 +57,9 @@ func (s ChallengeSolve) InputEvent() core.InputEvent {
 var (
 	solveSubsMu sync.RWMutex
 	solveSubs   []func(ChallengeSolve)
+	// withheldSubs hear the WITHHELD solves (SubscribeChallengeWithheldEvents);
+	// guarded by solveSubsMu with solveSubs.
+	withheldSubs []func(ChallengeSolve)
 )
 
 // SubscribeChallengeSolveEvents registers a callback invoked for every solved
@@ -83,7 +86,40 @@ func SubscribeChallengeSolveEvents(fn func(ChallengeSolve)) {
 func ResetChallengeSolveSubscribers() {
 	solveSubsMu.Lock()
 	solveSubs = nil
+	withheldSubs = nil
 	solveSubsMu.Unlock()
+}
+
+// SubscribeChallengeWithheldEvents registers a callback for every WITHHELD
+// solve: a valid PoW under the unsolicited grain (v2=unsolicited, no challenge
+// covered the client) that failed Rung 1, so it got no cookie and was sent on
+// to next (challenge_server.go). Same contract as SubscribeChallengeSolveEvents
+// (cheap, non-blocking, inline on verify; dropped by
+// ResetChallengeSolveSubscribers).
+//
+// A separate stream, not the solve stream: a withheld solve cleared nothing,
+// so the subscribers that read "this client now holds clearance" must not see
+// it (challenge_cookie_discard would read a client that never got a cookie as
+// one that threw it away). Evidence readers that count WHO solves — the
+// solver-farm detector — subscribe to both. Until 2026-11-18 these solves took
+// the solved path unarmed and reached the solver-farm detector anyway: the
+// farms' pre-solves on fresh IPs are the very traffic it convicts.
+func SubscribeChallengeWithheldEvents(fn func(ChallengeSolve)) {
+	if fn == nil {
+		return
+	}
+	solveSubsMu.Lock()
+	withheldSubs = append(withheldSubs, fn)
+	solveSubsMu.Unlock()
+}
+
+func publishChallengeWithheldEvent(s ChallengeSolve) {
+	solveSubsMu.RLock()
+	subs := append([]func(ChallengeSolve){}, withheldSubs...)
+	solveSubsMu.RUnlock()
+	for _, fn := range subs {
+		fn(s)
+	}
 }
 
 func publishChallengeSolveEvent(s ChallengeSolve) {
