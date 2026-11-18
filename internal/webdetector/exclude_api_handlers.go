@@ -118,6 +118,26 @@ func effectiveExcludeScope(r *http.Request) map[string]struct{} {
 	return parseQueryVhostSet(r, "scope_hosts")
 }
 
+// scopeHostsSeenBy narrows an entry's scope_hosts (the writing token's whole
+// vhost set) to the caller's own vhosts: a scoped caller must not see the
+// other domains of whichever account wrote the entry. A new slice; the
+// store's copy is untouched.
+func scopeHostsSeenBy(hosts []string, scope map[string]struct{}) []string {
+	if scope == nil || len(hosts) == 0 {
+		return hosts
+	}
+	out := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		if vhostAllowed(strings.ToLower(h), scope) {
+			out = append(out, h)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func filterExcludeListForScope(entries []excludeEntry, scope map[string]struct{}) []excludeEntry {
 	if len(entries) == 0 || scope == nil {
 		return entries
@@ -131,6 +151,7 @@ func filterExcludeListForScope(entries []excludeEntry, scope map[string]struct{}
 		if !scopedExcludeHostAllowed(entry.Value, scope) {
 			continue
 		}
+		entry.ScopeHosts = scopeHostsSeenBy(entry.ScopeHosts, scope)
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool {

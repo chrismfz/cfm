@@ -71,6 +71,7 @@ func (e *Engine) handleClamSigIgnoreList(w http.ResponseWriter, r *http.Request)
 		filtered := make([]clamSigIgnoreEntry, 0, len(entries))
 		for _, en := range entries {
 			if en.Host != "" && vhostAllowed(en.Host, scope) {
+				en.ScopeHosts = scopeHostsSeenBy(en.ScopeHosts, scope)
 				filtered = append(filtered, en)
 			}
 		}

@@ -39,6 +39,7 @@ func filterHTTP3ListForScope(entries []http3OverrideEntry, scope map[string]stru
 	out := make([]http3OverrideEntry, 0, len(entries))
 	for _, e := range entries {
 		if scopedExcludeHostAllowed(e.Host, scope) {
+			e.ScopeHosts = scopeHostsSeenBy(e.ScopeHosts, scope)
 			out = append(out, e)
 		}
 	}

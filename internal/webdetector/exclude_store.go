@@ -169,13 +169,37 @@ func (s *excludeStore) RemoveWithRuleIDs(t, v string, scope map[string]struct{},
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := s.key(t, v, scopeHosts, ruleIDs)
-	if _, exists := s.entries[k]; !exists {
+	if _, exists := s.entries[k]; exists {
+		delete(s.entries, k)
+	} else if !s.removeHostAnyScopeLocked(t, v, ruleIDs) {
 		return false
 	}
-	delete(s.entries, k)
 	s.rebuildCompiledLocked()
 	_ = s.saveLocked()
 	return true
+}
+
+// removeHostAnyScopeLocked removes every host exclude on (value, ruleIDs),
+// whatever scope_hosts it was written with. A host exclude acts on its own
+// host only, and its scope_hosts is the writer's vhost set at the time, so an
+// exact-scope match fails once that set changes (a domain moved to another
+// account, or the writer's account gained one): the entry kept applying and
+// nobody could remove it. The caller has already checked that it may manage
+// this host (validateScopedExcludeWrite). Path excludes keep the exact match:
+// their scope_hosts is the set of sites the exclude applies to.
+func (s *excludeStore) removeHostAnyScopeLocked(t, v string, ruleIDs []int) bool {
+	if t != "host" {
+		return false
+	}
+	want := ruleIDsKey(ruleIDs)
+	removed := false
+	for k, e := range s.entries {
+		if e.Type == "host" && e.Value == v && ruleIDsKey(e.RuleIDs) == want {
+			delete(s.entries, k)
+			removed = true
+		}
+	}
+	return removed
 }
 
 func (s *excludeStore) List() []excludeEntry {
