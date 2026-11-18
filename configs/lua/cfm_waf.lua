@@ -548,12 +548,33 @@ local CFG = {
   bad_ua_min_score = 4,
 }
 
--- Optional user overrides from cfm_waf_config.lua
+-- Optional operator overrides. The operator edits /etc/cfm/cfm_waf_config.lua;
+-- the daemon copies it to /var/lib/cfm/lua/cfm_waf_config.lua (root:cfm 0640,
+-- internal/wafconfig), because the worker cannot read root-only /etc/cfm.
+-- Loaded once per worker: an edit applies at the next edge reload. A file that
+-- is present but fails to load (syntax error) or returns no table used to be
+-- skipped silently, leaving the operator believing a rule was overridden.
 do
   local ok, usercfg = pcall(require, "cfm_waf_config")
   if ok and type(usercfg) == "table" then
     for k, v in pairs(usercfg) do
       CFG[k] = v
+    end
+  else
+    local why
+    if not ok then
+      local msg = tostring(usercfg)
+      if not msg:find("module 'cfm_waf_config' not found", 1, true) then
+        why = msg
+      end
+    elseif usercfg == true then
+      -- require() yields true for a chunk that returns nothing.
+      why = "returned nothing (expected `return { rule_<name> = \"<mode>\" }`)"
+    else
+      why = "returned a " .. type(usercfg) .. ", not a table"
+    end
+    if why and ngx and ngx.log then
+      ngx.log(ngx.ERR, "[cfm_waf] cfm_waf_config.lua ignored, WAF overrides NOT applied: ", why)
     end
   end
 end

@@ -20,7 +20,26 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **WAF rule overrides in `/etc/cfm/cfm_waf_config.lua` now apply.** The docs
+  and several release notes (2026.09.22, 2026.10.09, 2026.11.14) told
+  operators to set or revert a rule's mode there, but nothing read that file:
+  the edge workers run as `cfm` and cannot read root-only `/etc/cfm`, and the
+  edge only looks in its own Lua directories. An override written there never
+  took effect. That includes the 2026.10.09 advice to disable
+  `rule_form_relay_sppb_contact` until the upgrade. (No node had such a file.)
+  - The daemon now copies the file within ~5 s to
+    `/var/lib/cfm/lua/cfm_waf_config.lua` (`root:cfm 0640`), as it already
+    does for the IGNORE_NETS and self-IP lists. Deleting the `/etc/cfm` file
+    removes the copy.
+  - **Reload the edge after an edit**: the workers load the file once. The
+    daemon log says `[wafconfig] … reload the edge to apply it`.
+  - A file someone placed in `/var/lib/cfm/lua/` by hand is kept, and is
+    moved aside as `cfm_waf_config.lua.handplaced.<time>` only when an
+    `/etc/cfm` file appears.
+  - A file that fails to load (a syntax error, no `return`, not a table)
+    now logs `[cfm_waf] cfm_waf_config.lua ignored, WAF overrides NOT
+    applied: …` in the edge error log. It used to be skipped silently.
 
 ## 2026.11.18
 

@@ -146,6 +146,7 @@ tokens, stores) lives in `/var/lib/cfm/`.
 | `cfm.blocklists` | external feed pulls into allow / block sets | |
 | `cfm.dnat_bypass` / `cfm.dnat_cpanel_bypass` | sources that skip the web / panel DNAT | [`docs/dnat-bypass.md`](docs/dnat-bypass.md) |
 | `kernsec.conf` / `lsm.conf` | kernel hardening and BPF LSM policy | kernsec / cfm-lsm docs |
+| `cfm_waf_config.lua` (optional) | per-rule WAF mode overrides; the daemon copies it for the edge, then reload the edge | [`docs/waf.md`](docs/waf.md) "Promoting a rule" |
 | `openresty.conf` / `angie.conf` | the edge configuration | |
 
 **GeoIP / ASN data.** With `MAXMIND_ACCOUNT_ID` and `MAXMIND_LICENSE_KEY` set,
