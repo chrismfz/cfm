@@ -46,74 +46,64 @@ There is no monolithic `make test`. Run the Go suite directly:
 go test -race ./...
 ```
 
-Firewall backend is selectable at runtime: the `CFM_FIREWALL_ENGINE` line in
-`cfm.conf` (`FIREWALL_ENGINE` sets the same field; the later line wins) or the
-`CFM_FIREWALL_ENGINE` env var, which overrides it = `nft` (default,
-exec-based) or `nftlib` (netlink, zero-fork set/feed writes). The daemon AND
-the one-shot CLI resolve it the same way (`cmd/cfm/engine.go`). The CLI used
-to read only the env var, so on an nftlib node `cfm dnat on` ran the exec
-backend, whose untagged redirect the nftlib daemon later duplicated with its
-own. Set the engine in `cfm.conf`, not via `systemctl set-environment` (the
-CLI can't see a daemon-only env var). nftlib must never
-read `inet cfm input` over netlink: google/nftables v0.3.0 fails the whole
-dump on the `ct original …` match every DNAT accept carries, so those accepts
-are nft text on both backends (the cPanel ones in one shared implementation,
-`internal/firewall/panel_dnat_accepts.go`).
+### Firewall engines and nft rules
 
-The ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT, debug ports, portscan
-tracking, the output loopback accept) is ONE `nft -f` transaction planned by
-`firewall.PortsPolicyScript`, shared by both engines. It used to be dozens of
-separate nft runs that deleted the live accepts and drops by substring and
-re-added them, leaving the input chain without a default drop for a moment on
-every apply. Don't add a ports-policy rule or set write outside that planner,
-and match rules by their exact printed key, never by substring: nft prints
-`timeout 60s` as `1m`, and `"%ds"` made every apply add the portscan rules
-again. A change to it gets a live run in an isolated netns
-(`unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run
-'LiveNFT|ApplyPortsPolicyIsAtomic'`); the fleet's kernels (4.18, 5.14) are
-older than a dev box's. The DNAT accepts in the same chain follow one rule
-too: keep what is in place, insert before delete, a delete is best effort
-(`EnsurePanelDNATAccepts`; `EnsureInputAccepts` for the web ones, which also
-keeps the old-port accepts until DNATOn has moved the redirect). The web ones
-were deleted and re-added on every reload, a window of dropped DNAT'd
-connections that the live test now pins (a reload must not change a handle).
+The history behind each rule below is in the code comments it names.
 
-**TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`;
-`cfm.deny` is permanent-only and must never take one). Nothing on a restart
-may empty the `inet cfm` table: the rpm `%post` ran `cfm disable` on every
-upgrade and freed every TTL-banned attacker (2026-10-21). For what still does
-(reboot, `cfm reset`, `cfm disable`), `internal/ttlban` persists them to
-`/var/lib/cfm/ttlbans.json` and restores them after EnsureBase. A new unblock
-path (not an allow: the block element stays under an allow) calls
-`ttlban.Forget` next to `edgeban.Unban`, or a restart resurrects the ban. A
-snapshot that lost at least three stored bans, and most of them, is taken as
-a recreated table and kept; `cfm flush` is the intended clear (it removes the
-file and leaves a `.flushed` marker the daemon acts on). Live test: `-run LiveNFTTTLBans` (both engines). See
-`docs/DETECTORS.md` "TTL bans across a restart".
-
-**A feed set is replaced in ONE transaction** (`ReplaceSetFlushAdd`, both
-engines: one `nft -f` script / one netlink batch holding the flush and every
-add). It used to be a flush and then batches, each its own run, and the
-unions the base rules drop on (`block_ext_v4_hosts`, …) sat empty and then
-partial for seconds on every hourly apply. Don't split a replace into
-transactions again: the per-message element limit (nftlib's
-`setWriteChunk`) is about messages, not transactions. The batched write is
-only the logged fallback for a batch too large for the socket buffer (exec
-engine: also a run past its deadline; nftlib: also an interval set's
-ENOTEMPTY when its intervals do not overlap, and an ENOBUFS whose content the
-kernel does not hold); any other refusal keeps the old content, because the
-batched write flushes first and stops at the bad entry. Skip-if-unchanged
-(permanent sets) also asks the kernel for one element (`internal/firewall/setprobe`;
-`nft get element` loads the whole set, ~0.7 s at 200k), because the CLI can
-empty the table behind the daemon's back. The same netlink get answers IP
-lookups (`setprobe.Lookup`: `cfm which` / `cfm search` / locate, through
-`ipquery.FindMany`); only a CIDR query, or a set the kernel can't answer for,
-still dumps. On an interval set the kernel answers with the interval's start,
-and 4.18 can wrongly say "absent" for an address that is both an interval's
-end and the next one's start, which Lookup reports as ambiguous (the caller
-then dumps the set). Live test: `-run LiveNFTFeedReplace`
-(both engines), as real root in a netns (`unshare -n`) for the daemon's
-conditions: under `unshare -r` the socket buffer is capped at `wmem_max`.
+- **Engine selection.** The `CFM_FIREWALL_ENGINE` line in `cfm.conf`
+  (`FIREWALL_ENGINE` sets the same field; the later line wins), overridden by
+  the `CFM_FIREWALL_ENGINE` env var: `nft` (default, exec-based) or `nftlib`
+  (netlink, zero-fork set/feed writes). The daemon AND the one-shot CLI resolve
+  it the same way (`cmd/cfm/engine.go`). Set it in `cfm.conf`, never via
+  `systemctl set-environment`: the CLI can't see a daemon-only env var (an
+  nftlib node's `cfm dnat on` once ran the exec backend, and the daemon then
+  duplicated its untagged redirect).
+- **nftlib must never read `inet cfm input` over netlink.** google/nftables
+  v0.3.0 fails the whole dump on the `ct original …` match every DNAT accept
+  carries, so those accepts are nft text on both backends (the cPanel ones in
+  one shared implementation, `internal/firewall/panel_dnat_accepts.go`).
+- **The ports policy is ONE `nft -f` transaction** (TCP_IN/UDP_IN/TCP_OUT/
+  UDP_OUT, debug ports, portscan tracking, the output loopback accept), planned
+  by `firewall.PortsPolicyScript` for both engines; the separate runs it
+  replaced left the input chain without a default drop on every apply. Don't
+  add a ports-policy rule or set write outside that planner, and match rules by
+  their exact printed key, never by substring: nft prints `timeout 60s` as
+  `1m` (`NFTDuration`), and `"%ds"` re-added the portscan rules on every apply.
+- **DNAT accepts in that chain: keep what is in place, insert before delete,
+  a delete is best effort** (`EnsurePanelDNATAccepts`; `EnsureInputAccepts`
+  for the web ones, which also keeps the old-port accepts until DNATOn has
+  moved the redirect). A reload must not change a handle: delete-and-re-add on
+  every reload dropped DNAT'd connections, and the live test pins it.
+- **TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`;
+  `cfm.deny` is permanent-only and must never take one). Nothing on a restart
+  or upgrade may empty the `inet cfm` table (an rpm `%post` `cfm disable` once
+  freed every TTL-banned attacker). For what still does (reboot, `cfm reset`,
+  `cfm disable`), `internal/ttlban` persists them to
+  `/var/lib/cfm/ttlbans.json` and restores them after EnsureBase. A new unblock
+  path (not an allow: the block element stays under an allow) calls
+  `ttlban.Forget` next to `edgeban.Unban`, or a restart resurrects the ban.
+  `cfm flush` is the intended clear. Details (the lost-bans heuristic, the
+  `.flushed` marker): `docs/DETECTORS.md` "TTL bans across a restart".
+- **A feed set is replaced in ONE transaction** (`ReplaceSetFlushAdd`, both
+  engines: one `nft -f` script / one netlink batch holding the flush and every
+  add); as a flush plus batches, the unions the base rules drop on
+  (`block_ext_v4_hosts`, …) sat empty, then partial, on every hourly apply.
+  Don't split a replace into transactions again: nftlib's `setWriteChunk` is
+  about messages, not transactions. The batched write is only the logged
+  fallback for a batch too large for the socket buffer (plus the engine cases
+  named at `ReplaceSetFlushAdd` in `nft/nft.go` and `nftlib/bulk.go`); any other
+  refusal keeps the old content. Skip-if-unchanged also asks the kernel for one
+  element (`internal/firewall/setprobe`), because the CLI can empty the table
+  behind the daemon's back; the same probe answers IP lookups
+  (`setprobe.Lookup`, via `ipquery.FindMany`), and an interval-boundary answer
+  the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
+- **A change here gets a live run in an isolated netns** (the fleet's kernels,
+  4.18 and 5.14, are older than a dev box's):
+  `unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run 'LiveNFT|ApplyPortsPolicyIsAtomic'`;
+  TTL bans `-run LiveNFTTTLBans` (both engines); feed replace
+  `-run LiveNFTFeedReplace` (both engines) as real root in a netns
+  (`unshare -n`), because under `unshare -r` the socket buffer is capped at
+  `wmem_max`.
 
 ---
 
@@ -148,18 +138,15 @@ make test-js                                     # node --test on internal/webui
 ```
 
 The per-PR gate is `security.yml`'s **build-test** job (the block above) plus a
-tiny separate **changelog** job — it asserts `CHANGELOG.md` keeps a single,
+tiny **changelog** job: it asserts `CHANGELOG.md` keeps a single,
 correctly-placed `## [Unreleased]` heading (the date-stamper's invariant) and
-fails a PR that changes runtime code without adding a `[Unreleased]` entry
-(escape hatches: `[skip changelog]` in the PR title/body, or a `no-changelog`
-label; docs/tests/CI-only PRs are exempt). Both are kept lean so they run on
-every PR without burning the repo's Actions-minute budget. The heavier **advisory** scanners — **CodeQL** + **govulncheck** — moved
-to a **weekly schedule + manual dispatch** (`codeql.yml`, "Weekly Security
-Scans"); they no longer run per-PR/per-push. Trigger a manual run (Actions tab →
-Run workflow) before a release or after a risky merge. gosec and Semgrep were
-dropped (CodeQL covers the same ground). CodeQL has flagged real issues before
-(e.g. reflected XSS on the challenge page) — treat its alerts as real; just
-check the weekly run (or dispatch one) rather than expecting it on your PR.
+fails a PR that changes runtime code without an `[Unreleased]` entry (escape
+hatches: `[skip changelog]` in the PR title/body, or a `no-changelog` label;
+docs/tests/CI-only PRs are exempt). **CodeQL + govulncheck** are advisory and
+run weekly + on manual dispatch (`codeql.yml`, "Weekly Security Scans"), not
+per PR: dispatch one before a release or after a risky merge, and treat its
+alerts as real (it caught a reflected XSS on the challenge page). gosec and
+Semgrep were dropped (CodeQL covers the same ground).
 
 ---
 
@@ -211,202 +198,117 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
 - **Scoped vs admin auth is a hard security boundary** (cPanel users get
   scoped viewer tokens, never admin tokens). Validators live centrally;
   out-of-scope access must fail-closed (403). See §6.
-- **Code is the source of truth — keep doc-comments and docs in sync.**
-  Stale comments/docs have bitten us repeatedly: `governor_api.go` said
-  "Guard 3 (admin-only) for now" long after the endpoints were wired scoped;
-  `docs/endpoint_scope_inventory.md` listed scope-validated endpoints
-  (`waf/engine/summary`, `{challenge,waf}/exclude/*`) as admin-only and misled
-  a scope audit; a divergent fallback list in `ui-scope.js` disagreed with the
-  real nav matcher. So: when you change an endpoint's auth/scope (or any
-  behaviour a comment/doc describes), update the handler doc-comment **and**
-  `docs/endpoint_scope_inventory.md` **in the same change**, delete "for now /
-  TODO" guard comments once the work lands, and never keep a second copy of a
-  list/matcher that can drift. When a comment and the code disagree, trust the
-  code and fix the comment.
+- **Code is the source of truth — keep doc-comments and docs in sync.** Stale
+  scope docs/comments misled a scope audit more than once. When you change an
+  endpoint's auth/scope (or any behaviour a comment/doc describes), update the
+  handler doc-comment **and** `docs/endpoint_scope_inventory.md` **in the same
+  change**, delete "for now / TODO" guard comments once the work lands, and
+  never keep a second copy of a list/matcher that can drift. When a comment
+  and the code disagree, trust the code and fix the comment.
 - **A new log file needs a rotation entry in the same change.**
   `check_logrotate_coverage.sh` fails CI if a path CFM writes (edge
-  `access_log`/`error_log`, a `*_LOG_FILE` key in `cfm.conf`, a `/var/log/cfm/…`
-  literal in Go) is neither matched by `configs/logrotate-cfm` nor in a
-  directory documented as vendor-rotated. Two rules behind it: (a) never list a
-  path a distro/panel logrotate config already globs — `/var/log/{angie,nginx,
-  apache2,httpd}/`, `/usr/local/apache/logs/` — logrotate treats the second
-  declaration as a `duplicate log entry` error and aborts the run instead of
-  rotating; (b) prefer the directory glob already in the file over adding a
-  filename, because enumerated lists drift (they silently missed
-  `access.bad_request.log`, `cfm.clam.log`, `cfm.socket.log`, `ua_emergency.log`).
-  Run `./scripts/tests/check_logrotate_coverage.sh --host` on a live server to
-  see what is actually rotated there. A log logrotate is configured for can
-  still be unwritable to it: `logrotate.service` on EL9, Debian 11+ and
-  Ubuntu 22.04+ has
-  `ProtectSystem=full` (`/usr` read-only), so the OpenResty logs under
-  `/usr/local` need the `logrotate.service.d/cfm-openresty.conf` drop-in
-  (`configs/cfm-logrotate-systemd.conf`), and `--host` checks for it. See
+  `access_log`/`error_log`, a `*_LOG_FILE` key in `cfm.conf`, a
+  `/var/log/cfm/…` literal in Go) is neither matched by `configs/logrotate-cfm`
+  nor in a directory documented as vendor-rotated. Never list a path a
+  distro/panel logrotate config already globs (`/var/log/{angie,nginx,apache2,
+  httpd}/`, `/usr/local/apache/logs/`): a second declaration is a `duplicate
+  log entry` error that aborts the run. Prefer the existing directory glob over
+  a filename (enumerated lists drifted). The OpenResty logs under `/usr/local`
+  also need the `logrotate.service.d/cfm-openresty.conf` drop-in
+  (`ProtectSystem=full`). `--host` checks a live server; details in
   `docs/log-rotation.md`.
 - **Lua has exactly ONE delivery path: `/var/lib/cfm/lua/`, owned by the
   package.** The Makefile stages `configs/lua/` there with `rsync --delete`
-  (that flag, not a PKGROOT wipe, is what makes a retired module leave the
-  package — `stage-pkgroot`, which the rpm path uses, never wipes), the rpm
-  `%install` copies `/var` from that staged tree, and `%files` owns each file — which is what makes an upgrade
-  install new modules, refresh changed ones and REMOVE ones a release dropped.
-  Never add a second copy or a second copier. Both existed once and both were
-  wrong: the rpm `%install` re-copied `configs/` unfiltered into
-  `/usr/share/cfm/configs/`, shipping ~900 KB of duplicate modules, and a
-  postinst loop then copied THOSE over the files the package had just
-  installed — while the "locally modified → backup" protection it advertised
-  could never fire, because rpm replaces the files before `%post` runs.
-  `check_package_lua_delivery.sh` pins all of it. A hand-edit under
+  (that flag, not a PKGROOT wipe, is what drops a retired module —
+  `stage-pkgroot`, which the rpm path uses, never wipes), the rpm `%install`
+  copies `/var` from that staged tree, and `%files` owns each file, so an
+  upgrade installs, refreshes and REMOVES modules. Never add a second copy or a
+  second copier: an unfiltered copy into `/usr/share/cfm/configs/` plus a
+  postinst loop once overwrote the freshly installed modules.
+  `check_package_lua_delivery.sh` pins it. A hand-edit under
   `/var/lib/cfm/lua/` is overwritten on upgrade with no backup; the operator
   edit surface is `/etc/cfm/*`.
-- **Never write a bare `%macro` in an rpm spec COMMENT — escape it `%%`.**
-  `/usr/lib/rpm/redhat/macros` defines `%install` as a macro whose expansion
-  ends in a newline followed by `%install`. rpm expands macros on every spec
-  line, comments included, then splits the expanded buffer on newlines — so a
-  comment merely *mentioning* `%install` injects a real section header and the
-  build dies with `error: line NNN: second %install`. A comment block explaining
-  why a `%post` Lua-sync loop was removed did exactly that and broke
-  `make release`. The trap is that it is **EL-only**: Debian/Ubuntu rpm ships no
-  `redhat/macros`, so `rpmspec -P` on the dev box parses the same spec happily
-  and CI (ubuntu runners) would too — don't add an rpm parse to CI and think it
-  covers this. `check_rpm_spec_macros.sh` enforces the escape statically, and
-  runs from `make rpm` as well as CI, because the break surfaces on the EL
-  build host. To verify a packaging change **for real**, use an EL container —
-  parse-only catches this class and needs no staging:
-  ```bash
-  docker run --rm --network host -v "$PWD":/src:ro almalinux:8 sh -c \
-    'dnf -y -q install rpm-build && rpmspec -P \
-       --define "pkgroot /tmp/pk" --define "projectroot /src" \
-       /src/packaging/rpm/SPECS/cfm.spec >/dev/null'
-  ```
-  A full build additionally verifies `%files`/`%post`, but needs a staged tree
-  (`%install` copies from `%{pkgroot}` and skips silently when it is absent, so
-  an unstaged run dies in `%files` with misleading "File not found"):
-  ```bash
-  make stage-rpm            # populates build/pkgroot
-  docker run --rm --network host -v "$PWD":/src:ro almalinux:8 sh -c \
-    'dnf -y -q install rpm-build && mkdir -p /rt/BUILDROOT && rpmbuild \
-       --define "_topdir /rt" --define "debug_package %{nil}" \
-       --define "pkgroot /src/build/pkgroot" --define "projectroot /src" \
-       --buildroot /rt/BUILDROOT --target x86_64 \
-       -bb /src/packaging/rpm/SPECS/cfm.spec'
-  ```
-  That is what finally proved both the failure and the fix (and confirmed the
-  package really does own 30 Lua modules with nothing under
-  `/usr/share/cfm/configs/lua`).
-- **Never hand-date the top rpm `%changelog` entry.** EL10's rpm macros set
-  `source_date_epoch_from_changelog` and `clamp_mtime_to_source_date_epoch`:
-  with `SOURCE_DATE_EPOCH` unset, rpmbuild takes it from the newest
-  `%changelog` date and clamps every packaged file's mtime to it. A
-  hand-written `May 04 2026` entry made every file changed since then read
-  "May 4" in every later `.rpm` (EL8/9 builds and the `.deb` don't clamp, so
-  it looked EL-only and random). The top entry is `%{cfm_changelog_date}` —
-  `make rpm` passes Version's own date, a bare rpmbuild falls back to today — and
-  `make rpm` exports `SOURCE_DATE_EPOCH` = build time (unless already set), so
-  files keep real mtimes. Add hand-written entries BELOW the auto one, never
-  above: on any later day that is out of order, which EL9/EL10 report yet
-  still exit 0, silently dropping the rest of the changelog (EL8 fails).
-  `check_rpm_spec_macros.sh` enforces the top entry. To verify for real, run
-  `make -o build rpm` inside almalinux:10 (build `bin/cfm` on the host first)
-  — the bare-rpmbuild recipe above bypasses the Makefile, so it still clamps
-  today's files to 00:00 UTC.
+- **Never write a bare `%macro` in an rpm spec COMMENT — escape it `%%`.** On
+  EL, `/usr/lib/rpm/redhat/macros` makes rpm expand macros inside comments, so
+  a comment mentioning `%install` injects a real section header (`error: line
+  NNN: second %install`; it broke `make release`). It is **EL-only**: Debian/
+  Ubuntu rpm parses the same spec happily, so an rpm parse in CI would not
+  cover it. `check_rpm_spec_macros.sh` enforces the escape statically, from
+  `make rpm` as well as CI. Verify a packaging change for real in an EL
+  container: `docs/packaging.md` (parse-only and full-build recipes).
+- **Never hand-date the top rpm `%changelog` entry.** EL10 rpmbuild takes
+  `SOURCE_DATE_EPOCH` from the newest `%changelog` date and clamps every
+  packaged file's mtime to it (a hand-dated top entry made files read "May 4"
+  for months). The top entry is `%{cfm_changelog_date}`, and `make rpm` exports
+  `SOURCE_DATE_EPOCH` = build time (unless set). Add hand-written entries BELOW
+  the auto one, never above: out of order, EL9/EL10 silently drop the rest of
+  the changelog (EL8 fails). `check_rpm_spec_macros.sh` enforces the top entry.
+  To verify for real, run `make -o build rpm` inside almalinux:10 (build
+  `bin/cfm` on the host first); the bare-rpmbuild recipe in `docs/packaging.md` bypasses the
+  Makefile and still clamps today's files to 00:00 UTC.
 - **A guardrail that cannot run its matcher must FAIL, never report OK.**
-  Seven `scripts/tests/check_*.sh` shell out to `ripgrep`, which the runner
-  does not preinstall. `check_cli_transport.sh` piped `rg … || true`, so on CI
-  it read zero matches and printed success while checking nothing — a §5 rule
-  enforced by nothing, for as long as it had been wired. CI now installs
-  ripgrep next to luajit, and every rg-using script hard-fails when `rg` is
-  absent. Apply the same rule to any new guardrail: `|| true` may swallow "no
-  matches", never "no tool".
-- **Tests never touch CFM's live system paths.** A test that builds an engine,
-  store or collector from a sparse config gets the production defaults, and
-  they used to be literals: the suite wrote the LIVE files on any machine it
-  ran on as root. It replaced the operator's manual challenges, added a WAF
-  exclude, appended to the notifier history, and left a kernsec rollback
-  snapshot of TEST boot args that the host's first real apply then kept
-  instead of writing its own. The notifier tests also fell back to the
-  packaged `/etc/cfm/notify.conf` and SAVED over it, and the detectors-config
-  code prefers the live `/etc/cfm/detectors.conf` over any cfgDir. CI never
-  saw it: the runner isn't root, so the writes failed silently and the tests
-  passed.
-
-  Now each such default is a var the tests point at a temp dir:
+  `check_cli_transport.sh` once piped `rg … || true` on a runner without
+  ripgrep and passed while checking nothing. CI installs ripgrep next to
+  luajit, and every rg-using script hard-fails when `rg` is absent. For any new
+  guardrail: `|| true` may swallow "no matches", never "no tool".
+- **Tests never touch CFM's live system paths.** Production defaults used to
+  be literals, so the suite, run as root anywhere, wrote the LIVE files
+  (manual challenges, WAF excludes, notifier history and `notify.conf`, a
+  kernsec rollback snapshot of test boot args); CI, not root, never saw it.
+  Each such default is now a var the tests point at a temp dir:
   - `webdetector` `defaultStateDir`/`defaultLogDir` (via `TestMain`, and
     `SetDefaultDirsForTest` from the `TestMain` of another package whose tests
-    build an Engine, as apiserver does; the detectors register no longer keeps
-    a second copy of the store defaults);
+    build an Engine, as apiserver does);
   - the `kernsec` rollback snapshot paths;
   - the `sslcollector` `defaultCacheDir`;
-  - the `nft` `selfIPsLuaPath` (EnsureBase rewrites the edge's self-IP list;
-    this one was caught by the guard in CI, in a test added the same day);
+  - the `nft` `selfIPsLuaPath` (EnsureBase rewrites the edge's self-IP list);
   - the `notify` and `detectorscfg` `systemConfigPath` (via
-    `SetSystemConfigPathForTest` from the apiserver `TestMain`).
-  - the `edgeban` `DefaultPath` (`/var/lib/cfm/edgeban.json`, via
-    `SetPathForTest`; a test installing a Default store gives it a temp path);
-  - the `ttlban` `DefaultPath` (`/var/lib/cfm/ttlbans.json`, the persisted
-    TTL bans; via `SetPathForTest`, and a test building a store gives it a
-    temp path);
-  - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`, the per-host
-    CHALLENGE_TOKEN / OPENRESTY_TOKEN / SSLCOLLECTOR_SOCK_TOKEN store; via `SetDirForTest`, which also
-    clears the per-process token caches, from the `TestMain` of a package whose
-    tests reach the probe, or per test before resolving a token);
-  - the `wafconfig` `SourcePath` / `LuaPath` (`/etc/cfm/cfm_waf_config.lua` →
-    `/var/lib/cfm/lua/cfm_waf_config.lua`; set per test). The sync is started
-    by the daemon (`cmd/cfm`), never by the detectors manager, so its tests
-    cannot reach the live copy.
+    `SetSystemConfigPathForTest` from the apiserver `TestMain`; the
+    detectors-config code otherwise prefers the live `/etc/cfm/detectors.conf`);
+  - the `edgeban` `DefaultPath` (`/var/lib/cfm/edgeban.json`, `SetPathForTest`);
+  - the `ttlban` `DefaultPath` (`/var/lib/cfm/ttlbans.json`, `SetPathForTest`);
+  - the `hostsecrets` `Dir` (`/var/lib/cfm/secrets`; `SetDirForTest`, which
+    also clears the per-process token caches, from a `TestMain` or per test
+    before resolving a token);
+  - the `wafconfig` `SourcePath` / `LuaPath` (set per test; the sync is
+    started only by the daemon, never by the detectors manager).
 
-  The detectors' init-time states no longer create `detectors.state.d`
-  (`core.DefaultState`). A new default path goes through the same kind of
-  var, and `TestFillDefaultsPathsFollowTheRedirectableDirs` fails a
-  webdetector store added as a literal. `check_test_isolation.sh` (`arm`
-  before `go test`, `verify` after) is the net: it flags any change to
-  content, mode or ownership. The ingest socket, for one, used to re-own the
-  live `/run/cfm` for a test's temp socket. In CI the four dirs are first
-  created writable for the runner and seeded like a packaged node
-  (`ci_seed_cfm_dirs.sh`: conffiles, Lua, logs, runtime-state placeholders),
-  so a regressing write succeeds and shows, including one that only rewrites a
-  file that exists. Two blind spots:
-  - it watches only CFM's own dirs, so a test reaching `/etc/default/grub` or
-    `/etc/sysctl.d` is outside it;
-  - the CI runner isn't root, so tests that skip unless run as root (the lsm
-    enable path, the nft integration test) never run under it there.
-
-  Never "fix" an unwritable watched dir by re-owning it: on a CFM host that
-  hands the live state to that account. To find a writer, run the suite in a mount
-  namespace with an overlay on `/etc`, `/var` and `/run` and a tmpfs over the
-  CFM dirs (seed them for the exists-only class), then look at what landed
-  there. That is how these were found, without touching the host.
+  A new default path goes through the same kind of var
+  (`TestFillDefaultsPathsFollowTheRedirectableDirs` fails a webdetector store
+  added as a literal; the detectors' init-time states create no
+  `detectors.state.d`). `check_test_isolation.sh` (`arm` before `go test`,
+  `verify` after) is the net: any change to content, mode or ownership of
+  CFM's four dirs, which CI creates writable and seeds like a packaged node
+  (`ci_seed_cfm_dirs.sh`). Blind spots: paths outside those dirs
+  (`/etc/default/grub`, `/etc/sysctl.d`), and root-only tests (lsm enable, nft
+  integration) never run in CI. Never "fix" an unwritable watched dir by
+  re-owning it (that hands a node's live state to that account). To find a
+  writer, run the suite in a mount namespace with an overlay on `/etc`, `/var`
+  and `/run` and a tmpfs over the CFM dirs (seeded), then look at what landed.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
-- **`detectors.conf` scalar readers now tolerate an inline `;`/`#` comment.**
-  `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`) strip inline
-  comments via `cleanScalar` (as the string/float readers already did). Before
-  that fix they parsed the raw stored value, so `KEY = 5 ; note` became `"5 ;
-  note"`, failed, and **silently fell back to the built-in default** — a
-  fleet-wide latent trap that masked configured values (`waf_security`'s
-  `DRY_RUN`, the `/tmp` cleanup gate, the suspicious-vhost challenge thresholds).
-  Fixing it was itself a behaviour change (those values finally apply), so it
-  shipped as its own reviewed PR. Note `cleanScalar` cuts at the first `;`/`#`
-  and does NOT do quote-aware scanning. The STRING readers (`kvStrClean` →
-  `detconf.CleanValue`, quote-aware) had the mirror bug until 2026-11-17: the
-  section parser stored `KEY = "15m" ; note` as `15m" ; note`, CleanValue took
-  the stray closing quote as an opening one and kept the comment, and
-  `[cfm_endpoints] BLOCK = "15m" ; …` (stock, and `[api_abuse]` on older
-  confs) read as block mode `no` — that stage 3 never banned anywhere. The
-  parser now reads a quoted value followed only by a comment as the text
-  between the quotes (`detconf.unquoteValue`; any other value as before), and
-  the stock conf no longer quotes those lines. Prefer comments on their own
-  line anyway; scalars must never legitimately contain `;`/`#`.
+- **`detectors.conf` readers tolerate an inline `;`/`#` comment — don't
+  regress it.** `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`)
+  strip it via `cleanScalar`; before that, `KEY = 5 ; note` failed to parse and
+  **silently fell back to the built-in default** fleet-wide. `cleanScalar` cuts
+  at the first `;`/`#` and is NOT quote-aware. The string readers
+  (`kvStrClean` → `detconf.CleanValue`, quote-aware) rely on the parser reading
+  a quoted value followed only by a comment as the text between the quotes
+  (`detconf.unquoteValue`); without it `BLOCK = "15m" ; note` read as block
+  mode `no`. Prefer comments on their own line; scalars must never
+  legitimately contain `;`/`#`.
 
 ---
 
 ## 6. Where we historically lost the ball (read before touching these)
 
-Distilled from ~1000 PRs (Mar–Jun 2026). These areas generated the most
-rework, follow-ups, and "harden"/"fix-the-fix" churn. Move carefully here.
+The areas that generated the most rework and "fix-the-fix" churn. Each rule
+here is the short form; the subsystem doc it names holds the incidents,
+measurements and as-built detail. Move carefully.
 
 ### cPanel / panel-auth integration — the single most painful area
-~85 PRs spanning April→June. The iframe + token transport flow is subtle
-and easy to regress. Before changing it, read
-`docs/cpanel-plugin-token-transport.md` and
+The iframe + token transport flow is subtle and easy to regress. Before
+changing it, read `docs/cpanel-plugin-token-transport.md` and
 `docs/scoped-postdeploy-verification.md`. Specifically:
 - Token delivery is **postMessage-first** (with `cfmTokenAck`); URL-token
   fallback is deliberately *not* used when ACK times out.
@@ -416,516 +318,299 @@ and easy to regress. Before changing it, read
 - Avoid assertion **nonce reuse**; watch for `token_replay`.
 - `panelauth` mints scoped viewer tokens; the plugin must not use admin
   tokens.
-- Separately, cPanel **account transfers** (DNAT/rsync `/acctxfer*`,
-  WHM live-transfer) need challenge/WAF bypass and generous timeouts —
-  several incidents traced to hangs around these endpoints.
+- cPanel **account transfers** (DNAT/rsync `/acctxfer*`, WHM live-transfer)
+  need challenge/WAF bypass and generous timeouts (several hang incidents).
 - **One list for cPanel's own API/SSO/transfer endpoints:**
-  `cfm_panel_hosts.is_panel_api_or_sso` (panel listeners 2083/2087/2096). The
-  proxy subdomains on 443 (`cpanel.`/`whm.`/`webmail.`, `cfm.lua` Step 0d) pass
-  only its `/cpsess<N>/` subset (`is_session_api`), because `/api/`,
-  `/session` and the like are ordinary app route names. Before 2026-09-28
-  only the ports passed anything through, so `cpanel.X` 403'd File Manager
-  saves and uploads (docs/waf.md FP case 11). Change the list there, never in
-  a copy. Step 0d trusts the Host prefix only because it also requires
-  `proxysubdomains=1` + `proxysubdomainsoverride=0` (`proxy_hosts_reach_panel`)
-  and a registrable-domain host (prefix + public suffix such as
-  `cpanel.com.gr` is a tenant's own domain). Together those mean every such
-  Host reaches cpsrvd. Never drop those gates: without them a spoofed
+  `cfm_panel_hosts.is_panel_api_or_sso` (panel listeners 2083/2087/2096); the
+  443 proxy subdomains (`cpanel.`/`whm.`/`webmail.`, `cfm.lua` Step 0d) pass
+  only its `/cpsess<N>/` subset (`is_session_api`). Change the list there,
+  never in a copy. Step 0d trusts the Host prefix only behind three gates —
+  `proxysubdomains=1` + `proxysubdomainsoverride=0`
+  (`proxy_hosts_reach_panel`) and a registrable-domain host (`cpanel.com.gr`
+  is a tenant's own domain). Never drop them: without them a spoofed
   `Host: cpanel.x` bypasses the WAF into a docroot. The Go decision engine
-  mirrors all three (`panel_session_api.go`). Its test reads the lists out of
-  the `.lua` file, and both sides run
-  `scripts/tests/fixtures/panel_session_api.txt`.
+  mirrors all three (`panel_session_api.go`); both sides run
+  `scripts/tests/fixtures/panel_session_api.txt`. Detail: `docs/waf.md` FP
+  case 11.
 
 ### WAF false positives — never "done"
-The WAF needs continuous tuning against real apps. Recurring offenders:
-Joomla K2 / elFinder (`cmd=<verb>` misread as command injection),
-`/.well-known/` (breaks AutoSSL/CA HTTP DCV), WP migration/backup plugin
-imports (chunked multipart carrying raw PHP trips rule 402 `UPLOAD_PHP_TAG` —
-e.g. `admin-ajax.php?action=WMW_import`; remedy is an operator-side temporary
-rule-scoped exclude, NOT a code carve-out — an automatic `action`-keyed
-exemption was tried and reverted: admin-ajax dispatches on `$_REQUEST['action']`
-(body overrides query) and the 32 KB body window can't see an `action` hidden
-past it, so no edge-time keying is safe — see `docs/waf.md` FP case 6). When
-adding/strengthening a
-rule, check it doesn't trip legitimate panel/app traffic, and prefer
-`logonly` → `challenge` → `block` promotion over going straight to block.
-Reference: `docs/waf.md` (FP case studies, excludes),
+The WAF needs continuous tuning against real apps (Joomla K2 / elFinder
+`cmd=<verb>`, `/.well-known/` DCV, WP migration-plugin imports tripping 402).
+For an import that trips 402 the remedy is an operator-side temporary
+rule-scoped exclude, NOT a code carve-out: an `action`-keyed exemption was
+tried and reverted, because no edge-time keying on admin-ajax's `action` is
+safe (`docs/waf.md` FP case 6). When adding/strengthening a rule, check it
+doesn't trip legitimate panel/app traffic, and promote `logonly` →
+`challenge` → `block`, never straight to block. Reference: `docs/waf.md`
+(FP case studies, excludes, the promotion playbook),
 `docs/challenge-waf-release-checklist.md`.
 
 ### Challenge excludes & scoping
-Exclude/bypass matching must be scope-aware for scoped users, and excludes
-are increasingly **file-presence based** rather than config flags. Pre-auth
-login challenge behaviour differs between DNAT and OpenResty modes — verify
-both. `/.well-known/` needs **two** carve-outs, not one: the in-path serving
-carve-out (`cfm.lua` Step 0a1) only stops *serving* a challenge; the
-log-driven decision engine must **also** exclude the prefix from per-IP
-scoring (`isWellKnownChallengeExempt` in `engine.go`), or a CA's ACME/DCV
-validator (hits many domains + many one-time token paths) trips the scanner
-heuristics and gets flagged, polluting per-IP state — under the since-RETIRED
-per-IP challenge-DNAT the flag redirected the validator outright and broke
-SSL issuance, the incident that earned the rule. Any path-based challenge
-exemption likely needs the same both-sides treatment. A client exemption
-needs a second place too: the challenge page itself. That covers the verified
-good-bot downgrade, a Challenge Access-Control entry and the exclude file's
-serve-time match. `/__cfm_challenge?next=…` is what a challenged visitor's
-address bar shows, so fetchers handed that URL (Google-Read-Aloud, Meta link
-previews) fetch it directly, and its location bypasses cfm.lua.
-`challengePageExempt` mirrors the three `handleDecision` blocks and sends
-those clients to `next`; change the blocks and the mirror together. The
-vhost uniqIP count is a third mirror (`vhostChallengeExemptClient`,
-`uniqip_exempt.go`, since 2026-10-27): a client that passes a vhost challenge
-(the good-bot and exclude-file blocks, plus the bypass list the edge flags in
-`log-cfm.lua` column 13) is not counted toward arming one. A vhost in
-LOCKDOWN (`vhost_lockdown.go`, `docs/vhost-lockdown.md`, a manual arm's
-attribute, 30m default / 6h max) withdraws all of them: Step 0 stops
-bypassing crawler (`1`) prefixes for that host (`cfm_lockdown.lua`; CDN `2`
-prefixes, QUIC.cloud, keep it; a held crawler also skips the inline WAF, or
-bait on the site would get Googlebot node-wide nft-banned by `waf_security`),
-and the decision and challenge-page mirrors stand down for it — a new client
-exemption must check `vhostLockedDown` too. The uniqIP count is deliberately
-NOT locked down (it would arm an automatic v2 that outlives the lockdown). The
-exception is a `next` that carries a `cfm_rt`: the exemption cannot clear
-that challenged POST, and its owner would lose it. Before 2026-10-06 these
-clients got the PoW: titan served it to meta-externalagent ~1 940 times in
-14 hours.
-Never serve challenge CONTENT at a content URL: a CDN whose rule ignores the
-origin's `Cache-Control` caches it despite `no-store`. Cloudflare in front of
-anastasiadi.gr cached the page CFM rendered at a challenged `/`, with another
-visitor's token, and its redirects (2026-10-19). Cleared visitors re-solved
-~30 times in two minutes until the page rate limit banned them. The page now
-lives only at `/__cfm_challenge`. A cleared client bounced back gets one
-`cfm_nc` cache-busting retry, and `edge_health` names the host
-(`challenge_cdn_cache.go`, Check F). The edge drops `cfm_nc` before the
-origin (`cfm.lua` `strip_cdn_bust_arg`), or a signed URL (Laravel) fails its
-signature check — only on a plain path (raw `$request_uri` path == `$uri`): a
-changed query makes nginx send the DECODED path, so anyone appending
-`?cfm_nc=x` could otherwise turn `%3C` into a literal `<` at the origin.
+- Exclude/bypass matching must be scope-aware for scoped users; excludes are
+  increasingly **file-presence based** rather than config flags. Pre-auth
+  login challenge behaviour differs between DNAT and OpenResty modes — verify
+  both.
+- **A path-based challenge exemption needs both sides.** `/.well-known/` has
+  the in-path serving carve-out (`cfm.lua` Step 0a1) AND the decision engine's
+  scoring exclusion (`isWellKnownChallengeExempt` in `engine.go`); without the
+  second a CA's ACME/DCV validator gets flagged as a scanner (it once broke SSL
+  issuance). Both sides run `scripts/tests/fixtures/wellknown_exempt.txt`.
+- **A client exemption has mirrors; change them together.** The challenge page
+  itself is reached directly (`/__cfm_challenge?next=…`, a location that
+  bypasses cfm.lua), so `challengePageExempt` mirrors the three
+  `handleDecision` blocks (verified good-bot downgrade, Challenge
+  Access-Control entry, exclude-file serve-time match) and sends those clients
+  to `next` — except a `next` carrying a `cfm_rt` (that challenged POST would
+  be lost). The vhost uniqIP count is a third mirror
+  (`vhostChallengeExemptClient`, `uniqip_exempt.go`).
+- **A vhost in LOCKDOWN withdraws every client exemption**
+  (`vhost_lockdown.go`, `docs/vhost-lockdown.md`): Step 0 stops bypassing
+  crawler (`1`) prefixes for that host (CDN `2` prefixes keep it; a held
+  crawler also skips the inline WAF, or bait would get Googlebot nft-banned),
+  and the decision and challenge-page mirrors stand down. A new client
+  exemption must check `vhostLockedDown` too. The uniqIP count is deliberately
+  NOT locked down (it would arm an automatic v2 that outlives the lockdown).
+- **Never serve challenge CONTENT at a content URL:** a CDN that ignores the
+  origin's `Cache-Control` caches it despite `no-store` (it once served a
+  cached challenge with another visitor's token). The page lives only at
+  `/__cfm_challenge`; a cleared client bounced back gets one `cfm_nc`
+  cache-busting retry, and `edge_health` Check F names the host
+  (`docs/edge-health.md`). The edge strips `cfm_nc` before the origin
+  (`strip_cdn_bust_arg`, or a signed URL fails), but only on a plain path —
+  rebuilding a changed query would send the origin the DECODED path.
 
 ### Traffic rules — `Simulate` IS the enforcement path
 `trafficRuleStore.Simulate` is wired as the nginx bridge's `RuleDecision`, so
 whatever it returns is what the edge enforces; the `/rules/simulate` API just
-exposes the same call. It ignored `Enabled` for months — every "start disabled,
-validate first" preset was live (fixed 2026-09; `disabled_match` now carries the
-would-be match for the UI). Also: a rule `allow` only ends rule evaluation — it
-never bypasses WAF / vhost challenge / IP block (those are OR'd in `cfm.lua`
-Step 3) — and clearance-cookie holders return at Step 2b before rules run.
-A request only a rule blocks is logged `up=cfm_block_rule` (IP / vhost blocks
-stay `cfm_block`), and the web detector's 403 counters skip it
-(`isRuleBlock403`): a rule's block never escalates into a 403_flood nft ban.
-Rule semantics live in `rules-model.js` on the UI side; change it in the same PR
-as `traffic_rules.go`. Design + open items: `docs/traffic-rules-ux-proposal.md`.
+exposes the same call (it once ignored `Enabled`, so every "start disabled"
+preset was live; `disabled_match` carries the would-be match). A rule `allow`
+only ends rule evaluation — it never bypasses WAF / vhost challenge / IP
+block (OR'd in `cfm.lua` Step 3) — and clearance-cookie holders return at
+Step 2b before rules run. A request only a rule blocks is logged
+`up=cfm_block_rule` and skipped by the 403 counters (`isRuleBlock403`): a
+rule's block never escalates into a 403_flood nft ban. Rule semantics live in
+`rules-model.js` on the UI side; change it in the same PR as
+`traffic_rules.go`. Docs: `docs/traffic-rules.md`,
+`docs/traffic-rules-ux-proposal.md`.
 
 ### cfm-lsm — signal, then noise
-Built in a one-week May burst (~55 PRs) and immediately needed extensive
-false-positive silencing (CRED/OBS/FS noise from systemd-per-user, bwrap,
-crontab/at, setuid-root contexts, CONFIG-gated tracepoints). New LSM rules
-ship noisy — budget for a tuning pass and honour prior LSM decisions.
-Also: BPF bytecode can go stale — `make build` runs `verify-bpf-bindings`
-and `make release` regenerates objects; don't bypass these.
-Reference: `docs/cfm-lsm.md`, `docs/kernsec.md`.
+New LSM rules ship noisy (the first burst needed extensive CRED/OBS/FS
+false-positive silencing) — budget for a tuning pass and honour prior LSM
+decisions. BPF bytecode can go stale: `make build` runs `verify-bpf-bindings`
+and `make release` regenerates objects; don't bypass these. Reference:
+`docs/cfm-lsm.md`, `docs/kernsec.md`.
 
-### WAF → autoblock (`waf_security`) — new Jul 2026, move carefully
+### WAF → autoblock (`waf_security`) — move carefully
 Turns in-path WAF hits into a persistent nft block via the detector framework
 (`internal/detectors/wafsec/` + `waf_security_register.go`, published from
-`webdetector.RecordWAFTrigger` via `SubscribeWAFHitEvents`). Design:
-`docs/waf-autoblock-design.md`. Hard-won points:
+`webdetector.RecordWAFTrigger` via `SubscribeWAFHitEvents`). Design, the
+family/rule arming table and the decision records:
+`docs/waf-autoblock-design.md`.
 - **Phase 1 feeds edge-`block` hits ONLY** (the subscribe callback drops any
-  hit whose action != `block`). Do **not** key autoblock on reason-family
-  alone: a family spans edge tiers — `WAF_BACKDOOR` mixes block 438/440 with
-  logonly/challenge_v2 430-439, and `WAF_RCE` mixes block 320/329/332 with
-  challenge_v2 322-327, so family-only keying autoblocks lower-tier recon. Families with an edge-`block`
-  rule today (the Go registry, `DefaultMode: "block"`, is the source — check it
-  before editing this list): `WAF_SQLI` (301), `WAF_SQLI_LEXICAL` (309, since
-  2026-08-23), `WAF_RCE` (320, 329, 332 since 2026-11-17), `WAF_UPLOAD_FNAME` (401, 414),
-  `WAF_UPLOAD_CONTENT` (402), `WAF_WEBSHELL` since 2026-07-03 (413, the
-  proper-noun drop-path subset), `WAF_BACKDOOR` since 2026-11-04 (440, a fake
-  plugin's own PHP file called with its download / run command; its ban held
-  per rule, `HoldAutoblock`, through a burn-in; and 438, the base64 `<?php`
-  opener, since 2026-11-17), `WAF_CVE` (10001+), `WAF_PHP_WRAPPER` (305),
-  `WAF_AUTH_BURST` (510-512, the xmlrpc multicall / pingback / burst
-  rules; 511 pingback held per rule since 2026-10-15), and since 2026-11-17
-  `WAF_JS_PROTO` (303), `WAF_XXE` (307) and `WAF_PHP_WEBSHELL_BODY` (416),
-  each with its one block rule held per rule (`HoldAutoblock`, so the family
-  is armed but bans nothing; 303 is the React2Shell sweep, ~830 bans a day
-  armed) — all armed to 1 — plus
-  `WAF_TRAVERSAL` since 2026-09-05 (rule 101;
-  raw-path rule 103 since 2026-09-22; **held at 0** through its burn-in, see
-  below) — those are the only ones that
-  can fire in Phase 1. A held RULE can also
-  ship in code: `HoldAutoblock` on its `WAFRule` (`waf_rule_ids.go`) is the
-  default for a `RULE_<id>` key, so the hold reaches configs that predate the
-  rule (10020, the TranslatePress logged-in reset-preview request — its
-  id-lookup leg 10019 was held too and is armed since 2026-11-17; 303, 307 and
-  416 since 2026-11-17, evaluated late like the rest; 511, the xmlrpc pingback WordPress itself
-  sends, deferred in `cfm_waf.lua` like them; 10022, CVE-2026-109618's
-  length-less multipart leg, which a chunked upload client also sends;
-  10026, the PixelYourSite session-copy leg (raw path, Referer host,
-  utm_* query), request parts any scanner can trip; 10028, Magento
-  PolyShell's inferences: what 10027 cannot read on a cart-save request —
-  a cut or unread body, an XML entity, an unreadable encoding — and, logged
-  only, the payload names off the cart-save routes). The
-  armed body rules 10021 (same CVE) and 10024 (CVE-2026-109619's
-  `PHP_SESSION_UPLOAD_PROGRESS` field, which the public PHP2Shell tool sent
-  past 10021 on 2026-10-21) run FIRST in `check()` and are the body rules
-  cfm.lua enforces during the body burn-in (`BURNIN_ENFORCE_IDS`), because
-  their exploit is a large or chunked `POST /`; 10027 / 10028 (Magento
-  PolyShell) are in `BURNIN_ENFORCE_IDS` too (they gate themselves on a
-  Magento cart-save request, and their exploit can arrive as a SOAP body
-  read in burn-in): 10027 runs right after 10024, and the held 10028 joins
-  it there in the burn-in second pass only (`ctx.burnin_pass`; late
-  otherwise, like every held rule), so no unenforced block (10005 on an
-  envelope's text) ends that pass first. The rendered `[waf_security]` template is derived from
-  the same code defaults, so a fresh `detectors.conf` lists exactly these.
-- **Adding a block-tier rule to a family SILENTLY arms its autoblock** — the
-  default is `1 iff WAFFamilyHasBlockRule(fam)` (`waf_security_register.go`), and
-  existing `/etc/cfm/detectors.conf` files don't list the family, so they inherit
-  the armed default on the next binary upgrade. When you promote a rule to
-  `block`, decide the autoblock intent in the SAME change. `WAF_WEBSHELL` was held
-  at `0` through burn-in — auto-arming nft-bans a source that GETs `/c99.php`,
-  which includes benign internet scanners (Shodan, Censys, uptime monitors,
-  researchers) — but as of **2026-07-18 it is armed by default** (code + reference
-  config): the operator runs it fleet-wide and confirms it cleanly bans malicious
-  scanners/scrapers/bots with acceptable collateral. Exempt a benign scanner with
-  `ALLOW_UA_CONTAINS`/`ALLOW_NETS` or hold rule 413 with `RULE_413 = 0` rather
-  than un-arming the family. Arming a *newly* block-promoted family is still a
-  deliberate opt-in decision, after its own burn-in.
-- **The Lua edge de-dups pushes per `(ip, reason family, action tier)`** within `push_cooldown`
-  (`cfm_waf.lua should_push`) — and, for the `block` tier, per RULE too
-  (since 2026-10-08: a family can mix armed and held block rules, and a held
-  rule's push must not swallow an armed one's). Harmless at threshold 1 (first
-  hit is what counts), but an accumulate threshold (e.g. 40) counts distinct
-  cooldown windows, not raw hits, and two block rules of one family in the same
-  window push twice — retune when Phase 2 turns on challenge-tier families.
-  A held block RULE (`WAFRule.HoldAutoblock`, e.g. 10020, 303) shadows armed ones
-  exactly like a held family does, so it runs late in `cfm_waf.lua`, next to
-  traversal.
+  hit whose action != `block`). Never key autoblock on reason family alone: a
+  family spans tiers (`WAF_RCE`, `WAF_BACKDOOR` mix block with challenge_v2 /
+  logonly rules), so family-only keying bans lower-tier recon. Which families
+  can fire is the Go registry (`DefaultMode: "block"` in `waf_rule_ids.go`),
+  never a hand-kept list; the rendered `[waf_security]` template derives from
+  it.
+- **Adding a block-tier rule to a family SILENTLY arms its autoblock**: the
+  default is `1 iff WAFFamilyHasBlockRule(fam)`, and existing
+  `/etc/cfm/detectors.conf` files inherit it on upgrade. When you promote a
+  rule to `block`, decide the autoblock intent in the SAME change: arm, hold
+  the rule (`HoldAutoblock` on its `WAFRule`, the default for its `RULE_<id>`
+  key, so it reaches configs that predate the rule), or hold the family
+  (`heldAutoblockFamilies`). Arming a newly block-promoted family is a
+  deliberate opt-in after its own burn-in. Block tier is also what the
+  panel-port gate (`cfm_panel.lua`) enforces, so a block promotion arms the
+  rule on `:2083/:2087/:2096` too — check the `waf_rule_detail` panel section
+  for that rule in the same review.
+- **A held block family or rule shadows armed ones** (the first block hit owns
+  the headline `record()`, `goto done` ends evaluation, and `cfm.lua` pushes
+  only the headline), so held rules and the held `WAF_TRAVERSAL` family run in
+  the late group of `cfm_waf.lua`, after every armed block family, as does
+  rule 201's block. Keep them there, or arm them. **`WAF_TRAVERSAL` is held
+  at `0`** in code (`heldAutoblockFamilies`, the one source
+  `wafSecurityFamilies` reads), the reference `detectors.conf` and the coverage
+  test; arming it is the operator's `TRAVERSAL = 1`. "Push every
+  block-tier hit" was rejected (it removes the cheap-rules-first short
+  circuit); revisit only if a second held FAMILY appears, and then by letting
+  `record()` continue past a held family's block only (decision record in the
+  design doc).
+- **The Lua edge de-dups pushes per `(ip, reason family, action tier)`**
+  within `push_cooldown` (`cfm_waf.lua should_push`), and per RULE for the
+  `block` tier (a held rule's push must not swallow an armed one's). An
+  accumulate threshold counts cooldown windows, not raw hits — retune when
+  Phase 2 turns on challenge-tier families.
 - **An nft ban never stops a client behind a trusted proxy** (Cloudflare): on
-  the wire it is the proxy's address. A banned scanner kept hitting sites for
-  half an hour after each ban (2026-10-09). The web-related bans (the
-  waf_security / webdetector / challenge_* / modsec / cfm_endpoints / cpanel /
-  login_bruteforce sections, the challenge server, manual API/CLI bans) also go to the edge ban
-  store (`internal/edgeban`), which the bridge decision answers
-  `ip_action=block` for PROXIED requests only (`px=1` from cfm_decision.lua;
-  a direct client is nft's, allow sets included), after IGNORE_IPS, before
-  every allow. It is NOT an nft mirror (fleet feeds, cfm.deny, port-scan/flood
-  bans stay out): a reconcile from a complete read only narrows it to what nft
-  still blocks, and every nft allow set wins. A new web blocker or unblock /
-  allow path must call `edgeban.Ban` / `edgeban.Unban`. The edge keeps its
-  own copy (`cfm_edgeban.lua`, the changes pulled from `/nginx/edgeban` every
-  ~5 s) and checks it at cfm.lua Step 0e, before every exemption but the
-  static IP/CIDR bypass, and on the static-asset locations: a new exemption
-  step goes AFTER it, or a banned proxied client walks through it. That check
-  is `[webdetector] EDGE_BAN_MODE` = `enforce` (default since 2026-11-10) or `log`.
-  Kill switch `[webdetector] EDGE_BAN`.
-  The rest of nft's IP filter (the fleet feeds, `block_v4`, every allow)
-  reaches a proxied client through `internal/proxyipfilter` instead: the lists
-  in the daemon's memory (never in Lua: 268 k fleet entries vs the edge copy's
-  20 k), asked by the same decision, after the edge ban store, allows first as
-  in `inet cfm input`. `[webdetector] PROXIED_IPFILTER_FEED` / `_LOCAL` =
-  `log` (default) | `enforce` | `off` (`docs/proxied-ipfilter.md`).
+  the wire it is the proxy's address. The web-related bans (the waf_security /
+  webdetector / challenge_* / modsec / cfm_endpoints / cpanel /
+  login_bruteforce sections, the challenge server, manual API/CLI bans) also
+  go to the edge ban store (`internal/edgeban`), answered `ip_action=block`
+  for PROXIED requests only. It is NOT an nft mirror, and every nft allow set
+  wins. **A new web blocker or unblock / allow path must call `edgeban.Ban` /
+  `edgeban.Unban`.** The edge checks its copy (`cfm_edgeban.lua`) at cfm.lua
+  Step 0e, before every exemption but the static IP/CIDR bypass: **a new
+  exemption step goes AFTER it**, or a banned proxied client walks through.
+  `[webdetector] EDGE_BAN_MODE` = `enforce` (default) | `log`; kill switch
+  `EDGE_BAN`. The rest of nft's IP filter (fleet feeds, `block_v4`, every
+  allow) reaches a proxied client through `internal/proxyipfilter` (daemon
+  memory, never Lua), after the edge ban store, allows first;
+  `PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` (default) | `enforce` | `off`
+  (`docs/proxied-ipfilter.md`).
 - **A connection is NAT'd once, by the first nat chain that rewrites it.**
-  Imunify360 DNATs its sets to WebShield at -100 (`ip nat PREROUTING`), and its
-  `remote_proxy_static` set holds Cloudflare's ranges. With CFM's web redirect
-  at the -99 default, every Cloudflare visitor skipped the edge on earth for
-  months (~29% of its web requests, 2026-11-17). Imunify nodes run
-  `NFT_DNAT_PRIORITY = -101`; `edge_health` check H (`web-dnat-order`) warns
-  when a DNAT runs ahead while WebShield serves real traffic. With CFM first,
-  a graylisted direct visitor is dropped by Imunify's own filter (it accepts
-  that set only on WebShield's ports), never challenged. What WebShield did
-  that CFM lost, measured: `docs/imunify360-gap-analysis.md` ("WebShield").
-- **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY temp-ban),
-  API reporting and email are the section sink's job (`autoblock_sink.go`) —
-  don't reimplement them. A plain alert blocks per the section `BLOCK` policy;
-  `Extra["enforcement"]="dryrun"` logs-without-blocking.
+  Imunify360 DNATs its sets (Cloudflare's ranges among them) to WebShield at
+  -100, ahead of CFM's -99 default web redirect, so Cloudflare visitors
+  skipped the edge for months. Imunify nodes run `NFT_DNAT_PRIORITY = -101`;
+  `edge_health` check H (`web-dnat-order`) warns. Detail:
+  `docs/imunify360-gap-analysis.md` ("WebShield").
+- **The detector only emits `core.Alert`.** Blocking, leniency (GR/CY
+  temp-ban), API reporting and email are the section sink's job
+  (`autoblock_sink.go`) — don't reimplement them. A plain alert blocks per the
+  section `BLOCK` policy; `Extra["enforcement"]="dryrun"` logs without
+  blocking.
 - Ships a **soft TTL block** (`BLOCK = "6h"`, self-healing), not `permanent`;
-  `DRY_RUN = 1` is available for a watch-first burn-in. Every WAF family is a
-  config knob (key = family minus `WAF_`); coverage of the full registry is
-  asserted by `TestWAFSecurityFamilyCoverage`.
+  `DRY_RUN = 1` gives a watch-first burn-in. Every WAF family is a config knob
+  (key = family minus `WAF_`); `TestWAFSecurityFamilyCoverage` asserts the
+  whole registry and the armed / held defaults.
 
 ### WAF CVE detectors (`WAF_CVE`) — named-vulnerability rules
-Per-CVE in-path detectors live in the `10000+` rule-id band and emit the
-`WAF_CVE` reason family (`WAF_CVE:CVE_<year>_<suffix>:PRODUCT:TAG`), which the
-autoblock notifier turns into a `WAF/CVE-YYYY-NNNN` alert automatically
-(`cveFromReason` in `wafsec/detector.go`). **Read `WAF_CVE.md` before adding
-one** — it carries the as-built reference and a step-by-step "CVE hunting"
-recipe, plus the candidate backlog and the design decisions (§5–§6). Hard-won
-points:
-- **Never write a CVE signature from memory.** The assistant's knowledge cutoff
-  predates most target CVEs — get the exact method/endpoint/marker from a public
-  PoC, the vendor patch, NVD references, or operator-supplied logs/captures. A
-  param *name* legit traffic also sends is not exact enough.
-- **`WAF_CVE` is armed by default** (`CVE = 1`) because it has an edge-`block`
-  rule (10001, Simple File List) and the operator wants CVE hits to *both*
-  nft-ban *and* alert on Slack/mail — an un-armed family is dropped by `wafsec`
-  before the sink, so `CVE = 0` would notify nothing. The family is
-  heterogeneous (many CVEs, varying FP confidence), so a **lower-confidence CVE
-  rule ships with a per-rule `RULE_<id> = 0`** (hold the rule, not the family);
-  `DRY_RUN = 1` gives a watch-first burn-in. `TestWAFSecurityFamilyCoverage`
-  asserts `WAF_CVE` defaults to `1`. (As of 2026-07-18 `WAF_WEBSHELL` is also
-  armed by default; exempt a benign `/c99.php` scanner with `ALLOW_UA_CONTAINS`/
-  `ALLOW_NETS` or hold rule 413 with `RULE_413 = 0`.) The one family held the
-  other way is **`WAF_TRAVERSAL`**: rule 101 was promoted to block on 2026-09-05
-  after a clean 6-server review, but the family is held at `0` in code
-  (`wafSecurityFamilies`), in the reference `detectors.conf` and in the coverage
-  test — at threshold 1 its ~2 300 scanner IPs/week would be ~330 six-hour bans
-  and notifications a day. Arming it is the operator's `TRAVERSAL = 1`. Because
-  a held block family would otherwise **shadow** armed ones (the first block hit
-  owns the headline `record()`, `goto done` ends evaluation, and `cfm.lua` pushes
-  only the headline), the traversal step runs **after every armed block-tier
-  family** in `cfm_waf.lua` — keep it there, or arm the family, if you touch
-  the order. That order fix covers the shipped arming state only (an operator
-  who arms `TRAVERSAL` and un-arms another family gets the mirror image).
-  Rule 201's block (score >= 99 scanner UA; WAF_BAD_UA is un-armed) sits in
-  the same late spot since 2026-10-09: at step 1 it shadowed sqlmap's own
-  SQLi ban (same mirror image if an operator arms `BAD_UA`).
-  "Push every block-tier hit" was considered and rejected: it needs the block
-  short-circuit removed (cheap rules first, heavy scanners skipped on blocked
-  requests — a design feature, not an accident) for a case that does not
-  occur; decision record in `docs/waf-autoblock-design.md`. Revisit only if a
-  second held family ever appears, and then by letting `record()` continue
-  past a HELD family's block only. Block tier is also what
-  the panel-port gate (`cfm_panel.lua`) enforces, so promoting a rule to block
-  arms it on `:2083/:2087/:2096` too — check the `waf_rule_detail` panel
-  section for that rule in the same review.
-- **Lua↔Go id parity is enforced.** A new `10xxx` id needs matching entries in
-  `configs/lua/cfm_waf.lua` `RULE_IDS` **and** `internal/webdetector/waf_rule_ids.go`
-  (`TestWAFRuleIDs_LuaParity`), plus positive+negative Lua tests.
-  **Mode parity is enforced too** (`TestWAFRuleIDs_DefaultModeLuaParity`,
-  added 2026-09-22): a rule promotion/demotion must edit the Lua CFG default
-  **and** the Go mirror's `DefaultMode` in the same change. The test exists
-  because 12 entries had silently drifted — 11 were `logonly→challenge`
-  promotions where only the Lua side was edited and the mirror was forgotten
-  (`rule_crlf_injection` drifted the other way). Enforcement was never wrong
-  (the Lua CFG is what runs) and none touched `block`, but the CLI/panel/MCP
-  glossary showed stale tiers for months, and `DefaultMode == "block"` is
-  the `waf_security` arming source — a forgotten mirror edit on a **block**
-  promotion would have mis-armed autoblock. Key the
-  detector on the exact endpoint/marker, reuse hardened helpers
-  (`detect_upload_content`, not a raw `<?php` scan), and decide autoblock intent
-  in the same change. A rule keyed on a request FIELD reads it through
-  `php_request_fields` (`cfm_waf_detectors.lua`), never a hand-rolled split: a
-  field the edge reads differently from PHP is a bypass, and three review
-  rounds on 10017-10020 kept finding new ones (media type in a parameter,
-  multipart continuation lines, the 5120-byte line cut, `name==`, a decoy past
-  `max_input_vars`). Change that reader only with
-  `scripts/tests/php_request_fields_oracle.py check` passing against a real PHP
-  (`php -S` runs the same rfc1867.c as php-fpm), then `record` the CI fixture.
+Per-CVE in-path detectors live in the `10000+` rule-id band and emit
+`WAF_CVE:CVE_<year>_<suffix>:PRODUCT:TAG`, which the notifier turns into a
+`WAF/CVE-YYYY-NNNN` alert (`cveFromReason`). **Read `WAF_CVE.md` before
+adding one** (as-built table, "CVE hunting" recipe, backlog, design
+decisions, the body burn-in's `BURNIN_ENFORCE_IDS`).
+- **Never write a CVE signature from memory.** The assistant's knowledge
+  cutoff predates most target CVEs — get the exact method/endpoint/marker from
+  a public PoC, the vendor patch, NVD references, or operator-supplied
+  logs/captures. A param *name* legit traffic also sends is not exact enough.
+- **`WAF_CVE` is armed by default** (`CVE = 1`): an un-armed family is dropped
+  by `wafsec` before the sink, so `CVE = 0` would notify nothing. Hold a
+  lower-confidence CVE rule per rule (`RULE_<id> = 0` / `HoldAutoblock`), not
+  the family. (`WAF_WEBSHELL` is armed too: exempt a benign `/c99.php` scanner
+  with `ALLOW_UA_CONTAINS`/`ALLOW_NETS` or hold `RULE_413 = 0` rather than
+  un-arming the family.)
+- **Lua↔Go id AND mode parity are enforced.** A new `10xxx` id needs matching
+  entries in `configs/lua/cfm_waf.lua` `RULE_IDS` **and**
+  `internal/webdetector/waf_rule_ids.go` (`TestWAFRuleIDs_LuaParity`), plus
+  positive+negative Lua tests. A promotion/demotion edits the Lua CFG default
+  **and** the Go `DefaultMode` in the same change
+  (`TestWAFRuleIDs_DefaultModeLuaParity`): the Lua CFG is what runs, but
+  `DefaultMode == "block"` is the `waf_security` arming source.
+- Key the detector on the exact endpoint/marker, reuse hardened helpers
+  (`detect_upload_content`, not a raw `<?php` scan), and decide autoblock
+  intent in the same change. **A rule keyed on a request FIELD reads it through
+  `php_request_fields`** (`cfm_waf_detectors.lua`), never a hand-rolled split:
+  a field the edge reads differently from PHP is a bypass. Change that reader
+  only with `scripts/tests/php_request_fields_oracle.py check` passing against
+  a real PHP (`php -S` runs the same rfc1867.c as php-fpm), then `record` the
+  CI fixture.
 
 ### Concurrency / process lifecycle
-Early bugs included zombie/unreaped detector tailer subprocesses, panics,
-and snapshot-refresh races. When spawning subprocesses or background
-refreshers, ensure reaping, bounded backoff, and stale-snapshot markers
-rather than advancing heartbeats on failure.
-
-**mmap'd readers: the lock must cover the READ, not just the pointer load.**
-`internal/enrich` GeoLite2 readers are memory-mapped (`maxminddb-golang`
-`Open` → mmap; `Close` → munmap). Lookups used to copy the reader pointer
-under `mu.RLock`, unlock, then read, while the hot-reload closed the old
-reader — so a lookup overlapping a database refresh (CFM's own
-`maxmindupdater`, as often as every ~3 days) read unmapped memory: an
-unrecoverable SIGSEGV that took the daemon down (fixed 2026-09-22; `readGeo`
-holds `mu.RLock` for the whole read, and a reader is closed only after it is
-detached under `mu.Lock`). Apply the same rule to any mmap'd or otherwise
-closeable shared resource. The corollary bit us in the same fix: once readers
-hold the RLock for real work, a WRITE lock on a hot path — even one held for
-nanoseconds just to test a rate limit — waits on them and, with Go's writer
-preference, stalls every new reader behind it
-(`BenchmarkLookupGeoFastUnderMisses`: ~3.0µs per fast-path lookup with the
-rate limit under the mutex, ~1.1µs with it on an atomic); `statChk` is an
-atomic for that reason. Real GeoLite2 files can't be committed, but
-`internal/enrich/mmdb_testutil_test.go` generates spec-valid `.mmdb` files at
-test time — use it rather than assuming mmdb code is untestable
-(`TestHotSwapNeverReadsAClosedReader` reproduces the crash on the old code
-within 2s). Two schemas land under the GeoLite2 file names — MaxMind's and,
-without a MaxMind account, IPLocate's flat one — and both readers (the Go
-enricher's `geodb.go`, the edge's `cfm_geo.lua`) must read both: for a long
-time neither read IPLocate's, and the node silently had no geo at all. Measure
-a third-party schema on the REAL file, never from its CSV docs: IPLocate's
-`asn` is a string, and a typed-`uint` decode failed the whole record.
+- When spawning subprocesses or background refreshers, ensure reaping, bounded
+  backoff, and stale-snapshot markers rather than advancing heartbeats on
+  failure (early bugs: zombie tailers, panics, snapshot-refresh races). An
+  unknown must never read as OK: a failed read is an error, not a clean empty
+  result.
+- **mmap'd readers: the lock must cover the READ, not just the pointer
+  load.** `internal/enrich` GeoLite2 readers are mmap'd (`Close` munmaps); a
+  lookup that dropped `mu.RLock` before reading crashed the daemon (SIGSEGV)
+  when a database refresh closed the reader. `readGeo` holds the RLock for the
+  whole read; a reader is closed only after it is detached under `mu.Lock`.
+  Apply the same rule to any mmap'd or otherwise closeable shared resource.
+  Corollary: then never take the WRITE lock on a hot path (even for a
+  nanosecond rate-limit check — with Go's writer preference it stalls every
+  reader); `statChk` is an atomic for that reason. Test mmdb code with
+  `internal/enrich/mmdb_testutil_test.go` (spec-valid `.mmdb` at test time;
+  `TestHotSwapNeverReadsAClosedReader`).
+- **Both geo schemas must be read everywhere**: MaxMind's and IPLocate's flat
+  one land under the GeoLite2 file names, and both readers (`geodb.go`,
+  `cfm_geo.lua`) must read both (for a long time neither read IPLocate's and
+  the node silently had no geo). Measure a third-party schema on the REAL file,
+  never from its docs (IPLocate's `asn` is a string; a typed-`uint` decode
+  failed the whole record).
 
 ### Traffic classifier / fingerprint reputation ("evidence ledger") — shadow-first signals, operator-armed enforcement
-New Sep 2026. The node convicts a **fingerprint** (TLS/JA4, e.g. `c28caa00`) and
-emits **evidence** for the central ledger in cfm-web — three grains: `solver_farm`
-(per-vhost solving farms), `challenge_score` (per-IP `would_deny`, persisted to
-`detection_history`), and WAF-hit fp attribution (the handshake-derived
-`cfm_tlsfp` stamped on `waf_trigger` — **not** the spoofable `X-CFM-TLS` client
-header). Hard-won invariant, **do not cross it**: no SIGNAL keys enforcement on a
-fingerprint **automatically** — the `WAFHitEvent` published to `waf_security`
-carries **no** fingerprint (so autoblock can't key on it), and a fingerprint is a
-**population, not one client** (a legit browser/residential IP shares a coarse
-TLS bucket with a farm). A request relayed by a trusted proxy (Cloudflare) carries
-the PROXY's handshake, so `cfm_tlsfp.value()` returns no fingerprint for it since
-2026-09-23. Before that every visitor of a proxied vhost shared `ba6b4aad`, and the
-detector convicted it as a farm. Since 2026-09-19 (master plan **E3 node slice**) the ONE
-enforcement path is the **operator-armed** per-fingerprint policy: cfm-web
-`fingerprint_policies` (arming is permission-gated there) → agent pull →
-`internal/webdetector/fppolicy.go` store → `/nginx/fppolicy` bridge lookup →
-`cfm.lua` Step 0c (`deny` 403s pre-clearance; challenge/challenge_v2 are a floor
-for uncleared clients). Since 2026-09-22 the panel ports consult it too
-(`cfm_panel.lua` step 2f, `PANEL_FP_POLICY_MODE` ladder, default enforce):
-an armed `deny` 403s on `:2083/:2087/:2096` as well, while challenge-tier
-fingerprints stay OBSERVE-ONLY there (the panel serves no per-request
-challenge — the 2e loop rationale).
-Knobs `[webdetector] FP_POLICY` / `FP_POLICY_ALLOW_FPS`. Since 2026-09-20 the
-same feed also carries **country / ASN policy kinds** (challenge tiers ONLY —
-a geo `deny` is excluded by doctrine and dropped at three gates), enforced
-daemon-side as a challenge floor in `handleDecision` (country from edge
-geo/enrich, ASN via the local mmdb) with `challenge_v2` biting at verify via
-the geo resolver; no edge Lua involved, `FP_POLICY=0` kills all kinds. **ChallengeV2 Rung 1
-is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
-collectors, guardrails D5): every solve is scored on positive-only headless
-evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
-`v2=<fp|geo|vhost|mark|unsolicited>` names the arm covering the solve — absent = unarmed,
-so a passed-under-arm solve is greppable, not mistaken for a plain v1 one
-(the whole `v2`/`v2_*` payload family, by prefix, and `ms` are stripped for
-scoped callers since 2026-09-29: fp/geo are operator policy, like `src`, and
-every other member — `v2_via`, a waiver, a rescue, and `ms`, which times the
-waiver's inline forward-confirm — narrows the grain; stripping `v2` alone
-left `v2_waived` without `v2_via` an exact `v2=geo`);
-`sig=ptr:..,tch:..,key:..,mv:..,hc:..,dm:..,dpr:..,raf:..` (+ since 2026-09-29
-the trajectory readings `ut,co,st,dj,mj,pd`, + since 2026-10-22 `hid:1`, a
-page hidden at POST time, which sends no window size so `outer_zero` cannot
-fire on a minimized window; the input counts are trusted
-events only) is the report AS REPORTED — dm/dpr/raf, the trajectory
-readings, hid and rf (the software-renderer family, an enum, 2026-11-10)
-corpus-only and scored by nothing, ptr+mv decide
-the real-input rescue below (it only ever clears), hc feeds the
-corpus-measured mobile_hw_lie/mac_hw_lie tells (2026-09-23,
-`docs/traffic-classifier.md` "Rung-1 hardware tells"; scored as ONE
-device-claim group (its max, once) with touch_lie and the UA-borne ua_lie
-(a legacy Edge/12-18 token beside Chrome/80+, 2026-09-29: the one
-uaplausible rule the scorer reads, not under the kill switch below), so a
-single spoofed device never rejects alone; no core-count tell for a Windows/Linux UA — an
-RDS/VDI host is indistinguishable from a farm box; kill switch
-`CHALLENGE_V2_HW_TELLS`); the same group and kill switch carry linux_sw
-(2026-11-10, E4 read 6, the c28caa00 hs-90 profile: 20 for a desktop X11
-Linux UA — never Android/CrOS/Mobile/TV/cast/Tesla/Puffin — on a software
-renderer, an OS prior read from the UA and glr, not from hc; Linux +
-sw_renderer 80 passes, + no_input 110 rejects), ptr/tch/key
-also the no_input amplifier's inputs; absent keys = not reported, never a
-fabricated zero; since 2026-09-22 every solve AND reject line also carries
-`cc=`/`asn=`/`asn_name=`/`ptr=`, resolved once at verify — country/ASN from a
-live mmdb read (the cached record can be a day stale), PTR cached-or-async;
-the `v2=geo` arm check reads the same live database (it used to read the
-cached record, and after an mmdb update a `v2=geo` line's `cc=` could sit
-outside the armed set — seen now, that is a bug);
-top-level `ptr=` is reverse DNS, NOT `sig=ptr:` — and a reject writes its own
-`challenge_v2_reject` history row, never `challenge_solved`, so
-`detection_history type=challenge_v2_reject node="all"` is the FP-hunting
-query; since 2026-09-23 solve / reject / would_v2 lines and both rows carry
-`src=` — a verify-time snapshot of WHAT challenged the client
-(`waf:<id>`/`ip:<rule>`/`vhost:<reason>`/`rule:<id>`/`fp`/`geo`, `challenge_src.go`),
-log-only, never an arm, stripped for scoped callers — and the `abuse_shadow` MCP
-tool's `humanity` section sizes a new v2 arm from it; since 2026-09-29 they also
-carry `scope=` (`web` / `panel:<port>`, the verify surface, log-only,
-stripped for scoped callers; the marks and the IP release are web-only, so it
-is how a panel solve is told apart); payload `ptr` is stripped from scoped history rows like `sig`, but as
-defence in depth only — drilldown/analyze-host already show scoped callers a
-per-IP PTR, so it is NOT an admin-only datum), and
-for an armed `challenge_v2` fingerprint a failing solve earns NO clearance
-(`result=v2_reject`, retry-able with backoff) — except an FCrDNS-verified good
-bot under a geo/vhost arm (the grains the decision exemption softens; fp and
-rule/WAF marks stay strict), waived under `CHALLENGE_GOODBOT_EXEMPT`
-(`v2_waived=<name>` on the solve line/history; Google-Read-Aloud scores 140
-from rotating first-seen IPs, so the gate forward-confirms a crawler-looking
-PTR inline — bounded, reject path only; a reject whose PTR claims a crawler
-carries `v2_waiver_miss=<grain|mark|lockdown|off|spoofed|timeout|transient>`, or it
-would read like a spoof) — and except, under EVERY grain, a failing score with
-real pointer input (sig ptr >= 5 AND mv >= 100), no certain tell
-(webdriver / headless UA) and a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve), never above it (the
-cap, `rescueMaxScore`, 2026-10-20, E4 read 3 — fixed, not the fail score;
-above it sits the farm-only device-claim family, which faked input must not
-carry through; linux_sw's share is not counted against it, so a Linux 120
-with real input is rescued like the Windows 100): `v2_rescued=input` on an armed solve's line/history
-row and on the unarmed would_v2 line, never on an unarmed solve line (2026-09-29,
-E4: Windows Chrome/109 PCs score exactly 100 with a software renderer and no
-window size, and a retry cannot change that; the counts are client-authored —
-posted or CDP-injected movement passes too (the page counts trusted events
-only; script-dispatched ones go to `ut`), the confirm fallback's
-residual as well; kill switch `CHALLENGE_V2_INPUT_RESCUE`) — at the EDGE `challenge_v2`
-still serves the same challenge page as `challenge` (the rung difference is
-enforced at verify, not at serve). The verify gate ORs four arm grains (plus,
-since 2026-11-18, `unsolicited`: a web solve no challenge covered at verify,
-src=-, the farms' pre-solve for a cookie; a failing one is withheld — no
-cookie, 303 to next — never refused, `CHALLENGE_V2_UNSOLICITED`; and an
-automatic source's note rides its challenge entry, so a timed-out tick no
-longer drops a served challenge to v1):
-fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL
-vhost challenge — arm-surfaces slice A: API/CLI/cfm-admin Tier picker;
-persisted with the challenge; since 2026-11-14 the tier of every NEW manual
-arm that names none, panic button included, `CHALLENGE_V2_MANUAL` — or, since 2026-09-29, an AUTOMATIC vhost
-challenge whose source is in `CHALLENGE_V2_AUTO_VHOST`, default
-`suspicious_vhost,uniqpaths_short,under_attack,vhost_config` (a D5 amendment:
-TTL'd by the challenge, sized from the `src=` corpus first — except
-`vhost_config`, the always-on list (by default the `webmail.*, whm.*, cpanel.*`
-panel subdomains, every verify scope), which joined on 2026-10-22 after E4
-with no TTL: its bound is the pin or the node knob), overridable per vhost by
-a persisted tier pin `v1|v2|auto`; a manual v1 arm never downgrades an
-automatic v2 — that was a scoped bypass of an operator's v2 pin; ONE
-resolver, `challengeV2VhostTier`, serves the gate and every surface — never
-read the manual rung alone for "is this vhost v2"; a `v2=vhost` line/row
-carries `v2_via=manual|pin|auto:<source>` — src= cannot say, it reads the
-bridge entry's sticky reason), and a rung mark with three writers, each
-scoped like the challenge it imposed and read for web-scope verifies only —
-a traffic rule with action `challenge_v2` at decision time, per (ip,host)
-(slice B: rules-model.js and traffic_rules.go changed in the same PR, per
-the Simulate rule), and a WAF rule set to `"challenge_v2"` in
-cfm_waf_config.lua, per IP (slice C: severity challenge < challenge_v2 <
-block, only block short-circuits; handleIPPush records the mark), and,
-since 2026-10-22, the per-IP malpath challenge (`CHALLENGE_PATHS`), per IP
-(slice E, `ChallengeIPWithReason`; `CHALLENGE_V2_PATHS = 0` turns it off:
-a HeadlessChrome scanner solved it at v1 and downloaded an app's storage).
-The malpath challenge also REVOKES the IP's clearance (the cookie is
-stateless, so the daemon lists the IP on `/nginx/clearance/revoked`, the edge
-polls it into `clrrv|<ip>` and cfm.lua Step 1 stops honouring the cookie;
-it drops the bridge's `okState`, which otherwise answered allow over a later
-per-IP challenge; the challenge page must not wave a revoked cookie through
-either; `CHALLENGE_PATHS_REVOKE`), and its failed visits (rejects 10+ min
-apart, or 30 min into one that never pauses; never raw rejects: the page
-retries, and its give-up text asks for a reload) hold the challenge for an
-hour (no later challenge may shorten a malpath one: `HoldUntil`,
-`withMalpathHoldLocked`; holds survive a detectors.conf reload, not a
-restart; a solve ends them), then ban (`CHALLENGE_V2_PATHS_REJECT_BAN`, malpath-marked IPs only: the
-other grains' rejects are site owners' own bots and arm-held farms).
-An unblock clears every rung mark on the IP (`clearChallengeV2Marks`).
-Making webdriver / headless UA reject at every tier was measured and
-rejected: unarmed, they are mostly the site owner's own tools (HubSpot,
-iubenda, the Plesk screenshot bot). The WAF
-mark is per IP because its ipState decision is: until 2026-09-29 it was per
-(ip,host), and a client solved the same challenge at v1 on a sibling vhost.
-A passing solve releases the IP's decision on every host, so only a
-web-scope solve releases it (a panel solve used to lift a web WAF challenge).
-`rule_xss` 302 ships at challenge_v2 by default since 2026-09-22, and
-`TestWAFRuleIDs_DefaultModeLuaParity` now pins every Go DefaultMode to the
-Lua CFG default). Either way the wire/ipState
-stays plain "challenge" (the edge vocabulary), the verbatim tier reaches
-cfm.waf.log/history, and challenge-tier hits never feed waf_security
-autoblock. Version skew: an OLDER edge maps the unknown WAF mode to
-`disabled` — upgrade before setting the tier (docs/waf.md). Verify is reachable only through the
-edge (localhost listener; the per-IP challenge-DNAT is RETIRED per
-`docs/edge-unification-plan.md`), so the gate inputs (`X-CFM-TLS`, the
-verify host) are edge-authoritative on current confs; the client-authored
-humanity report remains spoofable by a signal-aware farm — deliberate D5b
-residual, all documented in the HONEST LIMITS block of `challenge_v2.go`; Rung 2 is narrowed to a
-"confirm you're human" step — since 2026-11-17 BUILT as the under-attack confirm
-(`challenge_confirm.go`, `CHALLENGE_V2_CONFIRM`, default `manual` = an operator's
-`attack on` only): a no-input solve from outside `CHALLENGE_V2_CONFIRM_AUDIENCE`
-(GR,CY; datacenter ASNs count as outside) gets a 403 + `X-CFM-Confirm` token and a
-Continue button, and the click passes (never a reject); the re-post's PoW is checked
-as of the token, so it outlives the PoW TTL — the fallback for a Rung-1 reject is
-not built — the visible puzzle was dropped 2026-09-29, and a farm running real browsers
-(`hs=0`) is the operator fingerprint / geo policy's job, not a harder check (master plan §5, E3's honest
-limits; `cfm_pcw` fired on none of them in the 2026-09-29 read). **Where we are: `docs/abuse-defense-progress.md`**
-(the measurement journal — read it first). **Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18 —
-the ONE roadmap/decision log; the other docs' phase checklists are frozen). Design
-hubs: `docs/traffic-classifier.md` (node) + `cfm-web:docs/fingerprint-reputation.md`
-(central). See also `docs/challenge-score.md`, `docs/roadmaps/challenge-engine.md` §8.1.
+Read **`docs/abuse-defense-progress.md`** first (where we are), then
+**`docs/abuse-defense-master-plan.md`** (THE plan of record and decision log;
+other docs' phase checklists are frozen). Every tell, line key, measurement and
+the observability contract: `docs/traffic-classifier.md` (§7 lists the rest).
+
+**The invariant — do not cross it: no SIGNAL keys enforcement on a fingerprint
+automatically.** A fingerprint (TLS/JA4) is a **population, not one client**
+(a legit browser shares a coarse TLS bucket with a farm). The
+`WAFHitEvent` published to `waf_security` carries **no** fingerprint, and WAF
+attribution uses the handshake-derived `cfm_tlsfp`, never the spoofable
+`X-CFM-TLS` client header. A request relayed by a trusted proxy carries the
+PROXY's handshake, so `cfm_tlsfp.value()` returns no fingerprint for it.
+Likewise origin is never innocence and datacenter-ASN alone never drives an
+adverse decision. The ONE fingerprint enforcement path is the
+**operator-armed** per-fingerprint policy: cfm-web `fingerprint_policies` →
+agent pull → `fppolicy.go` → `/nginx/fppolicy` → `cfm.lua` Step 0c (`deny`
+403s pre-clearance; challenge tiers are a floor for uncleared clients); the
+panel ports enforce an armed `deny` too (`cfm_panel.lua` step 2f,
+`PANEL_FP_POLICY_MODE`, default enforce) while challenge-tier fingerprints
+stay observe-only there (the panel serves no per-request challenge). The
+same feed carries **country / ASN policy kinds, challenge tiers ONLY** (a geo
+`deny` is excluded by doctrine).
+Knobs `[webdetector] FP_POLICY` (`0` kills all kinds) / `FP_POLICY_ALLOW_FPS`.
+
+**ChallengeV2 — couplings a code change can break:**
+- The edge serves `challenge_v2` as the same page as `challenge`; the rung is
+  enforced at verify. The wire/ipState stays plain "challenge"; the verbatim
+  tier reaches cfm.waf.log/history; challenge-tier hits never feed
+  `waf_security`. An OLDER edge maps an unknown WAF mode to `disabled` —
+  upgrade before setting the tier (`docs/waf.md`).
+- **Arm grains** (the list also lives in `challenge_v2.go`'s header):
+  fingerprint policy, geo policy, a per-vhost v2 tier, `unsolicited` (a web
+  solve no challenge covered: withheld, never refused), and rung marks from
+  three writers — a traffic rule with action `challenge_v2` (per ip+host;
+  `rules-model.js` and `traffic_rules.go` change together), a WAF rule at
+  `"challenge_v2"` (per IP, recorded in `handleIPPush`), and the malpath
+  challenge (`CHALLENGE_PATHS`, per IP, `CHALLENGE_V2_PATHS`). Marks are read
+  for web-scope verifies only, and only a web-scope solve releases the IP's
+  decision. An unblock clears every rung mark (`clearChallengeV2Marks`).
+- **Exemptions at verify are grain-scoped.** The FCrDNS good-bot waiver
+  (`CHALLENGE_GOODBOT_EXEMPT`, `v2_waived=`) applies only under a geo / vhost
+  arm (the grains the decision exemption softens) and never in lockdown; fp
+  policy and rule/WAF marks stay strict. The real-input rescue
+  (`v2_rescued=input`) applies under every grain but never above its fixed cap
+  (`rescueMaxScore`) and never with a certain tell (webdriver / headless UA).
+  Making webdriver / headless UA reject at every tier was measured and
+  rejected (unarmed, they are mostly site owners' own tools).
+- **ONE resolver for "is this vhost v2": `challengeV2VhostTier`**, serving
+  the gate and every surface — never read the manual rung alone. A manual v1
+  arm never downgrades an automatic v2 (that was a scoped bypass of an
+  operator's v2 pin).
+- The malpath challenge also revokes the IP's clearance (the edge must not
+  honour, nor the challenge page wave through, a revoked cookie), and its
+  failed visits hold, then ban — malpath-marked IPs only: other grains'
+  rejects are site owners' own bots and arm-held farms. Detail: master plan
+  §5 slice E.
+- **A reject writes its own `challenge_v2_reject` history row, never
+  `challenge_solved`** (`detection_history type=challenge_v2_reject
+  node="all"` is the FP-hunting query).
+- **Scoped callers never see operator policy**: the whole `v2` / `v2_*`
+  payload family (by prefix), `ms`, `src`, `scope` and `sig` are stripped for
+  scoped callers (`docs/endpoint_scope_inventory.md`); stripping `v2` alone
+  leaked the grain through its siblings. Payload `ptr` is stripped too, as
+  defence in depth only (scoped drilldowns already show a per-IP PTR).
+- **Report what was reported**: absent keys mean not reported, never a
+  fabricated zero; humanity keys are omitted when the scorer did not run.
+  Corpus-only readings (`dm`/`dpr`/`raf`, trajectory, `hid`, `rf`) are scored
+  by nothing until the corpus says so; a new tell is written from the corpus,
+  never from memory, and a single spoofed device claim never rejects alone.
+  The real-input rescue only ever clears. `src=` and `scope=` are log-only,
+  never an arm. Kill switches: `CHALLENGE_V2_HW_TELLS`,
+  `CHALLENGE_V2_INPUT_RESCUE`, `CHALLENGE_V2_UNSOLICITED`,
+  `CHALLENGE_V2_PATHS`, `CHALLENGE_PATHS_REVOKE`,
+  `CHALLENGE_V2_PATHS_REJECT_BAN`. The client-authored humanity report stays
+  spoofable by a signal-aware farm (the HONEST LIMITS block of `challenge_v2.go`); a farm
+  running real browsers is the operator fingerprint / geo policy's job.
 
 ### Site Cache (per-vhost edge caching) — bypass-by-default, the rails are absolute
-Built Sep 2026 (`docs/site-cache-design.md` = design + as-built,
-`docs/site-cache-runbook.md` = operating it). CFM once shipped a GLOBAL cache
-and it broke redirects, SSO, webmail and cPanel — every rule here exists
-because of that. Hard-won points:
+CFM once shipped a GLOBAL cache and it broke redirects, SSO, webmail and
+cPanel — every rule here exists because of that. Design + as-built:
+`docs/site-cache-design.md`; operating it: `docs/site-cache-runbook.md`.
 - **Bypass-by-default, pinned by `check_site_cache_config.sh`.** The confs
   pre-set `$cfm_cache_skip "1"`; only `cfm_cache.lua` (`static_gate` /
   `micro_gate`) flips it. Keep the guard strict and mutation-test any change
@@ -934,97 +619,63 @@ because of that. Hard-won points:
   `$arg_*` variable SHADOWS the real value (a `map` for the whole http block),
   so a stray `map … $http_authorization` would silently turn the
   credentialed-request rail off — the guard refuses every such writer.
-- **Tier B: arming a vhost's micro tier is the opt-in.** `MICRO_CACHE_ENFORCE`
-  shipped `0` (dry run) through burn-in, and has defaulted to `1` since
-  2026-09-23. That day the design §5.7 checklist passed on a live WordPress
-  vhost (infected.gr on virgo): anonymous MISS → HIT → EXPIRED at the bucket,
-  a logged-in user always bypassed, and logout went back to HITs. No other node
-  had a micro-armed vhost, so the flip armed nothing already there. The knob is
-  now a kill switch like `SITE_CACHE` (`0` = node-wide dry run, no vhost
-  disarmed). What guards a tenant is the per-vhost arm: the page confirms it,
-  and before arming micro on a new kind of app (a shop, a membership site)
-  follow runbook §7 (arm it `--strict-cookies`, find its session cookies with
-  the debug stamp, then §5.7 steps 5–7). The edge reader still treats an ABSENT
-  field as off (fail-safe; every file the daemon writes carries it). Micro
-  is entered ONLY at cfm.lua's Step 4 (after WAF, challenge, bridge decisions);
+- **Tier B: arming a vhost's micro tier is the opt-in.**
+  `MICRO_CACHE_ENFORCE` (default `1`) is a node-wide kill switch like
+  `SITE_CACHE`; the per-vhost arm is what guards a tenant. Before arming micro
+  on a new kind of app (a shop, a membership site), follow runbook §7. The
+  edge reader treats an ABSENT field as off (fail-safe). Micro is entered ONLY
+  at cfm.lua's Step 4 (after WAF, challenge, bridge decisions);
   `cfm_micro_entry_structure_test.lua` pins it.
 - **Tier A's static recipe/TTL are labels.** The static locations follow the
-  origin's Cache-Control/Expires with a 1 h fallback; don't document or promise
-  a static TTL the edge doesn't apply. Micro TTL snaps to MICRO_BUCKETS
-  {1,2,5,10,30,60,90,120}s; the guard pins the Lua list to the conf zones/locations.
+  origin's Cache-Control/Expires with a 1 h fallback; don't document or
+  promise a static TTL the edge doesn't apply. Micro TTL snaps to
+  MICRO_BUCKETS {1,2,5,10,30,60,90,120}s; the guard pins the Lua list to the
+  conf zones/locations.
 - **Go↔Lua parity via a generated fixture.** `site_cache_edge_parity_test.go`
-  renders the real feed + `StatsKeyFor` answers into
-  `scripts/tests/fixtures/site_cache_edge_parity.lua`; the Lua test feeds it to
-  the real `cfm_cache.lua`. Regenerate with `-update-edge-parity` and REVIEW
-  the diff — a changed key is a behaviour change, not fixture noise.
+  renders `scripts/tests/fixtures/site_cache_edge_parity.lua` for the real
+  `cfm_cache.lua`. Regenerate with `-update-edge-parity` and REVIEW the diff —
+  a changed key is a behaviour change, not fixture noise.
 - **The cfm-admin page model is a pinned copy.** `site-cache-model.js`
   mirrors the daemon's host / TTL / recipe / cookie rules and the edge's
-  bucket snapping. `site-cache-model.test.js` reads the recipe lists and limits
-  from `site_cache.go` and `MICRO_BUCKETS` from `cfm_cache.lua`. The cases in
-  `scripts/tests/fixtures/site_cache_ui_parity.txt` run in the JS test and on
-  the side they mirror:
-  - host / cookie through the daemon's real set path, TTL through
-    `parseCacheTTL` (`site_cache_ui_parity_test.go`);
-  - bucket through `cfm_cache.lua` (`cfm_cache_ui_parity_test.lua`).
-
-  Change a rule, a recipe or a bucket and those tests tell you the page must
-  follow. The page's saves are merge patches carrying only what the operator
-  decided. Never make one resend the whole form: that silently reverts a
-  concurrent cookie-rail change, and a new-policy form over an existing host
-  switched the host's caching off.
-- **`shdict:incr(key, n, init)` loses counters on a crc32 collision**
-  (lua-nginx-module 0.10.26, verified on nginx 1.24; the fleet's OpenResty /
-  Angie builds unchecked): the other key reads nil, or both count wrong, for
-  the dict's life (~13% odds per node at 35 000 counters; per-IP rate counters
-  at ~100k keys hit it routinely). Every edge counter goes through
-  `cfm_shdict.incr(dict, key, n, ttl)`: `incr` without init, then `add` with the
-  TTL, then `incr` again. That covers cfm_cache_log, cfm.lua waf_insp, the
-  cfm_decision breaker, the cfm_fppolicy budget, cfm_pcw, the cfm_rules rate
-  counters, cfm_ua_emergency and log-cfm. It works whatever the module version.
+  bucket snapping; `site-cache-model.test.js` and
+  `scripts/tests/fixtures/site_cache_ui_parity.txt` (run against the daemon's
+  set path and `parseCacheTTL`, and `cfm_cache.lua`) tell you when the page
+  must follow a rule, recipe or bucket change. The page's saves are merge
+  patches carrying only what the operator decided; never make one resend the
+  whole form (it silently reverted concurrent changes and switched caching
+  off).
+- **Every edge counter goes through `cfm_shdict.incr(dict, key, n, ttl)`**,
+  never `shdict:incr(key, n, init)`, which loses counters on a crc32 collision
+  (lua-nginx-module 0.10.26; per-IP rate counters hit it routinely).
   `cfm_shdict_test.lua` fails a new direct `incr` call with an init argument
-  (`d:incr`, `d.incr`, `d["incr"]`, in the modules and the confs' inline Lua;
-  an alias such as `local f = d.incr` is not seen), and requires the helper to
-  be bound as `local shd`.
-- **A shared dict's size change resets it on reload** (a same-size reload keeps
-  it); key counters on a fixed-size digest so capacity is a fixed number of
-  counters (the slab slot doubles past a 52-byte key).
+  (`d:incr`, `d.incr`, `d["incr"]`, in modules and confs' inline Lua; an alias
+  is not seen) and requires the helper to be bound as `local shd`.
+- **A shared dict's size change resets it on reload** (a same-size reload
+  keeps it); key counters on a fixed-size digest so capacity is a fixed
+  number of counters.
 - **The never-cache rules differ by tier. Don't document them as one list.**
   Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
-  panel/webmail hosts, GET/HEAD only, script paths — with ONE Tier B
-  exception (2026-10-13): a response whose Set-Cookie headers are ALL
-  tracking cookies (`_fbp`, `_fbc`, `_ga`, `_ga_<ID>`, `_gid`, `_gat`,
-  `_gcl_au/aw/dc/gb/gf/ha/gs`, case-sensitive) is stored, and the HTTPS
-  server's header filter strips every tracking line from every micro
-  response (`cfm_cache.micro_setcookie_filter`, `$cfm_sc_unsafe` fail-closed
-  "1"). Facebook for WooCommerce sets `_fbp` server-side on every page, so
-  without it no such shop could be micro-cached. It must stay in the
-  server-level `header_filter_by_lua_block`: a location-level one replaces
-  that block. nginx tests `proxy_no_cache` after the header filters (verified
-  live on nginx 1.24 + lua-nginx-module 0.10.26); the guard pins the rest.
-  The filter reads `headers_out`, so a cookie the EDGE adds before the micro
-  exec (`cfm_clearance`) also keeps `$cfm_sc_unsafe` at "1": wiring the
-  clearance fast path to micro (design §5.5.1) must exclude those first —
-  in the filter AND in `micro_note`, which marks a URL uncacheable on the same
-  `$cfm_sc_unsafe`. A
-  node can run new Lua with an old conf (the conf deploys only when `-t`
-  passes): `micro_gate` clamps to 60 s and `micro_note` keeps the old cookie
-  rule when `$cfm_sc_unsafe` is undeclared. Tier A reads no request
-  cookie and looks at the path only for its extension; session cookies,
-  credential headers and admin paths are Tier B only.
-- **`SITE_CACHE = 0` freezes each worker's policy table.** There is no feed
-  poll while it is off, so a purge or policy change reaches a worker only on
-  its first poll after the switch is restored, up to ~60 s later. The incident
-  procedure is: purge, reload the edge WHILE the switch is still 0, then
-  restore it (runbook §8). Reloading after the restore leaves a window: an old
-  worker re-reads the switch within ~10 s and serves the old generation until
-  it next polls.
-- **`detectors.conf` edits apply without a reload.** The manager polls the file.
-  SIGHUP still ends the daemon (its only handler saves the TTL bans,
-  `internal/ttlban`, then re-raises the signal), so `systemctl reload cfm` restarts it
-  (systemd `Restart=always`). A config reload builds a new webdetector Engine,
-  which empties the in-memory Site Cache stats view. A reload follows any save
-  (the signature is the file mtime) and the rotation of a tailed detector log
-  (its inode is hashed too).
+  panel/webmail hosts, GET/HEAD only, script paths; session cookies,
+  credential headers and admin paths are Tier B only. ONE Tier B exception: a
+  response whose Set-Cookie headers are ALL tracking cookies is stored, and the
+  tracking lines are stripped from every micro response by
+  `cfm_cache.micro_setcookie_filter` (`$cfm_sc_unsafe`, fail-closed "1"). That
+  filter must stay in the server-level `header_filter_by_lua_block` (a
+  location-level one replaces it). A cookie the EDGE adds before the micro
+  exec (`cfm_clearance`) keeps `$cfm_sc_unsafe` at "1": wiring the clearance
+  fast path to micro (design §5.5.1) must exclude those first, in the filter
+  AND in `micro_note`. A node can run new Lua with an old conf: keep the
+  old-conf fallbacks in `cfm_cache.lua`. Cookie list: runbook; details: design doc.
+- **`SITE_CACHE = 0` freezes each worker's policy table** (no feed poll while
+  off). Incident procedure: purge, reload the edge WHILE the switch is still
+  0, then restore it (runbook §8); reloading after the restore leaves a
+  window of the old generation.
+- **`detectors.conf` edits apply without a reload** (the manager polls it).
+  SIGHUP ends the daemon (its only handler saves the TTL bans, then re-raises),
+  so `systemctl reload cfm` restarts it (systemd `Restart=always`). A config
+  reload builds a new webdetector Engine, which empties the in-memory Site
+  Cache stats view; it follows any save (file mtime) and the rotation of a
+  tailed detector log (inode).
 
 ---
 
@@ -1062,6 +713,7 @@ because of that. Hard-won points:
 | CLI commands no topic doc owns (`webtop`, `bots`, `firewall status/path`, `health`) | `docs/cli.md` |
 | MySQL Governor | `docs/mysql-governor.md` |
 | Outbound Abuse Sentinel (per-uid outbound SMTP / scan / HTTP abuse) | `docs/outbound-sentinel.md` |
+| Packaging: verifying an rpm change in an EL container | `docs/packaging.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 | Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
 | ClamAV upload scanning (scope, inline mode, signature excludes) | `docs/clamav.md` |
@@ -1091,87 +743,61 @@ does not). A standing "no" goes into `docs/ROADMAP.md` as a `[decided]` line.
 ## 8. Releasing & CHANGELOG
 
 **The version IS the date, in UTC.** The Makefile sets
-`VERSION ?= $(date -u +%Y.%m.%d)` (all release timestamps are `date -u` — UTC —
-so a build never lands on a different day depending on the build host's
-timezone). The `.deb` and the git tag carry a `-HHMMSS` UTC suffix
-(`vYYYY.MM.DD-HHMMSS`) so multiple builds in a day are distinct; the CHANGELOG
-heading, however, is **date-only** (`YYYY.MM.DD`) — the date is the unit of
-release. There is no separate semver to bump. The normal release is just:
+`VERSION ?= $(date -u +%Y.%m.%d)` (every release timestamp is `date -u`, so a
+build never lands on a different day by host timezone). The `.deb` and the git
+tag carry a `-HHMMSS` UTC suffix (`vYYYY.MM.DD-HHMMSS`); the CHANGELOG heading
+is **date-only** (`YYYY.MM.DD`) — the date is the unit of release. There is no
+separate semver to bump. The release ritual is:
 
 ```bash
 make release    # builds bin/cfm, then the .deb and .rpm; also stamps CHANGELOG (below)
 make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
 ```
 
-`make release` runs `bypass-list bpf deb rpm`, so it also regenerates BPF
-objects — needs `clang` + `libbpf-dev` on the build host. `bypass-list` runs
-first: it re-fetches `configs/challenge_waf_bypass.conf` (crawler + CDN ranges:
-Google, Bing, QUIC.cloud, ...) with `scripts/build_bypass_list.py` so every
-package ships fresh ranges. The generator is fail-safe and runs `--strict`
-there (feeds are retried; if one still fails, comes back empty or — a feed of
-10+ ranges — shrinks by over half, the result is out of bounds, or the covered
-address space grows by more than the existing space minus its largest range
-plus a /20 / /48 — a poisoned feed — the last-good file ships and it
-warns with that file's date: never a partial list; the fetch is capped by
-`BYPASS_TIMEOUT`, 300 s). The
-offline validator (`bypass_list_test.py`, what `check_bypass_list.sh` runs in
-CI) failing does stop the release, and so does having no Python >= 3.9 to run
-it (the newest `python3.x` on PATH is used; EL8's `python3` is 3.6).
-`BYPASS_REFRESH=0` skips both for an offline build, and the release commit
-then leaves the list out. Prefixes are written `<cidr> 1;` (crawler) or
-`<cidr> 2;` (a `CDN_SOURCES` entry, QUIC.cloud): both bypass, but a vhost
-lockdown withdraws only the `1` kind (`docs/vhost-lockdown.md`), and the
-validator fails a committed list that lost its `2` lines. **Never add a source
-whose target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
-monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so that source
-becomes a free WAF-bypass proxy; such callers need a path-scoped exclude.
-`trusted-proxies` then refreshes `configs/trusted_proxies.conf` (the Cloudflare
-ranges the edge trusts to name the client via `CF-Connecting-IP`) from
-Cloudflare's API with `scripts/build_trusted_proxies.py`, under the same
-fail-safe rules and `BYPASS_REFRESH` switch; CI validates it with the bypass
-list. It is Cloudflare-only on purpose: a proxy that passes a client-supplied
-`CF-Connecting-IP` through (QUIC.cloud does) must never be added to it. It also stamps + commits/pushes
-`CHANGELOG.md` and cuts a **tag-only GitHub release** (title + that day's
-CHANGELOG section as notes, via `scripts/release-notes.sh`) — **no `.deb`/`.rpm`
-attached**, since packages are distributed by `make sync` to the apt/yum repo.
-`make sync` is what actually ships the binaries (+ `checksums.txt`).
+- `make release` runs `bypass-list bpf deb rpm` (BPF needs `clang` +
+  `libbpf-dev`). `bypass-list` re-fetches `configs/challenge_waf_bypass.conf`
+  (crawler + CDN ranges) and `trusted-proxies` refreshes
+  `configs/trusted_proxies.conf` (Cloudflare's ranges for `CF-Connecting-IP`),
+  both fail-safe (`--strict`: a failed, shrunk, out-of-bounds or poisoned feed
+  ships the last-good file, never a partial list; rules in
+  `scripts/build_bypass_list.py` and the Makefile). The offline validator
+  failing, or no Python >= 3.9, stops the release; `BYPASS_REFRESH=0` skips
+  both for an offline build.
+- Bypass prefixes are `<cidr> 1;` (crawler) or `<cidr> 2;` (a `CDN_SOURCES`
+  entry, QUIC.cloud); a vhost lockdown withdraws only the `1` kind, and the
+  validator fails a list that lost its `2` lines. **Never add a source whose
+  target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
+  monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so it becomes a
+  free WAF-bypass proxy; such callers need a path-scoped exclude.
+  `trusted_proxies.conf` is Cloudflare-only on purpose: a proxy that passes a
+  client-supplied `CF-Connecting-IP` through (QUIC.cloud does) must never be
+  added.
+- `make release` also cuts a **tag-only GitHub release** (that day's
+  CHANGELOG section as notes, `scripts/release-notes.sh`) with **no
+  `.deb`/`.rpm` attached**; `make sync` is what ships the binaries
+  (+ `checksums.txt`) to the apt/yum repo.
 
 ### CHANGELOG discipline (dating is now automated)
-
-`CHANGELOG.md` dating is **automated**: `make release` runs
-`scripts/stamp-changelog.sh $(REL_DATE)` after the packages build, which moves
-everything under `## [Unreleased]` beneath a `## YYYY.MM.DD` (UTC) heading and
-leaves a fresh empty `## [Unreleased]`. You no longer hand-edit the date on
-release day, and — as of the changelog-automation change — you no longer commit
-it by hand either:
 
 1. **While working (the only manual step):** add a bullet under
    `## [Unreleased]`, grouped by **Added / Changed / Fixed / Security /
    Removed**. Keep entries operator-facing (what changed, why it matters) — not
    "fixed typo".
-2. **`make release` commits & pushes it for you** — but **only** `CHANGELOG.md`
-   and the refreshed `configs/challenge_waf_bypass.conf` and
-   `configs/trusted_proxies.conf` (path-scoped `git commit -- <those>`),
-   never the whole tree, so built
-   binaries / compiled BPF objects sitting in a release host's working dir are
-   never swept into the commit. A failed commit/push warns but never aborts an
-   otherwise-good release. (Standalone `make changelog` still only edits the
-   file — it does not commit.)
+2. **`make release` stamps, commits and pushes it**: `scripts/stamp-changelog.sh
+   $(REL_DATE)` moves `[Unreleased]` under a `## YYYY.MM.DD` (UTC) heading and
+   leaves a fresh empty `## [Unreleased]`. The commit is path-scoped to
+   `CHANGELOG.md`, `configs/challenge_waf_bypass.conf` and
+   `configs/trusted_proxies.conf` (`git commit -- <those>`), never the whole
+   tree, so built binaries / BPF objects are never swept in. A failed
+   commit/push warns but never aborts a good release.
 
-The stamp is idempotent and safe to re-run:
-- an empty `[Unreleased]` (only `_Nothing yet._`) is a no-op;
-- a second build the same day appends the new `[Unreleased]` bullets **under**
-  the existing `## YYYY.MM.DD` section (one section per day), then resets
-  `[Unreleased]`.
-
-You can run it standalone with `make changelog`. The date always comes from the
-Makefile (`REL_DATE := date -u +%Y.%m.%d`), so the CHANGELOG date can never
-drift from the date portion of the package/tag.
-
-So the steady-state release ritual is now just: `make release ; make sync`.
-`make release` stamps **and** commits/pushes `CHANGELOG.md` for you; a CI
-`changelog` guard (`scripts/tests/check_changelog_entry.sh`, see §3) keeps the
-`[Unreleased]` heading stampable and nudges every runtime-code PR to carry an
+The stamp is idempotent: an empty `[Unreleased]` (only `_Nothing yet._`) is a
+no-op, and a second build the same day appends under the existing
+`## YYYY.MM.DD` section (one section per day). `make changelog` runs it
+standalone (edits only, no commit). The date always comes from the Makefile
+(`REL_DATE := date -u +%Y.%m.%d`), so it can never drift from the package/tag
+date. The CI `changelog` guard (`scripts/tests/check_changelog_entry.sh`, §3)
+keeps `[Unreleased]` stampable and nudges every runtime-code PR to carry an
 entry.
 
 ## 9. Workflow
@@ -1188,8 +814,7 @@ entry.
   Docs-only / config-comment PRs may skip it; anything with runtime behaviour
   does not. Note in the PR body that the review ran and what it found.
 - **Never retire a signal/detector on reasoning alone — check the fleet
-  first** (`docs/abuse-defense-master-plan.md` §4 D3a, added after `cfm_pcw`
-  came one review away from being deleted while alive). "It fed no decision"
+  first** (`docs/abuse-defense-master-plan.md` §4 D3a). "It fed no decision"
   is not evidence: a log-only signal feeds no decision by construction. Before
   deleting, show two things with the CFM MCP (`edge_error_tail` /
   `cfm_log_tail` / `abuse_shadow`, `node="all"`): that it actually emitted,
