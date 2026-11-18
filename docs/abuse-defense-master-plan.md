@@ -142,7 +142,7 @@ D3/D4 are the process fix.
   scored solve logs `hs=` + `tells=` so the operator can see exactly why any
   client passed or failed, `sig=` with the readings exactly as the client
   reported them (corpus for future tells; absent key = not reported, never a
-  fabricated zero), and `v2=<fp|geo|vhost|mark>` naming the arm whenever one
+  fabricated zero), and `v2=<fp|geo|vhost|mark|unsolicited>` naming the arm whenever one
   covers the solve — an armed solve that PASSES must not read like a plain v1
   one, or a live tier looks like a forgotten one (added 2026-09-22 after
   exactly that confusion in the field). With a shadow burn-in + measured FP

@@ -29,9 +29,11 @@ package webdetector
 // src=- means the snapshot found none: a challenge that is purely edge-local
 // by then (an entry that expired between serve and verify, or a stale page).
 // The field is absent when provenance could not be read at all (no bridge
-// wired). It is LOG-ONLY: nothing decides on it, so it can never move a
-// solve's outcome. The v2= grain stays the one answer to "did the teeth
-// cover this solve".
+// wired). Its sources are log-only — none of them arms anything, the v2=
+// grain stays the one answer to "did the teeth cover this solve" — with ONE
+// reading that decides: a resolved, EMPTY snapshot on a web solve arms the
+// unsolicited grain (challengeV2UnsolicitedArms, since 2026-11-18), the
+// farms' pre-solve for a cookie.
 
 import (
 	"strconv"

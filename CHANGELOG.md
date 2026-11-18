@@ -17,6 +17,47 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **A solve that nothing asked for no longer banks a clearance cookie.**
+  - The case: the solver farms open the challenge page on each new IP while
+    the site is NOT challenged, solve it, and keep the cookie. When the
+    site's automatic v2 challenge came back, that cookie walked the IP past
+    the v2 check. On 2026-11-18 one titan shop had 395 such solves in a
+    morning after its challenge ended; over two to three days four nodes had
+    6 333, 97% of them the two convicted farm fingerprints.
+  - Now: a web solve that no challenge covered when it was verified
+    (`src=-`) is scored at v2 (`v2=unsolicited` on the solve line). One that
+    fails gets no cookie and goes on to the page it asked for. Nothing is
+    challenging it, so a person who lands there (an expired challenge, an old
+    tab) sees no difference. The panel ports are not affected.
+  - Knob: `[webdetector] CHALLENGE_V2_UNSOLICITED = 0` turns it off.
+- **An automatic v2 challenge no longer drops to v1 while it is still being
+  served.**
+  - What happened: the v2 tier of an automatic site challenge had to be
+    renewed by every webdetector run within minutes. When a run timed out,
+    the challenge stayed but its tier fell to v1. A farm IP was rejected at
+    v2 and passed three seconds later. Separately, a `uniqpaths_short`
+    challenge lost its v2 tier as soon as the burst ended, while it ran out
+    its time at v1.
+  - Now the tier lasts as long as the challenge it belongs to (an hour at
+    most), and ends when the challenge or its source ends.
+
+### Fixed
+- **The subnet challenge (`CHALLENGE_SUBNET`) no longer re-issues the same
+  challenge every 10 seconds.**
+  - What happened: while a /24 stayed over its thresholds, every member IP
+    was challenged again on every 10-second pass, although each challenge
+    lasts `CHALLENGE_SUBNET_TTL` (20–30 min). Each pass wrote a history row
+    and an alert per IP. On qualityweb (2026-11-18) two Baidu /24s on two
+    sites made about 31 000 `challenge_issued` rows an hour for the same 200
+    IPs, and the webdetector run timed out about 270 times a day.
+  - Why it matters beyond the noise: a run that times out stops refreshing
+    the automatic v2 tier of challenged sites, so for a few minutes at a
+    time their challenge was held only to v1. A farm IP was rejected at v2
+    and passed three seconds later.
+  - Now: a new member of a hot subnet is still challenged within about 10
+    seconds. One already challenged is refreshed only once half its
+    challenge has run.
 ### Added
 - **`make waf-corpus`: detection and false-positive numbers for the WAF before
   a change ships.** It runs BlazeHTTP's labelled corpus (~33 k benign and ~650

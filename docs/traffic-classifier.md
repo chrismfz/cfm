@@ -1121,6 +1121,48 @@ Build the stack classes from the data by cipher list, restrict to UAs with
 nothing appended, exclude vhost-bound (front-proxy) lists, and keep it in the
 device-claim group.
 
+#### Unsolicited solves and the auto-v2 notes (2026-11-18)
+
+Two gaps let farm solves through at v1 after every surface armed v2 by
+default. The `abuse_shadow` humanity read on 2026-11-18 showed 1 341
+would_v2 solves in one morning: 1 072 with `src=-`, 140 under
+`vhost:suspicious_vhost` (qualityweb), 102 under `vhost:uniqpaths_short`
+(orion, titan).
+
+**The pre-solve (`v2=unsolicited`).** The farms fetch
+`/__cfm_challenge?next=…` on each fresh IP while the vhost is NOT challenged
+(gastronom.hk on titan: auto_off at 13:07, 395 such solves after it). Unarmed,
+each earned a clearance cookie scored at v1, and the cookie carried the IP
+past the v2 gate when the vhost's automatic challenge came back. Every
+challenge the edge serves comes from a live daemon decision (it caches only
+clean allows), so `src=-` at verify means none was served or the one served
+has ended. Such a WEB solve is now scored at v2. A failing one is withheld,
+not refused: one `challenge_v2_reject` row, then a 303 to `next` with no
+cookie, the way a solve goes. A person (an expired challenge, an old tab)
+reaches the page; a farm banks nothing. The panel ports are out: their
+human-entry challenge is not in the snapshot, so every panel solve reads
+`src=-` (the Google link-check proxies on `panel:2096`). Read before shipping
+(abuse_shadow, two to three days, four nodes): 6 333 web-scope would_v2
+solves with `src=-`, 97% `c28caa00`/`95070673`, three GR/CY (two of them the
+farm's Cytanet profile, one a webdriver). Knob `CHALLENGE_V2_UNSOLICITED`.
+A withheld solve is a reject, so like every v2 reject it reaches none of the
+solve subscribers (`challenge_solver_farm`, `challenge_score`, the
+Under-Attack solve rate, `challenge_cookie_discard`): the farms' pre-solves,
+which used to count as solves there, now show up only as
+`challenge_v2_reject` rows with `v2=unsolicited`. Open question: whether the
+solver-farm detector should read them as evidence.
+
+**The note lapse.** An automatic source's note lived 2–10 minutes and was
+renewed by each webdetector run. A run that timed out renewed nothing, so a
+served challenge dropped to v1 until the next good run: on qualityweb
+(~270 timeouts a day, from the subnet-challenge re-emit bug fixed the same
+day) 174.137.104.172 was rejected at v2 at 11:27:50 UTC and passed at
+11:27:53. And `uniqpaths_short` dropped its note when the burst ended while
+its challenge ran out its TTL, so the rest of that challenge was served at
+v1. A note now rides the host's challenge entry (capped at an hour) and ends
+with it or with the tick's drop, and `uniqpaths_short` no longer drops it
+early.
+
 #### Manual arms default to v2 (2026-11-14)
 
 A NEW manual vhost challenge whose caller names no tier is armed at v2:

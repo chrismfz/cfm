@@ -1607,9 +1607,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 } else if cur && shouldOff {
                     e.vhostUniqPathsActive[host] = false
                     e.vhostUniqPathsLastChange[host] = now
-                    if e.nginxBridge != nil {
-                        e.nginxBridge.DropVhostAutoSource(host, autoV2UniqPathsShort)
-                    }
+                    // The burst is over but its challenge is NOT cleared: it
+                    // runs out its TTL. So the source note is not dropped
+                    // either — it rides that entry (NoteVhostAutoSource) and
+                    // ends with it. Dropping it here served the rest of the
+                    // challenge at v1 (orion/titan, 2026-11-18).
                 } else if cur {
                     doChallenge = true // keep refreshing TTL while active
                 }
@@ -1635,7 +1637,8 @@ if doChallenge {
     }
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
                     // The auto-v2 resolver's view of this source: re-noted every
-                    // cycle it is active, short-lived (challenge_v2_auto.go).
+                    // cycle it is active, riding the challenge entry just
+                    // refreshed (NoteVhostAutoSource, challenge_v2_auto.go).
                     e.nginxBridge.NoteVhostAutoSource(host, autoV2UniqPathsShort, e.autoSourceNoteTTL())
                     if doLogOn && e.cfg.ChallengeLog {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
@@ -1643,11 +1646,11 @@ if doChallenge {
                     }
                     // This cycle skips the rest of the host (the scorer, the
                     // config list, Under-Attack), so their notes are not
-                    // re-noted and lapse within autoSourceNoteTTL: an
-                    // unevaluated source is not kept alive (the safe direction
-                    // for a human; with the default knob uniqpaths_short is
-                    // armed itself). An operator `attack off` drops the
-                    // under_attack note at once regardless.
+                    // re-noted: they keep the expiry their last note gave them
+                    // (at most the challenge entry they rode). With the default
+                    // knob uniqpaths_short is armed itself. An operator
+                    // `attack off` drops the under_attack note at once
+                    // regardless.
                     // vhost-wide challenge overrides need for per-IP enumeration
                     continue
                 }
@@ -1972,13 +1975,14 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
 
             // The auto-v2 resolver's view of this host's AUTOMATIC sources
             // (challenge_v2_auto.go): RE-NOTED on every cycle a source is
-            // active, with a short TTL (autoSourceNoteTTL), independently of
-            // the bridge entry's single Reason (which a manual arm or the
-            // config list relabels). A cycle that does not reach this point
-            // for the host — an exclude/ignore `continue`, a host that left
-            // the candidate set, a stalled tick — simply stops re-noting, and
-            // the source lapses within the TTL: no transition can leave a
-            // stale v2 behind. The drops just make "off" immediate.
+            // active, independently of the bridge entry's single Reason
+            // (which a manual arm or the config list relabels). A note rides
+            // the host's challenge entry (NoteVhostAutoSource, capped at an
+            // hour), so a cycle that does not reach this point — a stalled or
+            // timed-out tick, a host that left the candidate set — leaves the
+            // tier where the still-served challenge has it, and it ends with
+            // that entry. "Off" is the drops below; an excluded host is
+            // suppressed at read time (hostAutoSuppressed).
             if e.nginxBridge != nil {
                 noteTTL := e.autoSourceNoteTTL()
                 if autoActive {
@@ -2352,10 +2356,7 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 		e.subnetLastChalEmit[pairKey] = now
 		e.emitMu.Unlock()
 
-		ttl := e.cfg.ChallengeSubnetTTL
-		if ttl <= 0 {
-			ttl = 30 * time.Minute
-		}
+		ttl := e.subnetChallengeTTL()
 
 		rule := "CHALLENGE_SUBNET"
 
@@ -2364,6 +2365,13 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				if e.cfg.ChallengeLogSuppressed {
 					logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", ip, a.host, rule)
 				}
+				continue
+			}
+			// The pair cooldown above re-evaluates the subnet every 10s so a NEW
+			// member is challenged quickly; an IP already challenged is
+			// re-emitted only once its challenge is half spent.
+			emitKey := ip + "|" + a.host
+			if !e.subnetIPEmitDue(emitKey, now, ttl) {
 				continue
 			}
 
@@ -2387,8 +2395,6 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				"challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
 			}
 
-			e.RecordIPChallenge(ip, a.host, rule, "", "", 0, ttl)
-
 			select {
 			case out <- core.Alert{
 				When:    now,
@@ -2398,10 +2404,58 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				Samples: samples,
 				Extra:   extra,
 			}:
+				// Recorded and stamped only once the alert is out: a drop on a
+				// full channel (the default below) writes no history row for a
+				// challenge never applied, and leaves the member due, so the
+				// next pass retries it instead of waiting out ttl/2.
+				e.RecordIPChallenge(ip, a.host, rule, "", "", 0, ttl)
+				e.markSubnetIPEmit(emitKey, now)
 			default:
 			}
 		}
 	}
+}
+
+// subnetIPEmitDue reports whether the subnet challenge should (re-)emit for
+// key (ip|host) now, and records the emit when it should: a key it has never
+// emitted, or one whose last emit is at least half the challenge TTL ago (the
+// refresh that keeps the challenge alive while the subnet stays hot).
+//
+// Without it, every member of a hot subnet was re-emitted on every 10s pair
+// cooldown for as long as the subnet stayed over its thresholds, each emit a
+// synchronous history INSERT, a store write and a WEB/CHALLENGE alert. On
+// qualityweb (2026-11-18) two Baidu /24s on two vhosts made ~31 000
+// challenge_issued rows an hour for the same 200 IPs (each held a 20m
+// challenge), and the webdetector run timed out ~270 times a day: a run that
+// never finishes re-notes no auto-v2 source, so the vhost tier lapsed to v1
+// mid-challenge.
+//
+// It only reads; markSubnetIPEmit records an emit once its alert was sent.
+func (e *Engine) subnetIPEmitDue(key string, now time.Time, ttl time.Duration) bool {
+	e.emitMu.Lock()
+	defer e.emitMu.Unlock()
+	last, ok := e.subnetIPLastChalEmit[key]
+	return !ok || now.Sub(last) >= ttl/2
+}
+
+// markSubnetIPEmit records that the subnet challenge for key (ip|host) went
+// out at now (subnetIPEmitDue).
+func (e *Engine) markSubnetIPEmit(key string, now time.Time) {
+	e.emitMu.Lock()
+	defer e.emitMu.Unlock()
+	if e.subnetIPLastChalEmit == nil {
+		e.subnetIPLastChalEmit = make(map[string]time.Time)
+	}
+	e.subnetIPLastChalEmit[key] = now
+}
+
+// subnetChallengeTTL is CHALLENGE_SUBNET_TTL, 30m when unset: the one place
+// the emit loop and the gate's prune read it.
+func (e *Engine) subnetChallengeTTL() time.Duration {
+	if ttl := e.cfg.ChallengeSubnetTTL; ttl > 0 {
+		return ttl
+	}
+	return 30 * time.Minute
 }
 
 func minInt(a, b int) int {

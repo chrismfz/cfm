@@ -562,6 +562,10 @@ type Engine struct {
 
 	// Subnet challenge emit cooldown
 	subnetLastChalEmit map[string]time.Time
+	// Per-member (ip|host) re-emit gate of the subnet challenge
+	// (subnetIPEmitDue): a challenged member is refreshed at half its TTL,
+	// not on every pair cooldown.
+	subnetIPLastChalEmit map[string]time.Time
 	// subnetGoodBot caches per-/24 FCrDNS good-bot verdicts for the subnet
 	// challenge exemption (challenge_subnet_goodbot.go).
 	subnetGoodBot subnetGoodBotState
@@ -754,6 +758,7 @@ func NewEngine(cfg Config) *Engine {
 
 	e.ipLastChalEmit = make(map[string]time.Time)
 	e.subnetLastChalEmit = make(map[string]time.Time)
+	e.subnetIPLastChalEmit = make(map[string]time.Time)
 	e.chalLast = make(map[string]chalCtx)
 
 	e.vhostUnderAttack = make(map[string]bool)
@@ -2257,6 +2262,17 @@ func (e *Engine) pruneEmitMaps(now time.Time) {
 		for subnet, t := range e.subnetLastChalEmit {
 			if t.Before(cutoff) {
 				delete(e.subnetLastChalEmit, subnet)
+			}
+		}
+	}
+	// A member whose challenge has expired would be re-emitted anyway: drop it
+	// once its TTL has passed (and on the shared cutoff), so the map holds only
+	// live challenges.
+	if e.subnetIPLastChalEmit != nil {
+		subTTL := e.subnetChallengeTTL()
+		for key, t := range e.subnetIPLastChalEmit {
+			if t.Before(cutoff) || now.Sub(t) >= subTTL {
+				delete(e.subnetIPLastChalEmit, key)
 			}
 		}
 	}
