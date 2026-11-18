@@ -235,28 +235,36 @@ func immediateIPFromRequestMCP(r *http.Request) string {
 // instructions is the server-level guidance the MCP client shows the model.
 const instructions = `CFM (Configurable Firewall Manager) security telemetry, READ-ONLY. These tools
 report what CFM's edge WAF, challenge engine, log-driven web detector, nftables
-firewall, and detector framework are seeing and doing right now. They only read —
-nothing here blocks, unblocks, challenges, or changes configuration.
+firewall, detectors and host see and do right now. They only read: nothing here
+blocks, unblocks, challenges, or changes configuration.
 
 Orientation:
 - whats_wrong is the triage entry point: one call that ranks concrete problems
-  (health/disk/load, failed services, MySQL saturation, mail-queue backlog,
-  suspected outbound-mail spikes, API-abuse bursts) most-severe first, each with
-  the drill-down tool to use next. Start here for "is anything wrong right now?".
-- security_overview gives the headline picture (health + recent WAF/challenge
-  activity + active blocks); start there for "what's going on?".
-- WAF: waf_activity (recent hits, top rules, per-hour histogram), waf_rules.
-- Challenge engine: challenge_vhosts (which vhosts are challenged and why),
-  challenge_events (recent arm/pass/fail).
-- Traffic & attacks: suspicious_hosts (long-window scanners/attackers),
-  top_talkers (request-rate leaders), hot_ips, host_drilldown / ip_drilldown for
-  the "why" behind one host or IP, bots_top for user-agents.
-- Durable log: detection_history (WAF/challenge/clam/… events over time).
-- Alert log: alerts (every detector event raised for the notifier — the
-  "[CFM] host — KIND ip" mails — recorded even when no mail went out) and
-  alerts_summary (the same, grouped by kind/country/asn/vhost/hour/...).
-- Enforcement & platform: firewall_blocks (active nft bans incl. WAF autoblocks),
-  detectors_status, system_health.
+  (health/disk/load, processes, failed services, MySQL saturation, mail,
+  API-abuse bursts, edge and firewall-path findings) most-severe first, each
+  with the drill-down tool to use next. Start here for "is anything wrong?".
+- security_overview / system_health: the headline picture.
+- WAF: waf_activity, waf_rules, waf_rule_detail (one rule: hits, hosts, panel
+  ports), waf_fp_hunt (false-positive candidates).
+- Challenge engine: challenge_vhosts, challenge_events.
+- Web traffic: suspicious_hosts, top_talkers, hot_ips, host_drilldown /
+  ip_drilldown, bots_top, edge_access_tail, ip_forensics (one IP across logs),
+  host_access_history, auth_corpus (login outcomes), abuse_shadow.
+- History & alerts: detection_history (durable events), alerts,
+  alerts_summary.
+- Firewall: firewall_blocks, ip_locate (where an IP is listed), nft_counters,
+  firewall_selftest, blocklist_feeds, netfilter_path (host-wide NAT order).
+- Detectors & config: detectors_status, detectors_config, detector_coverage,
+  detectors_srcresolve, config_drift.
+- Edge: edge_health, edge_error_tail, site_cache_status, site_cache_stats,
+  http3_status.
+- Host: process_list, process_health, listening_ports, service_status,
+  journal_tail, dmesg_tail, cpu_throttle, lve_cpu, backup_status.
+- MySQL: mysql_pressure, db_web_pressure, mysql_log_tail, mysql_slow_queries.
+- Mail: mail_queue_summary, mail_traffic, mail_runtime, mail_log_tail,
+  mail_dns_check.
+- CFM itself: cfm_log_tail, lsm_status, lsm_detections, clam_status,
+  notifier_status.
 
 Most drilldown tools take a host= or ip= selector; time-window tools take hours=;
 list tools take limit=. Values come verbatim from the list/overview tools.`

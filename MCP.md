@@ -1,163 +1,201 @@
 # MCP.md — CFM read-only MCP server (as-built + roadmap)
 
 CFM embeds a **read-only [Model Context Protocol](https://modelcontextprotocol.io)
-server** so an MCP client — notably the **claude.ai remote "custom connector"** —
-can *read* what this node's security stack is seeing and doing: WAF hits,
-challenge state, suspicious traffic, firewall blocks, detector status, health.
-It exposes the **same `/api/v1` read endpoints the CLI and web UI already use** —
-nothing here blocks, unblocks, challenges, or changes configuration.
+server** so an MCP client (notably the **claude.ai remote "custom connector"**, or
+Claude Code) can *read* what this node's security stack is seeing and doing: WAF
+hits, challenge state, suspicious traffic, firewall blocks, detector status,
+health, mail, MySQL. Every tool runs **GET requests against `/api/v1` read
+endpoints the CLI and web UI already use**. Nothing here blocks, unblocks,
+challenges, or changes configuration.
 
-This doc is the as-built map + how to arm it + the roadmap. Keep it in sync with
-the registered tool set (`internal/mcpserver/tools.go`).
+This doc is the as-built map, how to arm it, and the open roadmap. The code is the
+source of truth: `internal/mcpserver/` (the `registerTools` list in `tools.go` is
+the single choke point) and `internal/apiserver/mcp_wire.go`. When you add, remove
+or change a tool, change §4 in the same PR. A tool's `Description` and argument
+`jsonschema` tags are what the client actually sees in `tools/list`. This doc
+summarises them; when they disagree, the code wins and this doc is the bug.
+
+**Fleet context.** This is the per-node server. The fleet-wide MCP gateway lives
+in **cfm-web**, not in this repo. It has its own central tools (e.g. `list_nodes`,
+`check_ip`, `recent_fleet_events`, `fleet_backup_status`, `fingerprints`), and it
+forwards `node_tools` / `node_call` to a node's `/mcp`. `node_call node="all"` fans
+one node tool out to every up node. The gateway authenticates to each node with
+the `AUTH_TOKEN` it already stores (§2). The node server stays read-only; the
+fleet's write tools (central blocklist, BGP blackhole, notify) are cfm-web's and
+are gated there (`docs/ROADMAP.md` §3).
 
 ---
 
 ## 1. How it works
 
 ```
-   Claude (claude.ai connector / Claude Code)
-        │  HTTPS
-        ▼
-   OpenResty edge  ── location ^~ /cfm-admin/ ──▶ 127.0.0.1:6060 (cfm daemon)
-        │  (TLS terminated here; adds X-Forwarded-Prefix: /cfm-admin)
-        ▼
-   apiserver mux  ──▶  /mcp        (bearer/OAuth-gated MCP endpoint)
-                  ──▶  /mcp/oauth/*        (OAuth 2.1 authorization server)
-                  ──▶  /.well-known/oauth-*  (discovery metadata)
+   Claude (claude.ai connector / Claude Code)       cfm-web gateway
+        │  HTTPS                                          │
+        ▼                                                 │
+   OpenResty/Angie edge                                   │
+     location ^~ /cfm-admin/  (rewrite /cfm-admin/x → /x, │
+     X-Forwarded-Prefix + X-CFM-Base: /cfm-admin,         │
+     X-Forwarded-Proto)  ──▶ 127.0.0.1:6060               │
+        │                                                 │
+        ▼                                                 ▼
+   apiserver mux (same stack on :6060 and :6061)
+      /mcp                                   bearer/OAuth-gated MCP endpoint
+      /mcp/oauth/{register,authorize,token}  OAuth 2.1 authorization server
+      /.well-known/oauth-protected-resource  RFC 9728 metadata
+      /.well-known/oauth-authorization-server  RFC 8414 metadata
+      /.well-known/openid-configuration      alias of the RFC 8414 document
         │
-        ▼  each tool call = in-process GET to an allow-listed /api/v1 read handler
-   TokenMiddleware(admin token)(mux) ──▶ existing WAF / challenge / webdet /
-                                          firewall / detectors / health handlers
+        ▼  each tool call = in-process GET to a hard-coded read path
+   TokenMiddleware(AUTH_TOKEN)(mux) ──▶ the existing /api/v1 handlers
 ```
 
 Key properties:
 
-- **Served through the edge under `/cfm-admin/mcp`.** No new port. The existing
-  `location ^~ /cfm-admin/` already proxies `/cfm-admin/mcp`, `/cfm-admin/mcp/oauth/*`
-  and `/cfm-admin/.well-known/*` to the daemon with the `X-Forwarded-Prefix`
-  header. Current OpenResty/Angie reference configs also send canonical
-  `X-Forwarded-Proto`; package upgrades do not necessarily replace live edge
-  conffiles, so verify that header after upgrade. MCP preserves the historical
-  HTTPS fallback only for a valid loopback client identity plus trusted public
-  prefix when the old live config omits XFP; explicit `http` remains authoritative.
-- **Stateless streamable HTTP** (`Stateless + JSONResponse`): every tool call is a
-  self-contained POST→JSON exchange, so there is no long-lived SSE stream to drop
-  behind the proxy (which otherwise causes the connector to show "disconnected"
-  and re-ask for permission).
+- **Served through the edge under `/cfm-admin/mcp`.** There is no new port and no
+  MCP-specific edge location. The existing `location ^~ /cfm-admin/` in
+  `configs/openresty.conf` / `configs/angie.conf` proxies `/cfm-admin/mcp`,
+  `/cfm-admin/mcp/oauth/*` and `/cfm-admin/.well-known/*` to the daemon. It sends
+  `X-Forwarded-Prefix: /cfm-admin`, `X-CFM-Base: /cfm-admin` and
+  `X-Forwarded-Proto`. Package upgrades do not necessarily replace live edge
+  conffiles, so check the header after an upgrade. If an older live config omits
+  `X-Forwarded-Proto`, `mcpRequestScheme` (`mcp_wire.go`) falls back to `https`
+  only for a trusted loopback peer that also sent the trusted prefix. An explicit
+  `http` is kept as is.
+- **The daemon paths are unprefixed** (`/mcp`, `/mcp/oauth/*`, `/.well-known/…`).
+  Every advertised URL (metadata, endpoints, token audience) is rebuilt per
+  request as `scheme://Host + /cfm-admin` from the forwarded headers.
+  `isMCPPublicPath` (`internal/apiserver/middleware.go`) lists exactly these five
+  paths. `TokenMiddleware` hands them straight to the MCP/OAuth gate, which does
+  its own authentication. The control-plane `RateLimitMiddleware` skips them too.
+  The mux is served by both listeners (`docs/security/control-plane.md` §1, §3),
+  so `/mcp` also answers on the direct `:6060`/`:6061` doors, under the same gate.
+- **Stateless streamable HTTP** (`Stateless + JSONResponse`, `server.go`
+  `statelessMCP`). Every call is a self-contained POST→JSON exchange, so there is
+  no long-lived SSE stream to drop behind the proxy. A dropped stream made the
+  connector show "disconnected" and ask for permission again.
 - **`DisableLocalhostProtection` is set on purpose.** The go-sdk's DNS-rebinding
-  guard 403s any request whose accepted-connection LocalAddr is loopback but whose
-  Host header is not — right for a localhost-only dev server, wrong for us: the
+  guard returns 403 to any request whose accepted-connection LocalAddr is loopback
+  but whose Host header is not. That suits a localhost-only dev server. CFM's
   edge terminates TLS and upstreams over `127.0.0.1:6060` while forwarding the
-  public Host, so an OAuth-authenticated client would get 403 on every `/mcp` call
-  after a fully successful auth flow. `/mcp` is bearer/OAuth-gated (not
-  cookie/session, so not CSRF-reachable), so the guard only breaks the real
-  topology; the bearer/OAuth gate is the sole authority. (`TestMCPBehindProxyNonLoopbackHost`.)
-- **Tools reuse existing handlers.** Each tool dispatches a GET to a hard-coded,
-  allow-listed `/api/v1` path **in-process** (a synthetic request run through
-  `TokenMiddleware(admin-token)(mux)`), so it reuses every existing handler and
-  its scope/admin gate verbatim and tracks the hot-swappable webdetector engine.
-  The tool never controls the path, so the surface stays read-only and bounded.
-- **CFM never exposes the admin token.** It uses the token for in-process dispatch;
-  a trusted fleet gateway may independently present the admin token it already
-  stores. Other clients use static `MCP_TOKEN` or a read-only OAuth token, both
-  **inert against `/api/v1`** and honoured only at the `/mcp` gate.
+  public Host, so every `/mcp` call would get a 403 after a successful OAuth flow.
+  `/mcp` is bearer-gated, not cookie/session, so it is not CSRF-reachable. The
+  bearer/OAuth gate is the only authority. (`TestMCPBehindProxyNonLoopbackHost`.)
+- **Tools reuse the existing handlers.** `mcp_wire.go`'s `dispatch` builds a
+  synthetic `GET` (method fixed to `http.MethodGet`) to a path the tool hard-codes,
+  with typed query params. It sets `Authorization: Bearer <AUTH_TOKEN>` and
+  `RemoteAddr 127.0.0.1:0`, and runs the request through
+  `TokenMiddleware(AUTH_TOKEN)(mux)`, without CSRF, session or MFA layers. So
+  every tool sees the **admin** view of its endpoint. The caller never chooses the
+  path or the verb. Admin-only endpoints such as `/search` (`ip_locate`) and
+  `firewall/counters` work. Scoped-viewer filtering does not apply, and there are
+  no per-tool roles. The dispatch is an in-process call, so the control-plane
+  rate limiter does not see it. It also suppresses the auth audit, so it does not
+  log fake loopback admin logins. Any occurrence of the admin token in a response
+  body is replaced by `[redacted]` as defence in depth.
+- **CFM never hands the admin token to a client.** It uses the token only for
+  in-process dispatch. A gateway that already stores it may present it at `/mcp`
+  (§2, option B). Every other client uses `MCP_TOKEN` or a CFM-minted OAuth access
+  token. Both are honoured only at the `/mcp` gate and do not authenticate
+  against `/api/v1`.
 
-Code: `internal/mcpserver/` (`server.go`, `oauth.go`, `tools.go`) +
-`internal/apiserver/mcp_wire.go` (wiring) + a `/mcp` entry in `isPublicPath`.
+Code: `internal/mcpserver/` (`server.go` handler, bearer gate, dispatch helpers and
+the server `instructions` string; `oauth.go`; `ratelimit.go`; `tools.go` plus one
+file per larger tool) and `internal/apiserver/mcp_wire.go` (arming, dispatch,
+static bearer, audit hooks), mounted last in `apiserver.go` (`registerMCPServer`).
 
 ---
 
 ## 2. How to arm it
 
-### Arming: DEFAULT-ON, with an auto-generated `MCP_TOKEN`
+### Arming: default-on, with an auto-generated `MCP_TOKEN`
 
-The MCP server has its **own** credential, `MCP_TOKEN`, kept separate from the
-admin/API `AUTH_TOKEN` (which CFM also uses for `/cfm-admin` and the Laravel
-API). Interactive and direct MCP clients should use `MCP_TOKEN`. The trusted
-fleet gateway may reuse the `AUTH_TOKEN` it already holds as a static `/mcp`
-bearer; CFM itself never returns or exposes that admin token to an MCP client.
+The MCP server has its own client credential, `MCP_TOKEN`, separate from the
+admin/API `AUTH_TOKEN`. The arming policy is `mcpArmToken` (`mcp_wire.go`),
+evaluated once when the apiserver starts:
 
-As of 2026-08 the server is **default-ON**. It mounts when:
+1. `MCP` (alias `MCP_ENABLED`) parsed as false in `cfm.conf` → **not mounted**.
+   This is the per-node kill switch. `parseBool` reads only `1/true/yes/on` as
+   true, so any unrecognised value also counts as off. Unset or `on` → continue.
+2. `AUTH_TOKEN` empty → **not mounted**, because the in-process dispatch
+   authenticates as admin.
+3. `MCP_TOKEN` empty → the daemon loads `/var/lib/cfm/mcp_token`. If that file is
+   missing or empty, the daemon generates 32 random bytes, encodes them as
+   URL-safe base64 (43 chars) and writes the file atomically with mode `0600`.
+   This file is daemon-only, unlike the group-readable Lua token files.
+4. The resulting token, trimmed, must be ≥ 24 chars (`minMCPTokenLen`). A
+   configured token that is shorter is **not replaced**. The server stays
+   unmounted (fail-closed).
 
-- `AUTH_TOKEN` is set (needed for the internal read dispatch), **and**
-- MCP is not turned off (`MCP = off` in `cfm.conf` is a per-node kill switch;
-  unset/`on` = armed).
-
-You **no longer have to set `MCP_TOKEN` per node.** If none is configured the
-daemon **auto-generates a strong, distinct one** and persists it at
-`/var/lib/cfm/mcp_token` (`0600 root:root` — a daemon-only secret; unlike the
-edge-consumed Lua token files it is never group-readable). This is what lets the
-fleet gateway reach every node's `/mcp` with the `AUTH_TOKEN` it already holds,
-with **no per-node `MCP_TOKEN` to distribute** across ~20 servers. A distinct
-auto-generated token preserves "an MCP leak is not an admin leak".
-
-Set `MCP_TOKEN` explicitly only to **pin** a specific value (must be ≥ 24 chars;
-a configured-but-weak token is treated as misconfiguration and keeps the server
-disabled — the daemon does not silently replace your explicit value). A
-hand-set `MCP_TOKEN` equal to `AUTH_TOKEN` logs a warning.
+A hand-set `MCP_TOKEN` equal to `AUTH_TOKEN` mounts the server but logs a warning.
 
 ```
-# /etc/cfm/cfm.conf
-# (nothing needed — default ON; the daemon self-arms with a generated token)
-# MCP_TOKEN=<32+ random chars>   # only to pin a specific token
-# MCP = off                      # only to disable on this node
+# /etc/cfm/cfm.conf  (reference: configs/cfm.conf)
+MCP_TOKEN = ""     # empty = auto-generate; set >= 24 chars only to pin a value
+MCP = on           # off = do not mount the MCP server on this node
 ```
 
-`MCP_TOKEN` (whether set or auto-generated) is the consent credential, the
-static bearer, and the OAuth signing key — **rotating it revokes every issued
-MCP token** (delete `/var/lib/cfm/mcp_token` to roll the auto-generated one).
+Startup lines in the API log (`logging.LogfAPI`):
 
-Startup log lines: `mcp: read-only MCP server mounted at /mcp … armed with an
-auto-generated MCP_TOKEN persisted at /var/lib/cfm/mcp_token` (default path), or
-when off: `mcp: MCP server disabled (disabled by config (MCP=off))` /
-`… (AUTH_TOKEN not set)` / `… (MCP_TOKEN too weak …)`.
+- `[apiserver] mcp: read-only MCP server mounted at /mcp (edge: /cfm-admin/mcp)`,
+  with `; armed with an auto-generated MCP_TOKEN persisted at /var/lib/cfm/mcp_token …`
+  when the token was generated.
+- When the server is off: `[apiserver] mcp: MCP server disabled (<reason>)`.
+  `<reason>` is one of `disabled by config (MCP=off)`, `AUTH_TOKEN not set`,
+  `MCP_TOKEN not set and auto-generate failed: …` or
+  `MCP_TOKEN too weak (need >= 24 chars)`.
 
-The connector URL is always:
+`MCP_TOKEN` (set or generated) does three jobs. It is the consent credential, a
+static bearer, and the source of the OAuth signing key (an HMAC-SHA256 derivation
+with domain label `cfm-mcp-oauth-signing-v1`, `deriveOAuthKey`).
+
+The connector URL is:
 
 ```
 https://<your-panel-hostname>/cfm-admin/mcp
 ```
 
-### Option A — claude.ai web connector (OAuth, recommended)
+### Option A: claude.ai web connector (OAuth)
 
-The claude.ai web UI has no header field; it authenticates a remote MCP server
-via OAuth. CFM ships a minimal OAuth 2.1 + PKCE authorization server for exactly
-this, so **no manual token handling in Claude** is needed.
+The claude.ai web UI has no header field, so it authenticates a remote MCP server
+through OAuth. CFM ships a minimal, stateless OAuth 2.1 + PKCE authorization server
+for this (`oauth.go`).
 
-1. In claude.ai, add a **custom connector** with URL
-   `https://<host>/cfm-admin/mcp`.
-2. Claude discovers the OAuth flow automatically: the `/mcp` endpoint answers an
-   unauthenticated request with `401` +
-   `WWW-Authenticate: … resource_metadata="https://<host>/cfm-admin/.well-known/oauth-protected-resource"`,
-   which Claude follows (RFC 9728) → registers a client → opens a **consent page**
-   in *your* browser. Authorization-server metadata is served both at the RFC 8414
-   path (`/.well-known/oauth-authorization-server`) and, as an alias, at the OIDC
-   discovery path (`/.well-known/openid-configuration`) — the claude.ai connector
-   probes the OIDC URL first, so serving it there is what lets registration
-   complete (all three are proxied under `/cfm-admin/` by the edge; no edge change).
-3. On the consent page (`/cfm-admin/mcp/oauth/authorize`), **paste your
-   `MCP_TOKEN`** and click **Approve**. Claude receives a **read-only** access
-   token bound to this node.
-4. Done — the connector is connected and the read-only tools are available.
+1. In claude.ai, add a custom connector with the URL `https://<host>/cfm-admin/mcp`.
+2. The client calls `/mcp` without a token and gets `401` with
+   `WWW-Authenticate: Bearer resource_metadata="https://<host>/cfm-admin/.well-known/oauth-protected-resource"`
+   (RFC 9728 §5.1).
+3. The client reads the AS metadata, served both at the RFC 8414 path
+   (`/.well-known/oauth-authorization-server`) and at the OIDC discovery path
+   (`/.well-known/openid-configuration`). The claude.ai connector probes the OIDC
+   path first. The metadata advertises response type `code`, grant types
+   `authorization_code` + `refresh_token`, PKCE `S256`, token auth method `none`
+   and scope `mcp`.
+4. The client registers dynamically (`POST /mcp/oauth/register`, RFC 7591).
+   Registration is open to anyone. Every `redirect_uris` entry must be `https`, or
+   `http` on `localhost` / `127.0.0.1`. The `client_id` is itself a signed value
+   (10-year expiry), so nothing is stored.
+5. The browser opens the consent page, `/cfm-admin/mcp/oauth/authorize`. Paste
+   `MCP_TOKEN` (never `AUTH_TOKEN`; the consent check accepts only `MCP_TOKEN`) and
+   click **Approve**.
+6. The client exchanges the code at `/mcp/oauth/token` for a **1-hour access
+   token** and a **7-day refresh token**. Both are audience-bound to
+   `https://<host>/cfm-admin/mcp`. The authorization code is valid for 2 minutes.
 
-> The pasted `MCP_TOKEN` goes to your own panel over HTTPS. Claude never receives
-> the admin `AUTH_TOKEN` at all, and the OAuth token it does receive is read-only
-> and inert against `/api/v1`.
+### Option B: Claude Code / API / curl / fleet gateway (static bearer)
 
-### Option B — Claude Code / API / curl (static bearer)
+A client that can send a header may skip OAuth and send
+`Authorization: Bearer <token>` directly. `StaticBearer` in `mcp_wire.go` accepts
+two tokens, each compared in constant time:
 
-Clients that *can* send a header may skip OAuth and present `MCP_TOKEN` directly.
-The static-bearer gate **also accepts the admin `AUTH_TOKEN`** — so a fleet
-gateway (e.g. the Laravel cfm-web) that already stores each node's `AUTH_TOKEN`
-to reach `/api/v1` can speak MCP to the node **without a second, separately
-managed `MCP_TOKEN`** in its agents table. This does not widen the boundary:
-`MCP_TOKEN` still cannot touch `/api/v1`, the `/mcp` tool surface is read-only
-whichever token authenticated, and an `AUTH_TOKEN` holder can already do
-everything via `/api/v1`. (The OAuth *consent* flow in Option A stays
-`MCP_TOKEN`-only — `AUTH_TOKEN` is never pasted into a browser.)
+- `MCP_TOKEN`, audited as `mcp_static`.
+- The admin `AUTH_TOKEN`, audited as `token_admin`. This lets a fleet gateway such
+  as cfm-web, which already holds each node's `AUTH_TOKEN` for `/api/v1`, speak
+  MCP without a second per-node secret. It does not widen anything. The `/mcp`
+  surface is read-only whichever token authenticated, and an `AUTH_TOKEN` holder
+  can already do everything through `/api/v1`.
 
 ```bash
-# Claude Code (project or user config): a remote MCP server with an auth header
+# Claude Code: a remote MCP server with an auth header
 claude mcp add --transport http cfm https://<host>/cfm-admin/mcp \
   --header "Authorization: Bearer $MCP_TOKEN"
 
@@ -169,227 +207,291 @@ curl -sS https://<host>/cfm-admin/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
+The auto-generated token is in `/var/lib/cfm/mcp_token` (root only).
+
 ### Disable / revoke
 
-- **Revoke all issued MCP tokens:** rotate `MCP_TOKEN` and reload — every OAuth
-  artifact (signed with a key derived from it) becomes invalid. If the token is
-  the auto-generated one, delete `/var/lib/cfm/mcp_token` (the daemon mints a
-  fresh one on next start); if pinned, change the `MCP_TOKEN` value in
-  `cfm.conf`. Either way this does **not** touch `AUTH_TOKEN`, so `/cfm-admin`
-  and the API keep working.
-- **Disable the server entirely:** set `MCP = off` in `cfm.conf` and reload — the
-  MCP surface is not mounted; the rest of the API is unaffected. (Since arming is
-  now default-ON, unsetting `MCP_TOKEN` no longer disables it — use `MCP = off`.)
+The token and the `MCP` switch are read only at startup, so each change below
+needs a daemon restart (`systemctl restart cfm`).
+
+- **Revoke every OAuth grant and change the static MCP token:** rotate
+  `MCP_TOKEN`. Every OAuth artifact (client_id, code, access and refresh token) is
+  signed with a key derived from it, so all become invalid. For the generated
+  token, delete `/var/lib/cfm/mcp_token`; a new one is minted on the next start.
+  For a pinned token, change the value in `cfm.conf`. Neither touches `AUTH_TOKEN`,
+  so `/cfm-admin`, the API and the gateway's static-bearer access keep working.
+- **Cut off the fleet gateway's MCP access:** that means rotating `AUTH_TOKEN`,
+  which also cuts its `/api/v1` access. Only `MCP=off` blocks MCP alone.
+- **Disable the server:** set `MCP = off` and restart. The five MCP/OAuth paths
+  are not mounted; the rest of the API is unaffected. Leaving `MCP_TOKEN` empty
+  does not disable it, because an empty token is auto-generated.
 
 ---
 
 ## 3. Security model
 
-- **Read-only by construction.** Only GET, only a fixed allow-list of `/api/v1`
-  read paths, only read tools are registered. The tool never chooses the HTTP verb
-  or an arbitrary path.
-- **Dedicated, least-exposure credential.** Interactive/direct MCP clients use
-  `MCP_TOKEN`; the trusted fleet gateway may authenticate with the admin token it
-  already holds. The OAuth access token minted from `MCP_TOKEN`
-  is audience-bound to `https://<host>/cfm-admin/mcp` and validated *only* at the
-  `/mcp` gate; it does not authenticate against `/api/v1`. So a leaked MCP token
-  grants read-only MCP access — not admin API access, and not `/cfm-admin`/Laravel
-  API access (those use `AUTH_TOKEN`).
-- **Admin/scoped boundary preserved.** CFM uses the admin token in-process for
-  read dispatch and never hands it to a client. A gateway that already stores
-  that token may present it at `/mcp`; scoped tokens do not gain that access.
-  (See `CLAUDE.md` §5 — scoped-vs-admin is a hard boundary.)
-- **Weak-token fail-closed.** An explicitly configured <24-char `MCP_TOKEN`
-  leaves the server unmounted; an absent token is generated securely and
-  persisted rather than exposing a guessable internet-facing credential.
-- **PKCE S256 mandatory**, dynamic client registration restricted to `https` (or
-  `http://localhost`) redirect URIs, consent page is frame-denied (clickjacking),
-  and all OAuth/discovery responses are CORS-open but credential-less (Bearer-only,
-  no cookies, `Allow-Credentials` never set — no ambient cross-origin read).
-- **Anti-phishing consent:** DCR is open (any client can register), so the consent
-  page **displays the redirect host** the grant will be delivered to and **warns**
-  when it is not this server's own hostname — the operator can see where a code is
-  going before approving.
-- **Single-use artifacts:** authorization codes are single-use (replay rejected),
-  and refresh tokens rotate with reuse detection (a redeemed refresh token is
-  invalidated). Access tokens are audience-bound and validated only at `/mcp`.
-- **CSRF:** `/mcp*` is bearer/OAuth-authenticated (not session), so it is naturally
-  outside the session-cookie CSRF check.
-- **Forwarded-header trust:** the advertised scheme/prefix are taken from
-  `X-Forwarded-*` **only** when the peer is the loopback edge; a direct non-loopback
-  caller cannot spoof them. Consent rate limits and MCP auth audits use the same
-  canonical client identity. Each supplied static/OAuth/consent credential emits
-  one secret-free `cfm.api.log` auth attempt; internal admin-token dispatches are
-  suppressed so they cannot create misleading loopback records. A malformed
-  forwarded identity is rate-limited in one unattributed bucket and may notify,
-  but can never challenge or block an inferred address.
+The control-plane picture (listeners, every credential, handler stack, IP binding)
+is `docs/security/control-plane.md`. This section covers what is specific to MCP.
+
+- **Read-only by construction.** Every tool is registered with
+  `ReadOnlyHint: true` (and `OpenWorldHint: true`). It calls only `dispatch`,
+  whose method is always `GET`, on a path literal in the tool's code. User args
+  become query parameters only. No tool takes a path, a verb or a URL. The one
+  GET known to have a side effect, `webdet/ua-drill` (it arms 10-minute UA
+  tracking, `ArmUAObserve`), is deliberately not exposed. Some reads do run
+  bounded host commands or lookups: `tail`/`grep` on logs, `journalctl -n`,
+  `dmesg`, `ss`, `systemctl status`, the edge binary's `-v` (never `-t` or a
+  reload), and live DNS for `mail_dns_check`.
+- **Credentials.** `MCP_TOKEN`, and OAuth tokens minted from it, are inert against
+  `/api/v1`: `TokenMiddleware` never accepts them. A leaked MCP token therefore
+  grants read-only MCP access, not admin API or `/cfm-admin` access. `AUTH_TOKEN`
+  is also accepted at `/mcp` for the gateway (§2 B). Scoped viewer tokens and
+  session cookies are not accepted at `/mcp`.
+- **No per-caller scoping.** Every authenticated MCP caller gets every tool with
+  the admin view (§1). Tool descriptions that mention what "scoped callers" don't
+  see refer to the underlying HTTP API, not to MCP callers. `detectors_config`
+  redacts secret-named keys itself (`internal/secretkeys`; it fails closed if the
+  body can't be parsed). `notifier_status` and `blocklist_feeds` never return
+  channel secrets or tokens.
+- **OAuth.** PKCE `S256` is mandatory: a missing `code_challenge` or another
+  method is refused. A `resource` whose host differs from the request host is
+  refused (`invalid_target`). Access tokens are checked against the exact
+  `https://<host>/cfm-admin/mcp` audience. The authorize endpoint validates the
+  `client_id` + `redirect_uri` pair before any redirect (open-redirect guard). The
+  consent page is never framed (`X-Frame-Options: DENY`,
+  `frame-ancestors 'none'`). Registration is open, so the consent page shows the
+  host the code will go to and warns when it is not this server's own hostname.
+  That warning is the anti-phishing control. OAuth and discovery responses send
+  `Access-Control-Allow-Origin: *` and never `Allow-Credentials`; the gate is
+  bearer-only.
+- **Single use and its limit.** Codes and refresh tokens carry a nonce that is
+  consumed on redemption. A replayed code or refresh token is rejected, and
+  refresh tokens rotate. The used-nonce set is **in memory**, so a daemon restart
+  forgets it. Access tokens cannot be revoked one by one; rotating `MCP_TOKEN`
+  revokes all of them (see §6).
+- **Consent throttle.** Consent POSTs are limited to 10 per 5 minutes per client
+  identity (`consentRLBurst` / `consentRLWindow`, `ratelimit.go`). Past that the
+  server answers `429` with `Retry-After: 300`, logs
+  `event=mcp_oauth_consent_ratelimited`, and publishes the API anomaly
+  `AUTH_MCP_CONSENT_RATE_LIMIT`. Requests with no attributable identity share one
+  `unattributed` bucket. The token's entropy (≥ 24 chars) remains the primary
+  control.
+- **No other MCP rate limit.** `/mcp` bypasses the control-plane
+  `RateLimitMiddleware`, and in-process dispatches never reach it.
+  `host_access_history` has its own cap: at most two archive scans per node, and
+  further calls get `429` with `Retry-After`.
+- **Audit.** Each MCP bearer decision and each consent submission emits one
+  secret-free auth-attempt audit (`auditAuthAttempt`; kind `mcp_token` or
+  `mcp_consent`; mechanism `mcp_static`, `token_admin`, `mcp_oauth` or `unknown`).
+  An invalid or malformed bearer also marks the request as an auth anomaly and
+  publishes `AUTH_MCP_TOKEN_INVALID`. A denied consent also logs
+  `event=mcp_oauth_consent_denied`. Internal dispatches are suppressed. Client
+  identity comes from `realIPFromRequest`, which trusts forwarded headers only
+  from the loopback edge, one hop.
 
 ---
 
 ## 4. Active tools (as-built)
 
-61 read-only tools. Each wraps the `/api/v1` endpoint(s) shown (the same the
-CLI/UI use). All carry the `readOnlyHint` annotation.
+**62 tools**, all registered unconditionally by `registerTools` (`tools.go`).
+`alerts.go` registers two of them: `alerts` and `alerts_summary`. No tool is
+hidden behind a feature flag or node capability. When a subsystem is absent, the
+tool still answers, with a marker such as `available:false`, `found:false`,
+`ready:false`, `enabled:false` or an empty summary. In a single-endpoint tool a
+non-2xx answer becomes a tool error carrying the endpoint's body. In a composed
+tool (`whats_wrong`, `security_overview`, `system_health`) the failing section
+becomes an `{"error":…}` object and the other sections are still returned.
+
+Conventions in the tables:
+
+- `*` marks a required argument. The SDK schema requires it, and most handlers
+  also reject an empty value.
+- Types are `int`, `bool` and `string`. "csv" means a comma-separated string.
+- "server default" means the tool passes nothing and the endpoint picks the value.
+- An `int` of 0 or below is not sent at all.
+- Endpoints are under `/api/v1/` unless shown with a leading `/`.
+
+### 4.1 Triage & overview
 
 | Tool | What it answers | Endpoint(s) | Args |
 |---|---|---|---|
-| `whats_wrong` | "Is anything wrong right now?" — one-call triage: pulls health/services/mysql/mail/panel-burn-in signals concurrently and returns a SEVERITY-RANKED (critical→warning→info) list of concrete problems (disk/inode near-full, high load, swap/conntrack pressure, failed/flapping service, edge/frontend down/degraded, MySQL near max conns, frozen mail backlog, suspected outbound-mail spikes, API-abuse bursts, real non-scanner clients a panel BLOCK rule / the bridge would/did act on, and the EDGE→ORIGIN HOP via `edge_health` — origin premature-closes/gateway 5xx, cross-SNI 421 reuse, origin-keepalive degradation — and a CDN caching CFM's challenge), each with the drill-down tool to use next. Catches the class where the edge and every daemon are 'up' but the ORIGIN is dropping requests — 502s no host metric shows. Conservative (no routine WAF/block noise); `sources` reports which signals were read/unavailable/errored (an unread signal is never assumed healthy) | `health/snapshot` + `health/anomalies` + `system/services` + `mysql/top` + `system/mail-queue` + `mail/traffic` + `system/waf-fp-hunt` + `system/edge-health` | — |
-| `security_overview` | "What's going on right now?" — one-call headline (compact: counts + top-N, not full lists) | `health/snapshot` + `waf/engine/summary` + `challenge/vhosts` + `firewall/list` + `webdet/suspicious` | — |
-| `waf_activity` | Recent WAF hits with FP evidence (timestamp/event type, IP, country/ISO/ASN, host, URL, action, reason/rule ID and available UA/referer/content type), plus top rules/IPs and per-hour histogram. Filters combine before aggregation; older observation rows may lack optional forensic fields. Correlate matching rows with `edge_access_tail` by IP/host/path or `ip_forensics` by IP | `waf/engine/summary` | `hours`, `limit`, `top`, `country`, `rule`, `ip`, `host`, `path`, `ua` |
-| `waf_rules` | Loaded WAF rules + enforcement tier | `waf/rules` | — |
-| `waf_rule_detail` | Deep-dive ONE rule / reason-family across BOTH surfaces (web edge + panel), since the panel runs the same cfm_waf ruleset. Give a family/substring (`WAF_SQLI`) or numeric id (`320`, resolved to its family for the web side). Returns matched registry rules (id/family/default_mode), the WEB slice (events/blocked/unique ips+hosts/top reasons/ips/hosts/countries over `hours`), and the PANEL slice (hits, scanner vs non-scanner, `nonscanner_would_block`, matched rule_ids, sample requests). "Is rule X safe to enforce?" + spots a rule clean on web but FP-ing on the panel. Composes `waf/rules`+`waf/engine/summary`+`system/waf-fp-hunt` | `waf/engine/summary`, `waf/rules`, `system/waf-fp-hunt` | `rule`*, `hours` |
-| `challenge_vhosts` | Which vhosts are challenged (manual/auto) and state | `challenge/vhosts` | `status`, `mode`, `limit` |
-| `challenge_events` | Recent challenge arm/pass/fail | `challenge/events` | `limit`, `host` |
-| `suspicious_hosts` | Long-window scanners/attackers by score | `webdet/suspicious` | `limit` |
-| `top_talkers` | Busiest vhosts by request volume/rate | `webdet/top-short` \| `webdet/long-top` | `limit`, `window` |
-| `hot_ips` | Hottest source IPs by recent rate | `webdet/ip-short` | `limit` |
-| `host_drilldown` | Top paths/IPs for one vhost (the "why") | `webdet/drilldown` | `host`*, `top` |
-| `ip_drilldown` | What one source IP is doing | `webdet/ip-drilldown` | `ip`* |
-| `edge_access_tail` | Recent edge access-log lines (method/URI/status/UA/timing) — raw request context around a WAF hit, for FP triage | `webdet/access-recent` | `ip`, `host`, `method`, `status`, `path`, `since`, `limit` |
-| `auth_corpus` | Login POSTs the edge saw since the daemon started, grouped by shape (login tag, the daemon's outcome `ok`/`fail`/`na`/`?` (only an origin answer gets one), status, path, Location path, Set-Cookie names) with counts, distinct IPs/hosts and example hosts — for measuring each CMS's success/failure answer before login signals key on it (`docs/webdetector-signals-v2.md`). In-memory, bounded, emptied by a restart/reload | `webdet/auth-corpus` | `tag`, `outcome`, `limit` |
-| `ip_forensics` | On-demand raw access-log lines for one IP (bounded `tail … \| grep`) — correlate an OLDER WAF hit; reaches back further than the live ring. `include_rotated=true` also scans the rotated siblings (`.1`, `.2.gz`, `-YYYYMMDD.gz`) newest-first for evidence from before the last logrotate (bounded: `max_files` default 10, a shared line budget, one timeout, gz streamed); returns `files_scanned` | `system/ip-forensics` | `ip`*, `lines`, `limit`, `source`, `include_rotated`, `max_files` |
-| `host_access_history` | ARCHIVAL traffic profile of ONE VHOST reconstructed from the edge's FULL access log (never the focused access.cfm.log) incl. rotated siblings (OpenResty/Angie alike): total requests, per-hour series + peaks-vs-median, status mix, top IPs, top UAs with a browser-envelope vs automation/bot-like split (heuristic UA normalization — `bot_ratio_pct`), top paths, method mix. Malformed/aborted traffic (400/408/414/431/494/499 — kept by the edge OUT of access.log) is scanned separately into `bad_requests.*` with its own totals/status/tops (`nil` = the resolved engine has no such live FILE; an existing-but-empty sidecar still gets its rotated archives scanned); `total_requests_with_bad` is the combined headline over attributable malformed requests. Reaches far beyond host_drilldown/edge_access_tail retention — but nodes keep limited rotation, so check `coverage_oldest_unix` vs the requested window before claiming "a month". Bounded: shared line budget across ALL files of both sections (`max_lines`), one timeout, key-capped tops; corrupt siblings in `files_failed`; EVERY reach bound sets `truncated=true` (incl. `live_tail_truncated`); `log_changed_during_scan=true` flags copytruncate/rotation/replacement mid-read or a rotation-set change after the live read (siblings then skipped — re-run); at most TWO archive scans run per node concurrently (429 + Retry-After beyond); rotated reach ON by default (`include_rotated=false` for live logs only). `combine` (default on) joins detector history over EXACTLY the same absolute window as the access scan: challenge issued/solved, block triggers, suspicious, WAF observed + per-rule breakdown; `detector_coverage` exposes the store's real retention/oldest retained event (`coverage_proven=false` = completeness not provable from retained rows; `detector_partial=true` on a failed twin query; `detector_unavailable=true` when history is unreadable); with `merge_www` the twins get a COMBINED view plus `detector_by_host` provenance | `webdet/host-access-history` | `host`*, `hours`, `merge_www`, `include_rotated`, `combine`, `max_files`, `lines`, `max_lines`, `top` |
-| `edge_error_tail` | Tail the edge (OpenResty/Angie) ERROR log — where the in-path Lua writes `ngx.log()`: panel LOGONLY decision verdicts (`logonly=would_enforce`), module-load failures, Lua errors. The error-log companion to `edge_access_tail` (which is the access ring). Bounded `tail` + optional grep, newest matches kept | `system/edge-error-log` | `grep`, `lines`, `limit`, `source` |
-| `waf_fp_hunt` | "Is it safe to enforce on the panel?" — aggregates the panel LOGONLY burn-in from the edge error log (`[cfm_panel_waf]` would-be actions + `[cfm_panel_decision]` would-enforce verdicts), SEPARATING known-scanner noise (Censys/Shodan/… by UA) from the customer-facing residue. Headline gates: `panel_waf.nonscanner_would_block` + `panel_decision.ip_block_count`. Also per-rule breakdown, candidate FPs (worst first, with samples), top UAs. Body rules not represented (panel WAF reads no body). The aggregated view over `edge_error_tail`'s raw lines | `system/waf-fp-hunt` | `lines`, `source` |
-| `abuse_shadow` | "What would the entity-abuse signals have challenged, and is it safe to enforce?" — aggregates the LOG-ONLY abuse-shadow log (`/var/log/cfm/cfm.abuse_shadow.log`). Signal C flags a per-IP request-rate OUTLIER vs the vhost's OWN median (the concentrated shape hiding under the aggregate score, e.g. a scraper melting one shop's backend). Returns would_challenge vs exempt_goodbot counts, unique hosts/IPs, top would-challenge (host,ip) outliers by peak ratio (+ datacenter provider tag), and the by-provider (datacenter-ASN) / by-good-bot (FCrDNS-verified) splits. NOTHING enforced — the burn-in measurement view to tune `ABUSE_SHADOW_RATE_*` before promotion. Empty when the feature is off | `system/abuse-shadow` | `lines` |
-| `lsm_detections` | Aggregate cfm-lsm (BPF LSM) DETECT events from CFM's own lsm log: per-policy totals + rate-cap suppression roll-up (`suppressed_total`), and top repeat offenders ranked by (policy, comm, exe) with last-seen, user, short exe sha256. Answers "is cfm-lsm firing at anything real, or is this one noisy FP?" — e.g. hundreds of `CFML-CRED-002` from sssd/sssd_kcm/panel perl = uid-transition noise → silence via `allow_comm=`/`allow_exe=` under `[policy]` in `/etc/cfm/lsm.conf` + `cfm lsm restart`; ONE event with exe under /tmp,/dev/shm or `(deleted)` = dropper pattern worth escalating. Aggregates the newest ≤2000 detect lines of the window; `window_full=true` ⇒ older exist (raw lines via `cfm_log_tail` which=lsm). Empty until cfm-lsm has fired | `system/lsm-detections` | `lines` |
-| `lsm_status` | cfm-lsm kernel-side state: preflight checks (can this host load BPF LSM at all? with remediation), enabled/attached (pinned links) vs config mismatch, BTF drift picks, per-policy configured mode vs live runtime (attached / would-attach / skip / unavailable) — the `cfm lsm status --json` wire format — PLUS `effective_allows`: per policy the MERGED allow_exe/allow_comm/allow_path sets (compiled-in defaults + operator entries). Before blaming a noisy CRED-002 FP, check whether that binary is already allowed; propose additions as `[policy] allow_exe=/allow_comm=` + `cfm lsm restart`. What COULD fire and how; pair with lsm_detections for what IS firing | `system/lsm-status` | — |
-| `backup_status` | This node's latest backup check (JetBackup 5 / Virtualmin / Proxmox vzdump, run by the health detector every 15 min): per adapter each job's last result, last SUCCESSFUL run, schedule, running flag, and the open findings (`backup_failed` / `backup_stale` / `backup_stuck` / `backup_partial` / `backup_uncovered` / `backup_dest` / `backup_no_job`) plus an adapter `error` when its CLI could not be read. `enabled`=false = BACKUP_ALERT off; `status`=null = no check finished yet; `age_seconds` = how old it is. "Are backups OK here, and since when not?" — fan out with node="all" | `health/backup` | — |
-| `mysql_pressure` | MySQL/MariaDB pressure now (mysqltop): connection saturation + per-user conns MERGED with CPU/query deltas, ranked — catch the offender ("few conns, high CPU") | `mysql/top` + `mysql/cpu` | `top` |
-| `db_web_pressure` | Per-ACCOUNT DB pressure × web request volume — flags the "few web hits, high DB pressure" tenant (runaway cron/import, abusive script, compromised account), NOT "lots of traffic → lots of DB". Folds DB users (`acct_*`) + vhosts up to the owning cPanel account; flagged accounts (`few_hits_high_pressure`) sort first, then by pressure-per-hit. `perf` says if cpu is real (busy_sec proxy on CloudLinux MariaDB). Attribution is cPanel-only — `web_attribution.vhosts_mapped=0` + a `note` when it can't map (non-cPanel host) | `mysql/cpu` + `mysql/top` + `webdet/top-short` | `top` |
-| `lve_cpu` | Per-tenant CPU pressure on CloudLinux (LVE) — which hosting account is burning CPU now. Each tenant hottest-first with `uid` + `username` (resolved login = the cPanel/DA account; empty if unresolved, uid 4294967295 labelled `(default LVE / outside)`), `cores` (CPU cores used) + `pct_of_limit` (% of its LVE CPU cap; 100 = throttled) + lCPU/nCPU + EP/NPROC. In-memory sampler of `/proc/lve/list` (~15s); the per-tenant companion to `mysql_pressure`. `available:false` off CloudLinux, `ready:false` while warming | `system/lve-cpu` | `top` |
-| `cpu_throttle` | Root-cause for high CPU load: THROTTLED or genuine demand? Reads instantaneous cpufreq+thermal+loadavg from sysfs/proc → `cause`: `genuine_demand` (near max freq under load — hunt the workload), `thermal_throttling` (slow+hot/throttle-counters — check cooling), `frequency_capped` (slow but cool — powersave governor/policy cap), `frequency_reduced` (slow, cause unclear), `low_load` (idle downclock, normal), `no_cpufreq_data` (VM — check host CPU steal). Load-gated so an idle downclock is never called throttling; carries freq ratio, governor, temp, throttle counters + a plain summary | `system/cpu-throttle` | — |
-| `mysql_log_tail` | Tail the MySQL ERROR log (crashes, deadlocks, aborted conns, InnoDB errors) — "what's erroring?" | `system/mysql-log` | `lines`, `grep`, `limit` |
-| `mysql_slow_queries` | Tail the MySQL SLOW-QUERY log (where enabled) — the slow statements behind high CPU | `system/mysql-log` | `lines`, `grep`, `limit` |
-| `cfm_log_tail` | Tail one of CFM's OWN logs (`/var/log/cfm/*` + legacy `/var/log/cfm.*` fallbacks) — `which` = main/error/api/detector/challenges/smtp/mysql/waf/clam/socket/lsm/service. "What did the daemon / a subsystem log?" when the edge access/error logs don't explain a symptom. Bounded tail + grep; a log not present → `found:false`; `window_full` flags a saturated tail window | `system/cfm-log` | `which`, `lines`, `grep`, `limit` |
-| `journal_tail` | Tail the systemd journal for an ALLOW-LISTED unit (cfm, angie/openresty/nginx/httpd/apache2, mysql/mysqld/mariadb, exim, dovecot, postfix, sshd, clamd, named) — a service's own startup/crash/restart output ("did cfm/the edge/mysql fail to start, and why?"). Arbitrary units rejected; non-systemd host → `available:false`. Bounded (`journalctl -n`) + grep | `system/journal` | `unit`*, `lines`, `grep`, `limit` |
-| `mail_log_tail` | Tail a mail log — `which=exim` (exim_mainlog, default) / `dovecot` / `postfix`. Raw-log companion to mail_queue_summary; where outbound-abuse evidence lives (`A=dovecot_login:` senders, `cwd=/home` scripts). Bounded tail + grep; path from a fixed candidate list; `found:false` if not logging there | `system/mail-log` | `which`, `lines`, `grep`, `limit` |
-| `mail_queue_summary` | Mail-queue breakdown (exim/postfix, auto) — total/frozen/deferred, age buckets, top sender+recipient domains, oldest, + top defer/freeze reasons — "why is mail backing up / stuck?" (detector-published, no probe) | `system/mail-queue` | — |
-| `mail_traffic` | Mail traffic over a window (Mail Monitor) — top outbound senders, most-sent domains, top inbound mailboxes, local-script (PHP/cron) submitters by unix user, + rejected/throttled/over-quota/failed-login tallies. "Who is sending a lot / which account is compromised" (per-hour counters persisted by the collector, no per-request probe; scope-aware). Admin callers also get `abuse`: the node's current mail-abuse findings (script spike / mailbox spike / hijack incl. IMAP/POP3 / bounce spike / queue hog / RBL listing) with subjects, recipients, recipient domains, envelope sender and the contact-form pattern (docs/mail-abuse.md) | `mail/traffic` | `hours`, `limit` |
-| `mail_dns_check` | Mail-auth DNS for a domain — SPF (present? lists this server's IP? all-qualifier), DMARC (policy), DKIM (selector key), sending-IP PTR/FCrDNS, MX + plain findings. The DNS "why" behind a Gmail `421-4.7.27 SPF did not pass` / `550 unsolicited`. Live TXT lookups; scope-aware (scoped users → own domains) | `mail/dns` | `domain`, `dkim_selector` |
-| `detection_history` | Durable timeline of detections (WAF/challenge/clam/…). `ip=<addr>` attributes one IP — the WAF/detector/challenge events behind why CFM acted on it (a `firewall_blocks` ban with no comment → check here; manual/blocklist bans leave no event). Same data as `cfm webtop history events --ip` | `webdet/history/events` | `limit`, `type`, `host`, `ip` |
-| `alerts` | The node's alert log (`internal/alerts`, docs/alerts.md): every event the detectors raised for the notifier — the "[CFM] host — KIND ip" mails — recorded even when no channel is set up or dedupe/an override did not send it. Per row: category, kind, severity, ip + country/ISO/ASN/PTR, vhost, reason, ban mode/ttl, delivery (`notified` / `send_failed` / `deduped` / `notifier_off` / `no_channels` / `muted` / `below_severity` / `queue_full`), samples, extra. Newest first, cursor paging | `alerts` | `hours`, `category`, `kind`, `min_severity`, `ip`, `country`, `asn`, `vhost`, `mode`, `delivery`, `q`, `limit`, `cursor` |
-| `alerts_summary` | The same log grouped by up to 3 of category / kind / severity / ip / country / asn / vhost / reason / mode / delivery / section / hour / day: count, distinct IPs, first/last, label. "Which detectors blocked GR clients, from which networks?" = `country=GR, group_by=kind,asn` | `alerts/summary` | same filters + `group_by`, `top` |
-| `bots_top` | Top user-agents (bots/crawlers/scrapers) | `webdet/ua-top` | `limit` |
-| `ip_locate` | Where + WHY an IP is blocked across ALL sources (nft/cfm.deny/csf/fail2ban/imunify360), incl. the cfm.deny autoblock reason (e.g. "autoblock: portscan …"). The `cfm which/search` equivalent; explains a `firewall_blocks` ban whose nft entry has no comment | `/search` | `ip`* |
-| `firewall_blocks` | Active nft bans (WAF autoblocks/detector bans/blocklist). No args → compact SUMMARY (total, perm/temp, top `by_country`, top `by_asn`); the list is often thousands of IPs. Drill down with `country`/`asn`/`reason` → matching rows + within-facet ASN breakdown for FP judgement (residential ISP vs VPS) | `firewall/list` | `country`, `asn`, `reason`, `limit` |
-| `firewall_selftest` | nftlib backend self-diagnostics — recent EnsureBase timings split into lock_wait/netlink/CLI (+ worst call), per-set feed-write sizes/errors, and `netlink`: count/errors/timeouts for every netlink call (each on its own socket; reads carry a deadline, writes don't) with the recent slow or timed-out calls. Root-cause an nftlib slowdown (EnsureBase duration climbing), stalled netlink reads (`netlink.timeouts`), or a feed that won't apply ("message too long"). `available:false` on exec-nft | `firewall/selftest` | — |
-| `blocklist_feeds` | The external blocklist feeds (`cfm.blocklists`: cfm-web MYBLOCK/MYALLOW + third-party lists) and whether they refresh — per feed type, URL (query redacted), interval, last fetch / last OK / last apply, last HTTP status + error, v4/v6 counts; `failing` count. `api_origin` = feed on the API_URL host (pulled with AUTH_TOKEN), `token_sent` = the last fetch carried it (token never shown). Fleet check that cfm-web feeds no longer rely on its IP-only fallback | `firewall/feeds` | — |
-| `nft_counters` | nftables named-counter view — how much traffic each L3/L4 firewall RULE is matching in `table inet cfm`, grouped by family (portflood/connlimit/synflood/ppsflood/hardening/smtpblock), busiest first + `by_family` totals. The RULE-match volume (distinct from `firewall_blocks`, the blocked-IP sets): "which firewall rules are firing, how hard?" — a spiking `portflood_*`/`synrate` points at an active flood. Does NOT reflect panel/web WAF or bridge enforcement (edge 403s, not nft — use `waf_activity`/`waf_fp_hunt`). `nonzero=true` hides idle counters | `firewall/counters` | `nonzero` |
-| `netfilter_path` | Host-wide nftables hook order across CFM, Imunify/WebShield, iptables-nft and other tables: actual numeric base-chain priorities, statically reachable NAT/DNAT/redirect rules, equal-priority ambiguity, configured/runtime CFM priority drift, and ordered overlaps for selected traffic. Safety bounds/unsupported verdict maps fail visibly as `analysis_incomplete`. Uses terse nft JSON; blocklist set elements are never returned | `firewall/path` | `hook`, `family`, `proto`, `dport` |
-| `detectors_status` | Which detectors run + recent activity | `detectors/status` | — |
-| `detectors_config` | The parsed detectors.conf **with values** — every section's keys (MODE / DRY_RUN / BLOCK / thresholds), the resolved path, `exists`, and `overlay_files`. "What is this knob actually set to?" and "did I leave X in monitor/dryrun instead of block?" — what `config_drift` (presence + stock-vs-live diffs, no live values) and `detectors_status` (runtime activity) can't show. Default is the BASE file; **`merged=true`** returns the EFFECTIVE view (base + every `/etc/cfm/detectors.d/*.conf` overlay merged, same layered reader the daemon runs) plus `overrides` — the per-key delta the overlays introduced (base value, effective value, and which overlay file won each): "which value actually wins, and where does it come from?" in one call. Secrets (CHALLENGE_TOKEN / OPENRESTY_TOKEN / any secret-name-shaped key) are `[redacted]` in both config and overrides. Admin-only endpoint, already backing the cfm-admin editor | `detectors/config` (`?view=merged`) | `merged` |
-| `detector_coverage` | Daemon-vs-detector coverage matrix: for every registered detector type, probes whether the watched daemon's systemd unit exists/is active (curated type→units affinity), lists the live detectors.conf sections (configured/ENABLED/active/source-probe-ok) and returns a reality-aware verdict — ok; GAP (daemon running, detector unconfigured or all ENABLED=0 = the real "I forgot"); disabled; dormant (enabled but daemon absent/stopped); absent (daemon not present AND not configured — informational, not a complaint); na (event-driven). Start at summary.gaps/dormant | `detectors/coverage` | — |
-| `detectors_srcresolve` | Dry-run SOURCE RESOLUTION per detector section: which journald unit / log file / docker container each section would tail RIGHT NOW and why — the same planners the daemon's registers use (probes run live; nothing starts or changes). Rows: engine (srcresolve vs legacy-auto vs n/a), configured source keys, resolved kind+target, reason, provisional (blind default, self-heals), would_disable (MTA absent here → section self-disables). The preview surface for removing hand-set MODE/LOG_PATH/JOURNAL_UNIT/DOCKER_CONTAINER pins before shipping a unified detectors.conf — fan out per node (cfm-web node_call node=all) to preview the whole fleet | `detectors/source-resolution` | — |
-| `config_drift` | Stock-vs-live config drift: compares the packaged reference configs (/usr/share/cfm/configs/) against /etc/cfm/ so you see features a release shipped that your conffiles never received (upgrades seed live once and never touch it again). detectors.conf via the daemon's own parser: missing_sections (e.g. a whole newer [waf_security]), missing_keys per section (newer knobs like challenge_cookie_discard settings = INACTIVE features), extra live-only entries, value_diffs (informational). cfm.conf: stock-documented keys absent from the live text entirely. Read-only; changes nothing | `system/config-drift` | — |
-| `clam_status` | ClamAV on-upload scanner health (box-wide): enabled? scope/mode (archives-gate, async/inline, dry-run), circuit-breaker (open/since/consec-fails/last-OK/last-err), queue len/cap, lifetime counters (scanned OK, errors, breaker-skips, queue drops, inline blocks). "Is upload scanning running or has clamd tripped the breaker/filled the queue?" | `clam/health` | — |
-| `notifier_status` | Alert-notifier runtime: which channels are enabled (Slack/email/webhook) + delivery state — "are CFM's alerts actually going out?". Secrets never returned | `notifier/status` | — |
-| `http3_status` | HTTP/3 (QUIC) opt-in list — which vhosts have HTTP/3 enabled at the edge | `http3/list` | — |
-| `edge_health` | Focused edge origin-hop CORRECTNESS check: correlates the edge access/error logs with the live engine+version to catch the class behind the 2026-08 cross-SNI Apache 421 (which the raw tails + config_drift can't surface in one call). Severity-ranked findings (`overall` ok/warn/critical/unknown): (A) engine+version + native-keepalive-default-on trap — nginx ≥1.29.7 (OpenResty 1.31.x) turns native upstream keepalive ON by default & SNI-blind, Angie keeps it off; (B) 421 WARM-REUSE fingerprint (status=421 + uct≈0 via cfm_origin_https) + top hosts; (C) `[cfm_origin_ka]` activation/degradation tiers; (D) ORIGIN_KEEPALIVE knob state (bridge config); (E) ORIGIN PREMATURE-CLOSE — gateway 5xx (502/503/504) with `uht="-"` AND a real `uaddr=`, i.e. the edge selected an origin peer and never got a response header back (a response the edge served itself — challenge/block — names no peer and is excluded), with the affected-vhost spread (many vhosts ⇒ the origin itself; one ⇒ that app). An application 500 always carries a header so it is excluded by construction; needs both an event floor and a rate, and is recency-aware; (F) `cdn-cached-challenge` — vhosts whose visitors holding a valid clearance were bounced back to the challenge through a trusted proxy from 3+ distinct clients (IPv6 per /64) in 24 h (only for a page target; direct bounces are listed in `evidence.direct_hosts`, relayed downloads in `evidence.download_hosts`, never as a warning), likely a CDN (Cloudflare) caching CFM's challenge despite no-store; the fix is the CDN's cache rule (in-memory; `ok` with `measured=false` when the challenge server is not serving); (G) `origin-real-ip` — does the origin (Apache/LiteSpeed/nginx on cPanel, DirectAdmin, NGM or plain) trust the edge's 127.0.0.1 to name the client, or log 127.0.0.1 for every visitor (config only; `ok` when no edge engine runs; fix: `cfm realip fix`, or the manual step it prints for LiteSpeed/NGM). Read-only (reads logs + config + runs the edge `-v`). Design: `docs/edge-health.md` | `system/edge-health` | `window` |
-| `system_health` | Health snapshot + recent anomalies | `health/snapshot` + `health/anomalies` | `since` |
-| `process_list` | Busiest processes (top-like: pid/user/state/%cpu/%mem/rss/threads/comm) — "load is high, who's eating it?" | `system/processes` | `top` |
-| `listening_ports` | Listening TCP/UDP sockets + owning process (`ss -tlnp`) — "is the edge/daemon/panel up, who owns :443?" | `system/listeners` | — |
-| `dmesg_tail` | Kernel ring buffer tail (OOM kills, I/O errors, segfaults, nft drops) — "why did it OOM/crash/reset?" | `system/dmesg` | `lines`, `grep` |
-| `service_status` | systemd unit status (loaded/active/enabled, sub-state, pid, memory, restarts, uptime) — "is cfm/edge/mysql/mail up, anything flapping?" | `system/services` | `units` |
+| `whats_wrong` | **Start here** for "is anything wrong right now?". Fetches 11 sections in parallel, each with a 25 s budget, and returns findings ranked critical → warning → info. Each finding has a `tool` (+ `args`) to drill into next. It covers disk/inode, load, memory/swap, conntrack, ECC errors, process-health D-state/zombie anomalies, failed or flapping services, equal-priority netfilter ambiguity and CFM priority drift, MySQL connection saturation, frozen mail, mail-abuse findings and anomalies, SMTP/spamd saturation, API-abuse bursts, panel burn-in residue, and edge_health warn/critical findings (origin premature-close, 421 reuse, keepalive degradation, CDN-cached challenge). It is deliberately conservative: routine WAF/firewall activity is not a finding. `status:"ok"` means no findings among the signals it could read; `sources` marks each input `ok` / `unavailable` / `degraded: …` / `error: …` | `health/snapshot`, `system/process-health`, `health/anomalies`, `system/services`, `firewall/path`, `mysql/top`, `system/mail-queue`, `mail/traffic`, `mail/runtime`, `system/waf-fp-hunt`, `system/edge-health` | — |
+| `security_overview` | Compact headline: health, WAF in the last hour (summary without raw rows), active challenged vhosts, the firewall block list (first 10 rows + `rows_total`), and the top 20 suspicious hosts. The five sections run in parallel, each with a 25 s budget | `health/snapshot`, `waf/engine/summary` (hours=1, top=10), `challenge/vhosts` (status=active, mode=all, limit=100), `firewall/list`, `webdet/suspicious` (limit=20) | — |
+| `system_health` | Health snapshot (load, memory, disk, service/edge liveness, ingest) plus recent health anomalies | `health/snapshot`, `health/anomalies` | `since` string (anomalies window: RFC3339 or a duration like `1h`) |
 
-`*` required.
+### 4.2 WAF
 
-> `process_list` returns the process **COMM** (executable name) only — never the
-> full cmdline, which routinely carries secrets (`mysql -pXXXX`, `--token=…`).
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `waf_activity` | Recent in-path WAF hits with FP evidence: time, event type, IP, country/ISO/ASN, host, URL, method, action, reason/rule ID, UA/referer/content type when available. Also filtered totals, top rules/IPs and an hourly histogram. Filters combine. Bodies are never included; secret-looking referer params are redacted | `waf/engine/summary` (enrich=1) | `hours` int (default 24), `limit` int, `top` int (server default), `country` string (ISO-2, csv), `rule` string (reason/family substring or exact rule ID), `ip` string (exact), `host` string (exact), `path` string (substring), `ua` string (substring) |
+| `waf_rules` | Loaded WAF rules: id, reason family, tier (logonly / challenge / challenge_v2 / block) | `waf/rules` | — |
+| `waf_rule_detail` | One rule or family across both surfaces. Returns `matched_rules` (registry); a `web` slice (events, blocked, unique IPs/hosts, top reasons/IPs/hosts/countries); a `panel` slice (hits, scanner vs non-scanner, `nonscanner_would_block`, rule_ids, samples). A numeric id also returns `web_by_id` (`also_matches` behind a stronger headline rule; sampled from the de-duplicated push). Read the `notes` | `waf/rules`, `waf/engine/summary`, `system/waf-fp-hunt` | `rule`* string (family, substring or numeric id), `hours` int (default 24, max 720) |
+| `waf_fp_hunt` | Panel LOGONLY burn-in from the edge error log (`[cfm_panel_waf]`, `[cfm_panel_decision]`). Separates scanner noise (by UA) from the customer-facing residue. The gates are `panel_waf.nonscanner_would_block` and `panel_decision.ip_block_count`. Body rules are not represented (the panel WAF reads no body) | `system/waf-fp-hunt` | `lines` int (default 5000, max 200000), `source` string (edge error-log basename or path from the available list) |
+
+### 4.3 Challenge engine
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `challenge_vhosts` | Vhosts under a challenge, manual or auto, with state. `lockdown=true` / `lockdown_until` marks a manual challenge with no client exemption | `challenge/vhosts` | `status` string (e.g. `active`; omit for all), `mode` string (`manual`/`auto`/`all`, default all), `limit` int |
+| `challenge_events` | Recent arm/pass/fail events, newest first | `challenge/events` | `limit` int, `host` string |
+
+### 4.4 Web traffic & request evidence
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `suspicious_hosts` | Long-window suspicious vhosts by behavioural score | `webdet/suspicious` | `limit` int |
+| `top_talkers` | Busiest vhosts by request volume/rate | `webdet/top-short`, or `webdet/long-top` when `window=long` | `limit` int, `window` string (`short` default / `long`) |
+| `hot_ips` | Hottest source IPs by recent rate | `webdet/ip-short` | `limit` int |
+| `host_drilldown` | Top paths and IPs for one vhost, short and long windows | `webdet/drilldown` | `host`* string, `top` int |
+| `ip_drilldown` | Which vhosts/paths one IP touches, its pattern and score | `webdet/ip-drilldown` | `ip`* string |
+| `bots_top` | Top user-agents by volume | `webdet/ua-top` | `limit` int |
+| `edge_access_tail` | Recent edge access-log lines from the in-memory ring, newest last. Secret-looking query params are redacted; no bodies | `webdet/access-recent` | `ip`, `host`, `method` strings; `status` string (exact `403` or class digit `4`); `path` string (URI substring); `since` string (`10m`, `2h`); `limit` int (default 50, max 500) |
+| `auth_corpus` | Login POSTs seen since the daemon started, grouped by shape: tag, outcome, logged-in-cookie bit, upstream, method, status, normalised path, Location path, Set-Cookie names. Each shape has counts, distinct IPs/hosts and example hosts. In memory and bounded (2000 shapes, 16 per /24 or /64); emptied by a restart or config reload. No cookie values, query strings or bodies | `webdet/auth-corpus` | `tag` string (e.g. `WP_LOGIN`, `JOOMLA_ADMIN`, `LOGIN_POST`), `outcome` string (`ok`/`fail`/`mfa`/`na`/`?`), `limit` int (default 100, max 1000) |
+| `ip_forensics` | Raw edge access-log lines for one IP (bounded `tail \| grep` with a timeout). With `include_rotated`, also scans rotated siblings (`.1`, `.N.gz`, `-YYYYMMDD.gz`) newest-first under a shared line budget. Returns `files_scanned` | `system/ip-forensics` | `ip`* string, `lines` int (default 300000, max 2000000), `limit` int (default 200, max 1000), `source` string (access-log basename or path), `include_rotated` bool (default false), `max_files` int (default 10, max 60) |
+| `host_access_history` | Archival profile of one vhost from the edge's full access log and its rotations. Covers requests, an hourly series with peaks vs median, status/method mix, top IPs, UAs (with a browser vs bot-like split) and paths. A separate `bad_requests` section reads `access.bad_request.log` (400/408/414/431/494/499). With `combine` it joins detector history over the same window and reports `detector_coverage`. Every reach bound sets `truncated`; `log_changed_during_scan` means rerun. Max 2 concurrent scans per node (`429` + `Retry-After`). Compare `coverage_oldest_unix` with the requested window before claiming a long reach | `webdet/host-access-history` | `host`* string; `hours` int (default 168, max 2160); `merge_www` bool; `include_rotated` bool (**default true**); `combine` bool (**default true**); `max_files` int (default 40, max 60); `lines` int (live tail, default 1000000); `max_lines` int (default 8000000, max 60000000); `top` int (default 20, max 50) |
+| `abuse_shadow` | Aggregates the log-only `/var/log/cfm/cfm.abuse_shadow.log`. Signals: `rate_outlier` (Signal C), `facet_expansion`, `cost_pressure`, `dc_fraction`, `origin_403_burst` (`would_ban`, `top_origin_403`). Includes the per-IP `challenge_score` (would_harden / would_deny, by_fp with `convicted`) and a `humanity` section for ChallengeV2 `would_v2` lines (by_src, by_scope, by_tells, `rescued`, …). Nothing is enforced; this is a sizing view. Empty when the feature is off | `system/abuse-shadow` | `lines` int (default 5000, max 200000) |
+
+### 4.5 Durable history & alerts
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `detection_history` | Persisted, GeoIP-enriched event timeline: WAF, challenge issued/solved, `challenge_v2_reject`, ClamAV, ECC (`hardware_ecc`), login-spray signals, `solver_farm`, … `ip=` tells why CFM acted on an IP; manual and blocklist bans leave no event (use `ip_locate`). The tool description documents the ChallengeV2 payload keys (`hs`, `tells`, `v2`, `v2_via`, `sig`, `src`, `scope`, `v2_waived`, `v2_rescued`, `v2_confirm`, `v2_waiver_miss`, …) | `webdet/history/events` (enrich=1) | `limit` int, `type` string, `host` string, `ip` string |
+| `alerts` | The node's alert log (`internal/alerts`, `docs/alerts.md`): every event raised for the notifier, recorded even when no mail went out. Rows carry category, kind, severity, IP + geo/ASN/PTR, vhost, reason, ban mode/TTL, count, `delivery` (`notified`, `send_failed`, `deduped`, `notifier_off`, `no_channels`, `muted`, `below_severity`, `queue_full`), up to 5 samples and extras. Newest first, cursor-paged | `alerts` | filters: `hours` int (default 24, max 2160; store keeps 30 days by default); `category` csv (e.g. `WAF,PORTSCAN`); `kind` csv (`WAF/SQLI`); `min_severity` string (`info`/`warning`/`critical`); `ip`, `country` (ISO-2 or name part), `asn` (number, `AS…` or name part), `vhost` strings (`-` = none); `mode` string (`ttl`/`permanent`); `delivery` csv; `q` string (free text). Plus `limit` int (default 100, max 500), `cursor` string (`next_cursor`) |
+| `alerts_summary` | The same log grouped by up to 3 dimensions: count, distinct IPs, first/last, label. Top groups by count; time buckets in time order | `alerts/summary` | the `alerts` filters, plus `group_by` csv (from `category, kind, severity, ip, country, asn, vhost, reason, mode, delivery, section, hour, day`; default `category`), `top` int (default 50, max 500) |
+
+### 4.6 Firewall
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `firewall_blocks` | Active nft bans. With no facet: a summary (`total`, permanent/temporary, `countries_total`, top 15 `by_country` and `by_asn`). With a facet: the matching rows plus a top-10 ASN breakdown for FP judgement. Facets combine | `firewall/list` (summarised in the tool) | `country` string (case-insensitive substring of the country name), `asn` int, `reason` string (ban-comment substring), `limit` int (drill-down rows, default 100, max 1000) |
+| `ip_locate` | Where and why an IP or CIDR is blocked across nft, cfm.deny, csf, fail2ban and imunify360, with the cfm.deny autoblock reason. Equivalent to `cfm which/search` | `/search` (outside `/api/v1`) | `ip`* string (IP or CIDR) |
+| `nft_counters` | Named-counter match volume in `table inet cfm` by family (portflood / connlimit / synflood / ppsflood / hardening / smtpblock), busiest first + `by_family`. Does not reflect edge WAF/bridge 403s. Returns `available:false` on the nftlib engine | `firewall/counters` | `nonzero` bool (hide idle counters) |
+| `firewall_selftest` | nftlib self-diagnostics: recent EnsureBase timings (lock_wait / netlink / CLI, worst call), per-set feed writes, and `netlink` (counts, errors, `timeouts`, slow or timed-out calls). Returns `available:false` on the exec-nft engine | `firewall/selftest` | — |
+| `blocklist_feeds` | Per external feed (`cfm.blocklists`): type, URL (query and userinfo redacted), interval, last fetch / OK / apply, HTTP status, error, v4/v6 counts; plus `failing`. `api_origin` / `token_sent` / `token_rejected` show whether cfm-web feeds were pulled with AUTH_TOKEN (the token is never shown) | `firewall/feeds` | — |
+| `netfilter_path` | Host-wide nftables hook order (CFM, Imunify/WebShield, iptables-nft, others): base chains by numeric priority, reachable NAT/DNAT/redirect rules, CFM configured-vs-runtime priority drift, equal-priority ambiguity, ordered overlaps. Blocklist set elements are never returned | `firewall/path` | `hook` string (`ingress, prerouting, input, forward, output, postrouting, egress`), `family` string (`ip, ip6, inet, bridge, arp, netdev`), `proto` string (`tcp`/`udp`), `dport` int (1–65535) |
+
+### 4.7 Detectors & configuration
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `detectors_status` | Detector framework runtime: which detectors are enabled and running, recent activity | `detectors/status` | — |
+| `detectors_config` | Parsed `detectors.conf` **with values** (global, core, leniency, advanced sections; path, `exists`, `overlay_files`). `merged=true` returns the effective view (base + `/etc/cfm/detectors.d/*.conf`) plus `overrides` (base value, effective value, winning overlay). Secret-named keys become `[redacted]` and are listed in `redacted_keys` | `detectors/config` (`view=merged` when merged) | `merged` bool |
+| `detector_coverage` | Daemon-vs-detector matrix with a verdict per type: ok / GAP / disabled / dormant / absent / na. Start at `summary.gaps` and `summary.dormant` | `detectors/coverage` | — |
+| `detectors_srcresolve` | Dry run of detector source resolution: which journald unit, file or container each section would tail now, and why. Includes `provisional` and `would_disable`. Nothing starts | `detectors/source-resolution` | — |
+| `config_drift` | Stock (`/usr/share/cfm/configs/`) vs live (`/etc/cfm/`). For `detectors.conf`: missing sections/keys, extras, value_diffs; overlays count as present and are not diffed. For `cfm.conf`: stock keys absent from the live text | `system/config-drift` | — |
+
+### 4.8 Edge (OpenResty / Angie)
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `edge_health` | Edge → origin correctness, `overall` ok/warn/critical/unknown, with these checks: (A) engine/version and the nginx ≥ 1.29.7 native-keepalive trap; (B) 421 warm-reuse fingerprint, recency-aware; (C) `[cfm_origin_ka]` tiers; (D) `ORIGIN_KEEPALIVE` state; (E) origin premature-close (gateway 5xx with `uht=-` and a real upstream); (F) CDN-cached challenge; (G) origin real-IP trust; (H) `web-dnat-order` (another DNAT, e.g. Imunify WebShield, ahead of CFM's web redirect). Runs the edge `-v` only. Design: `docs/edge-health.md` | `system/edge-health` | `window` int (access-log lines, default 50000, max 500000) |
+| `edge_error_tail` | Tail of the edge error log: Lua `ngx.log()`, panel LOGONLY verdicts, module-load failures. Newest matches kept | `system/edge-error-log` | `grep` string, `lines` int (default 5000, max 200000), `limit` int (default 200, max 1000), `source` string |
+| `http3_status` | Vhosts with HTTP/3 (QUIC) enabled at the edge | `http3/list` | — |
+| `site_cache_status` | Site Cache per-vhost policies (exact or `*.suffix`): static/micro tier, recipe/TTL, enabled, purge generation, `unloadable` entries, and `switches` (`site_cache`, `micro_cache_enforce` as last handed to the edge). The description gives the resolution rules (exact entry first, then the most specific wildcard; an entry with both tiers off is an opt-out) | `site-cache/list` | — |
+| `site_cache_stats` | Site Cache effectiveness per armed vhost: HIT / MISS / EXPIRED / STALE / UPDATING / REVALIDATED / BYPASS and a strict hit ratio. Pushed by the edge about every 60 s. Emptied by a daemon restart, a detectors.conf/overlay save, or rotation of a tailed log | `site-cache/stats` | `host` string (resolved to its policy key as the edge does) |
+
+### 4.9 Host, processes & services
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `process_list` | Busiest processes, top-style: pid, ppid, user, state, %cpu, %mem, rss, threads, command name (COMM). Filters apply before the top cut. `details=true` adds direct child PIDs and a bounded, sanitised argv. The raw `/proc/<pid>/cmdline` is never returned | `system/processes` | `top` int (default 15, max 200), `match` string (COMM substring), `pid` int, `details` bool |
+| `process_health` | One `/proc` scan: totals, scan completeness, state counts, COMM-family aggregates, RSS/count rankings, fanout. Includes a conservative evaluation of D-state pile-ups and zombies; a partial scan gives `evaluation.status=degraded`. No cmdline, NSS lookups or CPU sampling | `system/process-health` | — |
+| `listening_ports` | Listening TCP/UDP sockets grouped by (proto, port, process), with the owner COMM + pid and a bounded address sample (`ss -tlnp` style). No connections or peers | `system/listeners` | — |
+| `service_status` | systemd unit status: loaded, active, enabled, sub-state, main pid, memory, restarts, uptime | `system/services` | `units` csv (bare name = `.service`; default is the curated CFM + hosting-stack set with uninstalled units elided) |
+| `journal_tail` | `journalctl -n` for one allow-listed unit; any other unit is rejected; `available:false` without systemd | `system/journal` | `unit`* string (`cfm, angie, openresty, nginx, httpd, apache2, mysql, mysqld, mariadb, exim, dovecot, postfix, sshd, clamd, named`), `lines` int (default 500, max 20000), `grep` string, `limit` int (default 200, max 2000) |
+| `dmesg_tail` | Kernel ring buffer: OOM kills, I/O errors, segfaults, nft drops | `system/dmesg` | `lines` int (default 80, max 1000), `grep` string |
+| `cpu_throttle` | Root cause of high load. `cause` is one of `genuine_demand`, `thermal_throttling`, `frequency_capped`, `frequency_reduced`, `low_load` or `no_cpufreq_data` (typical on VMs), with the freq ratio, governor, temperature and throttle counters. Load-gated | `system/cpu-throttle` | — |
+| `lve_cpu` | Per-tenant CPU on CloudLinux from a ~15 s `/proc/lve/list` sampler: uid, username, cores, `pct_of_limit` (100 = throttled), lCPU/nCPU, EP/NPROC. `available:false` off CloudLinux; `ready:false` while warming up | `system/lve-cpu` | `top` int (default 25, max 500) |
+| `backup_status` | Latest backup check (JetBackup 5 / Virtualmin / Proxmox vzdump, run every 15 min): per job the last result, last success, schedule and running flag, plus findings (`backup_failed`, `_stale`, `_stuck`, `_partial`, `_uncovered`, `_dest`, `_no_job`). `enabled:false` means BACKUP_ALERT is off; `status:null` means no check has finished. See `docs/backup-check.md` | `health/backup` | — |
+
+### 4.10 MySQL / MariaDB
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `mysql_pressure` | Connection saturation plus per-user connections merged with CPU/busy/query deltas. Ranked by active connections, then CPU, then busy_sec, then queries, then connections. The `perf` block says which numbers are real (busy_sec stands in for CPU on many CloudLinux MariaDB builds). Errors if `mysql/top` fails (e.g. the governor is not running) | `mysql/top`, `mysql/cpu` | `top` int (default 25, max 200) |
+| `db_web_pressure` | Per-cPanel-account DB pressure × web request rate. Flags `few_hits_high_pressure` accounts first, then sorts by pressure per hit. Attribution is cPanel-only; elsewhere it reports `web_attribution.vhosts_mapped=0` and a note. Errors if `mysql/cpu` or `webdet/top-short` fail; `mysql/top` is optional | `mysql/cpu`, `mysql/top`, `webdet/top-short` | `top` int (default 25, max 200) |
+| `mysql_log_tail` | MySQL error log tail | `system/mysql-log` (which=error) | `lines` int (default 200, max 5000), `grep` string, `limit` int (default 200, max 2000) |
+| `mysql_slow_queries` | Slow-query log tail; `found:false` when the slow log is not configured | `system/mysql-log` (which=slow) | same as `mysql_log_tail` |
+
+### 4.11 Mail
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `mail_queue_summary` | Queue breakdown (exim or postfix, auto-detected): total/frozen/deferred, age buckets, top sender/recipient domains, `top_senders`, oldest messages, top defer/freeze reasons. Reads the queue detector's report; `available:false` without one | `system/mail-queue` | — |
+| `mail_traffic` | Mail Monitor over a window: top outbound senders, domains, inbound mailboxes, local-script submitters by unix user, and reject/throttle/over-quota/failed-login tallies. Also `anomalies` (spike / new-sender, with `peak` / `under_peak`), `deliverability` per provider, and `abuse` (findings refreshed every 5 min: `mail_script_spike`, `mail_outbound_spike`, `mail_hijack`, `mail_bounce_spike`, `mail_queue_hog`, `mail_rbl_listed`, with context). `available:false` until the collector has run. See `docs/mail-abuse.md` | `mail/traffic` | `hours` int (default 24, max 720), `limit` int (default 20, max 200) |
+| `mail_runtime` | SMTP/spamd saturation: inbound SMTP sessions vs Exim `smtp_accept_max`, spamd children vs `--max-children`, each with utilisation % and class ok/warn/critical, plus the worst of the two. A cap it cannot read shows `unknown` | `mail/runtime` | — |
+| `mail_log_tail` | Mail log tail. The path comes from a fixed candidate list; `found:false` when the service does not log there | `system/mail-log` | `which` string (`exim` default / `dovecot` / `postfix`), `lines` int (default 500, max 20000), `grep` string, `limit` int (default 200, max 2000) |
+| `mail_dns_check` | Mail-auth DNS for a domain: SPF (lists this server's IP? all-qualifier), DMARC policy, DKIM key at the selector(s), sending-IP PTR/FCrDNS, MX, plus findings. Live lookups | `mail/dns` | `domain`* string, `dkim_selector` csv (default `default`) |
+
+### 4.12 CFM's own logs & subsystems
+
+| Tool | What it answers | Endpoint(s) | Args |
+|---|---|---|---|
+| `cfm_log_tail` | Tail one of CFM's own logs (`/var/log/cfm/*`, with legacy `/var/log/cfm.*` fallbacks). `found:false` when the log is absent. `window_full` means the live window was saturated. `rotated=N` also scans N rotated siblings, newest first, gz-transparent and bounded; `files_scanned` and `truncated` report the reach | `system/cfm-log` | `which` string (`main` default, `error, api, detector, challenges, smtp, mysql, waf, clam, socket, lsm, service, abuse_shadow`), `lines` int (default 500, max 20000), `grep` string, `limit` int (default 200, max 2000), `rotated` int (default 0, max 60) |
+| `lsm_detections` | cfm-lsm DETECT events aggregated from the lsm log: per-policy totals with suppression roll-up, top (policy, comm, exe) offenders. Aggregates the newest ≤ 2000 detect lines; `window_full` means older ones exist | `system/lsm-detections` | `lines` int (default 5000, max 20000) |
+| `lsm_status` | cfm-lsm kernel-side state (`cfm lsm status --json` format): preflight, enabled/attached, BTF drift picks, per-policy configured vs live mode, plus `effective_allows` (merged allow_exe / allow_comm / allow_path per policy) | `system/lsm-status` | — |
+| `clam_status` | ClamAV upload scanner: enabled, scope/mode, circuit breaker, queue len/cap, lifetime counters | `clam/health` | — |
+| `notifier_status` | Alert-notifier channels (Slack/email/webhook/…) and delivery state; no secrets | `notifier/status` | — |
+
+**Removed tools.** `challenge_ip_status` (added and removed 2026.08.11) dumped the
+per-IP challenge-DNAT sets. It was retired with that machinery; the edge Lua
+clearance cookie is the only clearance model (`docs/edge-unification-plan.md`).
+Old notes may still mention it.
 
 ---
 
-## 5. Available but NOT yet exposed (deliberate)
+## 5. Read endpoints not exposed as tools
 
-The read-only API surface is larger (~70 GET endpoints; see the CLI/UI). These are
-intentionally held back for a focused first cut, not by any technical limit — the
-in-process dispatch makes adding one a few lines:
+The read API is larger than the tool set. These GET endpoints exist and have no
+tool yet. They were held back for focus, not for technical reasons: a
+pass-through tool is a few lines in `status_reads.go`.
 
-- **MySQL governor** (`/api/v1/mysql/*`) — large subsystem with scoped-filter
-  nuances; wants its own tool group + care around the scoped/admin filter.
-- **Forensic analyzers** (`webdet/analyze-ip`, `analyze-host`) — heavier; the
-  lighter `*_drilldown` tools cover the common case first.
-- **HTTP/3** (`http3/*`), **ClamAV detail** (`clam/health`, `sigignore/list`),
-  **Notifier** (`notifier/*`), **SSL stats** (`system/ssl/stats`), **DNAT state**
-  (`dnat/state`), **Traffic rules** (`webdet/rules`), **Excludes**
-  (`challenge/exclude/list`, `waf/exclude/list`), **Tokens** (`tokens/list|me`),
-  **Debug captures** (`debug/*`).
-- **Health timeseries** (`health/timeseries`) — snapshot + anomalies ship first.
-- **UA drill** (`webdet/ua-drill`) — intentionally excluded: it *arms* 10-minute
-  tracking (a side effect), so it is not a pure read.
+- **MySQL governor** beyond `top` and `cpu`: `mysql/state`, `processlist`,
+  `locks`, `history`, `kills`, `user-summary`, `user-history`, `user-kills`. These
+  need care around the scoped filter. `mysql/user-kill` is an action, not a read.
+- **Forensic analysers:** `webdet/analyze-ip`, `webdet/analyze-host`. They are
+  heavier; the `*_drilldown` tools cover the common case.
+- **Other status reads:** `system/ssl/stats`, `dnat/state`, `health/timeseries`,
+  `webdet/rules` (traffic rules), `challenge/exclude/list`, `waf/exclude/list`,
+  `clam/sigignore/list`, `notifier/history` and `notifier/metrics`, `tokens/list`,
+  and `debug/*` captures. `tokens/me` would only describe the internal admin
+  identity.
+- **Deliberately excluded:** `webdet/ua-drill`. A GET to it arms 10-minute UA/IP
+  tracking (`ArmUAObserve`), so it is not a pure read.
 
-**Explicitly out of scope:** every mutating verb. Several endpoints above also
-accept POST/PUT/DELETE (block, unblock, exclude add/remove, config change, kill,
-prune). The MCP server issues **GET only** and never registers a write tool.
+**Out of scope on the node:** every mutating verb. Several of the endpoints above
+also accept POST/PUT/DELETE (block, unblock, exclude add/remove, config change,
+kill, purge). The node MCP server issues GET only and registers no write tool.
+Fleet writes live in cfm-web behind per-ability tokens (`docs/ROADMAP.md` §3).
 
 ---
 
-## 6. Roadmap / ideas
+## 6. Roadmap / ideas (open)
 
-- **Phase 2 — breadth:** promote the deferred read endpoints above into tools,
-  grouped (a `mysql_*` group, `analyze_*`, `http3_status`, `clam_status`,
-  `ssl_stats`, `dnat_state`, `notifier_status`, `health_timeseries`).
-- **Per-tenant / scoped tokens:** today the MCP token grants node-wide read via the
-  admin dispatch. A future mode could mint a **scoped** MCP token (cPanel-user
-  viewer scope) so a tenant sees only their vhosts — reusing CFM's existing scoped
-  token model, keeping the scoped/admin boundary intact.
-- **Session-based consent:** replace the paste-admin-token consent with an
-  "Approve" behind the existing `/cfm-admin` admin login session (nicer UX; no
-  token pasting).
-- **Revocable token store:** move from stateless HMAC tokens to entries in the
-  existing revocable token store, surfaced in `/ui/tokens`, for per-connector
-  revocation without rotating `MCP_TOKEN`. (Today: codes/refresh are single-use
-  via an in-memory nonce set, but individual access tokens can only be revoked en
-  masse by rotating `MCP_TOKEN`.)
-- ~~**Consent-failure backoff**~~ **(done 2026.08.06):** the consent POST is now
-  rate-limited per source IP (`consentRLBurst=10` per `consentRLWindow=5m`,
-  `internal/mcpserver/ratelimit.go`); exceeding it returns `429` with a
-  `Retry-After` and logs `event=mcp_oauth_consent_ratelimited`. Defence-in-depth
-  against brute-forcing `MCP_TOKEN` through the form and against
-  `mcp_oauth_consent_*` log spam — the token entropy (>=24 chars) remains the
-  primary control.
-- **Guarded write tools (far later, opt-in):** a *very* narrow, confirm-gated set
-  (e.g. temporary exclude, manual challenge on/off) behind an explicit server-side
-  opt-in — mirroring how the sibling projects gate their write tools OFF by
-  default. Not planned until the read surface is proven.
-- **Prompts / resources:** expose a couple of MCP "prompts" (e.g. "triage this
-  IP", "explain these WAF hits") that compose the read tools.
+- **Breadth:** promote the §5 reads into tools: a `mysql_*` group, `analyze_*`,
+  `ssl_stats`, `dnat_state`, `health_timeseries`, traffic rules and exclude
+  lists.
+- **Per-tenant scoped MCP tokens:** today every MCP credential gets node-wide
+  admin reads. A scoped mode would mint an MCP token bound to a cPanel user's
+  viewer scope and dispatch with that scope instead of the admin token, keeping
+  the scoped/admin boundary.
+- **Session-based consent:** approve behind the existing `/cfm-admin` admin login
+  instead of pasting `MCP_TOKEN` on the consent page.
+- **Revocable OAuth grants:** move from stateless HMAC tokens to entries in the
+  existing revocable token store (shown in the tokens UI), so one connector can be
+  revoked without rotating `MCP_TOKEN`. This would also make the used-nonce set
+  (single-use codes, refresh rotation) survive a restart; today it is in memory.
+- **Prompts / resources:** the server registers tools only (`HasTools`). A couple
+  of MCP prompts ("triage this IP", "explain these WAF hits") could compose the
+  read tools.
+- **Server `instructions` string** (`server.go`): its orientation lists only the
+  first-generation tools. Expanding it to the current groups would help clients
+  that read it.
 
 ---
 
 ## 7. Release history
 
-The MCP surface is versioned by CFM's date-based releases (see `CHANGELOG.md`).
-"Information visible" = the tool set active as of that release.
-
-| Release | MCP status | Tools active |
-|---|---|---|
-| 2026.08.05 | **Introduced** — read-only MCP server; dedicated `MCP_TOKEN` credential (min 24 chars, fail-closed) separate from `AUTH_TOKEN`; OAuth 2.1 + PKCE for the claude.ai connector, static-bearer for Claude Code/API | The 15 tools in §4 (WAF, challenge, suspicious/traffic, drilldowns, history, bots, firewall blocks, detectors, health) |
-| 2026.08.06 | Edge-proxy connectivity fixes (OIDC-discovery alias, DNS-rebinding guard disabled); consent POST rate-limit; enrich reverse-DNS perf (waf/security summaries ~60s→~1.5s) | **+`process_list`, +`listening_ports`, +`dmesg_tail`, +`service_status`, +`edge_access_tail`, +`ip_forensics`, +`mysql_pressure`, +`mysql_log_tail`, +`mysql_slow_queries`, +`mail_queue_summary`** (25 tools) — node system diagnostics (busiest processes; listening sockets + owner; kernel ring buffer; systemd unit status) + WAF triage (recent edge access lines around a hit; on-demand bounded per-IP access-log lookup) + MySQL pressure (per-user conns×CPU) + MySQL error/slow-log tails + exim mail-queue breakdown; `security_overview` made compact |
-| 2026.08.11 | Mail Monitor + triage flagship | **+`mail_log_tail`, +`mail_traffic`, +`mail_dns_check`** (Mail Monitor: raw mail-log tail; per-hour traffic/anomaly/deliverability summary; mail-auth DNS check) **+`whats_wrong`** (30 tools) — one-call SEVERITY-RANKED triage that synthesizes health/services/mysql/mail signals into concrete problems, each pointing at its drill-down tool; the new recommended entry point |
-| 2026.08.11 | nftlib diagnostics | **+`firewall_selftest`** (31 tools) — read-only nftlib backend self-diagnostics: EnsureBase timing split (lock_wait/netlink/CLI) + per-set feed-write sizes/errors, to root-cause an nftlib EnsureBase slowdown or a feed failing to apply |
-| 2026.08.11 | challenge-loop debug | **+`challenge_ip_status`** (32 tools) — read-only dump of the DNAT challenge sets with per-IP TTL (diagnostic for the challenge-loop incident) |
-| 2026.08.11 | edge-unification 1b | **−`challenge_ip_status`** (31 tools) — retired with the per-IP challenge-DNAT machinery (the sets no longer exist; the edge Lua cookie is the only clearance model) |
-| 2026.08.12 | edge-unification 2d observability | **+`edge_error_tail`** (32 tools) — bounded tail of the edge (OpenResty/Angie) ERROR log with optional grep; surfaces the panel LOGONLY decision verdicts (`logonly=would_enforce`) + edge-Lua module/runtime errors that the access-log ring can't carry |
-| 2026.08.12 | edge-unification 2e burn-in analysis | **+`waf_fp_hunt`** (33 tools) — aggregates the panel LOGONLY signal (`[cfm_panel_waf]` + `[cfm_panel_decision]`) from the edge error log, separating known-scanner noise from the customer-facing residue (`nonscanner_would_block` + `ip_block_count`); the Phase-4 "safe to enforce?" read over `edge_error_tail`'s raw lines |
-| 2026.08.12 | CloudLinux per-tenant CPU | **+`lve_cpu`** (34 tools) — per-tenant CPU pressure from an in-memory `/proc/lve/list` sampler (~15s): each LVE's cores + %-of-limit (100 = throttled), hottest-first; the per-tenant companion to `mysql_pressure` for "box load high, which account?". Unit calibrated to nanoseconds against live CL8/CL9 |
-| 2026.08.12 | DB↔web correlation | **+`db_web_pressure`** (35 tools) — folds per-DB-user MySQL pressure and per-vhost web request rate up to the owning cPanel account and flags "few web hits, high DB pressure" tenants (runaway cron/import, abusive script, compromised account). Composes `mysql/cpu`+`mysql/top`+`webdet/top-short`; host→owner via the canonical `internal/panelmap` reader; pure join in `internal/dbwebcorr`. cPanel-only attribution (notes when it can't map) |
-| 2026.08.12 | CPU throttle root-cause | **+`cpu_throttle`** (36 tools) — turns "load is high" into a root cause: reads instantaneous cpufreq/thermal/loadavg and classifies thermal throttling vs frequency cap (governor/policy) vs genuine demand vs idle downclock vs no-cpufreq (VM → check host steal). Load-gated classifier so a downclocked idle CPU is never mislabelled. Pure leaf `internal/cputhrottle` |
-| 2026.08.12 | Minor status reads | **+`clam_status`, +`notifier_status`, +`http3_status`** (39 tools) — thin read-only wrappers over existing admin endpoints: ClamAV scanner health (breaker/queue/counters), alert-notifier channel + delivery state, and the HTTP/3 opt-in vhost list |
-| 2026.08.12 | Logs group | **+`cfm_log_tail`, +`journal_tail`** (41 tools) — bounded on-demand tails of CFM's own `/var/log/cfm/*` logs (curated `which` allow-list) and of allow-listed systemd unit journals (`journalctl -n`, curated unit allow-list so an admin read tool can't tail arbitrary units); backed by `internal/cfmlog` |
-| 2026.08.12 | Firewall drilldown | **+`nft_counters`** (42 tools) — nftables named-counter view over `table inet cfm`: per-rule L3/L4 match volume grouped by family (portflood/connlimit/synflood/ppsflood/hardening/smtpblock), busiest-first + `by_family` totals. "Which firewall rules are firing, how hard?" — distinct from `firewall_blocks` (blocked-IP sets); a spiking `portflood_*`/`synrate` flags an active flood. Backend-agnostic via `ListTableJSON` (no netlink object read); does NOT reflect panel/web WAF or bridge enforcement (edge 403s) |
-| 2026.08.12 | WAF per-rule cross-surface | **+`waf_rule_detail`** (43 tools) — deep-dives ONE WAF rule / reason-family across BOTH surfaces (in-path web edge + panel), joining the web WAF-event history and the panel LOGONLY/enforce burn-in lines by reason family (numeric id resolved via the registry, since web events carry only the reason). Web slice (events/blocked/unique/top reasons+ips+hosts+countries) + panel slice (scanner vs non-scanner, `nonscanner_would_block`, sample requests): "is rule X safe to enforce?" and spots a rule clean on web but FP-ing on the panel. Composes `waf/rules`+`waf/engine/summary`+`system/waf-fp-hunt`, no new endpoint |
-| 2026.08.21 | Abuse-shadow burn-in | **+`abuse_shadow`** (46 tools) — aggregates the LOG-ONLY abuse-shadow log (`internal/abuseshadow`): Signal C per-IP rate-outlier-vs-vhost-median lines (concentrated abuse hiding under the aggregate score), with would_challenge/exempt_goodbot counts, top outliers, and datacenter-provider + FCrDNS-good-bot splits. The "what would Signal C challenge, and is it safe to enforce?" read; reachable fleet-wide via the gateway `node_call node="all"`. Backs `docs/webdetector-refactor.md` |
-| 2026.08.23 | cfm-lsm observability | **+`lsm_detections`, +`lsm_status`** (50 tools) — the cfm-lsm triage pair. `lsm_detections` aggregates the DETECT lines from CFM's own lsm log (`internal/lsmdetect`, endpoint `/api/v1/system/lsm-detections`): per-policy counts + rate-cap suppression roll-up, top repeat offenders by (policy, comm, exe) with last-seen/user/short-sha256 — "real compromise vs chatty CRED-002 false positive (sssd/sssd_kcm/cagefsctl/panel perl)". `lsm_status` exposes `/api/v1/system/lsm-status` (the `cfm lsm status --json` wire format + an effective_allows block with the merged per-policy allow_exe/allow_comm/allow_path sets) so allow-list additions start from what is already allowed. Companions to `cfm_log_tail which=lsm` (raw lines) and `dmesg_tail` (kernel-side copies) |
-| 2026.08.23 | detector coverage + config drift | **+`detector_coverage`, +`config_drift`** (50 tools) — the "did I forget something?" pair. `detector_coverage` (`/api/v1/detectors/coverage`) cross-references registered catalogue × live detectors.conf state × a curated type→systemd-units affinity table: daemon-running-but-detector-off = GAP, enabled-but-daemon-absent = DORMANT, absent/absent = informational — ending the cfm-admin habit of complaining about detectors whose daemons don't exist on the host. `config_drift` (`/api/v1/system/config-drift`) diffs packaged reference configs vs /etc/cfm/: missing sections/keys are shipped features that never reached the live conffile (upgrades seed it once, never refresh); detectors.conf parsed with the daemon's own reader, cfm.conf checks stock-documented keys absent from live text |
-| 2026.08.25 | detector source-resolution preview | **+`detectors_srcresolve`** (53 tools) — dry run of the shared detector source resolver (`internal/detectors/srcresolve` planners, the SAME code the registers run): per section, the journald unit / file / docker container it would tail and why, plus provisional/self-disable verdicts. Backs `cfm detectors-srcresolve` (alias `detectors-resolve`) and the cfm-admin "Source resolution" card; built to preview MODE=auto fleet rollout before touching live configs |
-| 2026.08.27 | edge origin-hop correctness | **+`edge_health`** (54 tools) — a focused, CORRELATED edge → origin check (`/api/v1/system/edge-health`) that the raw tails + `config_drift` can't give in one call: it reads the edge access/error logs AND the live engine version together and names the class behind the 2026-08 cross-SNI 421 incident. Severity-ranked Tier-1 findings: engine+version + the nginx ≥1.29.7 native-keepalive-default-on/SNI-blind trap, the 421 warm-reuse fingerprint (status=421 + uct≈0 via cfm_origin_https), the `[cfm_origin_ka]` activation/degradation tiers, and the ORIGIN_KEEPALIVE knob state. Read-only (adds `edgelog.ScanAccess`; runs the edge `-v`, never `-t`). Design + Tier-2/3 roadmap: `docs/edge-health.md` |
-| 2026.09.18 | detector config values | **+`detectors_config`** (55 tools) — the parsed detectors.conf **with live values** (`/api/v1/detectors/config`, the endpoint already behind the cfm-admin editor): every section's keys map (MODE / DRY_RUN / BLOCK / thresholds), path, `exists`, `overlay_files`. Closes the gap the drift/status/srcresolve trio left open — none returned the actual configured value, so "did HUMANITY_MIN_OBS land at 100?" or "is this family still in dryrun instead of block?" was unanswerable over MCP. Secret-valued keys are `[redacted]` (new shared `internal/secretkeys`, so an MCP leak stays not-an-admin-leak). (Count corrected 53→55: the header had drifted one behind the registered set before this row.) |
-| 2026.09.18 | detector config — effective/merged view | **`detectors_config` gains `merged=true`** (still 55 tools) — the EFFECTIVE config the daemon runs: base + every `/etc/cfm/detectors.d/*.conf` overlay merged (via the manager's own `detconf.ReadLayered`), plus `overrides` — the per-key delta the overlays introduced (base vs effective + the winning overlay file). Answers "which value actually wins, and where does it come from?" in one call, closing the base-file-only caveat of the first cut. New endpoint mode `?view=merged` (`detectorscfg.LoadMergedAdminConfig`); overrides are redacted for secret keys too. |
-| 2026.09.19 | origin premature-close triage | **`edge_health` gains Check E + `whats_wrong` gains the edge→origin hop** (still 55 tools) — origin-hop failures now surface *proactively*. Check E counts gateway 5xx (502/503/504) carrying `uht="-"` — the origin accepted the connection then died without a response header — with the affected-vhost spread, an event floor AND a rate, and 421-style recency; an application 500 always has a header, so it is excluded by construction. `whats_wrong` now pulls `/api/v1/system/edge-health` and ranks its warn/critical findings (`ok`/`unknown` stay silent; gated on a resolved edge engine). Closes the gap behind a 2026-09 incident where a node's Apache workers were segfaulting in `mod_brotli` (~900 dropped requests/day across dozens of vhosts) while every host metric read green and `whats_wrong` reported only an unrelated flapping unit. Rides the existing access-log pass — no extra I/O. |
-| 2026.09.26 | blocklist feed state | **+`blocklist_feeds`** (58 tools; count corrected — the header had drifted behind the registered set) — read-only per-feed state of `cfm.blocklists` (`/api/v1/firewall/feeds`): last fetch/OK/apply, HTTP status, error, entry counts, and whether the cfm-web feeds were pulled WITH the node's AUTH_TOKEN (`token_sent`). Lands with the fetcher sending `Token:` to the API_URL origin, so `node="all"` confirms the fleet no longer needs cfm-web's IP-only token fallback before cfm-web removes it. |
-| 2026.10.08 | backup check | **+`backup_status`** (59 tools) — the node's latest backup check (`/api/v1/health/backup`, `internal/backupcheck` via the health detector; docs/backup-check.md). Also what cfm-web polls for its fleet Backups table and its "this node stopped reporting backups" check |
-| 2026.10.08 | mail abuse | **`mail_traffic` gains `abuse`, `whats_wrong` reports it** (still 59 tools) — the node's mail-abuse findings (docs/mail-abuse.md) with their context (subjects, recipients, recipient domains, envelope sender, contact-form pattern); `whats_wrong` shows them with their severity in place of the raw outbound anomalies |
-| 2026.10.08 | mail abuse II | `abuse` + `whats_wrong` gain `mail_bounce_spike`, `mail_queue_hog`, `mail_rbl_listed`; `mail_hijack` also counts dovecot IMAP/POP3 logins (still 59 tools) |
-| Unreleased | alert log | **+`alerts`, +`alerts_summary`** (61 tools; the header had drifted again at 58) — the node's alert store (`/api/v1/alerts`, `/api/v1/alerts/summary`; docs/alerts.md): every notifier event with its delivery outcome, filterable and groupable, so "why were these clients blocked?" no longer needs the logs@ mailbox. Also what cfm-web will pull for its fleet alert view |
-| Unreleased | login outcome | **+`auth_corpus`** (62 tools) — login POSTs grouped by shape (tag, the daemon's outcome, status, Location path, Set-Cookie names), the corpus for each CMS's success/failure rule (`/api/v1/webdet/auth-corpus`; docs/webdetector-signals-v2.md) |
+See `CHANGELOG.md` and `git log -- internal/mcpserver MCP.md`. Kept decisions:
+`webdet/ua-drill` stays unexposed (side effect, §5); `challenge_ip_status` was
+removed (§4).

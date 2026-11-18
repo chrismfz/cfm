@@ -20,7 +20,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The MCP server's instructions name every tool.** The guidance an MCP
+  client (Claude) reads when it connects listed only the first ~20 tools;
+  the edge, host, MySQL, mail, cfm-lsm, Site Cache and log tools were
+  missing, so a model had to discover them by listing. It now names all 62
+  by group. The tools themselves are unchanged.
 
 ## 2026.11.18
 

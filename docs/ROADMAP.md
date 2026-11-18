@@ -107,9 +107,13 @@ As-built: **`MCP.md`** (node tools) and the cfm-web fleet connector. Node MCP
 stays read-only; writes live in cfm-web (blocklist, blackhole, notify) behind
 per-ability tokens.
 
-- **`ip_forensics` → rotated logs** — [next]. Reach rotated log segments, not
-  just the live file.
-- **`challenge_ip_status`** — [idea]. Per-IP challenge state drilldown.
+- **More read tools** — [idea]. MySQL governor history reads, analyze-ip /
+  analyze-host, SSL collector stats, DNAT state, health time series, traffic
+  rules, exclude lists (`MCP.md` §5 lists the endpoints not yet exposed and
+  why).
+- **Per-tenant scoped MCP tokens** — [idea]. Today `/mcp` is admin-only.
+- **Revocable OAuth grants** — [idea]. Would also keep the used-nonce set
+  across a restart.
 
 ## 4. Mail Monitor
 
