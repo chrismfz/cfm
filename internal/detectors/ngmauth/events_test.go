@@ -36,9 +36,26 @@ func readEventFixture(t *testing.T) map[string]string {
 	return m
 }
 
+// stepUpCallRe finds the event of a stepUp / mailboxStepUp call. [^")]: the
+// event literal may sit on a later line (gofmt splits long calls), but the
+// match stops at the call's first ')' so a comment or a declaration
+// (`stepUp(r *http.Request, …, back func(string), …`) cannot pair stepUp with
+// an unrelated string.
+var stepUpCallRe = regexp.MustCompile(`\b(?:stepUp|mailboxStepUp)\([^")]*?"([A-Z_]+)"`)
+
 var bucketNames = map[eventBucket]string{
 	bucketInteractive: "interactive",
 	bucketToken:       "token",
+}
+
+func TestStepUpRegexSpansLines(t *testing.T) {
+	src := "s.stepUp(r, sess,\n\t\t\"API_TOKEN_CREATE\", back, func(u store.PanelUser) bool {\n" +
+		"// stepUp() then \"NOT_AN_EVENT\"\n" +
+		"func (s *Server) stepUp(r *http.Request, sess Session, event string, back func(string)) {}\n"
+	got := stepUpCallRe.FindAllStringSubmatch(src, -1)
+	if len(got) != 1 || got[0][1] != "API_TOKEN_CREATE" {
+		t.Fatalf("matches = %v, want only API_TOKEN_CREATE", got)
+	}
 }
 
 // TestNGMEventFixture pins abuseEvents to the fixture of NGM's events, both
@@ -73,7 +90,7 @@ func TestNGMEventFixture(t *testing.T) {
 		return
 	}
 	literal := regexp.MustCompile(`authLog\(\s*"([A-Z_]+)"`)
-	stepUp := regexp.MustCompile(`\b(?:stepUp|mailboxStepUp)\([^"\n]*?"([A-Z_]+)"`)
+	stepUp := stepUpCallRe
 	seen := 0
 	err := filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
 		if err != nil {

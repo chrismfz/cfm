@@ -48,8 +48,13 @@ either). That covers the old stock line `LOG_PATH = /var/log/apache2/error_log`,
 which a live `detectors.conf` keeps across upgrades: it is cPanel EA4's real
 path, but DirectAdmin, Debian and nginx hosts have no such file, and before
 2026-11-18 their `[modsec]` watched nothing. `MODE = file` pins `LOG_PATH`
-verbatim. `detectors_srcresolve` reports the file it would tail; the source
-probe (`detectors_status`) only checks that a candidate is readable.
+verbatim. The manager's config signature folds in that resolution, so a log
+that appears after the start (Apache installed later) rebuilds the section
+onto it. While no candidate has a denial the scan is repeated every 10 minutes,
+so the first denials in another log (an audit log) move the section there
+once; a pick with denials is then kept, as before. `detectors_srcresolve`
+reports the file it would tail; the source probe (`detectors_status`) only
+checks that a candidate is readable.
 
 The shared resolver:
 

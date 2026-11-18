@@ -38,8 +38,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (now including EA4's path) runs instead, so a live `detectors.conf` that
   kept the old line is fixed by the upgrade. The stock line is now
   `LOG_PATH = auto`, and a quiet host with no denials yet tails the first
-  error log that exists instead of nothing. `MODE = file` still pins the path
-  as given. `detectors_srcresolve` now reports the file it tails.
+  error log that exists instead of nothing, re-checked every 10 minutes until
+  one shows denials; a log that appears after the start is picked up without
+  a restart. `MODE = file` still pins the path as given.
+  `detectors_srcresolve` now reports the file it tails.
 - **`ngm_auth` counts the NGM credential failures it was missing.** The
   step-up re-auth failures (`PASSWORD_CHANGE_FAIL`, `MFA_DISABLE_FAIL`,
   `RECOVERY_SET_FAIL`: a logged-in session guessing the password) now count
@@ -50,7 +52,7 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **`[waf_security]`: a `RULE_<id>` above 1 counts that rule's own hits.**
   The other rules of its family used to fill its count, so `RULE_329 = 2`
   under a family at 5 fired on 329's first hit after one other RCE hit. Still
-  one alert per IP and family per window. Thresholds 0 and 1, which
+  one alert per IP and family until the family has been quiet for a window. Thresholds 0 and 1, which
   every shipped config uses, behave as before.
 
 ### Changed

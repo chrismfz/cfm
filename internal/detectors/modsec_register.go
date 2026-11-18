@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	core "cfm/internal/detectors/core"
@@ -81,6 +83,10 @@ type modsecResolution struct {
 	Path   string
 	Reason string
 	Warn   string // non-empty: log it (an explicit path missing in MODE=auto)
+	// Scanned: Path came from the candidate scan (not an explicit LOG_PATH).
+	// Busy: the scan found ModSecurity denials in it (a scored pick), as
+	// opposed to the quiet-host fallback to the first existing candidate.
+	Scanned, Busy bool
 }
 
 // modsecStat reports whether path is an existing regular file.
@@ -121,6 +127,7 @@ func resolveModsecLogPath(mode, logPath string, exists func(string) bool, score 
 		warn = "LOG_PATH " + logPath + " does not exist; MODE=auto, scanning the known locations instead"
 	}
 	best, bestHits, first := "", 0, ""
+	scored := map[string]bool{} // real paths already scored (EA4 links two candidates to one file)
 	for _, p := range modsecCandidates {
 		if !exists(p) {
 			continue
@@ -131,15 +138,23 @@ func resolveModsecLogPath(mode, logPath string, exists func(string) bool, score 
 		if score == nil {
 			break
 		}
+		real := p
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			real = r
+		}
+		if scored[real] {
+			continue
+		}
+		scored[real] = true
 		if h, _ := score(p, 2*1024*1024); h > bestHits {
 			best, bestHits = p, h
 		}
 	}
 	switch {
 	case best != "":
-		return modsecResolution{Path: best, Reason: fmt.Sprintf("autodetect: most ModSecurity denials (hits=%d)", bestHits), Warn: warn}
+		return modsecResolution{Path: best, Reason: fmt.Sprintf("autodetect: most ModSecurity denials (hits=%d)", bestHits), Warn: warn, Scanned: true, Busy: true}
 	case first != "":
-		return modsecResolution{Path: first, Reason: "autodetect: first existing candidate (no ModSecurity denials seen yet)", Warn: warn}
+		return modsecResolution{Path: first, Reason: "autodetect: first existing candidate (no ModSecurity denials seen yet)", Warn: warn, Scanned: true}
 	case explicit:
 		return modsecResolution{Path: logPath, Reason: "explicit LOG_PATH kept: no candidate exists either", Warn: warn}
 	}
@@ -166,13 +181,78 @@ func probeModsecSource(kv KV) (bool, string) {
 	}
 	_ = f.Close()
 	msg := "log file readable: " + res.Path
-	if strings.HasPrefix(res.Reason, "autodetect") {
-		msg += " (first existing candidate; the detector tails the one with the most denials)"
+	if res.Scanned {
+		msg += " (first existing candidate; the detector may tail another with more ModSecurity denials)"
 	}
 	if res.Warn != "" {
 		msg += " (" + res.Warn + ")"
 	}
 	return true, msg
+}
+
+// modsecRescoreEvery is how often a quiet [modsec] scan (no candidate had a
+// denial, so it fell back to the first existing log) is scored again. A var
+// for tests.
+var modsecRescoreEvery = 10 * time.Minute
+
+// modsecPick is the last scored resolution for one (MODE, LOG_PATH).
+type modsecPick struct {
+	at   time.Time
+	path string
+	busy bool
+}
+
+var modsecPicks = struct {
+	sync.Mutex
+	m map[string]modsecPick
+}{m: map[string]modsecPick{}}
+
+func modsecPickKey(mode, logPath string) string {
+	return strings.ToLower(strings.TrimSpace(mode)) + "\x00" + strings.TrimSpace(logPath)
+}
+
+// rememberModsecPick records what the register resolved, so cfgSig starts
+// from the same pick instead of rescoring (and rebuilding) right away.
+func rememberModsecPick(mode, logPath string, res modsecResolution, now time.Time) {
+	modsecPicks.Lock()
+	modsecPicks.m[modsecPickKey(mode, logPath)] = modsecPick{at: now, path: res.Path, busy: res.Busy}
+	modsecPicks.Unlock()
+}
+
+// modsecSigPath is what cfgSig folds in for a [modsec] section, so the
+// detector is rebuilt when its source changes even though LOG_PATH did not:
+//   - the stat-only resolution (cheap; stops at the first existing
+//     candidate): a log that appears after the build, or an explicit path
+//     that appears, changes it;
+//   - while the scan is quiet, the scored pick, re-scored every
+//     modsecRescoreEvery: denials that start in another candidate (an audit
+//     log) move the detector there. Once a pick has denials it is sticky, as
+//     the build-time scan always was, so two busy logs cannot flap rebuilds.
+//
+// An explicit LOG_PATH that exists, or MODE=file with a path, short-circuits
+// both to that path. Returns "" for a MODE the register does not handle.
+func modsecSigPath(kv KV, now time.Time) string {
+	mode := strings.ToLower(kvStrClean(kv, "MODE", "auto"))
+	if mode != "file" && mode != "auto" {
+		return ""
+	}
+	logPath := kvStrClean(kv, "LOG_PATH", "auto")
+	quick := resolveModsecLogPath(mode, logPath, modsecStat, nil)
+	if !quick.Scanned {
+		return quick.Path
+	}
+	key := modsecPickKey(mode, logPath)
+	modsecPicks.Lock()
+	pick, ok := modsecPicks.m[key]
+	modsecPicks.Unlock()
+	if !ok || (!pick.busy && now.Sub(pick.at) >= modsecRescoreEvery) {
+		res := resolveModsecLogPath(mode, logPath, modsecStat, scoreFile)
+		pick = modsecPick{at: now, path: res.Path, busy: res.Busy}
+		modsecPicks.Lock()
+		modsecPicks.m[key] = pick
+		modsecPicks.Unlock()
+	}
+	return quick.Path + "\x00" + pick.path
 }
 
 func init() {
@@ -221,6 +301,7 @@ func init() {
 		mode := strings.ToLower(cfg.Mode)
 		if mode == "file" || mode == "auto" {
 			res := resolveModsecLogPath(mode, cfg.LogPath, modsecStat, scoreFile)
+			rememberModsecPick(mode, cfg.LogPath, res, time.Now())
 			if res.Warn != "" {
 				logging.Logf("[detectors][modsec] %s", res.Warn)
 			}

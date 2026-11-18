@@ -258,3 +258,39 @@ func TestFamilyTripAfterRuleScopedBanIsQuiet(t *testing.T) {
 		t.Fatalf("family trip after the rule ban alerted %d times, want 0", len(got))
 	}
 }
+
+// A campaign that keeps hitting a rule-scoped rule after the family ban stays
+// one alert while it continues (its hits keep the family alive even after the
+// family's own counter drained), and the state is released once the family
+// has been quiet for a full Window.
+func TestRuleScopedHitsKeepFamilyBanAlive(t *testing.T) {
+	d := New(Config{
+		Window:        30 * time.Second,
+		Families:      map[string]int{"WAF_RCE": 1},
+		RuleOverrides: map[string]int{"329": 3},
+	})
+	ip := "203.0.113.24"
+	ago := func(dur time.Duration, reason, rule string) core.InputEvent {
+		e := ev(ip, reason, rule)
+		e.When = time.Now().Add(-dur)
+		return e
+	}
+	// The family hit is already past the 30 s window when pruning runs; the
+	// 329 hit is not.
+	d.Enqueue(ago(40*time.Second, "WAF_RCE:CMD", "320"))
+	d.Enqueue(ago(20*time.Second, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 1 {
+		t.Fatalf("family hit: %d alerts, want 1", len(got))
+	}
+	d.Enqueue(ago(10*time.Second, "WAF_RCE:SHELL", "329"))
+	d.Enqueue(ago(5*time.Second, "WAF_RCE:SHELL", "329"))
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("continuing campaign alerted again: %d", len(got))
+	}
+	// Long quiet: everything is released.
+	d.famSeen[ip+"|WAF_RCE"] = time.Now().Add(-time.Minute)
+	drain(t, d)
+	if len(d.fired) != 0 || len(d.famSeen) != 0 {
+		t.Fatalf("state not pruned after a quiet Window: fired=%v famSeen=%v", d.fired, d.famSeen)
+	}
+}
