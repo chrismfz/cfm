@@ -884,29 +884,93 @@ end
 -- (CVE-2018-7600, Drupal 7/8: `name[#post_render][0]=array_map&name[#suffix]=
 -- eval(...)`) and SA-CORE-2026-014 (CVE-2026-108097, Field UI, every Drupal
 -- before 10.6.19 / 11.3.19 / 11.4.10: a row's `#region_callback` goes to
--- call_user_func_array). No form, API or link sends such a key: Drupal builds
--- them server-side. So the marker is the key itself, as a request-field key
--- (`[#post_render]`) or a JSON key (`"#region_callback"`), never the word in
--- text. `s` is a decoded, lowercased surface (path + query, or args + body).
+-- call_user_func_array). Drupal builds those keys server-side, so no form, API
+-- or link sends one AS A KEY. Two places only, never the words in text (a
+-- quoted search for "#pre_render", a code sample in a post, a Markdown link
+-- `[#pre_render](...)` all carry them in a VALUE):
+--   * a request-field NAME, as PHP splits the query and a urlencoded or
+--     multipart body (each_request_field): `name[#post_render][0]`;
+--   * a JSON object key, `"#key":` (or `"\u0023key":`, which json_decode turns
+--     into the same), in a JSON body or in a field value that is a JSON
+--     document (`rows={"r1":{"#region_callback":...}}`, the lab-route probe).
 -- A 7-day read of all 8 edge nodes' access.log (2026-11-18) found these keys
--- only in attacks: the `#region_callback` lab-route probe and a Drupalgeddon2
--- payload that reached a site with a 200.
+-- only in attacks: the `#region_callback` probe and a Drupalgeddon2 payload
+-- that reached a site with a 200.
 _M._DRUPAL_RENDER_KEYS = { "region_callback", "post_render", "pre_render", "lazy_builder", "access_callback" }
-function _M.detect_cve_drupal_render_callback(s)
-  if not s or not (s:find("#", 1, true) or s:find("\\u0023", 1, true)) then return nil end
+
+do  -- own block: the module is at Lua's 200-locals limit
+-- the key, when a field name holds `[#key]`
+local function drupal_render_key_in_name(name)
+  if not name:find("#", 1, true) then
+    if not name:find("%", 1, true) then return nil end
+    name = _form_unescape(name)                -- double-encoded `%2523`
+    if not name:find("#", 1, true) then return nil end
+  end
+  name = lower(name)
   local keys = _M._DRUPAL_RENDER_KEYS
   for i = 1, #keys do
-    local k = keys[i]
-    -- (not `'#key'`: that is how Drupal's own PHP writes them, so a code
-    -- sample in a post would match; the exploits send a field or JSON key)
-    -- (and `"\u0023key"`: json_decode gives PHP the same `#key`)
-    if s:find("[#" .. k .. "]", 1, true) or s:find('"#' .. k .. '"', 1, true)
-       or s:find('"\\u0023' .. k .. '"', 1, true)
-       or s:find("%5b%23" .. k .. "%5d", 1, true) then
-      return k:upper()
+    if name:find("[#" .. keys[i] .. "]", 1, true) then return keys[i] end
+  end
+  return nil
+end
+
+-- the key, when JSON text `j` holds `"#key"` (or `"\u0023key"`) as an object
+-- key: an unescaped opening quote, the closing quote, then `:`
+local function drupal_render_key_in_json(j)
+  if not (j:find("#", 1, true) or j:find("\\u0023", 1, true)) then return nil end
+  j = lower(j)
+  local keys = _M._DRUPAL_RENDER_KEYS
+  for i = 1, #keys do
+    for _, lit in ipairs({ '"#' .. keys[i] .. '"', '"\\u0023' .. keys[i] .. '"' }) do
+      local init = 1
+      while true do
+        local a, e = j:find(lit, init, true)
+        if not a then break end
+        if (a == 1 or j:sub(a - 1, a - 1) ~= "\\") and j:find("^%s*:", e + 1) then
+          return keys[i]
+        end
+        init = e + 1
+      end
     end
   end
   return nil
+end
+
+local function json_doc(v)
+  return v:find("^%s*[{%[]") ~= nil
+end
+
+-- a large urlencoded source (query or body) is split only when its decoded
+-- text holds the pieces of some key (`region` + `callback`, ...): the same
+-- prefilter the other field-keyed rules use
+local drupal_render_skip
+do
+  local want = {}
+  for _, k in ipairs(_M._DRUPAL_RENDER_KEYS) do want[k] = true end
+  drupal_render_skip = source_lacks(want_hints(want))
+end
+
+function _M.detect_cve_drupal_render_callback(method, args, body, headers)
+  local hit
+  each_request_field(method, args, body, headers, function(k, v, _, enc)
+    if hit then return end
+    hit = drupal_render_key_in_name(k)
+    if hit then return end
+    if v and (v:find("#", 1, true) or v:find("%", 1, true)) then
+      if enc and v:find("[%%+]") then v = _form_unescape(v) end
+      if v:find("%", 1, true) then v = _form_unescape(v) end   -- double-encoded
+      if json_doc(v) then hit = drupal_render_key_in_json(v) end
+    end
+  end, drupal_render_skip)
+  if not hit and method == "post" and body and body ~= "" then
+    local mt = php_media_type(php_content_type(headers)) or ""
+    if mt:find("json", 1, true) or (mt ~= "multipart/form-data"
+       and mt ~= "application/x-www-form-urlencoded" and json_doc(body)) then
+      hit = drupal_render_key_in_json(cap(body, body_budget(headers)))
+    end
+  end
+  return hit and hit:upper() or nil
+end
 end
 
 function _M.detect_cve_fabrik_listfilter_eval(uri, method, args, body, headers, _nab)

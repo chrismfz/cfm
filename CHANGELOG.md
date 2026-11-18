@@ -24,7 +24,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **Drupal render-array injection blocked (rule 10030).** A request that
   sends a Drupal render-array callback key (`#region_callback`,
   `#post_render`, `#pre_render`, `#lazy_builder`, `#access_callback`) as a
-  parameter or JSON key is blocked and its source banned: the shape of
+  parameter name or a JSON key is blocked and its source banned (the words in
+  text, such as a search or a code sample in a post, never match): the shape of
   SA-CORE-2026-014 (CVE-2026-108097, fixed in Drupal 10.6.19 / 11.3.19 /
   11.4.10) and of Drupalgeddon2 (CVE-2018-7600), which reached a site with a
   200 this week. Drupal builds those keys itself, so no real request sends

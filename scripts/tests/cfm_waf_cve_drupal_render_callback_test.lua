@@ -83,6 +83,31 @@ clean(post("/node/add/article", "title=Tip&body%5B0%5D%5Bvalue%5D=%24form%5B%27%
       "a PHP code sample in a post ($form['#post_render'][] = ...)")
 clean(post("/api", '{"body":"$form[\\"#post_render\\"][] = 1"}', "application/json"), "an escaped JSON string with the key")
 
+-- The independent FP review (2026-11-18): the words as TEXT in a value, which
+-- the first version (a plain find over the whole surface) blocked.
+local function enc(x) return (x:gsub("[^%w%-_%.~]", function(c) return string.format("%%%02X", c:byte()) end)) end
+local U = "application/x-www-form-urlencoded"
+clean(get("/", "s=" .. enc('"#pre_render"')), "a quoted-phrase site search")
+clean(get("/search/node", "keys=" .. enc('"#lazy_builder" cache')), "a quoted Drupal site search")
+clean(post("/node/12/edit", "title=Render&body%5B0%5D%5Bvalue%5D=" .. enc('<pre>$build["#pre_render"][] = [static::class, "preRender"];</pre>') .. "&form_id=node_article_edit_form", U),
+      "a double-quoted PHP sample in a node body")
+clean(post("/comment/reply/5", "comment_body%5Bund%5D%5B0%5D%5Bvalue%5D=" .. enc('array("#access_callback" => "user_access")'), U),
+      "a D7 sample in a comment")
+clean(post("/node/add/article", table.concat({ "--b", 'Content-Disposition: form-data; name="body[0][value]"', "",
+      '<pre>$build["#pre_render"][] = 1;</pre>', "--b--", "" }, "\r\n"), "multipart/form-data; boundary=b"),
+      "a double-quoted sample in a multipart body")
+clean(post("/wp-json/wp/v2/posts/5", '{"content":"## Contents\\n- [#pre_render](#pre_render)\\n"}', "application/json"),
+      "a Markdown link in a JSON post")
+clean(post("/index.php", "wpTextbox1=" .. enc("See [[#post_render]] below.") .. "&wpSave=Save", U), "a wiki section link")
+clean(post("/api/save", '{"code":"$b[\\u0022#pre_render\\u0022] = 1;"}', "application/json"), "a \\u0022-escaped quote in a JSON value")
+clean(post("/devel/php", "code=" .. enc('$b["#pre_render"][] = "x";'), U), "Devel execute PHP, double quotes")
+clean(post("/admin/structure/webform/manage/contact/source", "elements=" .. enc('name:\n  "#type": textfield\n  "#pre_render":\n    - foo\n'), U),
+      "Webform source YAML with double-quoted keys")
+clean(post("/admin/structure/block/manage/x", "body%5Bvalue%5D=" .. enc('{{ content["#pre_render"] }}'), U), "a Twig sample")
+clean(post("/node/1/edit", "body%5B0%5D%5Bvalue%5D=" .. enc('const el = {"#post_render": fn};'), U), "a JS object literal in prose")
+clean(post("/wp-admin/admin-ajax.php", "action=elementor_ajax&actions=" .. enc('{"save":{"code":"$b[\\"#pre_render\\"]"}}'), U),
+      "an escaped key inside a JSON field value")
+
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " check(s) failed in cfm_waf_cve_drupal_render_callback_test.lua\n")
   os.exit(1)
