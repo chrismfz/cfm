@@ -215,6 +215,9 @@ Reference: `docs/cfm-lsm.md`.
 - **Hot policy reload without detaching** — [idea]. Mode changes go
   through `cfm lsm restart` now.
 - **`kernel.modules_disabled` via a late unit in kernsec** — [idea].
+- **kernsec `disable` / `rollback` should remove the `bpf` it merged into
+  `lsm=`** — [idea]. `UnmergeLSMBPF` exists but nothing calls it; only
+  unmerge when kernsec added it (an operator's own `bpf` must stay).
 
 ## 10. PHP runtime defense (CFM-managed Snuffleupagus)
 

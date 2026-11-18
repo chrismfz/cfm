@@ -490,10 +490,9 @@ func applyWrites(
 
 	// 6. Mount apply (CanEnable rules only). Strictly opt-in per-rule:
 	// only mount rules whose .CanEnable is true get an automated
-	// /etc/fstab edit + daemon-reload + remount. /tmp and /var/tmp
-	// stay tip-only — only /dev/shm meets the safety bar today (no
-	// on-disk state to migrate; tmpfs remount preserves contents;
-	// kernel noexec is a soft flag).
+	// /etc/fstab edit + daemon-reload + remount. Today that is /tmp,
+	// /var/tmp and /dev/shm (all Tier 1, mounts.go); /proc hidepid stays
+	// audit-only.
 	//
 	// Resolver decision drives the direction:
 	//   Apply        → EnableMount  (adds managed opts + remounts)
@@ -647,9 +646,9 @@ func buildDesiredCmdline(backend BootBackend, args []BootArg) (string, error) {
 // operator-added `bpf` from the lsm= value on Debian/Ubuntu hosts
 // where the operator enabled BPF LSM manually before installing cfm,
 // violating the contract in profile.go that operator args outside
-// ManagedBootArgKeys are not rewritten. The unmerge is therefore
-// only invoked from the explicit kernsec disable path (see
-// disable.go), where the operator has asked us to roll back.
+// ManagedBootArgKeys are not rewritten. Nothing calls UnmergeLSMBPF
+// today: disable and rollback leave a merged `bpf` in lsm= (remove it by
+// hand from the bootloader cmdline; docs/ROADMAP.md §9b).
 func buildDesiredCmdlineWithConf(backend BootBackend, args []BootArg, conf *Conf) (string, error) {
 	current, err := backend.NextBootCmdline()
 	if err != nil && !errors.Is(err, ErrBLSDivergence) {
