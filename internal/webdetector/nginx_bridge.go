@@ -3585,13 +3585,24 @@ func (b *NginxBridge) vhostEntryLocked(host string, now time.Time) (bridgeVhostE
 	return bridgeVhostEntry{}, false
 }
 
+// autoNoteMaxRide caps how far a note rides its host's challenge entry
+// (NoteVhostAutoSource): far enough for an automatic challenge's own TTL
+// (37m suspicious_vhost, 1h vhost_config), never a long manual arm's.
+const autoNoteMaxRide = time.Hour
+
 // NoteVhostAutoSource records that automatic vhost-challenge source (e.g.
-// suspicious_vhost) is active on host for ttl. Keyed on the WRITER host only
-// — the reader resolves a www. host to its apex's notes too, as the bridge
-// expands an apex challenge to www — so a www. host's own tick iteration can
-// never erase what its apex's iteration noted. The tick re-notes it on every
-// cycle the source is active, so the note lives exactly as long as it keeps
-// being refreshed (bounded by ttl once it stops).
+// suspicious_vhost) is active on host. Keyed on the WRITER host only — the
+// reader resolves a www. host to its apex's notes too, as the bridge expands
+// an apex challenge to www — so a www. host's own tick iteration can never
+// erase what its apex's iteration noted.
+//
+// The note lives until the later of ttl and the host's live challenge entry
+// (capped at autoNoteMaxRide): the tier ends with the challenge it
+// accompanies, or when the tick drops the source (DropVhostAutoSource, the
+// moment it turns off), not when a re-note is merely late. Before
+// 2026-11-18 it lived ttl alone (2–10 min), and every webdetector run that
+// timed out (qualityweb: ~270 a day) let it lapse while the challenge was
+// still served — a farm IP rejected at v2 passed three seconds later.
 func (b *NginxBridge) NoteVhostAutoSource(host, source string, ttl time.Duration) {
 	if b == nil || !b.cfg.Enabled || source == "" || ttl <= 0 {
 		return
@@ -3600,8 +3611,18 @@ func (b *NginxBridge) NoteVhostAutoSource(host, source string, ttl time.Duration
 	if host == "" {
 		return
 	}
-	exp := time.Now().Add(ttl)
+	now := time.Now()
+	exp := now.Add(ttl)
 	b.mu.Lock()
+	if h, ok := b.vhState[host]; ok && h.Action == "challenge" {
+		ride := h.Expires
+		if limit := now.Add(autoNoteMaxRide); ride.After(limit) {
+			ride = limit
+		}
+		if ride.After(exp) {
+			exp = ride
+		}
+	}
 	if b.vhAuto == nil {
 		b.vhAuto = make(map[string]map[string]time.Time)
 	}

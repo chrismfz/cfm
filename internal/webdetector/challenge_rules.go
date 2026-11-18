@@ -1607,9 +1607,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 } else if cur && shouldOff {
                     e.vhostUniqPathsActive[host] = false
                     e.vhostUniqPathsLastChange[host] = now
-                    if e.nginxBridge != nil {
-                        e.nginxBridge.DropVhostAutoSource(host, autoV2UniqPathsShort)
-                    }
+                    // The burst is over but its challenge is NOT cleared: it
+                    // runs out its TTL. So the source note is not dropped
+                    // either — it rides that entry (NoteVhostAutoSource) and
+                    // ends with it. Dropping it here served the rest of the
+                    // challenge at v1 (orion/titan, 2026-11-18).
                 } else if cur {
                     doChallenge = true // keep refreshing TTL while active
                 }
@@ -1635,7 +1637,8 @@ if doChallenge {
     }
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
                     // The auto-v2 resolver's view of this source: re-noted every
-                    // cycle it is active, short-lived (challenge_v2_auto.go).
+                    // cycle it is active, riding the challenge entry just
+                    // refreshed (NoteVhostAutoSource, challenge_v2_auto.go).
                     e.nginxBridge.NoteVhostAutoSource(host, autoV2UniqPathsShort, e.autoSourceNoteTTL())
                     if doLogOn && e.cfg.ChallengeLog {
                         logging.LogfCHALLENGES("[challenge][vhost] action=auto_on host=%s reason=uniqpaths_short uniqPaths=%d on=%d off=%d ttl=%s",
@@ -1643,11 +1646,11 @@ if doChallenge {
                     }
                     // This cycle skips the rest of the host (the scorer, the
                     // config list, Under-Attack), so their notes are not
-                    // re-noted and lapse within autoSourceNoteTTL: an
-                    // unevaluated source is not kept alive (the safe direction
-                    // for a human; with the default knob uniqpaths_short is
-                    // armed itself). An operator `attack off` drops the
-                    // under_attack note at once regardless.
+                    // re-noted: they keep the expiry their last note gave them
+                    // (at most the challenge entry they rode). With the default
+                    // knob uniqpaths_short is armed itself. An operator
+                    // `attack off` drops the under_attack note at once
+                    // regardless.
                     // vhost-wide challenge overrides need for per-IP enumeration
                     continue
                 }
@@ -1972,13 +1975,14 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
 
             // The auto-v2 resolver's view of this host's AUTOMATIC sources
             // (challenge_v2_auto.go): RE-NOTED on every cycle a source is
-            // active, with a short TTL (autoSourceNoteTTL), independently of
-            // the bridge entry's single Reason (which a manual arm or the
-            // config list relabels). A cycle that does not reach this point
-            // for the host — an exclude/ignore `continue`, a host that left
-            // the candidate set, a stalled tick — simply stops re-noting, and
-            // the source lapses within the TTL: no transition can leave a
-            // stale v2 behind. The drops just make "off" immediate.
+            // active, independently of the bridge entry's single Reason
+            // (which a manual arm or the config list relabels). A note rides
+            // the host's challenge entry (NoteVhostAutoSource, capped at an
+            // hour), so a cycle that does not reach this point — a stalled or
+            // timed-out tick, a host that left the candidate set — leaves the
+            // tier where the still-served challenge has it, and it ends with
+            // that entry. "Off" is the drops below; an excluded host is
+            // suppressed at read time (hostAutoSuppressed).
             if e.nginxBridge != nil {
                 noteTTL := e.autoSourceNoteTTL()
                 if autoActive {

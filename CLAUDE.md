@@ -771,7 +771,7 @@ the geo resolver; no edge Lua involved, `FP_POLICY=0` kills all kinds. **Challen
 is built** (2026-09-19, `challenge_v2.go` + the challenge-page passive
 collectors, guardrails D5): every solve is scored on positive-only headless
 evidence (`hs=`/`tells=` on the solve line; `hs=-` = no payload arrived, and
-`v2=<fp|geo|vhost|mark>` names the arm covering the solve — absent = unarmed,
+`v2=<fp|geo|vhost|mark|unsolicited>` names the arm covering the solve — absent = unarmed,
 so a passed-under-arm solve is greppable, not mistaken for a plain v1 one
 (the whole `v2`/`v2_*` payload family, by prefix, and `ms` are stripped for
 scoped callers since 2026-09-29: fp/geo are operator policy, like `src`, and
@@ -840,7 +840,12 @@ posted or CDP-injected movement passes too (the page counts trusted events
 only; script-dispatched ones go to `ut`), the confirm fallback's
 residual as well; kill switch `CHALLENGE_V2_INPUT_RESCUE`) — at the EDGE `challenge_v2`
 still serves the same challenge page as `challenge` (the rung difference is
-enforced at verify, not at serve). The verify gate ORs four arm grains:
+enforced at verify, not at serve). The verify gate ORs four arm grains (plus,
+since 2026-11-18, `unsolicited`: a web solve no challenge covered at verify,
+src=-, the farms' pre-solve for a cookie; a failing one is withheld — no
+cookie, 303 to next — never refused, `CHALLENGE_V2_UNSOLICITED`; and an
+automatic source's note rides its challenge entry, so a timed-out tick no
+longer drops a served challenge to v1):
 fingerprint policy, geo policy, a per-vhost v2 tier (a `rung=v2` MANUAL
 vhost challenge — arm-surfaces slice A: API/CLI/cfm-admin Tier picker;
 persisted with the challenge; since 2026-11-14 the tier of every NEW manual

@@ -42,9 +42,10 @@ package webdetector
 // snapshot reads, vhostEntryLocked): suspicious_vhost, uniqpaths_short,
 // vhost_config and under_attack (the Under-Attack state as the tick evaluates
 // it, operator override included). Each is re-noted on every cycle it is
-// active with a short TTL (autoSourceNoteTTL, 2–10 min) and dropped the cycle it turns
-// off, so the tier ends with the source or the vhost challenge, whichever
-// goes first — no missed transition can leave a stale v2 — and the
+// active — the note riding the host's challenge entry, capped at an hour
+// (NoteVhostAutoSource), so a late or timed-out tick never drops a served
+// challenge to v1 — and dropped the cycle it turns off, so the tier ends with
+// the source or the vhost challenge, whichever goes first, and the
 // under_attack note alone arms nothing on a host no vhost challenge covers
 // (an operator's `attack on` arms a manual challenge there itself since
 // 2026-11-17: under_attack_overrides.go). The entry's
@@ -336,9 +337,9 @@ func (t vhostV2Tier) via() string {
 // unarmed). With no live vhost challenge, or no live note, there is no
 // automatic source — the entry's own sticky Reason is never used to arm (it
 // can outlive the source that wrote it). Every source, Under-Attack included,
-// is re-noted by the tick on each cycle it is active and lapses within
-// autoSourceNoteTTL once it is not, so the tier can never outlive either the
-// vhost challenge or the source.
+// is re-noted by the tick on each cycle it is active and dropped the cycle it
+// turns off; a note nobody drops lives no longer than the challenge entry it
+// rode (an hour at most), so the tier cannot outlive the vhost challenge.
 func (e *Engine) autoV2Trigger(host string) string {
 	if e.nginxBridge == nil {
 		return ""
@@ -401,12 +402,11 @@ func (e *Engine) hostAutoSuppressed(host string) bool {
 	return len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(host, e.cfg.ChallengeVHostIgnore)
 }
 
-// autoSourceNoteTTL is how long one tick's note of an active automatic source
-// lives: 10 ticks, at least 2 minutes (so a tick slowed by a log backlog in
-// the very flood this is for never drops the tier to v1 between re-notes) and
-// normally at most 10 (so a source the tick stops seeing lapses soon) — but
-// always at least 3 ticks, so even a node with a long EVERY never lets an
-// active source lapse between two re-notes.
+// autoSourceNoteTTL is the FLOOR of one tick's note of an active automatic
+// source: 10 ticks, at least 2 minutes and normally at most 10, but always at
+// least 3 ticks. A note on a host with a live challenge entry lives as long as
+// that entry instead (NoteVhostAutoSource); the floor covers a note written
+// before its entry exists, and a host whose challenge is not its own entry.
 func (e *Engine) autoSourceNoteTTL() time.Duration {
 	ttl := 10 * e.cfg.Every
 	if ttl < 2*time.Minute {

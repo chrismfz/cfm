@@ -604,8 +604,9 @@ type ChallengeSolve struct {
 	// Src is the challenge provenance snapshot taken at verify: every source
 	// covering (ip, host) then (challengeSources, challenge_src.go), in a
 	// fixed order. SrcResolved says the snapshot ran (a bridge was wired);
-	// resolved-and-empty renders src=-, unresolved omits the field. Log-only:
-	// it never decides anything.
+	// resolved-and-empty renders src=-, unresolved omits the field. Its
+	// sources decide nothing; resolved-and-empty on a web solve arms the
+	// unsolicited grain (challengeV2UnsolicitedArms).
 	Src         []string
 	SrcResolved bool
 	// Scope is the surface the solve was verified on: "web", or
@@ -1038,6 +1039,15 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			solve.Src = s.bridge.challengeSources(fp.ID, ipStr, host, solve.CountryISO, solve.ASN)
 			solve.SrcResolved = true
 		}
+		// The unsolicited grain (challengeV2UnsolicitedArms): a web solve that
+		// no challenge covers now — a farm pre-solving the page on a fresh IP
+		// to bank a cookie — is scored like an armed one. It is the last grain
+		// and needs the snapshot, so it is resolved here rather than in
+		// challengeV2ArmGrainVia; a failing one is withheld below, not refused.
+		if v2On && v2Grain == "" && challengeV2UnsolicitedArms(scope, solve) {
+			v2Grain = v2GrainUnsolicited
+			solve.V2Grain = v2Grain
+		}
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
 		// the 8-character id instead of the full tuple. The UA rides along
@@ -1148,6 +1158,18 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					logging.LogfCHALLENGES("%s", solve.RejectLine())
 					if challengeV2RejectHook != nil {
 						challengeV2RejectHook(solve)
+					}
+					if v2Grain == v2GrainUnsolicited {
+						// Nothing challenges this client now, so there is
+						// nothing to retry: withhold the cookie and send it on
+						// to next, exactly as a solve would go — minus the
+						// clearance and the IP release. A person (an expired
+						// challenge, a stale tab) reaches the page; a farm
+						// banks no cookie for the next v2 arm.
+						setNoStore(w.Header())
+						w.Header().Set("Connection", "close")
+						http.Redirect(w, r, next, http.StatusSeeOther)
+						return
 					}
 					w.Header().Set("X-CFM-V2", "reject")
 					http.Error(w, "verification failed", http.StatusForbidden)

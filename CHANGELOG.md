@@ -17,6 +17,31 @@ back-filled here — see the git/PR history for that period.
 
 ## [Unreleased]
 
+### Security
+- **A solve that nothing asked for no longer banks a clearance cookie.**
+  - The case: the solver farms open the challenge page on each new IP while
+    the site is NOT challenged, solve it, and keep the cookie. When the
+    site's automatic v2 challenge came back, that cookie walked the IP past
+    the v2 check. On 2026-11-18 one titan shop had 395 such solves in a
+    morning after its challenge ended; over two to three days four nodes had
+    6 333, 97% of them the two convicted farm fingerprints.
+  - Now: a web solve that no challenge covered when it was verified
+    (`src=-`) is scored at v2 (`v2=unsolicited` on the solve line). One that
+    fails gets no cookie and goes on to the page it asked for. Nothing is
+    challenging it, so a person who lands there (an expired challenge, an old
+    tab) sees no difference. The panel ports are not affected.
+  - Knob: `[webdetector] CHALLENGE_V2_UNSOLICITED = 0` turns it off.
+- **An automatic v2 challenge no longer drops to v1 while it is still being
+  served.**
+  - What happened: the v2 tier of an automatic site challenge had to be
+    renewed by every webdetector run within minutes. When a run timed out,
+    the challenge stayed but its tier fell to v1. A farm IP was rejected at
+    v2 and passed three seconds later. Separately, a `uniqpaths_short`
+    challenge lost its v2 tier as soon as the burst ended, while it ran out
+    its time at v1.
+  - Now the tier lasts as long as the challenge it belongs to (an hour at
+    most), and ends when the challenge or its source ends.
+
 ### Fixed
 - **The subnet challenge (`CHALLENGE_SUBNET`) no longer re-issues the same
   challenge every 10 seconds.**

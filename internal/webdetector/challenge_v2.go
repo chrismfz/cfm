@@ -384,6 +384,10 @@ type challengeV2State struct {
 	// since 2026-11-14. Off, a tier-less manual arm is v1 as before. An
 	// explicit rung always wins, and a re-arm without one keeps the arm's.
 	manualV2 bool
+	// unsolicited arms a WEB solve that no challenge covered at verify
+	// (src=-, the unsolicited grain): CHALLENGE_V2_UNSOLICITED, default on.
+	// Off, such a solve earns clearance unscored as before.
+	unsolicited bool
 	// hostTier answers "is this host's vhost tier v2" plus what put it there
 	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
 	// resolution — NewEngine wires challengeV2GateTier (challenge_v2_auto.go:
@@ -405,7 +409,7 @@ type challengeV2State struct {
 	lockdown func(host string) bool
 }
 
-var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true, manualV2: true}
+var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true, manualV2: true, unsolicited: true}
 
 // ConfigureChallengeV2HWTells applies [webdetector] CHALLENGE_V2_HW_TELLS
 // (every reload; see challengeV2State.hwTells).
@@ -437,6 +441,42 @@ func ConfigureChallengeV2Manual(on bool) {
 	challengeV2.mu.Lock()
 	challengeV2.manualV2 = on
 	challengeV2.mu.Unlock()
+}
+
+// ConfigureChallengeV2Unsolicited applies [webdetector]
+// CHALLENGE_V2_UNSOLICITED (every reload; see challengeV2State.unsolicited).
+func ConfigureChallengeV2Unsolicited(on bool) {
+	challengeV2.mu.Lock()
+	challengeV2.unsolicited = on
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2UnsolicitedArms reports whether a solve is armed by the
+// unsolicited grain: a WEB-scope solve, otherwise unarmed, whose provenance
+// snapshot ran and found NO challenge covering the client (src=-).
+//
+// Why (2026-11-18 fleet read): the farms fetch /__cfm_challenge?next=… on each
+// fresh IP while the vhost is NOT challenged — 395 such solves on one titan
+// shop in a morning, 6 333 web-scope would_v2 solves over two to three days on
+// four nodes, 97% the convicted farm fingerprints. Unarmed, each earned a
+// clearance cookie scored at v1, and that cookie then carried the IP past the
+// v2 gate when the vhost's automatic challenge re-armed.
+//
+// Why it costs a person nothing: every challenge the edge serves comes from a
+// live daemon decision (the edge caches only clean allows), so src=- means
+// either no challenge was served or the one served has ended. An unsolicited
+// solve that fails is therefore not refused: the verify withholds the cookie
+// and sends the client on to next, which serves the page if nothing
+// challenges it now (challenge_server.go). The panel ports are out of scope:
+// their human-entry challenge is not in the snapshot, so every panel solve
+// reads src=-.
+func challengeV2UnsolicitedArms(scope string, s ChallengeSolve) bool {
+	if scope != "web" || !s.SrcResolved || len(s.Src) > 0 {
+		return false
+	}
+	challengeV2.mu.RLock()
+	defer challengeV2.mu.RUnlock()
+	return challengeV2.enabled && challengeV2.unsolicited
 }
 
 // challengeV2ManualDefaultRung is the stored tier ("v2", or "" for v1) of a
@@ -764,6 +804,10 @@ const (
 	v2GrainGeo   = "geo"   // a fleet-armed country/ASN policy covering the IP
 	v2GrainVhost = "vhost" // a v2-tier vhost challenge on the host (manual arm, or automatic via CHALLENGE_V2_AUTO_VHOST / a tier pin)
 	v2GrainMark  = "mark"  // a rung mark: per (ip,host) from a traffic rule, per IP from a WAF rule (web scope)
+	// v2GrainUnsolicited: a web solve no challenge covered at verify (src=-):
+	// a failing one gets no cookie and is sent on to next, never refused
+	// (challengeV2UnsolicitedArms).
+	v2GrainUnsolicited = "unsolicited"
 )
 
 // challengeV2ArmGrainVia answers D5a's "is this solve covered by an
@@ -924,7 +968,9 @@ func linuxSWShare(tells string) int {
 // challengeV2WaiverBar says whether a failing solve under grain may be waived
 // for a verified good bot: "" when it may, else why not. Waivable are only the
 // grains whose challenge the decision path's good-bot exemption already skips
-// (goodBotDowngrade softens the geo floor and the vhost challenge), and only
+// (goodBotDowngrade softens the geo floor and the vhost challenge) and the
+// unsolicited grain (no challenge to skip: a verified crawler that fetched
+// the page keeps its cookie, as it did before the grain existed), and only
 // when no traffic-rule / WAF mark covers the same client too (v2WaiverMark);
 // any other grain is v2WaiverGrain. challengeV2ArmGrainVia returns the FIRST
 // grain that covers the solve (fp, geo, vhost, mark), so a geo or vhost answer
@@ -935,7 +981,7 @@ func linuxSWShare(tells string) int {
 // skips the good-bot exemption there too.
 func challengeV2WaiverBar(grain, ip, host, scope string) string {
 	switch grain {
-	case v2GrainGeo, v2GrainVhost:
+	case v2GrainGeo, v2GrainVhost, v2GrainUnsolicited:
 		if challengeV2MarkCovers(ip, host, scope) {
 			return v2WaiverMark
 		}
