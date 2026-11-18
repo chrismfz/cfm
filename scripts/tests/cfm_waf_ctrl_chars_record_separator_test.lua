@@ -1,4 +1,5 @@
--- Rule 601 (rule_ctrl_chars) never flags 0x1E, the record separator.
+-- Rule 601 (rule_ctrl_chars) does not flag 0x1E, the record separator, in a
+-- body (the query keeps the full control-byte set).
 --
 -- 0x1E is framing in several protocols a browser speaks to the origin:
 -- Engine.IO v4 long-polling joins the packets of one POST with it (Socket.IO,
@@ -6,8 +7,9 @@
 -- with it (the handshake included, POSTed over long-polling / SSE), and
 -- RFC 7464 json-seq starts each record with it. On 2026-11-18 601 challenged
 -- a batched `POST /socket.io/?EIO=4&transport=polling` on speedhost, and a
--- challenge breaks the XHR (docs/waf.md FP case 13). A lone 0x1E has no
--- attack use, so it left 601's byte set; every other control byte counts.
+-- challenge breaks the XHR (docs/waf.md FP case 13). None of these protocols
+-- puts 0x1E in the query, so only the body scan leaves it out; every other
+-- control byte counts.
 
 _G.ngx = {
   now           = function() return 1000 end,
@@ -35,7 +37,7 @@ local function clean(args, body, h, uri, msg)
   check(det.detect_ctrl_chars(args, body, h, uri) ~= true, msg .. " (must not fire)")
 end
 
--- ── 0x1E as framing: never a hit, whatever the path ────────────────────────
+-- ── 0x1E in a body is framing: never a hit, whatever the path ──────────────
 local EIO = "EIO=4&transport=polling&t=ehgkjs8o&sid=hEzwv1QJ39MhkRLFAAAA"
 local BATCH = '42["chat","hello"]\x1e3'
 clean(EIO, BATCH, TEXT, "/socket.io/", "Engine.IO v4 polling batch (the speedhost request)")
@@ -57,10 +59,10 @@ fires("", '{"a":"\x08"}', JSON, "/api/x", "0x08")
 fires("", '{"a":"\x0b"}', JSON, "/api/x", "0x0B (vertical tab)")
 clean("", '{"a":"x\ty\r\nz"}', JSON, "/api/x", "TAB / CR / LF are text")
 
--- The query is searched as it arrives (raw bytes; %01 is not decoded here).
+-- The query keeps the full set, 0x1E included (it is searched as it arrives;
+-- whether %01 is decoded is not this test's subject).
 fires("q=a\x01b", "", TEXT, "/x", "a raw control byte in the query")
-clean("q=a\x1eb", "", TEXT, "/x", "a raw 0x1E in the query")
-clean("q=%01", "", TEXT, "/x", "percent-encoded: not decoded by 601 (documented)")
+fires("q=a\x1eb", "", TEXT, "/x", "a raw 0x1E in the query")
 
 -- ── End to end under the shipped modes: 601 among the hits or not ──────────
 local function has601(args, body, uri)
@@ -87,4 +89,4 @@ if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)
 end
-print("ok: rule 601 never flags 0x1E (record separator), every other control byte counts")
+print("ok: rule 601 leaves 0x1E (record separator) in a body alone, every other control byte counts")

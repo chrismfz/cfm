@@ -978,16 +978,24 @@ was the only such hit in seven days on the 8 edge nodes: a client upgrades to
 websocket and polls only before that, or when websocket is blocked, so the
 batched POST is rare, but every Socket.IO app can send it.
 
-**Fix (2026-11-18):** `0x1E` left 601's byte set altogether, in the body and
-the query. It is framing in more than Socket.IO: Engine.IO v4 under any mount
-path (Socket.IO's `path` option), ASP.NET SignalR's JSON protocol (every
-message ends with it, the handshake POSTed over long-polling / SSE included)
-and RFC 7464 json-seq. A carve-out keyed on `/socket.io` + `EIO=4` +
-`transport=polling` was the first version; review rejected it, because it
-missed those and a custom path, and a lone `0x1E` has no attack use anyway.
-Every other control byte still counts. The query leg reads the raw query: a
-percent-encoded control byte (`%01`) is not decoded by 601 (it was not before
-either; decoding it is a behaviour change to measure on the fleet first).
+**Fix (2026-11-18):** `0x1E` left 601's body scan. It is framing in more
+than Socket.IO: Engine.IO v4 under any mount path (Socket.IO's `path`
+option), ASP.NET SignalR's JSON protocol (every message ends with it, the
+handshake POSTed over long-polling / SSE included) and RFC 7464 json-seq. A
+carve-out keyed on `/socket.io` + `EIO=4` + `transport=polling` was the first
+version; review rejected it, because it missed those and a custom path. None
+of these protocols puts `0x1E` in the query, so the query leg keeps the full
+byte set. Every other control byte still counts. The query leg reads the raw
+query: a percent-encoded control byte (`%01`) is not decoded by 601 (it was
+not before either; decoding it is a behaviour change to measure on the fleet
+first).
+
+**Known limit:** Python's `str.split()` and Java's `Character.isWhitespace()`
+treat `0x1C-0x1F` as whitespace. A body value joined with `0x1E`
+(`union\x1eselect`) passes the keyword-adjacency rules (301), and 601 no
+longer challenges it in a body. It matters only to a Python / Java app that
+tokenises input that way: MySQL, PostgreSQL and the shell do not read `0x1E`
+as whitespace, and `0x1C`, `0x1D` and `0x1F` still trip 601.
 Test: `scripts/tests/cfm_waf_ctrl_chars_record_separator_test.lua`.
 
 **Rest of 601 on the fleet** (same 7 days, 56 hits): 8 were the Optimization
@@ -2997,7 +3005,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 2 | RCE | Substring list (JNDI, `;wget`, `\|bash`, backticks, `base64,`) | `cfm_waf_detectors.lua:102` |
 | 3 | Exploit methods | TRACE / TRACK / CONNECT | `cfm_waf_detectors.lua:127` |
 | 4 | PHP wrappers | `php://`, `phar://`, `data://`, `zip://`, `expect://`, `glob://` | `cfm_waf_detectors.lua:148` |
-| 5 | Control chars | `[\x01-\x08\x0b\x0c\x0e-\x1f]` in args/body with CT gating | `cfm_waf_detectors.lua:192` |
+| 5 | Control chars | `[\x01-\x08\x0b\x0c\x0e-\x1f]` in args; the same without `0x1E` (framing, FP case 13) in the body, with CT gating | `cfm_waf_detectors.lua` (`detect_ctrl_chars`) |
 | 6 | PHP webshell body | Scored: `<?php`+superglobals+exec-family+dyn-include+webshell-names | `cfm_waf_detectors.lua:241` |
 | 7 | Base64 body scan | Greedy `=([A-Za-z0-9+/]+=*)`, decode, scan decoded for shells/SQL/PHP | `cfm_waf_detectors.lua:401` |
 | 8 | XSS | Substring: `<script`, `=javascript:`, `onerror=`/`onload=`/… with `%f[%w]` anchor | `cfm_waf_detectors.lua:457` |

@@ -1073,18 +1073,11 @@ function _M.detect_ctrl_chars(args, body, headers, uri)
     return false
   end
 
-  -- The control bytes 601 flags: 0x01-0x1F except TAB, LF and CR (text)
-  -- and except 0x1E, the record separator, which is framing in several
-  -- protocols:
-  -- Engine.IO v4 long-polling joins a POST's packets with it (Socket.IO,
-  -- under any mount path), ASP.NET SignalR's JSON protocol ends every
-  -- message with it, and RFC 7464 json-seq starts each record with it. A
-  -- lone 0x1E has no attack use, so it is never a 601 hit (2026-11-18,
-  -- docs/waf.md FP case 13). The query is searched as it arrives: a
-  -- percent-encoded control byte (%01) is not decoded here.
-  local CTRL = "[\x01-\x08\x0b\x0c\x0e-\x1d\x1f]"
+  -- The control bytes 601 flags: 0x01-0x1F except TAB, LF and CR (text).
+  -- The query is searched as it arrives: a percent-encoded control byte
+  -- (%01) is not decoded here.
   local a = args or ""
-  if a ~= "" and a:find(CTRL) then
+  if a ~= "" and a:find("[\x01-\x08\x0b\x0c\x0e-\x1f]") then
     return true
   end
 
@@ -1096,7 +1089,12 @@ function _M.detect_ctrl_chars(args, body, headers, uri)
     return false
   end
 
-  if body:find(CTRL) then
+  -- In the body, 0x1E (the record separator) is not a hit: it is framing.
+  -- Engine.IO v4 long-polling joins a POST's packets with it (Socket.IO,
+  -- under any mount path), ASP.NET SignalR's JSON protocol ends every
+  -- message with it, and RFC 7464 json-seq starts each record with it
+  -- (2026-11-18, docs/waf.md FP case 13). None of them puts it in the query.
+  if body:find("[\x01-\x08\x0b\x0c\x0e-\x1d\x1f]") then
     return true
   end
 

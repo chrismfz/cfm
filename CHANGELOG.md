@@ -47,8 +47,8 @@ back-filled here — see the git/PR history for that period.
   Their long-polling POSTs separate messages with the 0x1E byte (Socket.IO
   under any path, ASP.NET SignalR, json-seq), and rule 601 (control
   characters) answered such a POST with a challenge the app could not solve.
-  0x1E alone is harmless, so 601 no longer counts it; every other control
-  byte still does. Seen on speedhost (a CRM's live updates);
+  It is framing there, so 601 no longer counts 0x1E in a body (the query
+  keeps it); every other control byte still counts. Seen on speedhost (a CRM's live updates);
   `docs/waf.md` FP case 13.
 - **The subnet challenge (`CHALLENGE_SUBNET`) no longer re-issues the same
   challenge every 10 seconds.**
