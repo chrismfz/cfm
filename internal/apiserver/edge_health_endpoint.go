@@ -88,7 +88,8 @@ var (
 	// And the relayed bounces for a download target, also never a warning.
 	edgeHealthDownloadBounces = webdet.RelayedDownloadBounceHosts
 	// Whether the challenge server is up here: without it Check F measures
-	// nothing, which is `unknown`, never an all-clear.
+	// nothing, and reports `ok` with evidence measured=false (no challenge
+	// page is served from this node, so there is none a CDN could cache).
 	edgeHealthChallengeServing = webdet.ChallengeServerServing
 	// Check G's source: the origin's real-IP trust of the edge, and whether an
 	// edge engine runs at all (without one there is nothing to trust).
@@ -211,7 +212,7 @@ func handleSystemEdgeHealth(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(buildEdgeHealthReport(r.Context(), window))
 }
 
-// buildEdgeHealthReport runs the Tier-1 checks and returns the response map.
+// buildEdgeHealthReport runs the edge_health checks and returns the response map.
 // Split from the handler so tests exercise the correlation/severity logic with
 // stubbed runners + log scanners, without the admin gate.
 func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
@@ -315,7 +316,7 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 		}
 		findings = append(findings, sev.add("origin-421-fingerprint", "critical",
 			itoa(warm421)+" warm-reuse 421s (uct≈0 via cfm_origin_https) in the last "+itoa(accScanned)+" access lines — the cross-SNI 443-reuse signature; "+itoa(recentWarm421)+" in the last "+itoa(int(edgeHealth421FreshWindowSec/60))+"m"+note,
-			warmEv(), "verify 443 origin reuse is off at every layer (origin-config-invariant, edge_error_tail)"))
+			warmEv(), "check that the live edge conf has `keepalive 0` in every cfm_origin_* upstream (OpenResty) and `proxy_ssl_session_reuse off` on the 443 origin locations, then reload the edge (edge_error_tail for the 421 lines; check_origin_ka_config.sh checks the reference conf)"))
 	case warm421 > 0:
 		// Warm-reuse 421s exist but ALL are older than the freshness window: the
 		// incident is in the file tail but has stopped (fix/restart took hold).
@@ -434,13 +435,14 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	case trap && knob == "true":
 		// Knob on, no LIVE warm-reuse 421s (either none at all, or only a resolved
 		// storm still in the file tail — Check B reports that separately). The
-		// 443-reuse CLASS applies, but Tier-1 cannot verify the SNI-safety config
-		// invariant (keepalive 0 / proxy_ssl_session_reuse off) — that is the CI
-		// gate + Tier-2's job. Report the exposure informatively, NOT as `warn`:
+		// 443-reuse CLASS applies, but this check does not read the live conf, so
+		// it cannot verify the SNI-safety invariant (keepalive 0 /
+		// proxy_ssl_session_reuse off); only the CI gate checks the reference
+		// conf. Report the exposure informatively, NOT as `warn`:
 		// warning here would fire forever on every correctly-configured node (cry
 		// wolf), and anything wiring whats_wrong on `overall` would too.
 		findings = append(findings, sev.add("engine-version-trap", "ok",
-			engineLabel(engine, version)+": native keepalive default-on & SNI-blind, ORIGIN_KEEPALIVE on, no live cross-SNI 421s — the SNI-safety config MUST be present; this Tier-1 check does not verify it (check_origin_ka_config.sh / edge_health Tier-2 does)",
+			engineLabel(engine, version)+": native keepalive default-on & SNI-blind, ORIGIN_KEEPALIVE on, no live cross-SNI 421s — the SNI-safety config MUST be present; this check does not read the live conf to verify it (the CI gate check_origin_ka_config.sh checks the reference conf only)",
 			aEv, ""))
 	case trap && knob == "false":
 		findings = append(findings, sev.add("engine-version-trap", "ok",

@@ -954,8 +954,9 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"reason":        reason,
 		// The host's effective vhost tier ("v2" or "" for v1) and where it
 		// comes from — challengeV2VhostTier, the verify gate's own resolver.
-		// This is the ONE vhost surface scoped tokens can read, so a customer
-		// can see (and switch) the tier on their own vhost (review finding).
+		// Scoped tokens read it here (and on /api/v1/challenge/vhost, which
+		// carries the same fields), so a customer can see (and switch) the
+		// tier on their own vhost (review finding).
 		"rung":         tier.Rung,
 		"rung_source":  tier.Source,
 		"rung_trigger": tier.Trigger,

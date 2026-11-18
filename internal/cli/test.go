@@ -114,10 +114,13 @@ func runConfigDriftChecks() {
 type auditReport struct {
 	UnknownKeys []string
 	BogusLines  []string
+	// IgnoredValues: known keys whose value the daemon does not apply
+	// (config.IgnoredValueNote), e.g. a moved SSLCOLLECTOR_SOCK_PATH.
+	IgnoredValues []string
 }
 
 func printAudit(name string, a auditReport) {
-	if len(a.UnknownKeys) == 0 && len(a.BogusLines) == 0 {
+	if len(a.UnknownKeys) == 0 && len(a.BogusLines) == 0 && len(a.IgnoredValues) == 0 {
 		fmt.Printf(" - %-20s : OK     no unknown keys or malformed lines\n", name)
 		return
 	}
@@ -127,6 +130,9 @@ func printAudit(name string, a auditReport) {
 	}
 	if len(a.BogusLines) > 0 {
 		fmt.Printf("   malformed lines       : %s\n", strings.Join(a.BogusLines, "; "))
+	}
+	if len(a.IgnoredValues) > 0 {
+		fmt.Printf("   ignored values        : %s\n", strings.Join(a.IgnoredValues, "; "))
 	}
 }
 
@@ -138,7 +144,7 @@ func auditCFMConfig(path string) (auditReport, error) {
 	defer f.Close()
 
 	unknown := map[string]struct{}{}
-	var bogus []string
+	var bogus, ignored []string
 	sc := bufio.NewScanner(f)
 	lineNo := 0
 	for sc.Scan() {
@@ -160,6 +166,8 @@ func auditCFMConfig(path string) (auditReport, error) {
 		}
 		if !cfgpkg.IsKnownKey(key) {
 			unknown[key] = struct{}{}
+		} else if note := cfgpkg.IgnoredValueNote(key, line[i+1:]); note != "" {
+			ignored = append(ignored, fmt.Sprintf("line %d: %s", lineNo, note))
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -170,7 +178,7 @@ func auditCFMConfig(path string) (auditReport, error) {
 		unknownList = append(unknownList, k)
 	}
 	sort.Strings(unknownList)
-	return auditReport{UnknownKeys: unknownList, BogusLines: bogus}, nil
+	return auditReport{UnknownKeys: unknownList, BogusLines: bogus, IgnoredValues: ignored}, nil
 }
 
 func printDiff(name, ref string, missing, extra []string) {

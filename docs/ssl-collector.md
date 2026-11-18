@@ -275,7 +275,7 @@ Referenced from `socketapi.go` and `sslcollector.lua`:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `SSLCOLLECTOR_SOCK_ENABLE` | off when absent; the shipped `cfm.conf` sets `1` | Run the unix socket server. Without it the edge gets no certs from CFM. |
-| `SSLCOLLECTOR_SOCK_PATH` | `/var/run/sslcollector.sock` | Socket path for the daemon and the `cfm ssl` CLI. The edge Lua has the default path hardcoded (`SOCKS` in `sslcollector.lua`), so do not change it. |
+| `SSLCOLLECTOR_SOCK_PATH` | `/var/run/sslcollector.sock` | Fixed. The edge Lua connects to this path only (`SOCKS` in `sslcollector.lua`), so the daemon and the `cfm ssl` CLI ignore any other value and log a warning; `cfm config test` lists it under "ignored values". (`cfm ssl --sock` still points one CLI run elsewhere.) |
 | `SSLCOLLECTOR_SOCK_TOKEN` | `placeholder` | Read only to create `/var/lib/cfm/secrets/sslcollector_sock_token` when that file is missing. Keep the line with `placeholder`. |
 | `SSLCOLLECTOR_SOCK_PEM_TTL` | `10m` | `/cert` PEM cache TTL per entry. |
 | `SSLCOLLECTOR_SOCK_PEM_MAX` | `50000` | `/cert` PEM cache size; when full the whole cache is cleared. |
@@ -295,7 +295,8 @@ cfm ssl refresh                 # ask the daemon to Refresh (POST /refresh)
 ```
 
 Each first asks the daemon to Refresh (skip with `--no-daemon-refresh`) and
-runs its own scan in the CLI process. On the edge, the `meta:*` keys in the
+runs its own scan in the CLI process. That scan only reads the cert files:
+it never writes `dump.json`, which is the daemon's. On the edge, the `meta:*` keys in the
 `sslcache` shared dict (listed at the top of `sslcollector.lua`) and the
 `[sslcollector]` lines in the edge error log show each worker's state.
 

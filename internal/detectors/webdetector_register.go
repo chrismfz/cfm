@@ -624,7 +624,7 @@ func init() {
 			EnrichDirs: dirs,
 
 			LongFactor: kvInt(kv, "LONG_FACTOR", 10),
-			MinScore:   kvFlt(kv, "MIN_SCORE", 0.60),
+			MinScore:   kvFlt(kv, "MIN_SCORE", webdet.DefaultMinScore),
 
 			// Deprecated: webdetector routes are now served by the shared apiserver.
 			APIListen: kvStrClean(kv, "API_LISTEN", ""),

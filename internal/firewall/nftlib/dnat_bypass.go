@@ -39,6 +39,35 @@ func dnatBypassIsManaged(userData []byte) bool {
 	return string(userData[:len(dnatBypassUserDataPrefix)]) == dnatBypassUserDataPrefix
 }
 
+// dnatBypassShowRuleLine renders a bypass rule (by its UserData tag) as the
+// nft text the exec engine's `nft list table` shows, for a status listing:
+// `ip saddr 192.0.2.1 accept` / `ip6 saddr 2001:db8::/64 accept`. The tag is
+// parsed by the same reader as the bypass file (firewall.ParseDNATBypassEntry),
+// so the line names what was installed. ok is false for a rule that is not a
+// bypass rule or whose tag does not hold an address.
+func dnatBypassShowRuleLine(userData []byte) (string, bool) {
+	if !dnatBypassIsManaged(userData) {
+		return "", false
+	}
+	e, err := firewall.ParseDNATBypassEntry(string(userData[len(dnatBypassUserDataPrefix):]))
+	if err != nil {
+		return "", false
+	}
+	return firewall.DNATBypassMatcher(e) + " " + e.Value + " accept", true
+}
+
+// dnatBypassShowLines renders every bypass rule of a chain, in chain order,
+// for the web and panel status listings alike.
+func dnatBypassShowLines(rules []*nftables.Rule) []string {
+	var out []string
+	for _, r := range rules {
+		if line, ok := dnatBypassShowRuleLine(r.UserData); ok {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
 // dnatBypassRuleExprs builds the netlink expression list for one bypass
 // entry. The shape is the equivalent of:
 //

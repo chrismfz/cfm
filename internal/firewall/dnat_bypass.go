@@ -171,7 +171,7 @@ func DNATBypassRuleExprs(entries []DNATBypassEntry, family, tableName, chainName
 	for _, e := range entries {
 		rules = append(rules, fmt.Sprintf(
 			"add rule %s %s %s %s %s accept comment %q",
-			family, tableName, chainName, dnatBypassMatcherStr(e), e.Value, DNATBypassComment,
+			family, tableName, chainName, DNATBypassMatcher(e), e.Value, DNATBypassComment,
 		))
 	}
 	return rules
@@ -185,7 +185,7 @@ func DNATBypassRuleExprs(entries []DNATBypassEntry, family, tableName, chainName
 func DNATBypassChainBlock(entries []DNATBypassEntry, skipped []string, fileHint string) string {
 	var b strings.Builder
 	for _, e := range entries {
-		fmt.Fprintf(&b, "    %s %s accept comment %q\n", dnatBypassMatcherStr(e), e.Value, DNATBypassComment)
+		fmt.Fprintf(&b, "    %s %s accept comment %q\n", DNATBypassMatcher(e), e.Value, DNATBypassComment)
 	}
 	for _, warn := range skipped {
 		fmt.Fprintf(&b, "    # WARNING: %s skipped entry: %s\n", fileHint, warn)
@@ -193,9 +193,10 @@ func DNATBypassChainBlock(entries []DNATBypassEntry, skipped []string, fileHint 
 	return b.String()
 }
 
-// dnatBypassMatcherStr returns the nft payload matcher prefix for an entry:
+// DNATBypassMatcher returns the nft payload matcher prefix for an entry
+// (both engines; nftlib also renders its status lines with it):
 // "ip saddr" for IPv4, "ip6 saddr" for IPv6.
-func dnatBypassMatcherStr(e DNATBypassEntry) string {
+func DNATBypassMatcher(e DNATBypassEntry) string {
 	if e.IsV6 {
 		return "ip6 saddr"
 	}

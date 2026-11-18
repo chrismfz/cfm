@@ -48,10 +48,34 @@ type Config struct {
 
 // --- Categories ---
 
+// SSLCollectorSockPath is the sslcollector unix socket. It is fixed: the
+// edge's sslcollector.lua connects to this path only, so cfm.conf's
+// SSLCOLLECTOR_SOCK_PATH is ignored (with a warning) when it names another.
+const SSLCollectorSockPath = "/var/run/sslcollector.sock"
+
+// warnedIgnoredValue: the IgnoredValueNote notes (key AND value) this process
+// already logged, so a value changed to another ignored one warns again.
+var warnedIgnoredValue sync.Map
+
+// IgnoredValueNote says why cfm.conf's value for key is not applied, or ""
+// when it is. val is the value as written after '=' (an inline comment and
+// surrounding quotes are dropped first, as the parser does). The parser's
+// warning and `cfm config test` both read it, so they cannot disagree.
+func IgnoredValueNote(key, val string) string {
+	v := strings.TrimSpace(trimQuotes(stripInlineComment(strings.TrimSpace(val))))
+	switch strings.ToUpper(strings.TrimSpace(key)) {
+	case "SSLCOLLECTOR_SOCK_PATH":
+		if v != "" && v != SSLCollectorSockPath {
+			return "SSLCOLLECTOR_SOCK_PATH=" + v + " is ignored: the sslcollector socket is fixed at " + SSLCollectorSockPath + " (the edge connects to that path only)"
+		}
+	}
+	return ""
+}
+
 // SSLCollectorSockConfig — exposes sslcollector over unix socket for OpenResty
 type SSLCollectorSockConfig struct {
 	Enabled      bool          // SSLCOLLECTOR_SOCK_ENABLE
-	SockPath     string        // SSLCOLLECTOR_SOCK_PATH
+	SockPath     string        // always SSLCollectorSockPath from cfm.conf (SSLCOLLECTOR_SOCK_PATH is not honoured)
 	Token        string        // SSLCOLLECTOR_SOCK_TOKEN (optional)
 	LuaTokenPath string        // SSLCOLLECTOR_LUA_TOKEN_PATH (default /var/lib/cfm/lua/cfm_token.lua)
 	PEMTTL       time.Duration // SSLCOLLECTOR_SOCK_PEM_TTL (default 10m)
@@ -527,7 +551,7 @@ func (c *Config) SetDefaults() {
 
 	// SSLCollector unix socket defaults
 	if c.SSLCollectorSock.SockPath == "" {
-		c.SSLCollectorSock.SockPath = "/var/run/sslcollector.sock"
+		c.SSLCollectorSock.SockPath = SSLCollectorSockPath
 	}
 	if c.SSLCollectorSock.LuaTokenPath == "" {
 		c.SSLCollectorSock.LuaTokenPath = "/var/lib/cfm/lua/cfm_token.lua"
@@ -1001,7 +1025,17 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "SSLCOLLECTOR_SOCK_ENABLE":
 			cfg.SSLCollectorSock.Enabled = parseBool(val)
 		case "SSLCOLLECTOR_SOCK_PATH":
-			cfg.SSLCollectorSock.SockPath = val
+			// The path is fixed: the edge's sslcollector.lua (and the
+			// packaging, and `cfm dnat` diagnostics) only know this one, so a
+			// moved socket silently cut certificate delivery to the edge.
+			// Once per process: the file is parsed on every reload and by
+			// most CLI commands.
+			if note := IgnoredValueNote(key, val); note != "" {
+				if _, seen := warnedIgnoredValue.LoadOrStore(note, true); !seen {
+					log.Printf("config: warning: line %d: %s", lineNo, note)
+				}
+			}
+			cfg.SSLCollectorSock.SockPath = SSLCollectorSockPath
 		case "SSLCOLLECTOR_SOCK_TOKEN":
 			cfg.SSLCollectorSock.Token = val
 		case "SSLCOLLECTOR_LUA_TOKEN_PATH":

@@ -16,7 +16,8 @@
 --     1. SO_PEERCRED — restrict socket callers to the exact nginx worker binary via kernel
 --        credential verification rather than a group-readable file token.
 --     2. Encrypted offline snapshot — encrypt dump.json so the on-disk artifact cannot be
---        used in isolation if exfiltrated.  Toggle via SSLCOLLECTOR_OFFLINE_CACHE = 0/1.
+--        used in isolation if exfiltrated.  (SSLCOLLECTOR_OFFLINE_CACHE = 0 does not
+--        remove the file: it only stops workers reading it; the daemon still writes it.)
 --
 --
 -- Health keys written to shared dict (all TTL=0, never expire):
@@ -60,6 +61,8 @@ local _miss_log_at      = 0
 local _miss_suppressed  = 0
 
 -- Socket(s) + token
+-- The path is fixed: the daemon ignores any other SSLCOLLECTOR_SOCK_PATH
+-- (internal/config SSLCollectorSockPath), so this is the only one to know.
 local SOCKS = {
   "/var/run/sslcollector.sock",
   -- "/var/run/sslcollector2.sock",  -- optional secondary for HA
@@ -105,7 +108,8 @@ do
   end
 end
 
--- OFFLINE_CACHE: when false, skip snapshot read/write.
+-- OFFLINE_CACHE: when false, skip the snapshot READ at startup (workers never
+-- write it; the daemon writes dump.json whatever this flag says).
 -- Disable via SSLCOLLECTOR_OFFLINE_CACHE = 0 in cfm.conf.
 -- Default true when config file is absent (older cfm build compatibility).
 local OFFLINE_CACHE = (_cfg.offline_cache ~= false)

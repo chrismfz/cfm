@@ -72,6 +72,26 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `LICENSE`, `NOTICE` and the GPL text (`/usr/share/doc/cfm/` in the .deb,
   `/usr/share/licenses/cfm/` in the .rpm), and the rpm's `License:` field,
   which wrongly said MIT, now names both licenses. See `NOTICE` and README §9.
+- **`SSLCOLLECTOR_SOCK_PATH` is fixed at `/var/run/sslcollector.sock`.** The
+  edge has only ever connected to that path, so a node that set another one
+  silently stopped delivering certificates to the edge. The daemon now ignores
+  any other value and logs a warning (once per value), and `cfm config test`
+  lists it under "ignored values"; the socket stays where it always was.
+
+### Fixed
+- **`edge_health` advice names only real checks.** Check B's critical advice
+  pointed at an `origin-config-invariant` check and check A's summary at an
+  "edge_health Tier-2", neither of which exists; both now say what to check in
+  the live edge conf. `whats_wrong` shows check H (`web-dnat-order`) under a
+  title instead of its raw id.
+- **nftlib: `cfm dnat cpanel status` prints the panel chain's own priority**
+  (it printed the web redirect's `NFT_DNAT_PRIORITY`). It and `cfm dnat` now
+  also list the source-IP bypass accept rules (`cfm.dnat_cpanel_bypass`,
+  `cfm.dnat_bypass`), as the exec engine already did.
+- **`cfm ssl stats|scan|dump` no longer rewrite the daemon's `dump.json`.**
+  The CLI's own scan only reads the cert files now.
+- **`/api/v1/webdet/suspicious` uses the `MIN_SCORE` default (0.60)** when no
+  score floor is configured, not 0.50.
 
 ## 2026.11.18
 
