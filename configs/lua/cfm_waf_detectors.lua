@@ -1822,9 +1822,8 @@ function _M.detect_sqli_probe(sc, scw)
      or scw:find("[%d'\"%)] and 1=1 ?$") then
     return true
   end
-  -- (`and` / `or` as whole words: a frontier, so `brand 'x'='x'` is not one)
-  if scw:find("%f[%w]and ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]")
-     or scw:find("%f[%w]or ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]") then
+  if scw:find("[%d'\"%)] ?and ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]")
+     or scw:find("[%d'\"%)] ?or ?%(? ?(['\"])([%w_]+)%1 ?= ?%1%2%f[^%w_]") then
     return true
   end
   if has(scw, "utl_inaddr.get_host_address(") then return true end
@@ -9088,7 +9087,9 @@ local function php_code_param(p)
   -- md5(31337))};`): it prints a known hash when the value reaches eval or a
   -- double-quoted string. No sink call, so php_code_context never sees it.
   -- Only probes matched it on the fleet (2026-11-18, docs/waf.md "SQLi gaps").
-  if p:find("var_dump%s*%(%s*md5%s*%(%s*%d") then return "VAR_DUMP_MD5" end
+  -- (5+ digits: the scanners' random number; `var_dump(md5(123))` in a PHP
+  -- forum search is a person)
+  if p:find("var_dump%s*%(%s*md5%s*%(%s*%d%d%d%d%d") then return "VAR_DUMP_MD5" end
   for i = 1, #PHP_ARG_SINKS do
     if php_global_call(p, PHP_ARG_SINKS[i]) then
       local ctx = php_code_context(p)

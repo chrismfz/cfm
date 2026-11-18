@@ -94,6 +94,18 @@ fires("catid=0%27%20/*!11110procedure*/%20/*!11110analyse*/%20(/*!11110extractva
       "versioned procedure analyse")
 fires("id=1/*!50000union*//*!50000select*/1,2",     "versioned union select")
 
+-- content between keywords, and an empty one inside a call (adversarial review)
+do
+  local function hit(qs) local h = waf.check(get(qs)); return h == true end
+  set_only({ rule_sqli_union_variant = "challenge_v2" })
+  check(hit("id=1%27union/*!all*/select+1,2"),      "319: union/*!all*/select")
+  check(hit("id=1%27union/*!50000all*/select+1,2"), "319: union/*!50000all*/select")
+  set_only({ rule_sqli_blind_lexical = "block" })
+  check(hit("id=1+and+extractvalue/*!*/(1,1)"),     "309: extractvalue/*!*/(")
+  check(hit("id=1+or+sleep/*!*/(5)"),               "309: or sleep/*!*/(")
+  set_only({ rule_sqli = "block" })
+end
+
 -- ── New 301 shapes ──────────────────────────────────────────────────────────
 fires("q=wahl%27%20ORDER%20BY%201--%20-",           "' order by 1-- -")
 fires("view=article%27%20ORDER%20BY%2012%23",       "' order by 12#")
@@ -122,16 +134,18 @@ clean("q=brand+%27a%27%3D%27a%27",                  "`brand` is not `and`")
 clean("q=a+and+%27b%27%3D%27c%27",                  "different words")
 clean("q=x+and+%27ab%27%3D%27abc%27",               "a prefix is not the same word")
 clean("q=procedure+analysis",                       "prose: procedure analysis")
+clean("q=x+and+(%27a%27%3D%27a%27)",                "tautology with no value break before `and`")
 clean("q=mysql+procedure+analyse(+)+syntax",        "prose: procedure analyse( with no value break")
 clean("q=/*+a+comment+*/hello",                     "a plain block comment")
 
 -- ── Rule 332: the var_dump(md5(N)) probe ────────────────────────────────────
 check(det.detect_php_code_args("language=%24%7B%40var_dump(md5(631881373))%7D%3B") == "VAR_DUMP_MD5",
       "332: ${@var_dump(md5(N))};")
-check(det.detect_php_code_args("x=var_dump+(+md5(+1+)+)") == "VAR_DUMP_MD5", "332: spaced")
+check(det.detect_php_code_args("x=var_dump+(+md5(+31337+)+)") == "VAR_DUMP_MD5", "332: spaced")
 check(det.detect_php_code_args("q=var_dump+tutorial") == nil, "332: the word var_dump")
 check(det.detect_php_code_args("q=var_dump(md5(%24x))") == nil, "332: md5 of a variable is not the probe")
 check(det.detect_php_code_args("q=md5(123)") == nil, "332: md5 alone")
+check(det.detect_php_code_args("q=php+var_dump(md5(123))") == nil, "332: a forum search with a small number")
 
 if fails > 0 then
   io.stderr:write("\n" .. fails .. " check(s) failed in cfm_waf_sqli_gaps_test.lua\n")

@@ -419,7 +419,14 @@ end
 --     detector can see that a comment closed the value (`' order by 1--`);
 --     one the next line continues after is dropped whole, as above
 --     (`1'--\nunion select` still reads `1'\nunion select`).
-local function strip_sql_comment_part(s)
+-- `glued` picks one of two readings of an executable comment's content: with
+-- a space on both sides (`union/*!all*/select` is `union all select`) or with
+-- none (`/*!11110extractvalue*/(` must still read `extractvalue(`). The query
+-- strip returns both, since the detectors only ask whether a shape occurs.
+-- Linear on every input: a `--` comment is cut with plain finds, never a
+-- backtracking gsub (`%-%-[^\n]*\n` was O(n^2) on a run of dashes with no
+-- newline: 8 KB of `-` cost ~0.5 s of worker CPU).
+local function strip_sql_comment_part(s, glued)
   if s:find("/*", 1, true) then
     local out, i = {}, 1
     local a = s:find("/*", i, true)
@@ -431,11 +438,11 @@ local function strip_sql_comment_part(s)
         i = #s + 1
         break
       end
-      -- executable comment: keep what the server runs (a space before it, as
-      -- the comment separated it from the text before; none after, so
-      -- `/*!extractvalue*/(` still reads as a call)
+      -- executable comment: keep what the server runs
       local run = s:sub(a + 2, b - 1):match("^[mM]?!%d*(.*)$")
-      if run then out[#out + 1] = " " .. run end
+      if run and run ~= "" then
+        out[#out + 1] = glued and run or (" " .. run .. " ")
+      end
       i = b + 2
       a = s:find("/*", i, true)
     end
@@ -443,20 +450,40 @@ local function strip_sql_comment_part(s)
     s = table.concat(out)
   end
   if s:find("--", 1, true) then
-    s = s:gsub("%-%-[^\n]*\n", "\n"):gsub("%-%-[^\n]*$", " --")
+    -- each `--` drops the rest of its line; the line break stays. Only the
+    -- comment that ends the text leaves its ` --` marker.
+    local out, i, n = {}, 1, #s
+    while i <= n do
+      local a = s:find("--", i, true)
+      if not a then out[#out + 1] = s:sub(i); break end
+      out[#out + 1] = s:sub(i, a - 1)
+      local nl = s:find("\n", a + 2, true)
+      if not nl then out[#out + 1] = " --"; break end
+      out[#out + 1] = "\n"                 -- keep the line break
+      i = nl + 1
+    end
+    s = table.concat(out)
   end
   return s
 end
 
-local function strip_sql_comments_query(s)
-  if not s:find("/*", 1, true) and not s:find("--", 1, true) then return s end
-  if not s:find("[&?]") then return strip_sql_comment_part(s) end
+local function strip_sql_query_reading(s, glued)
+  if not s:find("[&?]") then return strip_sql_comment_part(s, glued) end
   local out = {}
   for part, d in s:gmatch("([^&?]*)([&?]?)") do
-    out[#out + 1] = strip_sql_comment_part(part) .. d
+    out[#out + 1] = strip_sql_comment_part(part, glued) .. d
   end
-  out[#out + 1] = "&" .. strip_sql_comment_part(s)
+  out[#out + 1] = "&" .. strip_sql_comment_part(s, glued)
   return table.concat(out)
+end
+
+local function strip_sql_comments_query(s)
+  if not s:find("/*", 1, true) and not s:find("--", 1, true) then return s end
+  local r = strip_sql_query_reading(s, false)
+  if s:find("/%*[mM]?!") then              -- an executable comment
+    r = r .. "&" .. strip_sql_query_reading(s, true)
+  end
+  return r
 end
 
 -- The URI+query scan surface shared by traversal/rce/xss/sqli. URI and query

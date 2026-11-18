@@ -1997,7 +1997,24 @@ other 9 were DVWA SQLi in POST bodies, given up with the body change.) One
 white sample made the first `and 1=1` draft fire (`msg=1 and 1=1 is a very
 basic mathematical operation`), hence the "ends the parameter" condition.
 
-**Residual:** a `--` in a body still hides what follows it there; `' and 1=1
+**Adversarial review (before merge).** An independent review replayed
+~100 hand-picked query strings against main and this branch and found:
+- **A CPU DoS, fixed:** the first `--` strip was a `%-%-[^\n]*\n` gsub, O(n²)
+  on a run of dashes with no newline (8 KB of `-` cost ~0.5 s of worker CPU,
+  1.6 s with the path). It is now a single pass of plain finds (7.5 ms, as on
+  main), with a 64 KB guard in the strip test.
+- **Bypasses, fixed:** a space added after the `/*!…*/` content split
+  `union/*!all*/select` and `extractvalue/*!*/(`, which main caught. An empty
+  executable comment is removed again, and a non-empty one gets two readings
+  (with a space on each side, and glued).
+- **The tautology** had no value-break gate, although its comment said so. It
+  has one now. **332** needs 5+ digits (the scanners' random number), so a PHP
+  forum search for `var_dump(md5(123))` passes.
+
+**Residual:** SQL typed into a search box can still trip the new shapes
+(`?s=top 10 order by 2--`, `?q=… where 1 and 1=1;`, `?s=SQL "procedure
+analyse()"`). The 8-day replay found no such request on the fleet. A `--` in
+a body still hides what follows it there; `' and 1=1
 or …` followed by more words (it reads like that prose); `'nvOpzp; AND 1=1 OR
 (<'">…` (a `;` before `and` is not a value break here). Tests:
 `scripts/tests/cfm_waf_sqli_gaps_test.lua`,

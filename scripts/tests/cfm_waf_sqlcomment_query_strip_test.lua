@@ -39,29 +39,35 @@ local strip = util.strip_sql_comments_query
 
 -- The reference: the original gsub pair, with the executable-comment unwrap
 -- and the ` --` marker, applied to each `&`-separated part.
-local function ref_part(s)
+local function ref_part(s, glued)
   s = s:gsub("/%*(.-)%*/", function(c)
     local run = c:match("^[mM]?!%d*(.*)$")
-    return run and (" " .. run) or ""
+    if run and run ~= "" then return glued and run or (" " .. run .. " ") end
+    return ""
   end)
   return (s:gsub("%-%-[^\n]*\n", "\n"):gsub("%-%-[^\n]*$", " --"))
 end
-local function strip_ref(s)
-  if not s:find("/*", 1, true) and not s:find("--", 1, true) then return s end
-  if not s:find("[&?]") then return ref_part(s) end
+local function ref_reading(s, glued)
+  if not s:find("[&?]") then return ref_part(s, glued) end
   -- split by hand (not the scan's gmatch), delimiters kept
   local out, cur = {}, {}
   for i = 1, #s do
     local c = s:sub(i, i)
     if c == "&" or c == "?" then
-      out[#out + 1] = ref_part(table.concat(cur)) .. c
+      out[#out + 1] = ref_part(table.concat(cur), glued) .. c
       cur = {}
     else
       cur[#cur + 1] = c
     end
   end
-  out[#out + 1] = ref_part(table.concat(cur))
-  return table.concat(out) .. "&" .. ref_part(s)
+  out[#out + 1] = ref_part(table.concat(cur), glued)
+  return table.concat(out) .. "&" .. ref_part(s, glued)
+end
+local function strip_ref(s)
+  if not s:find("/*", 1, true) and not s:find("--", 1, true) then return s end
+  local r = ref_reading(s, false)
+  if s:find("/%*[mM]?!") then r = r .. "&" .. ref_reading(s, true) end
+  return r
 end
 
 local fails = 0
@@ -105,10 +111,12 @@ is("/index.php/--?id=1' union", "/index.php/ --?id=1' union&/index.php/ --",  "`
 is('a="--"&q=1', 'a=" --&q=1&a=" --',          "`\"` is not a delimiter")
 -- executable comments keep their content
 is("0' /*!11110procedure*/ /*!11110analyse*/ (/*!11110extractvalue*/(1",
-   "0'  procedure  analyse ( extractvalue(1",              "versioned executable comments")
-is("1/*!union*//*!50000select*/2", "1 union select2",    "unversioned + versioned, adjacent")
-is("/*M!100000sleep(5)*/",      " sleep(5)",             "MariaDB /*M!…*/")
-is("/*!*/",                     " ",                     "empty executable comment")
+   "0'  procedure   analyse  ( extractvalue (1&0' procedure analyse (extractvalue(1",
+   "versioned executable comments: spaced reading, then glued")
+is("1/*!union*//*!50000select*/2", "1 union  select 2&1unionselect2", "unversioned + versioned, adjacent")
+is("1'union/*!all*/select", "1'union all select&1'unionallselect", "content between keywords (union all select)")
+is("/*M!100000sleep(5)*/",      " sleep(5) &sleep(5)",   "MariaDB /*M!…*/")
+is("/*!*/",                     "&",                     "empty executable comment: removed, as before")
 is("/* !x*/",                   "",                      "a space before ! is a plain comment")
 
 -- ── 2) Deterministic fuzz corpus (scan == reference) ─────────────────────────
@@ -148,6 +156,17 @@ do
     string.format("64KB pathological input must strip in O(n) time (took %.3fs; a revert to the /%%*.-%%*/ gsub takes ~5s)", dt))
   -- ...and still be correct: no `*/` anywhere, so nothing is removed.
   check(out == pathological, "pathological input has no valid block comment, so it is returned verbatim")
+end
+
+-- A run of dashes with no newline: a `%-%-[^\n]*\n` gsub backtracks to the end
+-- for every `--` (O(n^2): 8 KB cost ~0.5 s). The scan cuts with plain finds.
+do
+  local t0 = os.clock()
+  strip(("-"):rep(65536))
+  strip("\n" .. ("-"):rep(65536))
+  strip(("a--b&"):rep(13000))
+  local dt = os.clock() - t0
+  check(dt < 2.0, string.format("64KB dash runs must strip in O(n) time (took %.3fs)", dt))
 end
 
 if fails > 0 then
