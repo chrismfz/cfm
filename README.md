@@ -231,7 +231,7 @@ Processlist monitor: slow-query notices, runaway-query kills, per-user
 connection limits, sleep reaper, per-user CPU. [`docs/mysql-governor.md`](docs/mysql-governor.md)
 
 ### cfm-lsm
-Seventeen BPF LSM policies, off by default, monitor first; eight can enforce.
+Seventeen BPF LSM policies, shipped on in monitor mode; eight can enforce.
 Programs pin to bpffs, so protection outlives a daemon restart.
 [`docs/cfm-lsm.md`](docs/cfm-lsm.md)
 
