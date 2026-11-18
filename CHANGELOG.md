@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.18
+
 ### Security
 - **Hardened /cfm-admin path normalisation in the auth middleware**, and in
   the edge configs' `/cfm-admin/` locations, which now also set
@@ -94,8 +98,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   The CLI's own scan only reads the cert files now.
 - **`/api/v1/webdet/suspicious` uses the `MIN_SCORE` default (0.60)** when no
   score floor is configured, not 0.50.
-
-## 2026.11.18
 
 ### Security
 - **A `--` in one query parameter no longer hides the next ones from the
