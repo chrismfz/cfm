@@ -304,7 +304,11 @@ func (st *fileSyncState) runActions(actions map[string][]string, sa []pendingWri
 				delete(st.pendingActions, id)
 				continue
 			}
-			id, actions[id] = restart.id, restart.argv
+			// What is pending now is the restart, whatever action failed.
+			// (Two statements: in `id, actions[id] = ...` the index would be
+			// the old id, leaving the restart id with no argv.)
+			actions[restart.id] = restart.argv
+			id = restart.id
 		}
 		if st.pendingActions == nil {
 			st.pendingActions = map[string][]string{}
@@ -331,6 +335,10 @@ func (st *fileSyncState) retryPendingActions() {
 // context: Stop must not cancel a restart half-way) and, for spamd, waits for
 // the service to be active again. It reports whether both succeeded.
 func runAction(id string, argv []string) bool {
+	if len(argv) == 0 {
+		logging.LogfAPI("[files] post-update %s has no command; dropping it", id)
+		return true
+	}
 	cctx, cancel := context.WithTimeout(context.Background(), postUpdateTimeout)
 	out, err := runSyncCommand(cctx, argv)
 	cancel()

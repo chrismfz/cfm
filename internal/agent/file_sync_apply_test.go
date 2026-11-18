@@ -683,3 +683,25 @@ func TestPostUpdateFailedActionIsRetried(t *testing.T) {
 		t.Fatal("retried an action that had succeeded")
 	}
 }
+
+// A reload that leaves spamd down, with the restart on the old files failing
+// too: the restart is what stays pending, with its command, and retrying it
+// runs `systemctl restart spamd` (it used to store no command and panic).
+func TestPostUpdateFailedReloadPendsTheRestart(t *testing.T) {
+	f := newSyncFixture(t)
+	f.seed(t, f.saDir+"rules.cf", "old\n", 0o600)
+	f.active = func(int) string { return "failed" }
+	var st fileSyncState
+	st.applyUpdates(context.Background(), []ConfigUpdate{f.update(f.saDir+"rules.cf", "new\n", "systemctl reload spamd")}, f.allowed())
+	argv, ok := st.pendingActions[actionRestartSpamd]
+	if !ok || strings.Join(argv, " ") != "systemctl restart spamd" || len(st.pendingActions) != 1 {
+		t.Fatalf("pending %v", st.pendingActions)
+	}
+	f.active = nil
+	f.cmds = nil
+	st.actionRetryAt = time.Time{}
+	st.retryPendingActions()
+	if len(f.cmds) != 1 || strings.Join(f.cmds[0], " ") != "systemctl restart spamd" || len(st.pendingActions) != 0 {
+		t.Fatalf("retry ran %v, pending %v", f.cmds, st.pendingActions)
+	}
+}
