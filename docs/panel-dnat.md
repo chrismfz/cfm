@@ -36,9 +36,12 @@ on|off` are deprecated: accepted with a warning, ignored.
 - `fallback`: Imunify first (priority -99). Not a complete panel mitigation
   when Imunify already redirects the ports.
 
-**Priority:** `-101` = CFM first, `-99` = Imunify first. A `--priority` that
-differs from `cfm.conf`'s `NFT_DNAT_PRIORITY` lasts only until the daemon
-reinstalls the chain (restart, reboot): set it in `cfm.conf`.
+**Priority:** `-101` = CFM first (the default), `-99` = Imunify first.
+`cfm dnat cpanel on --priority …` persists the choice, and the daemon reuses
+it on restart and reboot (`PanelStartupPriority`: the saved value, else the
+`NFT_PANEL_DNAT_PRIORITY` env var, else -101). `cfm.conf`'s
+`NFT_DNAT_PRIORITY` is the WEB redirect's priority and does not touch the
+panel chain.
 
 ## DirectAdmin
 

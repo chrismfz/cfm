@@ -80,6 +80,9 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
 - **Payment-webhook IP allowlists (PayPal IPN, Stripe) only on demand** —
   [decided 2026-06-27]. Shipped only after a real gateway-callback false
   positive is seen.
+- **WAF: unusual method outside its place** — [idea, low]. CONNECT to a
+  non-proxy, PROPFIND / SEARCH to a non-DAV path, folded into
+  `rule_exploit_methods` (607), which already covers the common cases.
 - **Edge Lua residuals** — [idea, low]. `cfm_purge.lua` `purge_ip` scans the
   whole `cfm_decisions` dict under lock on a force-unblock (perf); `[...]`
   bracket-class globs in excludes match literally in Lua but as a class in Go

@@ -4,7 +4,7 @@ argument-hint: [rule id, path, app name, or pasted log line]
 ---
 Triage this WAF issue: $ARGUMENTS
 
-Use `docs/waf.md`, `docs/waf-analysis-2026-05-08.md`, and
+Use `docs/waf.md` (its false-positive case studies and excludes) and
 `docs/challenge-waf-release-checklist.md`, plus the lessons in `CLAUDE.md` §6.
 
 1. Identify the rule(s) involved in `configs/lua/cfm_waf.lua` /

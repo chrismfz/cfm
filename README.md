@@ -86,7 +86,7 @@ Packages create the `cfm` system user and group.
 ### First login
 
 ```bash
-cfm auth user add <name>     # create a login-capable admin user (MFA available)
+cfm auth user add -u <name> -r admin    # password prompted; MFA available
 ```
 
 Then open `https://<hostname>/cfm-admin/` (through the edge) or
@@ -252,7 +252,8 @@ edge health checks ([`docs/edge-health.md`](docs/edge-health.md)), and the
 
 | Command | What it does | Doc |
 |---|---|---|
-| `cfm status`, `cfm test` | daemon and firewall state, config check | |
+| `cfm status` | daemon and firewall state | |
+| `cfm test` | host prerequisites (nft / ipset binaries, kernel modules) | |
 | `cfm block` / `unblock` / `allow` / `unallow` / `list` / `which` | manage and find addresses | |
 | `cfm flush` / `disable` / `reset` | clear bans / tear down nft | |
 | `cfm firewall status \| path` | firewall health, host-wide netfilter order | [`docs/cli.md`](docs/cli.md) |
