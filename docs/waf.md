@@ -986,9 +986,24 @@ carve-out keyed on `/socket.io` + `EIO=4` + `transport=polling` was the first
 version; review rejected it, because it missed those and a custom path. None
 of these protocols puts `0x1E` in the query, so the query leg keeps the full
 byte set. Every other control byte still counts. The query leg reads the raw
-query: a percent-encoded control byte (`%01`) is not decoded by 601 (it was
-not before either; decoding it is a behaviour change to measure on the fleet
-first).
+query: a percent-encoded control byte (`%01`) is not decoded by 601, by
+decision (below).
+
+**Not decoding `%01` in the query (measured 2026-11-18):** the edge access
+logs of the 8 edge nodes, 11-18 Nov, about 240 million requests, were
+searched for a query carrying an encoded byte decoding would make a 601 hit
+(`%01`-`%08`, `%0B`, `%0C`, `%0E`-`%1F`). Six matched, none an attack, so
+decoding would have added six challenges and caught nothing:
+- orion, `cnm-topography.gr` (5): GPTBot following a broken opensearch link
+  the site's own Joomla prints, `?format=opensearch&id=114:%2026-%11-%10-` (a
+  date written with `%` before each part);
+- earth (1): a logged-in user in cPanel File Manager (`json-api` `listfiles`)
+  opening a folder named with a PNG header's bytes (`%0d%0a%1a%0a`).
+
+So the query leg stays raw. The count leaves out what the logs do not hold:
+request bodies (a urlencoded POST body is not decoded by 601 either) and the
+requests nginx itself refuses (`access.bad_request.log`). Re-measure before
+changing it.
 
 **Known limit:** Python's `str.split()` and Java's `Character.isWhitespace()`
 treat `0x1C-0x1F` as whitespace. A body value joined with `0x1E`
