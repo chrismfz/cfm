@@ -1086,7 +1086,25 @@ function _M.detect_ctrl_chars(args, body, headers, uri)
     return false
   end
 
-  if body:find("[\x01-\x08\x0b\x0c\x0e-\x1f]") then
+  -- Engine.IO v4 (Socket.IO) HTTP long-polling joins the packets of one POST
+  -- with 0x1E, the record separator (2026-11-18, crm-staging.creatures.gr on
+  -- speedhost: a batched `POST /socket.io/?EIO=4&transport=polling` was
+  -- challenged, and a challenge breaks the XHR). On that request only, 0x1E
+  -- is the framing, not a payload byte: it is left out of the scan, every
+  -- other control byte still counts, and the query is checked as above.
+  -- The path may be mounted under a prefix (Socket.IO's `path` option).
+  local scan = "[\x01-\x08\x0b\x0c\x0e-\x1f]"
+  local p = lower(uri or ""):match("^[^?]*") or ""
+  if p:match("/socket%.io/?$") then
+    local qa = "&" .. lower(a)
+    if qa:find("&eio=4&", 1, true) or qa:match("&eio=4$") then
+      if qa:find("&transport=polling&", 1, true) or qa:match("&transport=polling$") then
+        scan = "[\x01-\x08\x0b\x0c\x0e-\x1d\x1f]"
+      end
+    end
+  end
+
+  if body:find(scan) then
     return true
   end
 

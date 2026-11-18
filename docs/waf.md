@@ -966,6 +966,32 @@ WebDAV client.
 Test: `scripts/tests/cfm_waf_header_vulns_test.lua` (rule 603 alone, plus the
 live DELETE under the shipped defaults).
 
+### FP case 13 — `WAF_CTRL_CHARS` (601) on Socket.IO long-polling
+
+**Shape:** speedhost, 2026-11-18, `crm-staging.creatures.gr`. A browser
+(Chrome, a Greek residential IP) sent `POST /socket.io/?EIO=4&transport=polling`
+with a `text/plain` body. Engine.IO v4, the transport under Socket.IO 3+, joins
+the packets of one polling POST with `0x1E` (the record separator), and 601
+reads any byte in `0x0E-0x1F` as a control-character payload. It pushed a
+`challenge_v2`, which an XHR cannot solve, so the app's connection broke. It
+was the only such hit in seven days on the 8 edge nodes: a client upgrades to
+websocket and polls only before that, or when websocket is blocked, so the
+batched POST is rare, but every Socket.IO app can send it.
+
+**Fix (2026-11-18):** on a path ending in `/socket.io` (any prefix, for
+Socket.IO's `path` option) whose query carries `EIO=4` and
+`transport=polling`, `0x1E` is left out of the body scan. Every other control
+byte still counts, and so does the query. Engine.IO v3 frames by length and
+sends no `0x1E`, so `EIO=3` is not exempt.
+Test: `scripts/tests/cfm_waf_ctrl_chars_socketio_test.lua`.
+
+**Rest of 601 on the fleet** (same 7 days, 56 hits): 8 were the Optimization
+Detective beacon under a language prefix (`/en/wp-json/…`), fixed on
+2026-11-17. The other 47 came from datacenter addresses: `POST /` with
+`text/css` / `text/csv` / `text/xml` bodies from `Go-http-client`, and
+`POST /inproxy-broker` to Psiphon hosts (`*.psiphon3.com`, `*.b-cdn.net`)
+fronted at our IPs. None was a visitor's request.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading
@@ -2277,7 +2303,11 @@ and all 33 219 benign ones.
   binary or compressed bytes, which the edge reads: 113 declared `text/plain`,
   36 sent no Content-Type, 28 `application/x-www-form-urlencoded`, 1
   `application/json`. A fix keyed on "no Content-Type" would clear only the
-  36. Then 302 (`rule_xss`) 17. The two block FPs are arguable
+  36. None of it shows on the fleet: over the 7 days to 2026-11-18, 601 hit
+  56 times on the 8 edge nodes, and only 9 of those were a visitor's request
+  (FP case 13; the beacons above are Chinese analytics our tenants do not
+  run). So 601's logic was not changed for the corpus: the fleet, not the
+  corpus, decides a rule change. Then 302 (`rule_xss`) 17. The two block FPs are arguable
   labels: a `HEAD /?protocol=authentication` from an MSIE 8 UA (201) and a URL
   carrying `%00` (101).
 - **Misses** by DVWA module: reflected XSS 59 / 243 detected, SQLi 53 / 118,

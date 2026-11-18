@@ -43,6 +43,13 @@ back-filled here — see the git/PR history for that period.
     most), and ends when the challenge or its source ends.
 
 ### Fixed
+- **Socket.IO apps no longer lose their connection to rule 601.** Engine.IO
+  v4 long-polling sends several packets in one POST, separated by the 0x1E
+  byte, and rule 601 (control characters) answered such a POST with a
+  challenge the app could not solve. On `/socket.io` with `EIO=4` and
+  `transport=polling`, 0x1E is now read as framing; every other control
+  byte still counts. Seen on speedhost (a CRM's live updates);
+  `docs/waf.md` FP case 13.
 - **The subnet challenge (`CHALLENGE_SUBNET`) no longer re-issues the same
   challenge every 10 seconds.**
   - What happened: while a /24 stayed over its thresholds, every member IP
