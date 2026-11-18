@@ -21,7 +21,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
-- **A tenant's history summary no longer counts the node's own fault rows.**
+- **A tenant's history summary no longer counts the server's mail and backup
+  rows.**
   `history/summary` `total_events`, and the detector summary inside
   `host-access-history`, left the server's `mail_*` / `backup_*` rows in the
   count for a tenant whose sites include the server's hostname, although the

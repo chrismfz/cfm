@@ -439,7 +439,7 @@ func (s *HistoryStore) SummarizeRange(host, ip string, fromUnix, toUnix int64) (
 	return s.summarizeRange(host, ip, fromUnix, toUnix, false)
 }
 
-// SummarizeTenant is Summarize for a scoped caller: the node's own fault rows
+// SummarizeTenant is Summarize for a scoped caller: the server-only rows
 // (isServerOnlyEventType: mail_*, backup_*), which a tenant never reads, are
 // not counted in TotalEvents either.
 func (s *HistoryStore) SummarizeTenant(host, ip string, hours int) (HistorySummary, error) {
