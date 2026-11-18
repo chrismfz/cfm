@@ -60,11 +60,6 @@ WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
   the edge already (the `modsec` detector reads it). UUSEC WAF, SafeLine and
   BunkerWeb were reviewed the same day: closed engines or CRS itself, so no
   rules to borrow; their usable ideas are the items above.
-- **No GPL rule sets or code** — [decided 2026-06-27]. CFM is Apache-2.0. An
-  app-level PHP WAF (NinjaFirewall, GPLv3) was compared after the myip.gr
-  WHMCS sqlmap scan: only capability categories were reimplemented
-  (rule 318); its regexes and signature data are never copied. GPL test
-  corpora (BlazeHTTP) are run, never vendored.
 - **Edge Lua residuals** — [idea, low]. `cfm_purge.lua` `purge_ip` scans the
   whole `cfm_decisions` dict under lock on a force-unblock (perf); `[...]`
   bracket-class globs in excludes match literally in Lua but as a class in Go
