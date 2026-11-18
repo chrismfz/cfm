@@ -167,3 +167,52 @@ func TestIngest_IpsDynSkippedWhenShadowDisabled(t *testing.T) {
 		t.Errorf("ipsDyn = %d with shadow disabled, want 0 (counter must not run when unused)", ipsDyn)
 	}
 }
+
+// An integration polling a quiet shop's WooCommerce REST API (vol2.gr's
+// e|connect stock bridge, ~27 requests an hour) read as a 24-31x rate outlier
+// every hour. Machine endpoints stay out of Signal C's counter, like static
+// assets; the enforced uniqIP path still counts them.
+func TestIngest_IpsDynExcludesMachineEndpoints(t *testing.T) {
+	e := NewEngine(Config{Every: 1 * time.Second, Window: 2 * time.Minute,
+		AbuseShadow: true, AbuseShadowRateOutlier: true})
+	now := float64(time.Now().Unix())
+	const ip, host = "194.48.152.107", "vol2.gr"
+
+	machine := []string{
+		"/wp-json/wc/v3/products?sku=ABC123",
+		"/wp-json/wc/v3/products/batch",
+		"/wc-api/v3/orders",
+	}
+	for i, u := range machine {
+		e.ingest(LogRec{TS: now + float64(i)*0.01, IP: ip, Host: host,
+			Method: "post", URI: u, Status: 200}, "raw")
+	}
+	e.ingest(LogRec{TS: now + 1, IP: ip, Host: host, Method: "get",
+		URI: "/product/some-item/", Status: 200}, "raw")
+	// The query is the client's: a page dressed as an API call or an asset
+	// still counts.
+	e.ingest(LogRec{TS: now + 1.1, IP: ip, Host: host, Method: "get",
+		URI: "/product/other/?x=/api/v1", Status: 200}, "raw")
+	e.ingest(LogRec{TS: now + 1.2, IP: ip, Host: host, Method: "get",
+		URI: "/shop/?x=/a.css", Status: 200}, "raw")
+	// The injected-outcome path (an edge 403) feeds the same counter.
+	e.InjectObserved(ip, host, "/wp-json/wc/v3/orders", "post", 403, "", 0, "e-connect")
+
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	hs := e.hosts[host]
+	if hs == nil {
+		t.Fatalf("host %s not recorded", host)
+	}
+	var ipsTotal, ipsDyn int
+	for i := range hs.buckets {
+		ipsTotal += hs.buckets[i].ips[ip]
+		ipsDyn += hs.buckets[i].ipsDyn[ip]
+	}
+	if ipsTotal != len(machine)+4 {
+		t.Errorf("ips (all requests) = %d, want %d", ipsTotal, len(machine)+4)
+	}
+	if ipsDyn != 3 {
+		t.Errorf("ipsDyn = %d, want 3 (the three pages): machine endpoints leaked into Signal C's counter, or a query hid a page", ipsDyn)
+	}
+}

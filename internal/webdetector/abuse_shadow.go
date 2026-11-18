@@ -3,6 +3,7 @@ package webdetector
 import (
 	"context"
 	"sort"
+	"strings"
 	"time"
 
 	"cfm/internal/goodbot"
@@ -287,4 +288,17 @@ func forwardConfirmsE(host, ip string) (matched bool, err error) {
 // forwardConfirmsWith is forwardConfirmsE over an injectable lookup (tests).
 func forwardConfirmsWith(ctx context.Context, lookup func(context.Context, string) ([]string, error), host, ip string) (matched bool, err error) {
 	return goodbot.ForwardConfirmsWith(ctx, lookup, host, ip)
+}
+
+// countsTowardRateOutlier reports whether a request feeds Signal C's per-IP
+// dynamic counter (bucketSW.ipsDyn): not a static asset (a pageview's asset
+// fan-out), and not a machine endpoint (isMachineStyleEndpointGo, the list the
+// no-UA rule exempts: WooCommerce REST, webhooks, payment callbacks), whose
+// integrations poll a quiet shop far above its visitors' rate on purpose.
+// Both are read on the PATH only: the query is the client's to write, and
+// with it "/shop/?x=/api" or "/shop/?x=/a.css" would hide a scraper's every
+// page from the counter.
+func countsTowardRateOutlier(uri string) bool {
+	path, _, _ := strings.Cut(uri, "?")
+	return !isStaticAssetPath(path) && !isMachineStyleEndpointGo(path)
 }

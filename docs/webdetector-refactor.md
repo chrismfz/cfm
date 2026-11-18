@@ -109,7 +109,11 @@ abuse is **residential**, so the ASN-agnostic signals lead:
   **Counts DYNAMIC requests only** (`bucketSW.ipsDyn`, `isStaticAssetPath`
   excluded): a single human page view pulls 40–60 static assets on an
   asset-heavy theme, so counting them made a normal shopper read as a 300–900×
-  outlier (the 2026-08 Greek-residential FP class). The enforced `uniqIP` path
+  outlier (the 2026-08 Greek-residential FP class). Machine endpoints
+  (`isMachineStyleEndpointGo`: WooCommerce REST, webhooks, payment callbacks,
+  the list the no-UA rule exempts) are left out too, since 2026-11-18: the
+  vol2.gr e|connect stock bridge polls `/wp-json/wc/v3/` ~27 times an hour and
+  read as a 24-31× outlier every hour. The enforced `uniqIP` path
   still counts all requests. Each shadow line also carries `cc=<ISO-2>`; the
   `abuse_shadow` tool surfaces a `by_country` split so a domestic-residential
   burst (likely FP) is obvious.
