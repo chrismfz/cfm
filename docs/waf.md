@@ -966,6 +966,45 @@ WebDAV client.
 Test: `scripts/tests/cfm_waf_header_vulns_test.lua` (rule 603 alone, plus the
 live DELETE under the shipped defaults).
 
+### FP case 13 — `WAF_CTRL_CHARS` (601) on Socket.IO long-polling
+
+**Shape:** speedhost, 2026-11-18, `crm-staging.creatures.gr`. A browser
+(Chrome, a Greek residential IP) sent `POST /socket.io/?EIO=4&transport=polling`
+with a `text/plain` body. Engine.IO v4, the transport under Socket.IO 3+, joins
+the packets of one polling POST with `0x1E` (the record separator), and 601
+reads any byte in `0x0E-0x1F` as a control-character payload. It pushed a
+`challenge_v2`, which an XHR cannot solve, so the app's connection broke. It
+was the only such hit in seven days on the 8 edge nodes: a client upgrades to
+websocket and polls only before that, or when websocket is blocked, so the
+batched POST is rare, but every Socket.IO app can send it.
+
+**Fix (2026-11-18):** `0x1E` left 601's body scan. It is framing in more
+than Socket.IO: Engine.IO v4 under any mount path (Socket.IO's `path`
+option), ASP.NET SignalR's JSON protocol (every message ends with it, the
+handshake POSTed over long-polling / SSE included) and RFC 7464 json-seq. A
+carve-out keyed on `/socket.io` + `EIO=4` + `transport=polling` was the first
+version; review rejected it, because it missed those and a custom path. None
+of these protocols puts `0x1E` in the query, so the query leg keeps the full
+byte set. Every other control byte still counts. The query leg reads the raw
+query: a percent-encoded control byte (`%01`) is not decoded by 601 (it was
+not before either; decoding it is a behaviour change to measure on the fleet
+first).
+
+**Known limit:** Python's `str.split()` and Java's `Character.isWhitespace()`
+treat `0x1C-0x1F` as whitespace. A body value joined with `0x1E`
+(`union\x1eselect`) passes the keyword-adjacency rules (301), and 601 no
+longer challenges it in a body. It matters only to a Python / Java app that
+tokenises input that way: MySQL, PostgreSQL and the shell do not read `0x1E`
+as whitespace, and `0x1C`, `0x1D` and `0x1F` still trip 601.
+Test: `scripts/tests/cfm_waf_ctrl_chars_record_separator_test.lua`.
+
+**Rest of 601 on the fleet** (same 7 days, 56 hits): 8 were the Optimization
+Detective beacon under a language prefix (`/en/wp-json/…`), fixed on
+2026-11-17. The other 47 came from datacenter addresses: `POST /` with
+`text/css` / `text/csv` / `text/xml` bodies from `Go-http-client`, and
+`POST /inproxy-broker` to Psiphon hosts (`*.psiphon3.com`, `*.b-cdn.net`)
+fronted at our IPs. None was a visitor's request.
+
 ### Structural anti-patterns to check during rule review
 
 A short list. Every one of these surfaced as a real FP above; reading
@@ -2277,7 +2316,11 @@ and all 33 219 benign ones.
   binary or compressed bytes, which the edge reads: 113 declared `text/plain`,
   36 sent no Content-Type, 28 `application/x-www-form-urlencoded`, 1
   `application/json`. A fix keyed on "no Content-Type" would clear only the
-  36. Then 302 (`rule_xss`) 17. The two block FPs are arguable
+  36. None of it shows on the fleet: over the 7 days to 2026-11-18, 601 hit
+  56 times on the 8 edge nodes, and only 9 of those were a visitor's request
+  (FP case 13; the beacons above are Chinese analytics our tenants do not
+  run). So 601's logic was not changed for the corpus: the fleet, not the
+  corpus, decides a rule change. Then 302 (`rule_xss`) 17. The two block FPs are arguable
   labels: a `HEAD /?protocol=authentication` from an MSIE 8 UA (201) and a URL
   carrying `%00` (101).
 - **Misses** by DVWA module: reflected XSS 59 / 243 detected, SQLi 53 / 118,
@@ -2962,7 +3005,7 @@ table, see [§ Rule IDs](#rule-ids) above.
 | 2 | RCE | Substring list (JNDI, `;wget`, `\|bash`, backticks, `base64,`) | `cfm_waf_detectors.lua:102` |
 | 3 | Exploit methods | TRACE / TRACK / CONNECT | `cfm_waf_detectors.lua:127` |
 | 4 | PHP wrappers | `php://`, `phar://`, `data://`, `zip://`, `expect://`, `glob://` | `cfm_waf_detectors.lua:148` |
-| 5 | Control chars | `[\x01-\x08\x0b\x0c\x0e-\x1f]` in args/body with CT gating | `cfm_waf_detectors.lua:192` |
+| 5 | Control chars | `[\x01-\x08\x0b\x0c\x0e-\x1f]` in args; the same without `0x1E` (framing, FP case 13) in the body, with CT gating | `cfm_waf_detectors.lua` (`detect_ctrl_chars`) |
 | 6 | PHP webshell body | Scored: `<?php`+superglobals+exec-family+dyn-include+webshell-names | `cfm_waf_detectors.lua:241` |
 | 7 | Base64 body scan | Greedy `=([A-Za-z0-9+/]+=*)`, decode, scan decoded for shells/SQL/PHP | `cfm_waf_detectors.lua:401` |
 | 8 | XSS | Substring: `<script`, `=javascript:`, `onerror=`/`onload=`/… with `%f[%w]` anchor | `cfm_waf_detectors.lua:457` |
