@@ -39,6 +39,14 @@ func TestNoteVhostAutoSource_RidesTheChallengeEntry(t *testing.T) {
 		t.Fatalf("note with no entry expires %s from now, want its 2m TTL", exp.Sub(now).Round(time.Minute))
 	}
 
+	// A host covered by a WILDCARD entry (the default CHALLENGE_VHOST list:
+	// webmail.*, whm.*, cpanel.*) has no exact-key entry: it rides the pattern.
+	b.ChallengeVhostWithReason("webmail.*", time.Hour, "vhost_config")
+	b.NoteVhostAutoSource("webmail.client.example", autoV2VhostConfig, 2*time.Minute)
+	if exp := noteExpiry(b, "webmail.client.example", autoV2VhostConfig); exp.Before(now.Add(50 * time.Minute)) {
+		t.Fatalf("wildcard-covered note expires %s from now, want it to ride the 1h pattern entry", exp.Sub(now).Round(time.Minute))
+	}
+
 	// A drop still ends it at once: "off" is immediate whatever the ride.
 	b.DropVhostAutoSource("auto.example", autoV2SuspiciousVhost)
 	if own, _, _, _ := b.vhostAutoSources("auto.example"); len(own) != 0 {

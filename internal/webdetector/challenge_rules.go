@@ -2395,8 +2395,6 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				"challenge_log_expired":    boolFlag(e.cfg.ChallengeLogExpired),
 			}
 
-			e.RecordIPChallenge(ip, a.host, rule, "", "", 0, ttl)
-
 			select {
 			case out <- core.Alert{
 				When:    now,
@@ -2406,9 +2404,11 @@ func (e *Engine) emitSubnetChallenges(now time.Time, out chan<- core.Alert) {
 				Samples: samples,
 				Extra:   extra,
 			}:
-				// Stamped only once the alert is out: a drop on a full channel
-				// (the default below) leaves the member due, so the next pass
-				// retries it instead of waiting out ttl/2 unchallenged.
+				// Recorded and stamped only once the alert is out: a drop on a
+				// full channel (the default below) writes no history row for a
+				// challenge never applied, and leaves the member due, so the
+				// next pass retries it instead of waiting out ttl/2.
+				e.RecordIPChallenge(ip, a.host, rule, "", "", 0, ttl)
 				e.markSubnetIPEmit(emitKey, now)
 			default:
 			}

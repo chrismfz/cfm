@@ -3614,7 +3614,11 @@ func (b *NginxBridge) NoteVhostAutoSource(host, source string, ttl time.Duration
 	now := time.Now()
 	exp := now.Add(ttl)
 	b.mu.Lock()
-	if h, ok := b.vhState[host]; ok && h.Action == "challenge" {
+	// The covering entry through the bridge's own matcher (vhostEntryLocked,
+	// the one the resolver and the src= snapshot read): a host challenged by
+	// a wildcard entry — the default CHALLENGE_VHOST list is webmail.*,
+	// whm.*, cpanel.* — has no exact-key entry of its own.
+	if h, ok := b.vhostEntryLocked(host, now); ok && h.Action == "challenge" {
 		ride := h.Expires
 		if limit := now.Add(autoNoteMaxRide); ride.After(limit) {
 			ride = limit
