@@ -204,7 +204,10 @@ type bucketSW struct {
 	// static requests, so counting them made a normal shopper read as a rate
 	// outlier (the 2026-08 FP — Greek residential IPs on small WooCommerce shops
 	// logged at 300-900× the vhost median, almost entirely .css). The enforced
-	// uniqIP path deliberately keeps using ips (all requests).
+	// uniqIP path deliberately keeps using ips (all requests). Server-to-server
+	// endpoints (isChallengeExemptEndpoint: WooCommerce REST, payment webhooks)
+	// are left out too (countsTowardRateOutlier): an integration polling a quiet
+	// shop read as a 24-31x outlier every hour (vol2.gr, 2026-11-18).
 	ipsDyn map[string]int
 
 	// Keep a few representative raw lines per IP for alert samples.
@@ -1775,7 +1778,11 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		// signal that reads it is enabled (off by default), so it adds no map
 		// and no per-request work on the hot path otherwise. isStaticAssetPath
 		// tolerates a query string, so rec.URI (== p below) is safe here.
-		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && !isStaticAssetPath(rec.URI) {
+		// Server-to-server endpoints (WooCommerce REST, payment webhooks: the
+		// narrow isChallengeExemptEndpoint list) are left out: an integration's
+		// steady sync out-rates a quiet shop's visitors by design (the vol2.gr
+		// e|connect bridge read as a 24-31x outlier every hour, 2026-11-18).
+		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && countsTowardRateOutlier(rec.URI) {
 			if b.ipsDyn == nil {
 				b.ipsDyn = make(map[string]int)
 			}
@@ -3733,7 +3740,7 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 	// Dynamic-only mirror for Signal C (a 403 is a dynamic response; static
 	// assets almost never 403, but gate anyway for parity with the main ingest).
 	// Only maintained when the shadow signal that reads it is enabled.
-	if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && !isStaticAssetPath(uri) {
+	if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && countsTowardRateOutlier(uri) {
 		if b.ipsDyn == nil {
 			b.ipsDyn = make(map[string]int)
 		}
