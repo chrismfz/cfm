@@ -50,7 +50,7 @@ func realMalpathSubs(t testing.TB) (mal, chal []string) {
 	if len(list) < 50 {
 		t.Fatalf("malpath list has only %d entries", len(list))
 	}
-	return malRuleSubs(compileMalRules(list, 3)), chalRuleSubs(compileChalRules(list, 2))
+	return ruleSubs(compileMalRules(list, 3)), ruleSubs(compileChalRules(list, 2))
 }
 
 func fixturePaths(t testing.TB) []string {
@@ -221,4 +221,26 @@ func BenchmarkMalpathMatch(b *testing.B) {
 			benchSink += pm.first(m)
 		}
 	})
+}
+
+// TestPathMatcherLinearFallback: a list whose table would pass the cap keeps
+// the linear loop, with the same answers.
+func TestPathMatcherLinearFallback(t *testing.T) {
+	mal, _ := realMalpathSubs(t)
+	old := pathMatcherMaxCells
+	pathMatcherMaxCells = 100
+	m := newPathMatcher(mal)
+	pathMatcherMaxCells = old
+	if m == nil || !m.linear || m.delta != nil {
+		t.Fatal("over the cap: want the linear fallback and no table")
+	}
+	for _, p := range fixturePaths(t) {
+		pl := strings.ToLower(p)
+		if got, want := m.first(pl), linearFirst(mal, pl); got != want {
+			t.Errorf("path %q: fallback=%d linear=%d", p, got, want)
+		}
+	}
+	if full := newPathMatcher(mal); full.linear {
+		t.Fatal("the shipped list must fit the default cap")
+	}
 }

@@ -745,8 +745,8 @@ func NewEngine(cfg Config) *Engine {
 	if cfg.ChallengePathsEnabled {
 		e.chalRules = compileChalRules(cfg.ChallengePathsList, cfg.ChallengePathsCount)
 	}
-	e.malMatch = newPathMatcher(malRuleSubs(e.malRules))
-	if chalSubs := chalRuleSubs(e.chalRules); e.malMatch.sameSubs(chalSubs) {
+	e.malMatch = newPathMatcher(ruleSubs(e.malRules))
+	if chalSubs := ruleSubs(e.chalRules); e.malMatch.sameSubs(chalSubs) {
 		e.chalMatch = e.malMatch
 	} else {
 		e.chalMatch = newPathMatcher(chalSubs)
@@ -1846,12 +1846,6 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 				b.ipsAgent[rec.IP]++
 			}
 		}
-	}
-
-	// Malicious path probe thresholds (optional)
-	if rec.IP != "" && e.cfg.MalPathCount > 0 && len(e.cfg.MalPathList) > 0 {
-		// p is already normalized below; but we can safely use rec.URI too (lowercased).
-		// We'll count based on the normalized path (no query string).
 	}
 
 	if b.uas == nil {
@@ -4199,7 +4193,9 @@ func compileMalRules(list []string, def int) []malRule {
 	return rules
 }
 
-func malRuleSubs(rules []malRule) []string {
+// ruleSubs lists the patterns of compiled MALPATH / CHALLENGE_PATHS rules,
+// in rule order (the order pathMatcher's indices refer to).
+func ruleSubs(rules []malRule) []string {
 	out := make([]string, len(rules))
 	for i, r := range rules {
 		out[i] = r.sub

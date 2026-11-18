@@ -21,14 +21,24 @@ import "strings"
 // patterns never match (the loops skipped them). Matching is on bytes: callers
 // lower-case both sides with strings.ToLower, as the loops did.
 //
+// The table is dense, so its size is bounded by pathMatcherMaxCells: a list
+// whose worst-case table would exceed it (an operator's very large
+// MALPATH_LIST / file) keeps the linear loop instead, same answers.
+//
 // A pathMatcher is immutable once built and safe for concurrent use.
 type pathMatcher struct {
-	subs    []string   // the patterns, in rule order (for equality / sharing)
+	subs    []string   // the patterns, in rule order (sharing; the linear fallback)
+	linear  bool       // table over the cap: answer with the linear loop
 	class   [256]uint8 // byte -> class; 0 = byte in no pattern
 	nclass  int
 	delta   []int32 // state*nclass + class -> next state
 	minRule []int32 // per state: lowest rule index ending here, or -1
 }
+
+// pathMatcherMaxCells caps the transition table at 4 Mi int32 cells (16 MB).
+// The shipped list needs ~0.12 Mi (335 entries: 2 794 states x 42 classes).
+// A var so tests can lower it.
+var pathMatcherMaxCells = 4 << 20
 
 // newPathMatcher compiles subs (already lower-cased; rule order). It returns
 // nil when no pattern is non-empty, so callers keep their len()==0 fast path.
@@ -64,6 +74,16 @@ func newPathMatcher(subs []string) *pathMatcher {
 		nc = 256
 	}
 	m.nclass = nc
+
+	// Worst case: one state per pattern byte, plus the root.
+	states := 1
+	for _, s := range subs {
+		states += len(s)
+	}
+	if states*nc > pathMatcherMaxCells {
+		m.linear = true
+		return m
+	}
 
 	// Trie (goto function) with -1 for a missing edge.
 	newState := func() int32 {
@@ -129,6 +149,14 @@ func newPathMatcher(subs []string) *pathMatcher {
 // first returns the lowest rule index whose pattern occurs in s, or -1.
 func (m *pathMatcher) first(s string) int {
 	if m == nil {
+		return -1
+	}
+	if m.linear {
+		for i, sub := range m.subs {
+			if sub != "" && strings.Contains(s, sub) {
+				return i
+			}
+		}
 		return -1
 	}
 	best := int32(-1)

@@ -72,6 +72,10 @@ back-filled here — see the git/PR history for that period.
   entry in file order (so `N:pattern` thresholds count the same rule), cPanel
   session paths skipped. Measured on a typical path: 3.1 µs → 0.1 µs per line
   at 152 entries, 6.4 µs → 0.1 µs at the 306 the list now holds.
+  The list file is also read once per config load instead of twice when
+  both keys name it. A list so large that the matcher's table would pass
+  16 MB (an operator's own, tens of thousands of entries) keeps the linear
+  scan.
 
 ## 2026.11.17
 

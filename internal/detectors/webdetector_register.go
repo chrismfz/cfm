@@ -937,25 +937,11 @@ func init() {
 
 		// MALPATH_FILE (one entry per line; supports comments with #)
 		cfg.MalPathFile = kvStrClean(kv, "MALPATH_FILE", "")
+		var malFileList []string
+		malFileRead := false
 		if cfg.MalPathFile != "" {
-			f, err := os.Open(cfg.MalPathFile)
-			if err != nil {
-				logging.Logf("[webdetector] MALPATH_FILE open failed: %s: %v", cfg.MalPathFile, err)
-			} else {
-				defer f.Close()
-				sc := bufio.NewScanner(f)
-				for sc.Scan() {
-					line := strings.TrimSpace(sc.Text())
-					if line == "" || strings.HasPrefix(line, "#") {
-						continue
-					}
-					line = strings.ToLower(line)
-					cfg.MalPathList = append(cfg.MalPathList, line)
-				}
-				if err := sc.Err(); err != nil {
-					logging.Logf("[webdetector] MALPATH_FILE scan failed: %s: %v", cfg.MalPathFile, err)
-				}
-			}
+			malFileList, malFileRead = readPathListFile("MALPATH_FILE", cfg.MalPathFile)
+			cfg.MalPathList = append(cfg.MalPathList, malFileList...)
 		}
 
 		// CHALLENGE_PATHS_FILE (one entry per line; supports comments with #).
@@ -970,25 +956,12 @@ func init() {
 			cfg.ChallengePathsFile = p
 		}
 		if cfg.ChallengePathsEnabled && cfg.ChallengePathsFile != "" {
-			f, err := os.Open(cfg.ChallengePathsFile)
-			if err != nil {
-				logging.Logf("[webdetector] CHALLENGE_PATHS_FILE open failed: %s: %v", cfg.ChallengePathsFile, err)
+			// Both keys name the malpath list by default: read it once.
+			if malFileRead && filepath.Clean(cfg.ChallengePathsFile) == filepath.Clean(cfg.MalPathFile) {
+				cfg.ChallengePathsList = append(cfg.ChallengePathsList, malFileList...)
 			} else {
-				defer f.Close()
-				sc := bufio.NewScanner(f)
-				for sc.Scan() {
-					line := strings.TrimSpace(sc.Text())
-					if line == "" || strings.HasPrefix(line, "#") {
-						continue
-					}
-					line = strings.ToLower(line)
-
-					// IMPORTANT: needs cfg.ChallengePathsList []string in webdet.Config
-					cfg.ChallengePathsList = append(cfg.ChallengePathsList, line)
-				}
-				if err := sc.Err(); err != nil {
-					logging.Logf("[webdetector] CHALLENGE_PATHS_FILE scan failed: %s: %v", cfg.ChallengePathsFile, err)
-				}
+				l, _ := readPathListFile("CHALLENGE_PATHS_FILE", cfg.ChallengePathsFile)
+				cfg.ChallengePathsList = append(cfg.ChallengePathsList, l...)
 			}
 		}
 
@@ -1342,4 +1315,30 @@ func challengeSolvedLine(s webdet.ChallengeSolve, reason string, wafRuleID int) 
 	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=solved ms=%d solve_ms=%s diff=%d tls_fp=%s ua_family=%s ua=%q%s%s%s%s%s%s%s%s",
 		s.IP, s.Host, s.URI, s.VerifyMS, solveMS, s.Diff, s.TLSFingerprintOrDash(), s.UAFamilyOrDash(), s.UA,
 		s.HumanitySuffix(), uaBad, reasonPart, ridPart, s.GeoSuffix(), s.SrcSuffix(), s.ScopeSuffix(), s.LegacyGeoTail())
+}
+
+// readPathListFile reads a MALPATH_FILE / CHALLENGE_PATHS_FILE list: one entry
+// per line, trimmed and lower-cased, blank and # lines skipped. ok is false
+// when the file could not be read whole (logged under key); the entries read
+// before a scan error are still returned, as the inline readers did.
+func readPathListFile(key, path string) (list []string, ok bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		logging.Logf("[webdetector] %s open failed: %s: %v", key, path, err)
+		return nil, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		list = append(list, strings.ToLower(line))
+	}
+	if err := sc.Err(); err != nil {
+		logging.Logf("[webdetector] %s scan failed: %s: %v", key, path, err)
+		return list, false
+	}
+	return list, true
 }

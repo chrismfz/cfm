@@ -13,11 +13,9 @@ import (
 
 )
 
-// chalRule supports "N:substring" overrides like MALPATH.
-type chalRule struct {
-	sub   string // lowercased
-	count int
-}
+// chalRule supports "N:substring" overrides like MALPATH: the same rule
+// shape, so both lists share ruleSubs and one pathMatcher.
+type chalRule = malRule
 
 type chalCtx struct {
     Host   string
@@ -447,14 +445,6 @@ func (e *Engine) trackChallengePaths(rec LogRec, pm *pathMatchOnce, b *bucketSW)
             TS:     rec.TS,
             UA:     rec.UA,
 	}
-}
-
-func chalRuleSubs(rules []chalRule) []string {
-	out := make([]string, len(rules))
-	for i, r := range rules {
-		out[i] = r.sub
-	}
-	return out
 }
 
 func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
