@@ -5,7 +5,6 @@ This guide explains how to configure CFM detectors safely in production, startin
 - Main runtime file: `/etc/cfm/detectors.conf`
 - Reference template/examples: [`../configs/detectors.conf`](../configs/detectors.conf)
 - Leniency companion sections: [§6](#6-leniency-companion-sections)
-- Web UI / detectors settings page: [`cfm-admin-webtop.md`](cfm-admin-webtop.md)
 
 ---
 
@@ -1070,7 +1069,6 @@ Mitigation path:
 
 - Reference config and inline presets: [`../configs/detectors.conf`](../configs/detectors.conf)
 - Leniency companion sections: [§6](#6-leniency-companion-sections)
-- Web UI / detector settings docs: [`cfm-admin-webtop.md`](cfm-admin-webtop.md)
 
 ---
 

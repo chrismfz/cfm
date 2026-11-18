@@ -466,7 +466,6 @@ CFM ships **reference configs** under `configs/` (packaged to `/usr/share/cfm/co
     detectors/              # detectors UI page
     settings/               # settings UI page
     webdetector/            # webdetector pages (overview, controls, forensics, vhost, waf)
-  docs/cfm-admin-webtop.md  # deployment/auth notes for embedded /cfm-admin UI
 packaging/
   debian/DEBIAN/*           # postinst/prerm/postrm, conffiles, etc.
   rpm/SPECS/cfm.spec

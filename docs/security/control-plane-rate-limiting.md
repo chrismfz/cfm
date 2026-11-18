@@ -2,9 +2,9 @@
 
 **Status:** ✅ IMPLEMENTED — `internal/apiserver/ratelimit.go` + `withAuthnSubject`
 threading. Ships **enforcing by default** (`429`) with **honestly high ceilings** +
-full log/API observability. Tests: `ratelimit_test.go`. Live verification → Step 10.
+full log/API observability. Tests: `ratelimit_test.go`.
 
-Finding/spec: `Audit_Fix_Order.md` Step 8 (P2). Goal: bound already-authenticated
+Goal (2026-08 control-plane audit, P2): bound already-authenticated
 control-plane abuse without treating every caller equally, keyed by identity class
 × route class, never by raw credential material.
 

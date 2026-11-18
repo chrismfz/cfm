@@ -13,8 +13,7 @@ we are making one tool reason over the raw ones we already have.
 
 Code: `internal/mcpserver/whats_wrong.go` (evaluator + handler),
 `internal/mcpserver/whats_wrong_process_health.go` (the first enrichment,
-#1278). Design siblings: `docs/webdetector-history-design.md`,
-`docs/DETECTORS.md`.
+#1278). Design sibling: `docs/DETECTORS.md`.
 
 ---
 

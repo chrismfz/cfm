@@ -2,9 +2,9 @@
 
 **Status:** ✅ IMPLEMENTED (safe subset) — `internal/apiserver/security_headers.go`
 + `no-store` on auth failures in `internal/apiserver/middleware.go`. CSP / frame
-policy and HSTS are **deliberately deferred** (see §4). Live retest → Step 10.
+policy and HSTS are **deliberately deferred** (see §4).
 
-Finding: `Audit_Results.md` R10 (HARDENING, CONFIRMED LIVE, P2).
+Origin: the 2026-08 control-plane audit, finding R10 (hardening, confirmed live, P2).
 
 ## 1. Problem
 
@@ -82,5 +82,3 @@ brief (they were originally "deferred", now consciously declined):
 - `internal/apiserver/security_headers_test.go`: baseline headers present on
   HTML/200 and on error responses; a handler's own stricter `Referrer-Policy` is
   preserved; anonymous and invalid-token `401`s carry `no-store` + `Vary: Cookie`.
-- Live (Step 10): re-run the R10 direct-vs-edge header probes with a credentialed
-  session and confirm parity on `:6061` for the identity `401`s and `/login`.

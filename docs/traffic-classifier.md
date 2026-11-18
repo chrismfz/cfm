@@ -20,8 +20,8 @@
 > AUTOMATICALLY. Since 2026-09-19 (master plan E3 node slice) the one
 > enforcement path is the OPERATOR-armed per-fingerprint policy pulled from
 > cfm-web (`internal/webdetector/fppolicy.go` + `configs/lua/cfm_fppolicy.lua`).
-> Superseded design notes folded into this hub: `docs/archive/solver-farm-cross-host-phase2.md`,
-> `docs/archive/solver-farm-fingerprint-concentration.md`, `docs/archive/fleet-fingerprint-reputation.md`.
+> The earlier solver-farm and fleet-reputation design notes were folded into
+> this hub and deleted (git history keeps them).
 
 > **Status:** WORKING NOTES (not a frozen spec). Accumulating the Phase-0 audit
 > and a grounded design before we commit to weights/actions. Authorised to live

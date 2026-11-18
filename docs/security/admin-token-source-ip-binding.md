@@ -51,8 +51,7 @@ any IP that is not us.**
 - No committed CFM nft rule gates 6060/6061 to selfIPs/`cfm.allow`/`cfm.dyndns`.
 
 So today the admin plane is Internet-reachable and protected **only** by
-app-layer auth (as `Audit.md` acknowledges: "listeners must be safe when
-Internet-reachable"). Both the app-layer binding below and any L3/L4 nft port
+app-layer auth (the listeners must be safe when Internet-reachable). Both the app-layer binding below and any L3/L4 nft port
 lock are currently **absent**.
 
 ## Why this is safe to do (the key insight)
@@ -288,4 +287,4 @@ not the primary control. Currently absent (see live exposure above).
 - **Complementary to cfm-web token-at-rest hashing:** hashing protects the token
   *at rest*; this makes a leaked token unusable *in use* from the wrong IP.
 - References: `docs/security/admin-sso-bootstrap.md`,
-  `docs/security/direct-6060-transport-policy.md`, `Audit.md`.
+  `docs/security/direct-6060-transport-policy.md`.

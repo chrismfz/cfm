@@ -5,8 +5,7 @@
 `AdminTransportRedirect` safety net; machine `/api/v1` left as-is; redirect status
 `302`. Code: `internal/apiserver/transport_redirect.go` + `Start()` wiring +
 `configs/cfm.conf` `LISTEN_ADDRESS=127.0.0.1`; tests `transport_redirect_test.go`.
-**Finding:** `Audit_Results.md` R01 (HIGH, CONFIRMED LIVE) · **Spec:**
-`Audit_Fix_Order.md` Step 5 · `Audit.md` §2.
+Origin: the 2026-08 control-plane audit, finding R01 (HIGH, confirmed live).
 
 ---
 
@@ -34,7 +33,7 @@ should be upgraded:
 | **Local machine (CLI)** | `cfm` CLI → `127.0.0.1:6060` plaintext, Bearer | `"6060"` (loopback peer, no forwarded id) | **NO** — loopback plaintext never touches the wire |
 | **Direct external browser** | `http://host:6060/cfm-admin/` straight to the listener | `"6060"` (non-loopback peer) | **YES** — this is R01 |
 
-The audit is explicit (`Audit.md` §2): *"never globally redirect every request on
+The audit was explicit: *"never globally redirect every request on
 6060."* The signal that separates these is already built: `requestPeer(r).Entry`
 distinguishes `edge` from `6060`/`6061`, and `requestPeer(r).ImmediateIP.IsLoopback()`
 distinguishes the loopback CLI from an external browser.
@@ -51,8 +50,7 @@ on the port alone.
 - `requestPeer(r).Entry` — `"edge"` | `"6060"` | `"6061"` | `"other"` (existing).
 - `requestPeer(r).ImmediateIP.IsLoopback()` — local vs external (existing).
 - **`tlsReady`** — a NEW runtime flag. It must be true **only after the `:6061`
-  listener actually binds**, not merely because `TLS_PORT > 0` (`Audit.md`
-  §2 is explicit). No such signal exists today (`tlsSrv` is a local var, never
+  listener actually binds**, not merely because `TLS_PORT > 0`. No such signal exists today (`tlsSrv` is a local var, never
   published; SSLCollector readiness is per-SNI-host, not global). See §7.
 - **Browser-admin-route predicate** — path under `/cfm-admin/` (before the
   prefix rewriter) **or** an HTML UI/login route with `Accept: text/html`.
@@ -71,7 +69,7 @@ untouched.
 | 1 | immediate peer is **loopback** (local CLI/curl) | **pass through** — loopback plaintext is not a wire risk |
 | 2 | external, **not** a browser admin route (`/api/v1/*`, `/debug/*`, `/mcp`, assets) | **pass through** (default) — see §6a machine-API decision |
 | 3 | external, browser admin route, **GET/HEAD**, `tlsReady` | **redirect** → `https://<host>:<TLSPort><uri>` (§5) |
-| 4 | external, browser admin route, **unsafe method** (POST/PUT/PATCH/DELETE/…), **any TLS state** | **reject** — `HTTPS required`, *not* processed then redirected (`Audit.md` §2, spec pt 4). Refused **before** the redirect/degraded split, so a write is never processed over plaintext even in the degraded window or on a crafted empty-Host request. |
+| 4 | external, browser admin route, **unsafe method** (POST/PUT/PATCH/DELETE/…), **any TLS state** | **reject** — `HTTPS required`, *not* processed then redirected. Refused **before** the redirect/degraded split, so a write is never processed over plaintext even in the degraded window or on a crafted empty-Host request. |
 | 5 | external, browser admin route, **GET/HEAD**, `tlsReady == false` (or no usable Host / TLS port) | **degraded**: pass through over HTTP (read-only — writes were refused by row 4), log `event=admin_http_fallback` (§6b) |
 
 Rows 3 and 4 are the R01 fix. Row 4 matters because a plain redirect on a login
@@ -106,8 +104,8 @@ target = "https://" + net.JoinHostPort(host, tlsPortStr) + r.URL.RequestURI()
 ### 6a. Machine `/api/v1/*` over direct external plaintext `:6060`
 
 The CLI is loopback (exempt); cfm-web uses `:6061`; so external plaintext
-`/api/v1` should not exist in normal operation — but `Audit.md` §2 notes *"API
-deployments may explicitly use HTTP."* Options:
+`/api/v1` should not exist in normal operation — but API
+deployments may explicitly use HTTP. Options:
 
 - **(A) Leave `/api/v1` on `:6060` as-is** (row 2 pass-through). Least disruption;
   machine clients own their transport risk. **Recommended for Step 5** — scope
@@ -144,7 +142,7 @@ required, is to bind the HTTP listener to `127.0.0.1` (`LISTEN_ADDRESS`), so the
 is **no external plaintext at all** — the edge (loopback) and CLI (loopback) still
 work, and only `:6061` is public. The redirect approach is only necessary if
 `:6060` **must** stay externally reachable as a fallback. The threat model
-(`Audit.md` §0) treats `:6060` as an intended Internet-reachable fallback, so this
+treats `:6060` as an intended Internet-reachable fallback, so this
 design implements the redirect — but the operator should confirm whether external
 `:6060` is needed; loopback-binding is a cleaner fix if not, and the two are
 complementary (loopback-bind removes the attack surface; the redirect handles the
@@ -169,8 +167,7 @@ struct the middleware can read). In `Start()`:
   (`apiserver.go:367`), before the serve goroutine;
 - stays `false` when `TLSPort <= 0`, `ssl == nil`, or the listen fails.
 
-This matches `Audit.md` §2 ("mark ready only after successful runtime
-bind/readiness"). A bound-but-no-cert-for-this-SNI case still fails the TLS
+Ready means a successful runtime bind, nothing less. A bound-but-no-cert-for-this-SNI case still fails the TLS
 handshake on `:6061` — but that is a **cert-provisioning** issue, not a
 transport-policy bug; redirecting a browser to `:6061` is still correct (it would
 otherwise stay on plaintext). We do **not** try to gate on per-SNI cert
@@ -269,4 +266,3 @@ middleware directly (pattern: `auth_redirect_test.go`).
 - edge → loopback `:6060` never sent to `:6061` ✔ (row 0);
 - no login/session-changing credential accepted over direct HTTP while TLS healthy ✔ (row 4);
 - controlled TLS-down fallback works and is visibly logged ✔ (row 5); challenge-gating deferred to Step 4;
-- R01 retest closed in `Audit_Results.md` after live verification (Step 10).

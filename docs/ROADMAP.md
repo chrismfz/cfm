@@ -1,70 +1,36 @@
 # CFM Roadmap
 
-A single index of **where CFM is going**: work in flight, the near-term
-backlog, and longer tracks. This file is a map, not a spec — each item points
-at the authoritative doc/PR that owns the detail, so this page never becomes a
-second copy that drifts (CLAUDE.md §5). When an item lands, move it to
-`CHANGELOG.md` and delete it here.
+A single index of **where CFM is going**: what is open, in priority order
+within each area. This file is a map, not a spec. Each item points at the doc
+or PR that owns the detail, so this page never becomes a second copy that
+drifts (CLAUDE.md §5). **When an item lands, delete it here** (the CHANGELOG
+records it). Done items are not kept "for the record".
 
-Conventions: **[in flight]** has an open PR or branch · **[next]** is queued and
-scoped · **[track]** is a larger effort not yet broken into PRs · **[idea]** is
-not yet committed to. Discipline for everything here: build → adversarial
-review-until-clean → PR → merge → next (many small single-concern PRs).
+Tags: **[next]** queued and scoped · **[track]** larger effort, not yet broken
+into PRs · **[idea]** not committed to · **[decided]** a standing "no", kept so
+it is not reopened without new evidence. Discipline for everything here:
+build → adversarial review until clean → PR → merge → next (small
+single-concern PRs).
+
+Last full review: 2026-11-18.
 
 ---
 
-## 1. Edge unification (one enforcement path, one clearance model)
+## 1. WAF tuning & coverage
 
-Full design + phase log: **`docs/edge-unification-plan.md`**. Retire the legacy
-per-IP challenge-DNAT path; unify web + panel on the edge cookie-clearance model.
+Behaviour + FP runbooks: **`docs/waf.md`**, `docs/challenge-waf-release-checklist.md`.
+WAF→autoblock: `docs/waf-autoblock-design.md`. CVE rules: **`WAF_CVE.md`**
+(backlog: `WAF_CVE_PLAN.md`). Pre-merge numbers: `make waf-corpus` (BlazeHTTP).
 
-- **Phase 2 — DONE** (2026-08-12). Panel unification LOGONLY landed (2a/2b/2d/2e
-  + `cfm_selfip` parity); the last open item, the cPanel-plugin iframe cross-port
-  clearance flow, was verified live (no loop). Burn-in FP gate clean on both
-  engines (see `docs/edge-unification-plan.md` Status).
-- **Phase 3 — burn-in + fleet + dead-code removal** — [in flight]. Burn-in done
-  (orion+titan). `OPENRESTY_MODE` reference key removed (behavioural collapse was
-  already in 1a; runtime deprecation warning kept). **Remaining:** the
-  **cookie-net cleanup** (inert `cfm_ok`, legacy shared-cookie-name fallback, and
-  — with Phase 4 — the panel loop-breaker) as its **own sign-off-gated PR** after
-  a longer burn-in, since it touches the incident clearance path.
-- **Phase 4 — panel enforcement graduation** — [track]. Also owns deleting
-  `cfm_panel.lua`'s superseded local policy (can't remove the live enforcer
-  before the bridge decision enforces). **Both** the panel
-  challenge/decision (2d) **and** the panel WAF (2e) graduate from LOGONLY to
-  enforce after logging confirms low false-positive rates — each its own opt-in
-  PR after its own burn-in. Prereqs: ~~full self-origin parity~~ (DONE — shared
-  `cfm_selfip` module gives the panel WAF the web edge's self-IP + `IGNORE_NETS`
-  skip; wire it into the panel decision path when that enforces), a
-  per-Content-Type body-inspection decision for panel, and preserved fail-open +
-  kill-switch discipline so an admin can never be locked out of WHM/cPanel.
-
-## 2. WAF tuning & coverage
-
-Behaviour + FP runbooks: **`docs/waf.md`**, `docs/waf-analysis-2026-05-08.md`,
-`docs/challenge-waf-release-checklist.md`. WAF→autoblock: `docs/waf-autoblock-design.md`.
-
-- **WAF false-positive tuning** — [track, never "done"]. Continuous, against
-  real apps (Joomla K2/elFinder, `/.well-known/`, WP migration/backup imports).
-  Prefer `logonly` → `challenge` → `block` promotion; operator-side rule-scoped
-  excludes over code carve-outs.
-- **WAF CVE detectors (`WAF_CVE`)** — [track]. Per-CVE in-path rules in the
-  `10000+` band. As-built + "CVE hunting" recipe: **`WAF_CVE.md`**; design +
-  candidate backlog: `WAF_CVE_PLAN.md`. Never write a signature from memory.
-- **Gap analysis follow-ups** — [idea]. See `docs/waf-gap-analysis-ninjafirewall.md`.
-- **No Coraza / OWASP CRS in-path** — [decided 2026-11-18]. Its anomaly
-  score has nothing to bind to (per-rule modes, autoblock families, scoped
-  excludes, edge ban), it brings a second exclusion system and CRS's FP load on
-  WordPress / Joomla / cPanel, and cPanel origins often run ModSecurity behind
-  the edge already (the `modsec` detector reads it). The 2026-05 reference audit
-  (`docs/waf.md`, external-reference table) found only two places a reference
-  is meaningfully stronger; the next two items take those, as CFM rules with
-  stable ids and modes. UUSEC WAF, SafeLine and BunkerWeb were reviewed the same
-  day: closed engines (UUSEC, SafeLine) or CRS itself (BunkerWeb), so no rules
-  to borrow; their usable ideas are the items below.
+- **WAF false-positive tuning** — [track, never "done"]. Against real apps
+  (Joomla K2/elFinder, `/.well-known/`, WP migration/backup imports). Promote
+  `logonly` → `challenge` → `block`; operator-side rule-scoped excludes over
+  code carve-outs.
+- **WAF CVE detectors (`WAF_CVE`)** — [track]. Per-CVE rules in the `10000+`
+  band. Never write a signature from memory.
 - **libinjection SQLi / XSS tokenizer** — [next]. LuaJIT FFI binding
   (`lua-resty-libinjection`-style) as a new detector beside 301 / 302,
-  shipping `logonly`. Measured with the corpus below before merge and with
+  shipping `logonly`. Measured with `make waf-corpus` before merge and with
   `cfm webtop waf hit-rates` on the fleet before any promotion.
 - **Decoding / normalization transforms** — [next]. `cmdLine`-style
   normalization for the RCE rules, unicode / fullwidth folding and
@@ -72,198 +38,140 @@ Behaviour + FP runbooks: **`docs/waf.md`**, `docs/waf-analysis-2026-05-08.md`,
   no unicode normalization). Scope each to the variables it belongs to: the
   strict UTF-8 walker applied to the whole args+body buffer flagged legacy
   ISO-8859-7 Greek forms (`docs/waf.md`).
-- **Labelled pre-merge corpus (BlazeHTTP)** — [next]. chaitin/blazehttp:
-  ~33 k benign and ~650 attack raw-HTTP samples. Run from outside against a
-  staging edge and report detection and FP rate per rule, so a WAF change has
-  before / after numbers. It complements the production hit-rates, which see
-  how often a rule fires but never what it misses. GPLv3: run it, never vendor
-  the corpus or code into this repo.
+- **Login brute-force signals in the web detector** — [next]. The edge counts
+  login *submissions* (rule 501: 8 per IP in 20 s), so a slow or distributed
+  attack never trips it (vol2.gr, 2026-11-04: 2 787 failed `wp-login.php`
+  posts from 1 121 IPs, none over 5 in 20 s). Phase 0 is built (the `auth`
+  column, `auth_corpus` MCP tool); next the detector counts FAILED logins per
+  IP across vhosts, per vhost, per /24, and flags a success from an IP that
+  failed elsewhere. Design + fleet numbers: `docs/webdetector-signals-v2.md`.
 - **cfm-admin WAF / ban UX** — [idea].
   - Hit-rates view: `/api/v1/waf/hit-rates` and its promotion hint
     (`ok_to_promote` / `silent` / `review` / `noisy`) are CLI/API only today.
-  - Per-vhost protection presets (BunkerWeb's low / medium / high idea) that
-    only WRITE the existing knobs (WAF modes, challenge tier, rate rules), never
-    a second copy of the settings.
-  - Ban evidence: check that every ban, not only `waf_security`'s, carries
-    the requests that caused it in `detection_history`, and show it beside
-    the ban.
-- **Login brute-force signals in the web detector** — [next]. The edge counts
-  login *submissions* (rule 501: 8 per IP in 20 s, across sites), so a slow or
-  distributed attack never trips it: vol2.gr (titan) took 2 787 failed
-  `wp-login.php` posts in October from 1 121 IPs, none over 5 in 20 s, and the
-  same three IPs (217.60.196.2, 103.47.145.17, 49.232.230.213) tried 150+
-  WordPress sites on every node. The web detector already reads the origin's
-  status per request (`engine.go`, the 40x counters), but status alone cannot
-  tell a login's outcome (a hide-login plugin answers a failure with a 302 to
-  `?login=failed`), so the edge adds an outcome column (the logged-in cookie)
-  and the detector counts FAILED logins:
-  per IP across vhosts over hours (ban), per vhost (alert, then a tighter per-IP
-  limit while the site is under attack), per /24, and a success from an IP that
-  failed elsewhere (alert). Every CMS the edge knows the same way (the
-  `auth_endpoint_tag` list: WordPress, Joomla `/administrator/`, OpenCart,
-  Magento, Drupal `/user/login`, Laravel-style `/admin/login`, generic `/login`),
-  each with its own success/failure answer to verify. The action (a ban through
-  the detector sink, or an edge deny) is open. Context: the 2026-11-04 vol2.gr
-  takeover attempt (rule 440, the 501 clearance cap).
-  Design (with compromise, recon/abuse and shadow behaviour signals, and the
-  fleet numbers): `docs/webdetector-signals-v2.md`.
+  - Per-vhost protection presets (low / medium / high) that only WRITE the
+    existing knobs (WAF modes, challenge tier, rate rules), never a second
+    copy of the settings.
+  - Ban evidence: every ban, not only `waf_security`'s, carries the requests
+    that caused it in `detection_history`, shown beside the ban.
+- **No Coraza / OWASP CRS in-path** — [decided 2026-11-18]. Its anomaly score
+  has nothing to bind to (per-rule modes, autoblock families, scoped excludes,
+  edge ban), it brings a second exclusion system and CRS's FP load on
+  WordPress / Joomla / cPanel, and cPanel origins often run ModSecurity behind
+  the edge already (the `modsec` detector reads it). UUSEC WAF, SafeLine and
+  BunkerWeb were reviewed the same day: closed engines or CRS itself, so no
+  rules to borrow; their usable ideas are the items above.
+- **No GPL rule sets or code** — [decided 2026-06-27]. CFM is Apache-2.0. An
+  app-level PHP WAF (NinjaFirewall, GPLv3) was compared after the myip.gr
+  WHMCS sqlmap scan: only capability categories were reimplemented
+  (rule 318); its regexes and signature data are never copied. GPL test
+  corpora (BlazeHTTP) are run, never vendored.
+- **Edge Lua residuals** — [idea, low]. `cfm_purge.lua` `purge_ip` scans the
+  whole `cfm_decisions` dict under lock on a force-unblock (perf); `[...]`
+  bracket-class globs in excludes match literally in Lua but as a class in Go
+  (narrower in-path, so protective).
+
+## 2. Panel enforcement (edge unification follow-up)
+
+Edge unification is done (as-built: `docs/edge-unification-plan.md`): panel
+WAF + bridge decision enforce by default (`PANEL_WAF_MODE` /
+`PANEL_DECISION_MODE`), the blanket panel challenge is kept on purpose.
+
+- **Watch default-enforce on authenticated panel traffic** — [track,
+  operator]. The burn-in behind it was scanner-dominated; per node, drop to
+  `logonly` on a false positive.
+- **Per-Content-Type body inspection on the panel ports** — [idea].
 
 ## 3. MCP telemetry surface
 
-As-built + roadmap: **`MCP.md`**. Read-only telemetry across the fleet
-(orion/titan). Everything here is READ-ONLY unless the write-layer track lands.
+As-built: **`MCP.md`** (node tools) and the cfm-web fleet connector. Node MCP
+stays read-only; writes live in cfm-web (blocklist, blackhole, notify) behind
+per-ability tokens.
 
-- **`whats_wrong` triage synthesis** — [in flight]. Ranked "what's wrong right
-  now" entry point.
-- **Logs group** — DONE. `cfm_log_tail` (CFM's own `/var/log/cfm/*`, curated
-  keys) + `journal_tail` (allow-listed systemd units) landed via `internal/cfmlog`
-  (edge `edge_error_tail` already landed).
-- **Firewall/WAF drilldowns** — [next]. `nft_counters`, `waf_rule_detail`,
-  `challenge_ip_status` (`waf_fp_hunt` landed — panel-logonly burn-in aggregator).
-- **`ip_forensics` → rotated logs** — [next]. Optionally reach rotated log
-  segments, not just the live file.
-- **Minor read wins** — [next]. `notifier_status`, `clam_status`, `http3_status`.
-- **MCP write/actions layer** — [track]. `mysql_kill` first, then `block_ip` —
-  behind explicit auth; today the MCP surface is read-only by design.
-- **Mail-log reader tool** — [next]. MCP + CLI reader for dovecot/exim/postfix
-  (see §5).
-- **Fleet MCP gateway in Laravel `cfm-web`** — [track]. Aggregate per-node MCP
-  behind the fleet controller.
-- **Laravel-embedded agent w/ DB session history** — [track, Ekdosi-style].
+- **`ip_forensics` → rotated logs** — [next]. Reach rotated log segments, not
+  just the live file.
+- **`challenge_ip_status`** — [idea]. Per-IP challenge state drilldown.
 
-## 4. MySQL / resource pressure & governor
-
-- **Correlation: MySQL pressure vs vhost hits** — DONE (MCP). `internal/dbwebcorr`
-  join + the `db_web_pressure` MCP tool (composes governor `cpu`/`top` + webdet
-  `top-short`, host→owner via `internal/panelmap`) surface "few hits, high DB
-  pressure" tenants. Follow-ups (optional): a CLI/web-UI surface, and DirectAdmin
-  host→owner support in `panelmap` (`/etc/virtual/domainowners`) so attribution
-  works off cPanel too.
-- **CPU thermal/throttle signal** — DONE. `internal/cputhrottle` (pure,
-  load-gated classifier) + `GET /api/v1/system/cpu-throttle` + MCP `cpu_throttle`
-  turn "high load" into a root cause: thermal throttling vs frequency cap
-  (governor/policy) vs genuine demand vs idle downclock vs no-cpufreq (VM → check
-  host steal). Follow-up idea: fold CPU steal% (from the health snapshot) into the
-  verdict so the VM case gets a concrete answer, not just a pointer.
-- **LVE per-tenant CPU signal (CloudLinux)** — DONE. Data plane:
-  `internal/lvestat` (pure parser + cores/%-of-limit, unit calibrated to ns) →
-  `internal/lvecpu` collector → `/api/v1/system/lve-cpu` + MCP `lve_cpu`.
-  Presentation: `cfm lve` CLI + the Health-page "LVE per-tenant CPU" table.
-- **Guard governor perf/userstat capability flags** — DONE (data race fixed;
-  atomic.Bool + -race regression test).
-
-## 5. Mail Monitor
-
-Subsystem overview: staged NGM-style (`internal/mailmeter`). Traffic,
-deliverability, per-domain, DNS, spam largely landed (see CHANGELOG).
+## 4. Mail Monitor
 
 - **MTA-agnostic mail tools** — [next]. Serve mail summaries from a
   detector-published snapshot instead of a per-request exec, so the tools work
-  across exim/postfix/etc. without shelling out each call.
-- **Mail-log reader** — [next]. Shared with §3.
+  across exim/postfix without shelling out each call.
 
-## 6. Health / observability correctness
+## 5. Health / observability correctness
 
-- **Wire the remaining `cfm_metrics`** — [next]. `waf_events_1h` now reads the
-  real last-hour count (reconciled with `waf_last_hour`), but its siblings
-  `active_blocks` / `challenge_queue` / `outbound_alerts` are still structural
-  zeros (no production producer). Populate them from their real sources
-  (firewall block list / challenge engine / mail anomaly), or drop them.
-- ("which engine is the edge" family — resolved across whats_wrong #1230,
-  edge_error_tail #1231/#1232, health-CLI #1233. Kept here as a watch item: any
-  NEW consumer of edge-engine state must use `runtime.edge_service`.)
+- **Wire or drop the remaining `cfm_metrics`** — [next]. `active_blocks` /
+  `challenge_queue` / `outbound_alerts` are still structural zeros
+  (`internal/healthmodel/collector.go`). Populate them from the firewall block
+  list / challenge engine / mail anomaly, or drop them.
+- Watch item: any NEW consumer of edge-engine state must use
+  `runtime.edge_service`.
+- **CPU steal% in the `cpu_throttle` verdict** — [idea]. So the VM case gets a
+  concrete answer, not just a pointer.
+- **DirectAdmin host→owner in `panelmap`** — [idea]. `/etc/virtual/domainowners`,
+  so `db_web_pressure` attribution works off cPanel too.
 
-## 7. Operator / security housekeeping
+## 6. Control plane & operator housekeeping
 
-Not code — operator actions tracked so they aren't forgotten.
+- **Roll `ADMIN_TOKEN_IP_BINDING = enforce` per node** — [next, operator].
+  Shipped default `off`; design + rollout note:
+  `docs/security/admin-token-source-ip-binding.md`.
+- **Rotate `MCP_TOKEN` + remove `MCPGODEBUG`** — [next, operator].
+  Post-rollout hygiene on the live nodes.
+- **Retire `internal/apiserver/auth_autoblock.go`** — [next]. Still started
+  in `apiserver.go`; the `cfm_endpoints` detector is meant to replace it.
+  Remove only after showing the detector bans the same login brute force
+  (keep the login throttle / account lock).
+- **Pre-auth challenge in front of the direct admin login** — [idea]. Design:
+  `docs/security/challenge-login-gate-design.md` (test both edge and DNAT
+  mode).
+- **Fleet `detectors.conf` fixes** — [next, operator]. Quote typos, missing
+  panel `CHALLENGE_VHOST` patterns, `permanent` leniency, dead keys:
+  `docs/detectors-config-unification.md` §7.
 
-- **Rotate `MCP_TOKEN` + remove `MCPGODEBUG`** — [next, operator]. Post-rollout
-  hygiene on the live nodes.
-- **Fleet detectors.conf immediate fixes** — [next, operator]. The quote-typo
-  (`SESSION_ALL_FAILED"`) on 5 nodes, 3deers' missing panel `CHALLENGE_VHOST`
-  patterns, speedhost's `permanent` leniency, dead `.leniency` threshold keys.
-  List: `docs/detectors-config-unification.md` §7.
-- **Neutralize a leaked admin `AUTH_TOKEN`** — two-part, so a leaked token (e.g.
-  from a cfm-web DB leak) is useless without credentials:
-  **(A) SHIPPED (default off).** `ADMIN_TOKEN_IP_BINDING = off|logonly|enforce`
-  gates the `token_admin` branch to {loopback, selfIPs, `cfm.allow`/`cfm.dyndns`,
-  the API_URL host} — closes direct-API use and SSO-code minting from any other IP
-  (browser SSO/scoped/session/MCP untouched; fail-safe, independent of the
-  firewall). **Operator action:** roll `enforce` per-node (see the doc's rollout
-  note). **(B) still [design, code]:** decouple the embed cookie signing key from
-  `AUTH_TOKEN` (per-node secret, or a stateful admin session — recommended, reuses
-  `authstore`/`auth.db`), else a leaked token forges a `cfm-embed-admin` cookie and
-  walks in from any IP, bypassing (A). **Also residual:** `/mcp` accepts the admin
-  token (read-only telemetry) from any IP — close with a dedicated `MCP_TOKEN` so
-  `auth_token` stops being an MCP credential. Live evidence 2026-08-27: token presented
-  only from cfm-web `84.54.49.4` (= `cfm.myip.gr`) and loopback; `:6060`/`:6061`
-  Internet-bound with no nft gate. Full design (traces, cookie-forgery gap,
-  caveats): `docs/security/admin-token-source-ip-binding.md`.
+## 7. Detectors config unification
 
-## 8. Detectors config unification
+Design: `docs/detectors-config-unification.md`. Shipped: `srcresolve` (auto
+source detection) and `detectors.d` overlays (`detconf` layering).
 
-Design: `docs/detectors-config-unification.md` (2026-08-25 10-server audit).
-Auto-detected sources (`srcresolve`), `/etc/cfm/detectors.d/` overlays so the
-base conffile stays package-updateable (no more `.rpmnew`), global
-`[leniency]`, persisted auto-tokens, fleet-converged defaults.
+- **Global `[leniency]` fallback + persisted auto-tokens** — [next] (doc §9 PR 6).
+- **Stock `detectors.conf` converged defaults** — [next] (doc §9 PR 7). A
+  behaviour change on hosts that inherit defaults: ships alone.
+- **Fleet migration** — [track, operator]. Move each node's deltas to an
+  overlay; `config_drift` reports a clean base.
 
-- **PR sequence** — [next]. §9 of the doc: srcresolve → ssh/dovecot →
-  exim/postfix+docker → webdetector edge source → detconf layering (WebUI
-  editor writes overlays) → global leniency + tokens → converged stock values.
+## 8. Traffic classifier / abuse defense
 
-## 9. Traffic classifier (distributed-scraper / challenge-defeat defense)
+**Plan of record: `docs/abuse-defense-master-plan.md`** (the one roadmap +
+decision log for challenge / classifier / fingerprint reputation, both repos;
+its §5 is the only live to-do list). Progress journal:
+`docs/abuse-defense-progress.md`. Design: `docs/traffic-classifier.md`,
+`docs/challenge-score.md`, `docs/under-attack-mode.md`,
+`cfm-web:docs/fingerprint-reputation.md`. This section is only an index.
 
-**Plan of record: `docs/abuse-defense-master-plan.md`** (2026-09-18
-consolidation — the ONE roadmap + decision log for the challenge /
-traffic-classifier / fingerprint-reputation effort, both repos). This section
-is deliberately only an index, per the "never keep a second copy of a list
-that can drift" rule.
+## 9. Webshell-drop safety net (cfm-lsm → ClamAV → edge attribution)
 
-- **State (short):** the evidence pipeline is built and proven — three shadow
-  sources feed cfm-web's durable fingerprint ledger, which has convicted live
-  solver farms (`c28caa00`, `95070673`) with block-safe IP intelligence. The
-  action channel shipped with E3 (2026-09-22: policy fetch + ChallengeV2
-  Rung 1 with teeth); E1 closed manual-only and E2 was dropped (2026-09-29).
-  The master plan's §5 is the only live to-do list: E4's measurement first,
-  then the candidates listed there.
-- **Standing decisions** (master plan §4): residential members of a
-  fingerprint are never auto-banned (ChallengeV2 is the residential path);
-  deny on a bare fingerprint only when farm-unique; every shadow burn-in gets
-  an exit contract; sensor freeze until E4's measurement.
-- **Design detail:** node side `docs/traffic-classifier.md` (grains, ladder,
-  ChallengeV2 rungs) · per-IP score `docs/challenge-score.md` · central ledger
-  `cfm-web:docs/fingerprint-reputation.md` · under-attack state machine
-  `docs/under-attack-mode.md`. Their embedded phase checklists are frozen and
-  defer to the master plan.
+Design: `docs/lsm-php-drop-detection.md` (after the 2026-11-12 dmkomotinis.gr
+compromise). `CFML-FS-009` watches the PHP tier write a PHP-executable file
+under a docroot; the daemon scans that file with ClamAV and ties it to the
+edge request so the IP can be banned.
 
-## 10. Webshell-drop safety net (cfm-lsm → ClamAV → edge attribution)
+- **P0 count-only** — [next, after the operator answers the doc's §11].
+  `panelmap.Docroots()`, the BPF policy (own ringbuf, monitor-only) and the
+  `php_drops` MCP aggregates. A fleet count gates every later phase; kernel
+  deny is not planned.
 
-Design: `docs/lsm-php-drop-detection.md` (2026-11-14, after the dmkomotinis.gr
-Fabrik compromise on earth). `CFML-FS-009` watches the PHP tier
-create/overwrite/rename a PHP-executable file under a docroot. The daemon then
-scans exactly that file with ClamAV, records it, and ties it to the edge
-request so the IP can be banned.
+## 10. PHP runtime defense (CFM-managed Snuffleupagus)
 
-- **P0 count-only** — [next, after operator answers the doc's §11]. Slices 1–2
-  of the doc's §12: `panelmap.Docroots()`, then the BPF policy (own ringbuf,
-  monitor-only) and the `php_drops` MCP aggregates. A fleet count gates every
-  later phase (scan → suspect alerts/quarantine opt-in → autoblock); kernel deny
-  is not planned.
+Design: `docs/roadmaps/php-runtime-defense.md`. CFM renders Snuffleupagus
+rules, monitor/enforce modes and per-vhost excludes, and never writes its own
+PHP extension (decided 2026-11-18: one engine for one purpose). Pairs with §9
+at the kernel boundary. `cfm php-inventory` is shipped.
 
-## 11. PHP runtime defense (CFM-managed Snuffleupagus)
-
-Design: `docs/roadmaps/php-runtime-defense.md`. The PHP-VM layer Imunify
-Proactive Defense covers on Imunify hosts: CFM renders Snuffleupagus rules,
-monitor/enforce modes and per-vhost excludes, and never writes its own PHP
-extension (the `cfm-php` extension seed was dropped on 2026-11-18: one engine
-for one purpose). Pairs with §10 at the kernel boundary.
-
-- **P0a `cfm php-inventory`** — done (2026-07-22).
-- **P0b per-vhost PHP handler mapping (alt-php vs ea-php)** — next; it picks
+- **P0b per-vhost PHP handler mapping (alt-php vs ea-php)** — [next]. It picks
   the beachhead adapter for P1 (monitor-only, one server).
 
 ---
 
-_Larger design docs live under `docs/`; this roadmap only indexes them. See
+_Design docs live under `docs/`; this roadmap only indexes them. See
 `CLAUDE.md` §6–§7 for the "where we historically lost the ball" areas and the
 per-topic doc pointers._

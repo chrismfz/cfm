@@ -2,10 +2,10 @@
 
 **Status:** ✅ IMPLEMENTED — `internal/apiserver/session_cookie_transport.go` +
 always-`Secure` goauth manager + `AUTH_SECURE_COOKIE` deprecation. Tests:
-`session_cookie_transport_test.go`. Live verification → Step 10. (Prerequisite: the
+`session_cookie_transport_test.go`. (Prerequisite: the
 `:6061` self-signed fallback, PR #1356, so a fresh/by-IP box is reachable over TLS.)
 
-Finding/spec: `Audit_Fix_Order.md` Step 6 (P1). Make the session cookie's `Secure`
+Goal (2026-08 control-plane audit, P1): make the session cookie's `Secure`
 flag automatic from the **effective trusted scheme** (not `AUTH_SECURE_COOKIE`, not
 raw `r.TLS`), and give the TLS-down degraded HTTP window its own **distinct**
 non-Secure cookie so a real `cfm-sid; Secure` is never downgraded over plaintext —

@@ -40,7 +40,7 @@ is never challenged.
 
 Refactor `internal/webdetector/challenge_server.go` to expose its **existing** handlers
 for registration on any mux (they already exist on an internal `http.NewServeMux()`),
-without creating a second challenge implementation inside the apiserver (per `Audit.md`).
+without creating a second challenge implementation inside the apiserver.
 
 ```
 ChallengeServer

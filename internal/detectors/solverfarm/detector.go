@@ -253,7 +253,7 @@ type Config struct {
 	// SINGLE client fingerprint — the low-and-slow farm the subnet-count rule
 	// above (calibrated for a ~110/min farm) misses at ~8/min. The fingerprint is
 	// a GROUP-BY key, never a matched value, so a new tool with a new fingerprint
-	// trips the same shape. See docs/archive/solver-farm-fingerprint-concentration.md.
+	// trips the same shape. See docs/traffic-classifier.md (solver-farm grain).
 	FPTrack bool
 	// MinFPSubnets / MinFPCountries are the low-rate thresholds, AND'd. Country is
 	// the load-bearing false-positive guard: a legit shared-fingerprint population
@@ -284,7 +284,7 @@ type Config struct {
 	// under the per-vhost country bar (per Window) on every individual host. This catches
 	// the thin farm the per-host FPTrack misses (measured: 95070673 across 22
 	// vhosts / 44 countries, ~1 solve/IP). Fingerprint is a GROUP-BY key, never a
-	// matched value. See docs/archive/solver-farm-cross-host-phase2.md.
+	// matched value. See docs/traffic-classifier.md (solver-farm grain).
 	XHTrack bool
 	// XHWindow is the (longer) aggregation window for the cross-host track — a thin
 	// farm needs time to accumulate its spread. Independent of Window.
@@ -1013,7 +1013,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 // must not be throttled by the mail cadence. Fingerprint is the GROUP-BY key that
 // flagged the vhost (the cross-host fp when present, else the per-host
 // concentration fp; empty for a subnet-spread-only finding) — never a matched
-// signature. See docs/archive/fleet-fingerprint-reputation.md §5 for the ingest contract.
+// signature. The ingest contract: cfm-web:docs/fingerprint-reputation.md.
 type Finding struct {
 	When        time.Time
 	Host        string

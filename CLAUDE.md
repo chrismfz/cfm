@@ -1037,7 +1037,6 @@ because of that. Hard-won points:
 | BPF LSM | `docs/cfm-lsm.md` · Kernel hardening: `docs/kernsec.md` |
 | Detectors (incl. leniency §6) | `docs/DETECTORS.md` |
 | Detectors config unification (design: srcresolve / detectors.d overlays / converged defaults) | `docs/detectors-config-unification.md` |
-| Web detector history (as-built) | `docs/webdetector-history-design.md` |
 | `what's_wrong` root-cause engine (contract + roadmap) | `docs/whats-wrong-rootcause.md` |
 | Challenge engine design (PoW/solver/TLS-fp) | `docs/roadmaps/challenge-engine.md` |
 | Abuse defense (challenge / classifier / fingerprint) — **PLAN OF RECORD** | `docs/abuse-defense-master-plan.md` (the one roadmap + decision log, both repos) |
@@ -1068,10 +1067,13 @@ because of that. Hard-won points:
 | Targeted challenges (audience floor on the automatic vhost challenges + under-attack confirm step) — design; the confirm step built for a manual `attack on` (`CHALLENGE_V2_CONFIRM`) | `docs/targeted-challenge-design.md` |
 
 **Historical / superseded** (kept for reference, NOT current state — read the "current" doc each names):
-`docs/edge-lua-audit-2026-07-08.md` (audit closed) · `docs/waf-analysis-2026-05-08.md` (→ `docs/waf.md`) ·
-`docs/waf-gap-analysis-ninjafirewall.md` (decision record) · `WAF_CVE_PLAN.md` (→ `WAF_CVE.md`) ·
-`docs/webdetector-history-design.md` (as-built → `history_store.go`). Folded away: `Detectors.Leniency.md` → `docs/DETECTORS.md` §6;
-`docs/roadmaps/edge-shared-loaders.md` → `docs/edge-unification-plan.md` §10. Also: `docs/archive/fleet-fingerprint-reputation.md` (idea note → `cfm-web:docs/fingerprint-reputation.md`) · `docs/archive/solver-farm-cross-host-phase2.md`, `docs/archive/solver-farm-fingerprint-concentration.md` (shipped → `docs/traffic-classifier.md`).
+`docs/waf-analysis-2026-05-08.md` (FP corpus → `docs/waf.md`) · `WAF_CVE_PLAN.md` (backlog → `WAF_CVE.md`).
+
+**Docs policy.** A doc earns its place by being current or by holding a
+decision that would otherwise be reopened. Finished audits, closed plans and
+"as-built" notes the code now states are deleted, not archived: git history
+keeps them, and a stale doc read as current misleads (code moves on, the doc
+does not). A standing "no" goes into `docs/ROADMAP.md` as a `[decided]` line.
 
 ---
 
