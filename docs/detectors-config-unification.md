@@ -358,7 +358,7 @@ is not a network address.
    delete token keys. `detectors_status` shows each resolved source.
 
 Every code PR: adversarial self-review before opening; update
-`docs/DETECTORS.md` (§6 leniency lookup order, new §source-resolution) and
+`docs/DETECTORS.md` (§6 leniency lookup order, §1 "Source modes") and
 `docs/endpoint_scope_inventory.md` if any endpoint changes, in the same
 change.
 
