@@ -7,12 +7,13 @@ Seventeen policies ship, all compiled into one BPF object
 (`internal/lsm/policy.go`). That list is the authoritative scope of
 cfm-lsm; anything beyond it needs a separate, named proposal.
 
-- **Off unless configured.** The code defaults are `enabled = false`
-  and `mode = disabled` for every policy (`DefaultConf`). The packaged
-  `configs/lsm.conf` (installed as `/etc/cfm/lsm.conf`,
-  `%config(noreplace)`) currently ships `enabled = true` with every
-  policy at `mode = monitor`. A new install therefore attaches all
-  available policies in monitor mode.
+- **On in monitor mode, fleet-wide.** The packaged `configs/lsm.conf`
+  (installed as `/etc/cfm/lsm.conf`, `%config(noreplace)`) ships
+  `enabled = true` with every policy at `mode = monitor`, so every
+  install attaches all available policies in monitor mode. That is the
+  intended state. The code defaults (`DefaultConf`: `enabled = false`,
+  every policy `disabled`) apply only when `lsm.conf` is missing or
+  omits a key.
 - **Monitor first.** `monitor` reports and never blocks. `enforce`
   returns `-EPERM` from the hook on a match.
 - **Enforce-capable:** `CFML-EXEC-001`, `CFML-EXEC-003`,
@@ -750,9 +751,10 @@ Detection (BPF programs on kernel hooks) is separate from collection
 (the daemon draining the ringbuf). Block decisions happen in the kernel
 whether or not userspace is alive.
 
-### Default state — off
+### Default state — on, monitor
 
-With no `lsm.conf`, or `enabled = false`, nothing attaches. With
+The shipped `lsm.conf` has `enabled = true` and every policy at
+`monitor`. With no `lsm.conf`, or `enabled = false`, nothing attaches. With
 `enabled = true` the daemon auto-enables on start and on each
 config-reload tick when no pins exist. Only `cfm lsm disable` detaches.
 

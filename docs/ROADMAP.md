@@ -187,6 +187,19 @@ edge request so the IP can be banned.
   `php_drops` MCP aggregates. A fleet count gates every later phase; kernel
   deny is not planned.
 
+## 9a. Site Cache follow-ups
+
+Design + as-built: `docs/site-cache-design.md` (§14 lists every open item);
+operating it: `docs/site-cache-runbook.md`.
+
+- **Micro-cache on the clearance fast path** — [idea]. Exclude the edge-set
+  `cfm_clearance` cookie from the store check first (design §5.5.1).
+- **Per-URL purge** and a per-host purge under an admin wildcard — [idea].
+- **`whats_wrong`: "armed but ~0 hits"** — [idea].
+- **Durable stats** (history, per-tier split, bytes saved) — [idea].
+- **Bypass on `Vary: Cookie`**, static TTL buckets, a per-vhost fill
+  budget — [idea].
+
 ## 9b. cfm-lsm follow-ups
 
 Reference: `docs/cfm-lsm.md`.
