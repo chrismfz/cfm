@@ -35,3 +35,22 @@ func (b *Backend) DeleteSetElem(set, elem string) error {
 	}
 	return nil
 }
+
+// WriteSetElems writes many elements in ONE `nft -f` run (one transaction).
+func (b *Backend) WriteSetElems(set string, elems []firewall.SetElemWrite) error {
+	if len(elems) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, e := range elems {
+		if e.Replace {
+			fmt.Fprintf(&sb, "delete element %s %s %s { %s }\n", family, tableName, set, e.Elem)
+		}
+		if e.TTL != nil && *e.TTL > 0 {
+			fmt.Fprintf(&sb, "add element %s %s %s { %s timeout %s }\n", family, tableName, set, e.Elem, humanTimeout(*e.TTL))
+		} else {
+			fmt.Fprintf(&sb, "add element %s %s %s { %s }\n", family, tableName, set, e.Elem)
+		}
+	}
+	return b.nftExpr(strings.TrimSuffix(sb.String(), "\n"))
+}

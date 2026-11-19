@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"syscall"
 	"testing"
@@ -19,6 +20,9 @@ type netFake struct {
 	readErr   map[string]error
 	writeErr  error
 	deleteErr error
+	batchErr  error
+	batches   int
+	reads     map[string]int
 	writes    []string // "set elem"
 	deletes   []string // "set elem"
 }
@@ -39,6 +43,10 @@ func (f *netFake) set(name string) map[string]time.Duration {
 }
 
 func (f *netFake) ListSetElementsTimed(set string) ([]SetElementTimed, error) {
+	if f.reads == nil {
+		f.reads = map[string]int{}
+	}
+	f.reads[set]++
 	if err := f.readErr[set]; err != nil {
 		return nil, err
 	}
@@ -64,6 +72,19 @@ func (f *netFake) WriteSetElem(set, elem string, ttl *time.Duration, replace boo
 	return nil
 }
 
+func (f *netFake) WriteSetElems(set string, elems []SetElemWrite) error {
+	f.batches++
+	if f.batchErr != nil {
+		return f.batchErr // all or none, as one transaction
+	}
+	for _, e := range elems {
+		if err := f.WriteSetElem(set, e.Elem, e.TTL, e.Replace); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (f *netFake) DeleteSetElem(set, elem string) error {
 	if f.deleteErr != nil {
 		return f.deleteErr
@@ -78,6 +99,8 @@ func (f *netFake) DeleteSetElem(set, elem string) error {
 var testLocalAddrs []string
 
 func init() {
+	guardCacheTTL = 0                         // each ban reads its guards (TestGuardViewIsCached sets it)
+	procIPv6Route = "/nonexistent/ipv6_route" // no gateways but the tests' own
 	localAddrs = func() ([]net.Addr, error) {
 		var out []net.Addr
 		for _, s := range testLocalAddrs {
@@ -414,5 +437,135 @@ func TestGuardReadsTheFleetWhitelistWithoutASnapshot(t *testing.T) {
 	g.set("allow_ext_v6_hosts")["2001:db8:1:2::55"] = 0
 	if elem, _, _ := ExtendClientBlock(g, net.ParseIP(v6a), time.Hour); elem != net6 {
 		t.Fatalf("with a snapshot: elem=%q, want the /64 (the snapshot decides)", elem)
+	}
+}
+
+// The TTL ban restore's batch: one guard read and one read of the set for all
+// of them, one transaction per chunk; kept, extended, added and guarded sorted
+// out; a refused chunk retried one by one.
+func TestExtendBlockNets(t *testing.T) {
+	f := newNetFake()
+	f.set(BlockV6Clients)["2001:db8:1:1::/64"] = 0             // permanent: kept
+	f.set(BlockV6Clients)["2001:db8:1:2::/64"] = 2 * time.Hour // longer: kept
+	f.set(BlockV6Clients)["2001:db8:1:3::/64"] = time.Minute   // shorter: extended
+	f.set("ignore_v6")["2001:db8:1:5::7"] = 0                  // guarded
+	bans := []NetBan{
+		{netip.MustParsePrefix("2001:db8:1:1::/64"), time.Hour},
+		{netip.MustParsePrefix("2001:db8:1:2::/64"), time.Hour},
+		{netip.MustParsePrefix("2001:db8:1:3::/64"), time.Hour},
+		{netip.MustParsePrefix("2001:db8:1:4::/64"), time.Hour},
+		{netip.MustParsePrefix("2001:db8:1:5::/64"), time.Hour},
+		{netip.MustParsePrefix("2001:db8:1:6::1/64"), time.Hour}, // not canonical
+	}
+	res, guarded, failed := ExtendBlockNets(f, bans)
+	if res.Kept != 2 || res.Extended != 1 || res.Added != 1 || len(guarded) != 1 || guarded[0].String() != "2001:db8:1:5::/64" || len(failed) != 1 {
+		t.Fatalf("res=%+v guarded=%v failed=%v", res, guarded, failed)
+	}
+	if f.reads[BlockV6Clients] != 1 || f.reads["self_v6"] != 1 || f.batches != 1 {
+		t.Fatalf("reads=%v batches=%d, want one of each", f.reads, f.batches)
+	}
+	if f.set(BlockV6Clients)["2001:db8:1:3::/64"] != time.Hour || f.set(BlockV6Clients)["2001:db8:1:1::/64"] != 0 {
+		t.Fatalf("set after: %v", f.set(BlockV6Clients))
+	}
+	// A refused transaction: one at a time.
+	g := newNetFake()
+	g.batchErr = errors.New("message too long")
+	res, _, failed = ExtendBlockNets(g, bans[3:4])
+	if res.Added != 1 || len(failed) != 0 || g.set(BlockV6Clients)["2001:db8:1:4::/64"] != time.Hour {
+		t.Fatalf("one-by-one fallback: res=%+v failed=%v set=%v", res, failed, g.sets)
+	}
+	// The same /64 twice: one write, at the longer TTL.
+	d := newNetFake()
+	twice := []NetBan{{netip.MustParsePrefix("2001:db8:1:4::/64"), time.Hour}, {netip.MustParsePrefix("2001:db8:1:4::/64"), 2 * time.Hour}}
+	if res, _, failed := ExtendBlockNets(d, twice); res.Added != 1 || len(failed) != 0 || d.set(BlockV6Clients)["2001:db8:1:4::/64"] != 2*time.Hour {
+		t.Fatalf("twice: res=%+v failed=%v set=%v", res, failed, d.sets)
+	}
+	// Many: chunked.
+	h := newNetFake()
+	var many []NetBan
+	for i := 0; i < netBatchChunk+10; i++ {
+		many = append(many, NetBan{netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 9, byte(i >> 8), byte(i)}), 64), time.Hour})
+	}
+	if res, _, failed := ExtendBlockNets(h, many); res.Added != len(many) || len(failed) != 0 || h.batches != 2 {
+		t.Fatalf("chunked: res=%+v failed=%d batches=%d", res, len(failed), h.batches)
+	}
+}
+
+// Never shortened, exactly: an equal TTL keeps the ban, a second longer
+// extends it.
+func TestExtendClientBlockNeverShortensAtTheEdge(t *testing.T) {
+	f := newNetFake()
+	f.set(BlockV6Clients)[net6] = time.Hour
+	if _, kept, _ := ExtendClientBlock(f, net.ParseIP(v6a), time.Hour); !kept || len(f.writes) != 0 {
+		t.Fatalf("equal TTL: kept=%v writes=%v", kept, f.writes)
+	}
+	if _, kept, _ := ExtendClientBlock(f, net.ParseIP(v6a), time.Hour+time.Second); kept || f.set(BlockV6Clients)[net6] != time.Hour+time.Second {
+		t.Fatalf("a second longer: kept=%v set=%v", kept, f.sets)
+	}
+	if _, kept, _ := ExtendClientBlock(f, net.ParseIP(v6a), 59*time.Minute); !kept || f.set(BlockV6Clients)[net6] != time.Hour+time.Second {
+		t.Fatalf("shorter: kept=%v set=%v", kept, f.sets)
+	}
+}
+
+// The default-route gateway's /64 is never banned as a whole (dropping the
+// router's neighbour discovery would cut the node's IPv6).
+func TestGuardKeepsTheDefaultGatewaysSlash64(t *testing.T) {
+	dir := t.TempDir()
+	route := dir + "/ipv6_route"
+	// dest ::/0 via 2001:db8:1:2:2ff:ff:ff:ff (eth0), and a non-default route.
+	content := "00000000000000000000000000000000 00 00000000000000000000000000000000 00 20010db800010002002ff00ff00ff0ff 00000400 00000001 00000000 00000003     eth0\n" +
+		"20010db8000900000000000000000000 40 00000000000000000000000000000000 00 20010db8000500000000000000000001 00000400 00000001 00000000 00000003     eth0\n"
+	if err := os.WriteFile(route, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := procIPv6Route
+	procIPv6Route = route
+	t.Cleanup(func() { procIPv6Route = old })
+	f := newNetFake()
+	if elem, _, _ := ExtendClientBlock(f, net.ParseIP(v6a), time.Hour); elem != v6a {
+		t.Fatalf("a /64 holding the default gateway: elem=%q, want the address", elem)
+	}
+	if elem, _, _ := ExtendClientBlock(f, net.ParseIP("2001:db8:5::9"), time.Hour); elem != "2001:db8:5::/64" {
+		t.Fatalf("a non-default route's next hop is no guard: elem=%q", elem)
+	}
+}
+
+// A live ban reuses the guard view for guardCacheTTL on one backend.
+func TestGuardViewIsCached(t *testing.T) {
+	guardCacheTTL = time.Minute
+	t.Cleanup(func() { guardCacheTTL = 0; ResetGuardCache() })
+	f := newNetFake()
+	_, _, _ = ExtendClientBlock(f, net.ParseIP(v6a), time.Hour)
+	_, _, _ = ExtendClientBlock(f, net.ParseIP("2001:db8:7:7::1"), time.Hour)
+	if f.reads["self_v6"] != 1 {
+		t.Fatalf("self_v6 read %d times, want once within the cache TTL", f.reads["self_v6"])
+	}
+	g := newNetFake() // another backend: its own read
+	_, _, _ = ExtendClientBlock(g, net.ParseIP(v6a), time.Hour)
+	if g.reads["self_v6"] != 1 {
+		t.Fatalf("another backend reused the cache: %v", g.reads)
+	}
+}
+
+func TestParseClientTarget(t *testing.T) {
+	for in, want := range map[string]string{
+		"192.0.2.1":           "192.0.2.1",
+		"2001:db8:1:2::a":     "2001:db8:1:2::a",
+		"2001:db8:1:2::/64":   "2001:db8:1:2::",
+		"2001:db8:1:2::5/64":  "2001:db8:1:2::", // the /64 it names
+		"2001:db8:1::/48":     "",
+		"192.0.2.0/24":        "",
+		"::ffff:192.0.2.0/64": "",
+		"fe80::/64":           "", // ungrouped: no client /64
+		"64:ff9b::/64":        "",
+		"not-an-ip":           "",
+	} {
+		got := ""
+		if ip := ParseClientTarget(in); ip != nil {
+			got = ip.String()
+		}
+		if got != want {
+			t.Errorf("ParseClientTarget(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/nftables"
+
 	"cfm/internal/firewall"
 )
 
@@ -43,4 +45,39 @@ func (b *Backend) DeleteSetElem(set, elem string) error {
 		return err // a missing set (a table an older daemon built) is no error
 	}
 	return nil
+}
+
+// WriteSetElems writes many elements (CIDRs of an interval set) in ONE
+// netlink batch (one transaction).
+func (b *Backend) WriteSetElems(set string, elems []firewall.SetElemWrite) error {
+	if len(elems) == 0 {
+		return nil
+	}
+	var dels, adds []nftables.SetElement
+	for _, e := range elems {
+		a, err := cidrToIntervalElems(e.Elem, e.TTL)
+		if err != nil {
+			return fmt.Errorf("nftlib WriteSetElems %s: %w", set, err)
+		}
+		adds = append(adds, a...)
+		if e.Replace {
+			d, _ := cidrToIntervalElems(e.Elem, nil)
+			dels = append(dels, d...)
+		}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, err := b.lookupSet(set)
+	if err != nil {
+		return fmt.Errorf("nftlib WriteSetElems %s: %w", set, err)
+	}
+	if len(dels) > 0 {
+		if err := b.conn.SetDeleteElements(s, dels); err != nil {
+			return fmt.Errorf("nftlib WriteSetElems %s: %w", set, err)
+		}
+	}
+	if err := b.conn.SetAddElements(s, adds); err != nil {
+		return fmt.Errorf("nftlib WriteSetElems %s: %w", set, err)
+	}
+	return b.conn.Flush()
 }

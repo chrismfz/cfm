@@ -182,9 +182,14 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   prefix text (`2001:db8:1:2::/64`); a v4-mapped address is IPv4. Left as
   they are: loopback, link-local (a /64 there is the whole link), anything in
   `::/64` (it holds `::1`, the origin hop's source), multicast,
-  `64:ff9b::/64` (it holds NAT64's `/96`, each address an IPv4 client), zoned and unparsable
-  addresses. Known limits: a Teredo client shares its server's /64; a 6to4
-  (`2002::/16`) or any /48 / /56 customer can still rotate across its /64s.
+  `64:ff9b::/64` (it holds NAT64's `/96`, each address an IPv4 client), the
+  local-use NAT64 `64:ff9b:1::/48`, Teredo `2001::/32` (a /64 there is a
+  Teredo server, shared by its clients), zoned and unparsable addresses.
+  Only a key holding `/` is a /64; an ungrouped address comes back as given
+  (callers key canonical text). Known limits: an operator-chosen NAT64 /96
+  outside those ranges cannot be told apart; a 6to4 (`2002::/16`) or any
+  /48 / /56 customer can still rotate across its /64s; a ULA (`fc00::/7`) or
+  site-local /64 is grouped (the node's own is guarded).
 - **Never on an allow or an exact match** (an allow widened to a /64 allows a
   whole customer prefix), nor on a clearance cookie or a log line.
 - **nft:** a masked key (`ip6 saddr and ffff:ffff:ffff:ffff::`) in a dynamic
@@ -213,7 +218,8 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     element, checked on earth's 4.18).
   - **Guards:** the address is banned instead when the /64 holds this node's
     own address (its interfaces and `self_v6`: a provider handing one /64 to
-    several customers' VPSes), an ignored address or network (`ignore_v6`,
+    several customers' VPSes) or a default-route gateway (`/proc/net/ipv6_route`:
+    dropping the router's neighbour discovery would cut the node off), an ignored address or network (`ignore_v6`,
     `ignore_v6_nets`, `IGNORE_IPS` / `IGNORE_NETS`), or a trusted proxy's
     range (`trusted_proxies.conf`, loaded before the TTL restore: a
     detector that saw a proxy's own address must not ban the proxy's /64),
@@ -222,18 +228,33 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     from the edge ban store's last read): nft would still accept it, but the
     edge never answers a /64 an allow touches and the restore drops one, so
     the address is banned for all three alike; and when nft cannot read or
-    write the set. The TTL ban restore at boot checks the same sources
+    write the set. A live ban reads these guards at most once per 10 s
+    (`guardCacheTTL`; an allow or ignore added in that window is seen by the
+    next read, and the edge's own check is per answer). The TTL ban restore at boot checks the same sources
     (`ttlban.Store.ExcludeNet`, read from the files before the daemon loads
     them) and counts a refused /64 excluded. `cfm flush` empties the set
     like the other block sets.
   - **Edge:** the edge ban store keys it as the /64 and answers every
     address of it, except where an allow, a trusted proxy range or an
-    `IGNORE_IPS` entry touches any of it.
+    `IGNORE_IPS` entry touches any of it. An allow added after a /64 ban:
+    the edge stops answering the /64 at its next reconcile, while nft keeps
+    the ban to its TTL (it accepts the allowed address before its drops
+    anyway); `cfm unblock` frees the rest at once.
   - **Restart, unblock:** TTL /64 bans survive a restart (`internal/ttlban`;
     a permanent one, like a detector's permanent host ban, is not
-    persisted). Unblocking any address of the /64 frees the /64 (nft, the
-    edge, `ttlbans.json`, `cfm unblock` with the daemon down too). The alert
-    says "Banned as: <the /64>".
+    persisted). The restore writes the /64s in batches (one transaction per
+    500, `firewall.ExtendBlockNets`, one guard and set read for all; a
+    refused batch falls back one at a time): one at a time, 1000 /64s took
+    33.6 s on the exec engine, past the edge ban reconcile's 30 s wait, and
+    that reconcile then dropped them from the edge. Unblocking any address of
+    the /64, or the /64 itself (`cfm unblock 2001:db8:1:2::/64`, the API
+    alike), frees the /64 (nft, the edge, `ttlbans.json`, `cfm unblock` with
+    the daemon down too). The alert says "Banned as: <the /64>".
+  - **Downgrade:** a cfm from before this leaves `block_v6_clients` and its
+    drops in place (nothing removes them), but its `cfm unblock` and
+    `cfm flush` do not touch the set: free a /64 there with
+    `nft delete element inet cfm block_v6_clients '{ <the /64> }'`, or flush
+    it, or let its TTL run out.
 - **Still per address:** counters, rate limits and the edge's shared dicts
   (next), then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
 

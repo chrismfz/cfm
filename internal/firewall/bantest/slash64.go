@@ -4,6 +4,7 @@ package bantest
 
 import (
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,12 +134,14 @@ func RunClientSlash64Bans(t *testing.T, newBackend func() firewall.Backend) {
 	// A /64 holding this node's own address, or an ignored one, is never
 	// banned as a whole: the address is.
 	nft("add", "element", "inet", "cfm", "self_v6", "{ 2001:db8:7:7::1/128 }")
+	firewall.ResetGuardCache() // a live ban reuses its guard read for 10s
 	if elem, _, err := firewall.ExtendClientBlock(be, net.ParseIP("2001:db8:7:7::99"), time.Hour); err != nil || elem != "2001:db8:7:7::99" {
 		t.Fatalf("a /64 with this node in it: elem=%q err=%v", elem, err)
 	}
 	if err := be.AddIgnore(net.ParseIP("2001:db8:8:8::5"), nil); err != nil {
 		t.Fatal(err)
 	}
+	firewall.ResetGuardCache()
 	if elem, _, err := firewall.ExtendClientBlock(be, net.ParseIP("2001:db8:8:8::99"), time.Hour); err != nil || elem != "2001:db8:8:8::99" {
 		t.Fatalf("a /64 with an ignored address in it: elem=%q err=%v", elem, err)
 	}
@@ -183,6 +186,32 @@ func RunClientSlash64Bans(t *testing.T, newBackend func() firewall.Backend) {
 	}
 	if n := elems(be, firewall.BlockV6Clients); n["2001:db8:5:6::/64"] < 119*time.Minute {
 		t.Fatalf("the /64 TTL ban did not come back: %v", n)
+	}
+
+	// The restore's batch on a live nft: more than one chunk, one /64 already
+	// held longer (kept), one shorter (extended in the same transaction).
+	if _, _, err := firewall.ExtendClientBlock(be, net.ParseIP("2001:db8:9:0::1"), 3*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := firewall.ExtendClientBlock(be, net.ParseIP("2001:db8:9:1::1"), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var many []firewall.NetBan
+	for i := 0; i < 600; i++ {
+		many = append(many, firewall.NetBan{P: netip.PrefixFrom(netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 9, byte(i >> 8), byte(i)}), 64), TTL: time.Hour})
+	}
+	res, guarded, failed := firewall.ExtendBlockNets(be, many)
+	if res.Added != 598 || res.Extended != 1 || res.Kept != 1 || len(guarded) != 0 || len(failed) != 0 {
+		t.Fatalf("batch: res=%+v guarded=%v failed=%v", res, guarded, failed)
+	}
+	got := elems(be, firewall.BlockV6Clients)
+	if got["2001:db8:9::/64"] < 179*time.Minute || got["2001:db8:9:1::/64"] < 59*time.Minute || got["2001:db8:9:257::/64"] < 59*time.Minute {
+		t.Fatalf("after the batch: %d elements, 9:0 %v 9:1 %v 9:257 %v", len(got), got["2001:db8:9::/64"], got["2001:db8:9:1::/64"], got["2001:db8:9:257::/64"])
+	}
+	for _, nb := range many {
+		if err := firewall.RemoveClientPrefix(be, nb.P); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// An upgrade: a chain from before block_v6_clients (its two drops gone).

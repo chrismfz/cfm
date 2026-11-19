@@ -353,6 +353,7 @@ func (b *failingBatchBackend) RemoveBlock(ip net.IP) error {
 	return nil
 }
 func (b *failingBatchBackend) WriteSetElem(string, string, *time.Duration, bool) error { return nil }
+func (b *failingBatchBackend) WriteSetElems(string, []firewall.SetElemWrite) error     { return nil }
 func (b *failingBatchBackend) ListSetElementsTimed(set string) ([]firewall.SetElementTimed, error) {
 	if set == firewall.BlockV6Clients {
 		return []firewall.SetElementTimed{{Elem: "2001:db8::/64", Expires: time.Hour}}, nil

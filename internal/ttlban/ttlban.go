@@ -295,23 +295,29 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 	var undoNets []netip.Prefix
 	if be != nil && len(nets) > 0 {
 		sort.Slice(nets, func(i, j int) bool { return nets[i].p.Addr().Less(nets[j].p.Addr()) })
-		var guarded []string
+		// One batch (one guard read, one read of the set, a transaction per
+		// chunk): one by one, a thousand /64s outlasted the edge ban store's
+		// wait for the restore, and its first reconcile then dropped them.
+		bans := make([]firewall.NetBan, 0, len(nets))
 		for _, n := range nets {
-			_, nerr := firewall.ExtendBlockNet(be, n.p, n.ttl)
-			switch {
-			case errors.Is(nerr, firewall.ErrClientNetGuarded):
-				// It holds an address it must not drop now: excluded, as an
-				// allowed host ban is, not a failed restore.
-				res.Excluded++
-				guarded = append(guarded, n.p.String())
-			case nerr != nil && err == nil:
-				err = fmt.Errorf("ttlban: restore %s: %w", n.p, nerr)
+			bans = append(bans, firewall.NetBan{P: n.p, TTL: n.ttl})
+		}
+		nres, guardedNets, failedNets := firewall.ExtendBlockNets(be, bans)
+		res.Batch.Added += nres.Added
+		res.Batch.Extended += nres.Extended
+		res.Batch.Kept += nres.Kept
+		for p, nerr := range failedNets {
+			if err == nil {
+				err = fmt.Errorf("ttlban: restore %s: %w", p, nerr)
 			}
 		}
-		if len(guarded) > 0 {
+		if len(guardedNets) > 0 {
+			// They hold an address they must not drop now: excluded, as an
+			// allowed host ban is, not a failed restore.
+			res.Excluded += len(guardedNets)
 			s.mu.Lock()
-			for _, k := range guarded {
-				delete(s.bans, k)
+			for _, p := range guardedNets {
+				delete(s.bans, p.String())
 			}
 			s.mu.Unlock() // saved below (Excluded > 0)
 		}

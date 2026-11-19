@@ -14,7 +14,8 @@
 --   there is every neighbour on the link), any address in ::/64 (that /64
 --   holds ::1, the edge's own origin hop), multicast (ff00::/8),
 --   64:ff9b::/64 (it holds NAT64's 64:ff9b::/96, each address there an IPv4
---   client), a zone id ("%eth0")
+--   client), the local-use NAT64 64:ff9b:1::/48 (RFC 8215), Teredo 2001::/32
+--   (a /64 there is a Teredo server, shared by its clients), a zone id ("%eth0")
 --   and anything unparsable.
 --
 -- Never key an ALLOW or an exact match on this (an allow widened to a /64
@@ -85,6 +86,8 @@ end
 local V4MAPPED = "00000000000000000000ffff"
 local LOOPBACK = "00000000000000000000000000000001"
 local NAT64 = "0064ff9b00000000"
+local NAT64_LOCAL = "0064ff9b0001" -- /48
+local TEREDO = "20010000"         -- /32
 
 -- client(ip): the key described above.
 function M.client(ip)
@@ -97,7 +100,8 @@ function M.client(ip)
       math.floor(n / 256) % 256, n % 256)
   end
   if h == LOOPBACK or h:match("^fe[89ab]") or h:sub(1, 16) == "0000000000000000"
-     or h:sub(1, 2) == "ff" or h:sub(1, 16) == NAT64 then
+     or h:sub(1, 2) == "ff" or h:sub(1, 16) == NAT64
+     or h:sub(1, 12) == NAT64_LOCAL or h:sub(1, 8) == TEREDO then
     return ip
   end
   -- The first four groups; the zero run that ends the /64 (at least the four

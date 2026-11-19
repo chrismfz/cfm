@@ -1,10 +1,12 @@
 package firewall
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -62,6 +64,136 @@ type SetElemWriter interface {
 	// DeleteSetElem deletes elem from set; an element the set does not hold
 	// is not an error.
 	DeleteSetElem(set, elem string) error
+	// WriteSetElems is WriteSetElem for many elements in ONE transaction
+	// (the TTL ban restore; the caller chunks): all written or none.
+	WriteSetElems(set string, elems []SetElemWrite) error
+}
+
+// SetElemWrite is one element for WriteSetElems.
+type SetElemWrite struct {
+	Elem    string
+	TTL     *time.Duration // nil: permanent
+	Replace bool           // delete the element equal to Elem first
+}
+
+// NetBan is one /64 for ExtendBlockNets.
+type NetBan struct {
+	P   netip.Prefix
+	TTL time.Duration
+}
+
+// netBatchChunk is how many elements one WriteSetElems transaction holds.
+const netBatchChunk = 500
+
+// ExtendBlockNets bans many /64s in block_v6_clients, never shortening a ban:
+// the TTL ban restore. One guard read and one read of the set for the whole
+// batch, then one transaction per netBatchChunk elements; a refused chunk is
+// retried one element at a time, so one bad element costs only itself (one at
+// a time, 1000 restored /64s took 34 s on exec, past the edge ban store's
+// wait). guarded lists the /64s a guard refused (ErrClientNetGuarded's
+// cases), failed the ones that could not be written.
+func ExtendBlockNets(be Backend, bans []NetBan) (res BlockBatchResult, guarded []netip.Prefix, failed map[netip.Prefix]error) {
+	failed = map[netip.Prefix]error{}
+	failAll := func(err error) {
+		for _, b := range bans {
+			failed[b.P] = err
+		}
+	}
+	w, ok := be.(SetElemWriter)
+	if !ok {
+		failAll(fmt.Errorf("this backend cannot write %s", BlockV6Clients))
+		return res, nil, failed
+	}
+	view, err := newGuardView(be)
+	if err != nil {
+		failAll(fmt.Errorf("cannot check what the /64s hold: %w", err))
+		return res, nil, failed
+	}
+	netBlockMu.Lock()
+	defer netBlockMu.Unlock()
+	elems, err := be.ListSetElementsTimed(BlockV6Clients)
+	if err != nil {
+		failAll(fmt.Errorf("cannot read %s: %w", BlockV6Clients, err))
+		return res, nil, failed
+	}
+	type held struct {
+		permanent bool
+		left      time.Duration
+	}
+	have := map[netip.Prefix]held{}
+	for _, e := range elems {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(e.Elem)); err == nil {
+			have[p.Masked()] = held{e.Expires <= 0, e.Expires}
+		}
+	}
+	// One /64 once, at its longest TTL: one transaction must not add an
+	// interval twice.
+	longest := map[netip.Prefix]time.Duration{}
+	var order []NetBan
+	for _, b := range bans {
+		if t, seen := longest[b.P]; seen {
+			longest[b.P] = max(t, b.TTL)
+			continue
+		}
+		longest[b.P] = b.TTL
+		order = append(order, b)
+	}
+	var writes []SetElemWrite
+	extended := map[string]bool{}
+	for _, b := range order {
+		b.TTL = longest[b.P]
+		p := b.P.Masked()
+		if !p.IsValid() || !p.Addr().Is6() || p.Addr().Is4In6() || p != b.P {
+			failed[b.P] = fmt.Errorf("not an IPv6 network: %v", b.P)
+			continue
+		}
+		if why := view.refuses(p); why != "" {
+			logging.Logf("[firewall] ban of %s: %s", p, why)
+			guarded = append(guarded, p)
+			continue
+		}
+		ttl := b.TTL
+		if ttl < time.Second {
+			ttl = time.Second
+		}
+		h, exists := have[p]
+		if exists && (h.permanent || h.left >= ttl) {
+			res.Kept++
+			continue
+		}
+		t := ttl
+		writes = append(writes, SetElemWrite{Elem: p.String(), TTL: &t, Replace: exists})
+		extended[p.String()] = exists
+	}
+	count := func(e SetElemWrite) {
+		if extended[e.Elem] {
+			res.Extended++
+		} else {
+			res.Added++
+		}
+	}
+	for i := 0; i < len(writes); i += netBatchChunk {
+		chunk := writes[i:min(i+netBatchChunk, len(writes))]
+		if err := w.WriteSetElems(BlockV6Clients, chunk); err == nil {
+			for _, e := range chunk {
+				count(e)
+			}
+			continue
+		}
+		for _, e := range chunk { // one at a time: the bad one costs only itself
+			err := w.WriteSetElem(BlockV6Clients, e.Elem, e.TTL, e.Replace)
+			if err != nil && e.Replace {
+				// Expired since the read: its delete fails, a plain add stands.
+				err = w.WriteSetElem(BlockV6Clients, e.Elem, e.TTL, false)
+			}
+			if err != nil {
+				failed[netip.MustParsePrefix(e.Elem)] = err
+				continue
+			}
+			count(e)
+		}
+	}
+	return res, guarded, failed
 }
 
 // netBlockMu serialises the read-then-write of a /64 ban: two extends of one
@@ -387,50 +519,159 @@ var clientNetGuardSets = []string{"self_v6", "ignore_v6", "ignore_v6_nets", "all
 // no "allow_sets" snapshot is registered.
 var clientNetFleetAllowSets = []string{"allow_ext_v6_hosts", "allow_ext_v6_nets"}
 
-// clientNetGuard says why p must not be banned as a whole ("" when it may).
-func clientNetGuard(be Backend, p netip.Prefix) (string, error) {
+// guardSpan is one element of a guard set, as its first and last address.
+type guardSpan struct {
+	lo, hi netip.Addr
+	text   string // the element, or the address, as logged
+	what   string // "this node's own address", the set's name
+}
+
+// guardView is what a /64 must not cover, read once: this node's interface
+// addresses and default-route gateways, and the guard sets' elements. The
+// registered checks (SetClientNetExempt) are asked live.
+type guardView struct {
+	spans []guardSpan
+}
+
+// refuses says why p must not be banned as a whole ("" when it may).
+func (v *guardView) refuses(p netip.Prefix) string {
 	if name := ClientNetExempted(p); name != "" {
-		return fmt.Sprintf("the /64 is refused by the %s check", name), nil
+		return fmt.Sprintf("the /64 is refused by the %s check", name)
 	}
+	plo, phi := prefixRange(p)
+	for _, g := range v.spans {
+		if !g.hi.Less(plo) && !phi.Less(g.lo) {
+			return fmt.Sprintf("the /64 holds %s (%s)", g.what, g.text)
+		}
+	}
+	return ""
+}
+
+// guardCacheTTL is how long a live ban reuses a guardView (each read is
+// several nft runs on exec: an IPv6 ban storm must not pay them per ban).
+// An allow, ignore or self address added since is seen within it. A var:
+// tests set 0.
+var guardCacheTTL = 10 * time.Second
+
+var (
+	guardCacheMu sync.Mutex
+	guardCache   struct {
+		be   Backend
+		at   time.Time
+		view *guardView
+		sets int // the number of sets it read (the fleet allows or not)
+	}
+)
+
+// cachedGuardView is newGuardView, reused for guardCacheTTL on one backend.
+func cachedGuardView(be Backend) (*guardView, error) {
+	sets := len(guardSetsNow())
+	guardCacheMu.Lock()
+	defer guardCacheMu.Unlock()
+	c := &guardCache
+	if guardCacheTTL > 0 && c.view != nil && c.be == be && c.sets == sets && time.Since(c.at) < guardCacheTTL {
+		return c.view, nil
+	}
+	v, err := newGuardView(be)
+	if err != nil {
+		return nil, err
+	}
+	c.be, c.at, c.view, c.sets = be, time.Now(), v, sets
+	return v, nil
+}
+
+// ResetGuardCache drops the cached guard view: the next ban reads its guards
+// afresh (a test that changes a guard set behind the backend's back).
+func ResetGuardCache() {
+	guardCacheMu.Lock()
+	guardCache.view = nil
+	guardCacheMu.Unlock()
+}
+
+// guardSetsNow are the sets a guardView reads now: the fleet whitelist's too
+// while no "allow_sets" snapshot is registered (boot, before the edge ban
+// store's first reconcile; or a store cleared after failed reads).
+func guardSetsNow() []string {
+	if clientNetExemptRegistered("allow_sets") {
+		return clientNetGuardSets
+	}
+	return append(append([]string(nil), clientNetGuardSets...), clientNetFleetAllowSets...)
+}
+
+// procIPv6Route is the kernel's IPv6 routing table (a var: tests point it at
+// a file).
+var procIPv6Route = "/proc/net/ipv6_route"
+
+// defaultGateways are the next hops of this node's IPv6 default routes: the
+// provider's router, whose /64 a ban must not cover (dropping its
+// neighbour discovery would cut the node's IPv6). A link-local one is
+// ungrouped anyway.
+func defaultGateways() []netip.Addr {
+	raw, err := os.ReadFile(procIPv6Route) // #nosec G304 -- fixed kernel path
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 5 || f[0] != strings.Repeat("0", 32) || f[1] != "00" || f[4] == strings.Repeat("0", 32) {
+			continue
+		}
+		b, err := hex.DecodeString(f[4])
+		if err != nil || len(b) != 16 {
+			continue
+		}
+		out = append(out, netip.AddrFrom16([16]byte(b)))
+	}
+	return out
+}
+
+// newGuardView reads what a /64 must not cover. A guard set it cannot read is
+// an error (the caller bans the address).
+func newGuardView(be Backend) (*guardView, error) {
+	v := &guardView{}
 	// This node's own addresses, from its interfaces: self_v6 below is
 	// rewritten (flushed, then filled) on every refresh, and a read in
 	// between would miss them.
 	if addrs, err := localAddrs(); err == nil {
 		for _, a := range addrs {
 			if n, ok := a.(*net.IPNet); ok {
-				if ip, ok := netip.AddrFromSlice(n.IP); ok && p.Contains(ip.Unmap()) {
-					return fmt.Sprintf("the /64 holds this node's own address (%s)", ip), nil
+				if ip, ok := netip.AddrFromSlice(n.IP); ok && ip.Unmap().Is6() {
+					ip = ip.Unmap()
+					v.spans = append(v.spans, guardSpan{lo: ip, hi: ip, text: ip.String(), what: "this node's own address"})
 				}
 			}
 		}
 	}
-	plo, phi := prefixRange(p)
-	sets := clientNetGuardSets
-	if !clientNetExemptRegistered("allow_sets") {
-		// No allow snapshot yet (boot, before the edge ban store's first
-		// reconcile; or a store cleared after failed reads): read the fleet
-		// whitelist itself.
-		sets = append(append([]string(nil), sets...), clientNetFleetAllowSets...)
+	for _, gw := range defaultGateways() {
+		v.spans = append(v.spans, guardSpan{lo: gw, hi: gw, text: gw.String(), what: "this node's default gateway"})
 	}
-	for _, set := range sets {
+	for _, set := range guardSetsNow() {
 		elems, err := be.ListSetElementsTimed(set)
 		if err != nil {
-			return "", fmt.Errorf("%s: %w", set, err)
+			return nil, fmt.Errorf("%s: %w", set, err)
+		}
+		what := set
+		if set == "self_v6" {
+			what = "this node's own address"
 		}
 		for _, e := range elems {
-			lo, hi, ok := ElemRange(e.Elem)
-			if !ok || !lo.Is6() {
-				continue
-			}
-			if !hi.Less(plo) && !phi.Less(lo) {
-				if set == "self_v6" {
-					return fmt.Sprintf("the /64 holds this node's own address (%s)", strings.TrimSpace(e.Elem)), nil
-				}
-				return fmt.Sprintf("the /64 holds %s (%s)", strings.TrimSpace(e.Elem), set), nil
+			if lo, hi, ok := ElemRange(e.Elem); ok && lo.Is6() {
+				v.spans = append(v.spans, guardSpan{lo: lo, hi: hi, text: strings.TrimSpace(e.Elem), what: what})
 			}
 		}
 	}
-	return "", nil
+	return v, nil
+}
+
+// clientNetGuard says why p must not be banned as a whole ("" when it may),
+// from the cached view.
+func clientNetGuard(be Backend, p netip.Prefix) (string, error) {
+	v, err := cachedGuardView(be)
+	if err != nil {
+		return "", err
+	}
+	return v.refuses(p), nil
 }
 
 // prefixRange is p's first and last address.
@@ -481,4 +722,23 @@ func ElemRange(s string) (lo, hi netip.Addr, ok bool) {
 	}
 	a = a.Unmap()
 	return a, a, true
+}
+
+// ParseClientTarget reads an unblock target: an address, or an IPv6 client
+// /64 as an automatic ban names it ("2001:db8:1:2::/64", the text of
+// block_v6_clients and of the ban notification), which stands for any
+// address of it. Anything else is nil.
+func ParseClientTarget(s string) net.IP {
+	if ip := net.ParseIP(s); ip != nil {
+		return ip
+	}
+	p, err := netip.ParsePrefix(s)
+	if err != nil || !p.Addr().Is6() || p.Addr().Is4In6() || p.Bits() != 64 {
+		return nil
+	}
+	ip := net.IP(p.Masked().Addr().AsSlice())
+	if cn, ok := ClientNet(ip); !ok || cn != p.Masked() {
+		return nil // an ungrouped range: no client /64 to free
+	}
+	return ip
 }

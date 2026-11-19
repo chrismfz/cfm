@@ -102,7 +102,8 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			}
 		}
 
-		ip := net.ParseIP(ipStr)
+		// An address, or an automatic IPv6 client ban's /64.
+		ip := firewall.ParseClientTarget(ipStr)
 		if ip == nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{

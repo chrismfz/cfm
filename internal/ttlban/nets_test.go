@@ -16,6 +16,7 @@ type netsFake struct {
 	batchFake
 	nets    map[string]time.Duration // 0 = permanent
 	addErr  error
+	batches int
 	added   []string
 	removed []string
 }
@@ -41,6 +42,19 @@ func (f *netsFake) WriteSetElem(set, cidr string, ttl *time.Duration, replace bo
 	f.nets[cidr] = 0
 	if ttl != nil {
 		f.nets[cidr] = *ttl
+	}
+	return nil
+}
+
+func (f *netsFake) WriteSetElems(set string, elems []firewall.SetElemWrite) error {
+	f.batches++
+	if f.addErr != nil {
+		return f.addErr // all or none, as one transaction
+	}
+	for _, e := range elems {
+		if err := f.WriteSetElem(set, e.Elem, e.TTL, e.Replace); err != nil {
+			return err
+		}
 	}
 	return nil
 }

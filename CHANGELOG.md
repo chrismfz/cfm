@@ -21,7 +21,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Security
-- **An automatic L7 ban of an IPv6 client takes its whole /64.** The
+- **An automatic L7 ban of an IPv6 client takes its whole /64** (not a
+  loopback, link-local, NAT64 or Teredo address: a /64 there is shared by
+  unrelated clients, so those stay per address). The
   detector sections (waf_security, the web detector, logins…), the challenge
   server and the admin API's login autoblock, TTL and permanent, banned the
   one address, so a client rotating inside the /64 any VPS or ISP line hands
@@ -32,20 +34,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   CIDRs. A /64 ban is only ever added or extended, an extend replaces it in
   one transaction, and the address is banned instead (no ban is lost) when
   the /64 holds this node's own address (a provider sharing one /64 between
-  customers' VPSes), an ignored address or network (`cfm.ignore`,
+  customers' VPSes) or its default gateway, an ignored address or network (`cfm.ignore`,
   `IGNORE_IPS` / `IGNORE_NETS`), an allowed one, a trusted proxy's range
   (Cloudflare's), or nft cannot write it. `cfm flush` empties
   `block_v6_clients` too. The edge bans the
   /64 too for clients behind Cloudflare (not where an allow or a trusted
   proxy range touches it), a TTL /64 ban survives a reboot or `cfm reset`
   (`ttlbans.json`; a permanent one, like a detector's permanent host ban, is
-  not persisted), and unblocking any of its addresses frees the /64. The
+  not persisted; the boot restore writes them in batches, so a thousand land
+  inside the edge's 30 s wait), and unblocking any of its addresses, or the
+  /64 itself (`cfm unblock <the /64>`), frees the /64. The
   alert says `Banned as: <the /64>`. The kernel flood / port-scan autoblock
   stays per address (it counts packets whose source can be spoofed: a /64
   there would let a forged prefix ban someone else's), as do IPv4 and manual
   bans; counters and rate limits are still per address (next). Live netns
-  run on both engines (and the kernel behaviour on earth's 4.18);
-  `docs/edge-ipv6.md` "IPv6 /64 grouping".
+  run on both engines (and the kernel behaviour on earth's 4.18 and rigel's
+  5.14). A downgrade leaves the set in place, but the older `cfm unblock` /
+  `cfm flush` do not touch it; `docs/edge-ipv6.md` "IPv6 /64 grouping".
 - **IPv6 link-local clients (`fe80::/10`) are never self at the edge.**
   `cfm_selfip.lua` counted them as the node's own, so a request from one
   skipped the WAF and the challenge (cfm.lua Step 0a). Harmless while the

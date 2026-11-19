@@ -4,7 +4,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,12 +20,13 @@ import (
 
 func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP>")
+		fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP | IPv6 client /64>")
 		return 2
 	}
-	ip := net.ParseIP(args[0])
+	// An address, or an automatic IPv6 client ban's /64.
+	ip := firewall.ParseClientTarget(args[0])
 	if ip == nil {
-		fmt.Fprintln(os.Stderr, "invalid IP")
+		fmt.Fprintln(os.Stderr, "invalid IP (an address, or an IPv6 client /64)")
 		return 2
 	}
 
