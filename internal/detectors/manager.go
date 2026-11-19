@@ -5,6 +5,7 @@ import (
 	core "cfm/internal/detectors/core"
 	"cfm/internal/detectorstatus"
 	"cfm/internal/enrich"
+	"cfm/internal/firewall"
 	"cfm/internal/hostsecrets"
 	"cfm/internal/logging"
 	"cfm/internal/sslcollector"
@@ -345,6 +346,10 @@ func (m *manager) maybeReload(parent context.Context) {
 
 	// --- ΝΕΟ: build global ignore από [global] ---
 	ig := newIPIgnoreFromGlobal(secs.Global)
+	// An automatic IPv6 client /64 ban never drops an ignored address: it
+	// bans the address instead (firewall/client_block.go). A nil ig (no
+	// IGNORE_IPS / IGNORE_NETS) overlaps nothing.
+	firewall.SetClientNetExempt("ignore", ig.OverlapsPrefix)
 	if ig != nil {
 		logging.Logf("[detectors] global ignore enabled: IGNORE_IPS=%q IGNORE_NETS=%q",
 			kvStrClean(secs.Global, "IGNORE_IPS", ""),

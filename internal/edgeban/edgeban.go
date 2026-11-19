@@ -20,6 +20,12 @@
 // that came through a trusted proxy: a direct client is nft's alone. Anything
 // uncertain fails toward NOT blocking: the store answers nothing until its
 // first reconcile, and a disabled store answers nothing.
+//
+// An entry is what nft blocks: an address, or the /64 an automatic ban of an
+// IPv6 client takes (firewall.ExtendClientBlock; docs/edge-ipv6.md "IPv6 /64
+// grouping"), keyed as ipkey prints it ("2001:db8:1:2::/64"). A /64 that an
+// allow set or a trusted proxy range overlaps, even in part, is never
+// answered: the edge cannot tell the allowed address from the rest of it.
 package edgeban
 
 import (
@@ -27,6 +33,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -37,6 +44,7 @@ import (
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/ipkey"
 	"cfm/internal/logging"
 	"cfm/internal/proxyipfilter"
 )
@@ -102,6 +110,9 @@ func SetTrustedProxies(nets []*net.IPNet) {
 	}
 	a.merge()
 	proxies.Store(a)
+	// Nor does nft ban a proxy's whole /64 (a detector that saw the proxy's
+	// own address): firewall/client_block.go bans the address instead.
+	firewall.SetClientNetExempt("trusted_proxies", func(p netip.Prefix) bool { return proxies.Load().overlaps(p) })
 	version.Add(1)
 }
 
@@ -145,6 +156,30 @@ func ParseTrustedProxies(text string) []*net.IPNet {
 }
 
 func init() { enabled.Store(true) }
+
+// registerAllowExempt tells the firewall, once the Default store holds an
+// allow snapshot, that a /64 the allow sets touch (the fleet whitelist
+// included) is never banned as a whole: the edge would never answer it
+// (answers) and the TTL restore drops it, so nft bans the address instead
+// (firewall/client_block.go). Until then (and after Clear) the firewall reads
+// the fleet whitelist sets itself.
+func (s *Store) registerAllowExempt(on bool) {
+	if s == nil || s != Default() {
+		return
+	}
+	if !on {
+		firewall.SetClientNetExempt("allow_sets", nil)
+		return
+	}
+	firewall.SetClientNetExempt("allow_sets", func(p netip.Prefix) bool {
+		d := Default()
+		if d == nil {
+			return false
+		}
+		a := d.allow.Load()
+		return a != nil && a.overlaps(p)
+	})
+}
 
 // SetEnabled is the [webdetector] EDGE_BAN kill switch: off, Banned answers
 // false for every address (the store keeps its entries).
@@ -211,11 +246,50 @@ func key(ip net.IP) string {
 	return ip.String()
 }
 
+// keyOf is the key of a ban element: an address (key), or an IPv6 client's
+// /64 exactly as ipkey groups it, in its text. Any other CIDR is no
+// edge ban ("").
+func keyOf(elem string) string {
+	elem = strings.TrimSpace(elem)
+	if !strings.Contains(elem, "/") {
+		return key(net.ParseIP(elem))
+	}
+	p, err := netip.ParsePrefix(elem)
+	if err != nil {
+		return ""
+	}
+	if g, ok := ipkey.Prefix(p.Addr()); !ok || g != p {
+		return ""
+	}
+	return p.String()
+}
+
+// clientKey is the /64 key of addr when ipkey groups it, else "".
+func clientKey(addr net.IP) string {
+	a, ok := netip.AddrFromSlice(addr)
+	if !ok {
+		return ""
+	}
+	if p, grouped := ipkey.Prefix(a.Unmap()); grouped {
+		return p.String()
+	}
+	return ""
+}
+
 // Add records a ban of ip for ttl (nil or <= 0: permanent). exact replaces
 // the entry (a manual ban sets the operator's TTL, as AddBlock does);
 // otherwise a longer or permanent entry is kept (as ExtendBlock does).
 func (s *Store) Add(ip net.IP, ttl *time.Duration, source string, exact bool) {
-	k := key(ip)
+	s.add(key(ip), ttl, source, exact)
+}
+
+// AddElem is Add for a ban element as firewall.ExtendClientBlock names it:
+// an address or an IPv6 client's /64.
+func (s *Store) AddElem(elem string, ttl *time.Duration, source string, exact bool) {
+	s.add(keyOf(elem), ttl, source, exact)
+}
+
+func (s *Store) add(k string, ttl *time.Duration, source string, exact bool) {
 	if s == nil || k == "" {
 		return
 	}
@@ -244,18 +318,28 @@ func outlasts(a, b Entry) bool {
 	return !a.Expires.Before(b.Expires)
 }
 
-// Remove drops ip (an unblock).
+// Remove drops ip (an unblock): the address, and the /64 ban of its client
+// (unblocking an IPv6 address frees its /64, which is the client). A /64
+// key itself is accepted too.
 func (s *Store) Remove(ip string) {
 	if s == nil {
 		return
 	}
-	k := key(net.ParseIP(strings.TrimSpace(ip)))
-	if k == "" {
-		return
+	keys := []string{keyOf(ip)}
+	if addr := net.ParseIP(strings.TrimSpace(ip)); addr != nil {
+		keys = append(keys, clientKey(addr))
 	}
+	had := false
 	s.mu.Lock()
-	_, had := s.m[k]
-	delete(s.m, k)
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		if _, ok := s.m[k]; ok {
+			had = true
+			delete(s.m, k)
+		}
+	}
 	s.mu.Unlock()
 	if had {
 		s.save()
@@ -273,23 +357,47 @@ func (s *Store) Banned(ip string) (bool, time.Duration) {
 	if k == "" {
 		return false, 0
 	}
+	ck := clientKey(addr)
 	s.mu.RLock()
 	e, ok := s.m[k]
-	s.mu.RUnlock()
-	if !ok {
-		return false, 0
+	ce, cok := Entry{}, false
+	if ck != "" {
+		ce, cok = s.m[ck]
 	}
-	return s.answers(addr, e, s.now())
+	s.mu.RUnlock()
+	now := s.now()
+	if ok {
+		if b, left := s.answers(k, e, now); b {
+			return b, left
+		}
+	}
+	if cok {
+		return s.answers(ck, ce, now)
+	}
+	return false, 0
 }
 
-// answers is Banned for an entry the store holds.
-func (s *Store) answers(addr net.IP, e Entry, now time.Time) (bool, time.Duration) {
-	// nft accepts an allowed address before any block drop: so does the edge.
-	if a := s.allow.Load(); a != nil && a.contains(addr) {
-		return false, 0
-	}
-	if isTrustedProxy(addr) {
-		return false, 0
+// answers is Banned for an entry the store holds under k (an address or a
+// /64).
+func (s *Store) answers(k string, e Entry, now time.Time) (bool, time.Duration) {
+	if p, err := netip.ParsePrefix(k); err == nil {
+		// A /64: never answered when an allow or a trusted proxy range
+		// touches any of it (the edge cannot tell those addresses apart).
+		if a := s.allow.Load(); a != nil && a.overlaps(p) {
+			return false, 0
+		}
+		if proxies.Load().overlaps(p) {
+			return false, 0
+		}
+	} else {
+		addr := net.ParseIP(k)
+		// nft accepts an allowed address before any block drop: so does the edge.
+		if a := s.allow.Load(); a != nil && a.contains(addr) {
+			return false, 0
+		}
+		if isTrustedProxy(addr) {
+			return false, 0
+		}
 	}
 	if e.Expires.IsZero() {
 		return true, 0
@@ -330,7 +438,7 @@ func (s *Store) List() []Item {
 	s.mu.RUnlock()
 	out := all[:0]
 	for i, it := range all {
-		if ok, _ := s.answers(net.ParseIP(it.IP), ents[i], now); ok {
+		if ok, _ := s.answers(it.IP, ents[i], now); ok {
 			out = append(out, it)
 		}
 	}
@@ -376,7 +484,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 	now := s.now()
 	inNft := make(map[string]time.Time, len(snap.Blocks)) // zero = permanent
 	for _, b := range snap.Blocks {
-		if k := key(net.ParseIP(strings.TrimSpace(b.Elem))); k != "" {
+		if k := keyOf(b.Elem); k != "" {
 			var exp time.Time
 			if b.Expires > 0 {
 				exp = now.Add(b.Expires)
@@ -386,6 +494,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 	}
 	allow := parseAllowSet(snap.Allows)
 	old := s.allow.Swap(allow)
+	s.registerAllowExempt(true)
 	changed := false
 	s.mu.Lock()
 	for k, e := range s.m {
@@ -395,7 +504,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 		case !e.Expires.IsZero() && !e.Expires.After(now):
 			delete(s.m, k)
 			changed = true
-		case allow.contains(net.ParseIP(k)):
+		case allow.coversKey(k):
 			delete(s.m, k)
 			changed = true
 		case !blocked && !fresh:
@@ -435,6 +544,7 @@ func (s *Store) Clear() {
 	s.ready.Store(false)
 	s.cleared.Store(true)
 	s.allow.Store(nil)
+	s.registerAllowExempt(false)
 	version.Add(1)
 }
 
@@ -602,6 +712,36 @@ func norm(ip net.IP) net.IP {
 	return ip.To16()
 }
 
+// overlaps reports whether any address of p is in the set.
+func (a *allowSet) overlaps(p netip.Prefix) bool {
+	if a == nil || !p.IsValid() {
+		return false
+	}
+	lo, hi, ok := firewall.ElemRange(p.String())
+	if !ok {
+		return false
+	}
+	if lo.Is4() {
+		l, h := lo.As4(), hi.As4()
+		ql, qh := binary.BigEndian.Uint32(l[:]), binary.BigEndian.Uint32(h[:])
+		i := sort.Search(len(a.v4), func(i int) bool { return a.v4[i].lo > qh }) - 1
+		return i >= 0 && a.v4[i].hi >= ql
+	}
+	ql, qh := lo.As16(), hi.As16()
+	i := sort.Search(len(a.v6), func(i int) bool { return bytes.Compare(a.v6[i].lo[:], qh[:]) > 0 }) - 1
+	return i >= 0 && bytes.Compare(a.v6[i].hi[:], ql[:]) >= 0
+}
+
+// coversKey: for an address key, the set holds it; for a /64 key, the set
+// touches any of it (Reconcile drops such an entry, as answers never
+// answers it).
+func (a *allowSet) coversKey(k string) bool {
+	if p, err := netip.ParsePrefix(k); err == nil {
+		return a.overlaps(p)
+	}
+	return a.contains(net.ParseIP(k))
+}
+
 func (a *allowSet) contains(ip net.IP) bool {
 	if a == nil || ip == nil {
 		return false
@@ -637,7 +777,7 @@ func (s *Store) Load() {
 	}
 	s.mu.Lock()
 	for k, e := range m {
-		if kk := key(net.ParseIP(k)); kk != "" {
+		if kk := keyOf(k); kk != "" {
 			s.m[kk] = e
 		}
 	}
@@ -704,6 +844,13 @@ func Ban(ip net.IP, ttl *time.Duration, source string, exact bool) {
 	Default().Add(ip, ttl, source, exact)
 }
 
+// BanElem records in the Default store (no-op without one) a ban of the
+// element nft now blocks, as firewall.ExtendClientBlock / BlockClientPermanent
+// return it: an address or an IPv6 client's /64.
+func BanElem(elem string, ttl *time.Duration, source string) {
+	Default().AddElem(elem, ttl, source, false)
+}
+
 // Unban drops ip from the Default store (no-op without one), and clears it
 // from the proxied-client IP filter's lists until they are next read
 // (internal/proxyipfilter): every unblock and allow path calls Unban, and the
@@ -711,6 +858,10 @@ func Ban(ip net.IP, ttl *time.Duration, source string, exact bool) {
 // dropping it.
 func Unban(ip string) {
 	Default().Remove(ip)
+	// The address only: forgetting its whole /64 there would lift every
+	// source (the fleet blacklist, other addresses' own bans) for the /64.
+	// Other addresses of an unblocked /64 ban stay filtered until the
+	// filter's next read of the sets (proxyipfilter.LocalRefreshEvery).
 	proxyipfilter.Forget(ip)
 }
 
@@ -719,6 +870,14 @@ func IsBanned(ip string) (bool, time.Duration) { return Default().Banned(ip) }
 
 // List is the Default store's List (nil without one).
 func List() []Item { return Default().List() }
+
+// AddrOverlapMatcher is AddrMatcher for a network: it reports whether any
+// address of the prefix is in the elements (the TTL ban restore's test for
+// an IPv6 client /64).
+func AddrOverlapMatcher(elems []string) func(netip.Prefix) bool {
+	a := parseAllowSet(elems)
+	return a.overlaps
+}
 
 // AddrMatcher returns a matcher for nft set elements as nft lists them
 // (hosts, CIDRs, first-last ranges), the one edge ban reconcile uses for the

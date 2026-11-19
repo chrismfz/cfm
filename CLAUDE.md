@@ -74,7 +74,8 @@ The history behind each rule below is in the code comments it names.
   for the web ones, which also keeps the old-port accepts until DNATOn has
   moved the redirect). A reload must not change a handle: delete-and-re-add on
   every reload dropped DNAT'd connections, and the live test pins it.
-- **TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`;
+- **TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`, and
+  `block_v6_clients` for an IPv6 client's automatic /64 ban;
   `cfm.deny` is permanent-only and must never take one). Nothing on a restart
   or upgrade may empty the `inet cfm` table (an rpm `%post` `cfm disable` once
   freed every TTL-banned attacker). For what still does (reboot, `cfm reset`,
@@ -97,6 +98,13 @@ The history behind each rule below is in the code comments it names.
   behind the daemon's back; the same probe answers IP lookups
   (`setprobe.Lookup`, via `ipquery.FindMany`), and an interval-boundary answer
   the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
+- **A base input rule added after the rest needs an anchor.** Both engines'
+  EnsureBase insert a missing early rule at position 0 and append a missing
+  late one: on a node's existing chain a new drop would land above the self /
+  allow accepts (or below the ports policy's accepts). List it in
+  `firewall.BaseRuleAnchors` (rule + the rule it follows): a missing one is
+  then added right after its anchor (`add rule … position <handle>`), and the
+  live `LiveNFTClientSlash64` test pins the upgrade case.
 - **A change here gets a live run in an isolated netns** (the fleet's kernels,
   4.18 and 5.14, are older than a dev box's):
   `unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run 'LiveNFT|ApplyPortsPolicyIsAtomic'`;
@@ -315,6 +323,11 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   and `/run` and a tmpfs over the CFM dirs (seeded), then look at what landed.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
+- **A per-client key is `ipkey.Client` (Go) / `cfm_ipkey.client` (Lua):** an
+  IPv6 client is its /64 (`docs/edge-ipv6.md` "IPv6 /64 grouping"). Never key
+  an allow, an exact match, a clearance cookie or a log line on it, and never
+  add another private "IPv4 or /64" helper: both twins run
+  `scripts/tests/fixtures/ipkey.txt`.
 - **`detectors.conf` readers tolerate an inline `;`/`#` comment — don't
   regress it.** `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`)
   strip it via `cleanScalar`; before that, `KEY = 5 ; note` failed to parse and
@@ -476,7 +489,12 @@ family/rule arming table and the decision records:
   go to the edge ban store (`internal/edgeban`), answered `ip_action=block`
   for PROXIED requests only. It is NOT an nft mirror, and every nft allow set
   wins. **A new web blocker or unblock / allow path must call `edgeban.Ban` /
-  `edgeban.Unban`.** The edge checks its copy (`cfm_edgeban.lua`) at cfm.lua
+  `edgeban.Unban`.** An automatic blocker bans through
+  `firewall.ExtendClientBlock` / `BlockClientPermanent` (an IPv6 client is its
+  /64, in its own set `block_v6_clients`; the kernel L3/L4 autoblock stays per
+  address, its source can be spoofed) and hands the element they return to
+  `edgeban.BanElem`; an unblock also calls `firewall.RemoveClientNet` and
+  `ttlban.ForgetClient`. The edge checks its copy (`cfm_edgeban.lua`) at cfm.lua
   Step 0e, before every exemption but the static IP/CIDR bypass: **a new
   exemption step goes AFTER it**, or a banned proxied client walks through.
   `[webdetector] EDGE_BAN_MODE` = `enforce` (default) | `log`; kill switch

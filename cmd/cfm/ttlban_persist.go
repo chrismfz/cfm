@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,7 +34,11 @@ const ttlBanShutdownBudget = 10 * time.Second
 // (a fresh table: the daemon loads them only later in startup) and [global]
 // IGNORE_IPS / IGNORE_NETS. An unreadable source is logged and skipped: the
 // others still apply, and nft's own allow accepts come before its drops.
-func ttlBanExclude(be firewall.Backend, cfgDir string) func(net.IP) bool {
+//
+// The second matcher is the same test for an IPv6 client /64 ban: any
+// address of it in those sources (the firewall's own guard cannot see them
+// yet at boot: cfm.ignore and IGNORE_IPS load later in startup).
+func ttlBanExclude(be firewall.Backend, cfgDir string) (func(net.IP) bool, func(netip.Prefix) bool) {
 	var elems []string
 	for _, set := range ttlBanExcludeSets {
 		got, err := be.ListSetElementsTimed(set)
@@ -68,10 +73,12 @@ func ttlBanExclude(be firewall.Backend, cfgDir string) func(net.IP) bool {
 			logging.Logf("[ttlban] restore: cannot read IGNORE_IPS (%v); not excluded from it", err)
 		}
 	}
-	inSets := edgeban.AddrMatcher(elems)
+	inSets, overlaps := edgeban.AddrMatcher(elems), edgeban.AddrOverlapMatcher(elems)
 	return func(ip net.IP) bool {
-		return inSets(ip) || ig.ShouldIgnore(ip.String())
-	}
+			return inSets(ip) || ig.ShouldIgnore(ip.String())
+		}, func(p netip.Prefix) bool {
+			return overlaps(p) || ig.OverlapsPrefix(p)
+		}
 }
 
 // ttlBanRestoreWait bounds how long the first edge ban reconcile waits for
@@ -93,7 +100,7 @@ func restoreTTLBans(be firewall.Backend, cfgDir string) *ttlban.Store {
 	ttlban.SetDefault(s)
 	exclude := func(net.IP) bool { return false }
 	if s.Len() > 0 { // the exclude reads 16 sets: only when there is something to restore
-		exclude = ttlBanExclude(be, cfgDir)
+		exclude, s.ExcludeNet = ttlBanExclude(be, cfgDir)
 	}
 	res, err := s.Restore(be, exclude)
 	b := res.Batch

@@ -20,8 +20,8 @@ func (f *extendFake) AddBlockBatch(entries []BlockEntry) (BlockBatchResult, erro
 	for ip, d := range f.left {
 		cur = append(cur, SetElementTimed{Elem: ip, Expires: d})
 	}
-	v4, _, skipped := SplitBlockEntries(entries)
-	plan := PlanBlockBatch(v4, cur)
+	v4, v6, skipped := SplitBlockEntries(entries)
+	plan := PlanBlockBatch(append(v4, v6...), cur)
 	r := BlockBatchResult{Skipped: skipped, Kept: plan.Kept}
 	for _, w := range plan.Writes {
 		if w.Replace {

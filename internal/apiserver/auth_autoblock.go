@@ -141,24 +141,24 @@ const (
 // authAutoblockApply blocks ip for mode. A ttl block never shortens an
 // existing one: AddBlock replaces the element, so a permanent block of the
 // address (cfm.deny, a port-scan or manual block) would become a timed one.
-// A permanent block replaces a timed one; dryrun adds nothing.
+// A permanent block replaces a timed one; dryrun adds nothing. An IPv6
+// client is banned as its /64 (firewall.ExtendBlockResult /
+// BlockClientPermanent; docs/edge-ipv6.md "IPv6 /64 grouping").
 func authAutoblockApply(be firewall.Backend, ip net.IP, mode string, ttl *time.Duration) string {
 	switch mode {
 	case "dryrun":
 		return authBlockDone
 	case "ttl":
-		res, err := be.AddBlockBatch([]firewall.BlockEntry{{IP: ip, TTL: *ttl}})
+		_, kept, err := firewall.ExtendClientBlock(be, ip, *ttl)
 		switch {
 		case err != nil:
 			return authBlockFailed
-		case res.Kept > 0:
+		case kept:
 			return authBlockKept
-		case res.Added+res.Extended == 0: // not blockable (unspecified address)
-			return authBlockFailed
 		}
 		return authBlockDone
 	}
-	if be.AddBlock(ip, authAutoblockReason, ttl) != nil {
+	if _, err := firewall.BlockClientPermanent(be, ip, authAutoblockReason); err != nil {
 		return authBlockFailed
 	}
 	return authBlockDone

@@ -429,6 +429,11 @@ func (b *Backend) EnsureBase() (err error) {
 	if err := b.ensureSetWithFlags(blockV6Nets, "ipv6_addr", "timeout,interval"); err != nil {
 		return err
 	}
+	// The automatic IPv6 client /64 bans (firewall/client_block.go): their
+	// own set, so they never collide with the operator's CIDRs above.
+	if err := b.ensureSetWithFlags(firewall.BlockV6Clients, "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
 
 	// NEW: ignore (manual) hosts + nets
 	if err := b.ensureSetWithFlags("ignore_v4", "ipv4_addr", "timeout"); err != nil {
@@ -516,7 +521,7 @@ func (b *Backend) EnsureBase() (err error) {
 	// as we add/insert rules during this EnsureBase run.
 	resInput, _ := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "input")
 	inputRules := firewall.ParseChainRules(resInput.Stdout)
-	ruleInInput := inputRules.Has
+	ruleInInput := inputRules.Present
 	recordRuleInInput := inputRules.Add
 
 	// Drop the copies the old presence check piled up: it never recognised
@@ -534,11 +539,21 @@ func (b *Backend) EnsureBase() (err error) {
 		}
 	}
 
+	// A rule written after the rest (firewall.BaseRuleAnchors) goes right
+	// after its anchor on a chain that already holds it: an insert at 0
+	// would put it above the self / allow accepts, an append below the ports
+	// policy's accepts.
+	place := func(expr, otherwise string) string {
+		if h := inputRules.AnchorHandle(expr); h != "" {
+			return fmt.Sprintf(`add rule %s %s input position %s %s`, family, tableName, h, expr)
+		}
+		return otherwise
+	}
 	addRule := func(expr string) error {
 		if ruleInInput(expr) {
 			return nil
 		}
-		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input %s`, family, tableName, expr)); err != nil {
+		if err := b.nftCmd(place(expr, fmt.Sprintf(`add rule %s %s input %s`, family, tableName, expr))); err != nil {
 			return err
 		}
 		recordRuleInInput(expr)
@@ -552,7 +567,7 @@ func (b *Backend) EnsureBase() (err error) {
 		if ruleInInput(expr) {
 			return
 		}
-		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)); err == nil {
+		if err := b.nftCmd(place(expr, fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))); err == nil {
 			recordRuleInInput(expr)
 		}
 	}
@@ -587,6 +602,7 @@ func (b *Backend) EnsureBase() (err error) {
 		`ip6 saddr @block_ext_v6_nets drop`,
 		`ip saddr @block_v4_nets drop`,
 		`ip6 saddr @block_v6_nets drop`,
+		`ip6 saddr @block_v6_clients drop`,
 	}
 
 	// 5) ICMP → flood (below unconditional drops)
@@ -626,6 +642,9 @@ func (b *Backend) EnsureBase() (err error) {
 		return err
 	}
 	if err := addRule(`ct state established,related ip6 saddr @block_v6_nets drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ct state established,related ip6 saddr @block_v6_clients drop`); err != nil {
 		return err
 	}
 
@@ -868,7 +887,7 @@ func (b *Backend) removeBlockLocked(ip net.IP) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, elem)
 	out, err := b.nftOut(cmd)
-	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err, out)
 	}
 	return nil
@@ -961,7 +980,7 @@ func (b *Backend) RemoveIgnore(ip net.IP) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, ip.String())
 	out, err := b.nftOut(cmd)
-	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err, out)
 	}
 	return nil
@@ -996,7 +1015,7 @@ func (b *Backend) RemoveIgnoreNet(cidr string) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
 	out, err2 := b.nftOut(cmd)
-	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err2 != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err2, out)
 	}
 	return nil
@@ -1013,10 +1032,22 @@ func (b *Backend) RemoveAllow(ip net.IP) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, elem)
 	out, err := b.nftOut(cmd)
-	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err, out)
 	}
 	return nil
+}
+
+// missingElement reports nft's output for a delete of an element the set
+// does not hold, which every Remove* takes as done: "No such file or
+// directory" for a host set, "Could not delete element", and "element does
+// not exist" for an interval set (nft 1.0.4 on EL8 and 1.0.9 on EL9 alike,
+// checked 2026-11-19: before it was matched, every remove of a CIDR the set
+// did not hold failed).
+func missingElement(out string) bool {
+	return strings.Contains(out, "No such file or directory") ||
+		strings.Contains(out, "Could not delete element") ||
+		strings.Contains(out, "element does not exist")
 }
 
 // -------- manual nets (CIDR) --------
@@ -1065,7 +1096,7 @@ func (b *Backend) RemoveBlockNet(cidr string) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
 	out, err2 := b.nftOut(cmd)
-	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err2 != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err2, out)
 	}
 	return nil
@@ -1104,7 +1135,7 @@ func (b *Backend) RemoveAllowNet(cidr string) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
 	out, err2 := b.nftOut(cmd)
-	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err2 != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err2, out)
 	}
 	return nil

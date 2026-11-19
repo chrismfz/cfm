@@ -1895,8 +1895,9 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 	st.fwBlockedUntil = now.Add(ttl)
 	s.rlMu.Unlock()
 
-	if _, err := firewall.ExtendBlock(s.fw, ip, ttl); err == nil { // never shortens a longer block
-		edgeban.Ban(ip, &ttl, "challenge_selfprotect", false)
+	// Never shortens a longer block; an IPv6 client is banned as its /64.
+	if elem, _, err := firewall.ExtendClientBlock(s.fw, ip, ttl); err == nil {
+		edgeban.BanElem(elem, &ttl, "challenge_selfprotect")
 	}
 }
 
@@ -2023,8 +2024,9 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
 			if ip == nil {
 				return
 			}
-			if _, err := firewall.ExtendBlock(s.fw, ip, ttl); err == nil { // never shortens a longer block
-				edgeban.Ban(ip, &ttl, "challenge_abuse", false)
+			// Never shortens a longer block; an IPv6 client is banned as its /64.
+			if elem, _, err := firewall.ExtendClientBlock(s.fw, ip, ttl); err == nil {
+				edgeban.BanElem(elem, &ttl, "challenge_abuse")
 			}
 		}
 	}

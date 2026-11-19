@@ -1,11 +1,14 @@
 package webdetector
 
 import (
+	"cfm/internal/firewall"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -201,5 +204,28 @@ func TestEdgeBanClearedEmptiesTheEdge(t *testing.T) {
 	}
 	if st := b.EdgeBanStatus(); !st.Cleared || st.Ready {
 		t.Errorf("status %+v, want cleared and not ready", st)
+	}
+}
+
+// An IPv6 client /64 ban reaches the edge as its /64 key, unless a check the
+// firewall registered (IGNORE_IPS / IGNORE_NETS, the trusted proxies, the
+// allows) refuses that /64: the address-based bypass cannot read a prefix.
+func TestEdgeBanFeedSkipsAnExemptedSlash64(t *testing.T) {
+	s := edgeban.New(filepath.Join(t.TempDir(), "edgeban.json"))
+	s.AddElem("2001:db8:1:2::/64", nil, "waf_security", false)
+	s.AddElem("2001:db8:3:4::/64", nil, "waf_security", false)
+	s.Reconcile(edgeban.Snapshot{Blocks: []firewall.SetElementTimed{{Elem: "2001:db8:1:2::/64"}, {Elem: "2001:db8:3:4::/64"}}, ReadAt: time.Now().Add(time.Second)})
+	edgeban.SetDefault(s)
+	t.Cleanup(func() { edgeban.SetDefault(nil) })
+	firewall.SetClientNetExempt("ignore", func(p netip.Prefix) bool { return p.String() == "2001:db8:3:4::/64" })
+	t.Cleanup(func() { firewall.SetClientNetExempt("ignore", nil) })
+
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	_, first, raw := pollEdgeBan(t, b, url.Values{}, "tok")
+	if _, ok := first.IPs["2001:db8:1:2::/64"]; !ok {
+		t.Fatalf("the /64 is not in the list: %s", raw)
+	}
+	if _, ok := first.IPs["2001:db8:3:4::/64"]; ok {
+		t.Fatalf("an exempted /64 is in the list: %s", raw)
 	}
 }

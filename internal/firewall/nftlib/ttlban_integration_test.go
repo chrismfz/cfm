@@ -21,3 +21,14 @@ func TestLiveNFTTTLBansSurviveRestart(t *testing.T) {
 		return b
 	})
 }
+
+// unshare -rn env CFM_NFT_INTEGRATION=1 go test ./internal/firewall/nftlib/ -run LiveNFTClientSlash64 -v
+func TestLiveNFTClientSlash64Bans(t *testing.T) {
+	bantest.RunClientSlash64Bans(t, func() firewall.Backend {
+		b, err := New()
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return b
+	})
+}

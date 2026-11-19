@@ -97,6 +97,22 @@ check(eb.verdict("198.51.100.7") == nil, "a timed ban ends at its expiry")
 clock = clock + 100000
 check(eb.verdict("203.0.113.5") == "block", "a permanent ban has no TTL (the daemon down: still enforced, as nft)")
 
+-- ── An IPv6 client's /64 ban: every address of the /64, one log line ───────
+reset()
+check(eb.apply(d, full("e1", 10, { ["2001:db8:1:2::/64"] = 0, ["2001:db8:9::1"] = 0 }), clock), "apply a list with a /64")
+check(as("2001:db8:1:2::a") == "block", "an address of a banned /64: block")
+check(as("2001:db8:1:2:ffff:ffff:ffff:fffe") == "block", "another address of it: block")
+check(as("2001:DB8:1:2::B") == "block", "uppercase: the same /64")
+check(as("2001:db8:1:3::a") == nil, "the next /64: nothing")
+check(as("2001:db8:9::1") == "block", "a host ban of an IPv6 address still matches")
+check(as("2001:db8:9::2") == nil, "a host ban covers only its address")
+check(eb.banned("2001:db8:1:2::7") == true and eb.banned("2001:db8:1:3::7") == false, "M.banned answers the /64 too")
+local n64 = 0
+for _, l in ipairs(logs) do if l:find("ban=2001:db8:1:2::/64", 1, true) then n64 = n64 + 1 end end
+check(n64 == 1, "one log line for the /64 however many of its addresses come (got " .. n64 .. ")")
+-- A /64 key never matches an IPv4 client, and fe80 / ::1 stay as they are.
+check(as("203.0.113.5") == nil and as("fe80::1") == nil and as("::1") == nil, "no stray matches")
+
 -- ── Mode: log counts and logs, enforce blocks; one log line per minute ─────
 reset()
 eb.apply(d, full("e1", 1, { ["203.0.113.5"] = 0 }, "log"), clock)

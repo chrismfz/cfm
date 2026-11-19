@@ -322,3 +322,58 @@ func TestUnblockPOSTWithValidPayloadProceeds(t *testing.T) {
 		t.Fatalf("expected ip=192.0.2.10, got %q", gotIP)
 	}
 }
+
+// netStubBackend records the /64 deletes of an IPv6 client unblock.
+type netStubBackend struct {
+	stubFirewallBackend
+	mu      sync.Mutex
+	netDels []string
+}
+
+func (s *netStubBackend) WriteSetElem(string, string, *time.Duration, bool) error { return nil }
+func (s *netStubBackend) WriteSetElems(string, []firewall.SetElemWrite) error     { return nil }
+func (s *netStubBackend) DeleteSetElem(set, elem string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.netDels = append(s.netDels, set+" "+elem)
+	return nil
+}
+
+// The API unblock of an IPv6 client frees its automatic /64 ban, given an
+// address of it or the /64 itself (the text of the ban notification).
+func TestUnblockFreesTheIPv6ClientSlash64(t *testing.T) {
+	origUnblockDo := unblockDo
+	var wg sync.WaitGroup
+	unblockDo = func(context.Context, net.IP, unblock.Options) (*unblock.Result, error) {
+		defer wg.Done()
+		return &unblock.Result{}, nil
+	}
+	t.Cleanup(func() { wg.Wait(); unblockDo = origUnblockDo })
+
+	for _, in := range []string{"2001:db8:1:2::a", "2001:db8:1:2::/64"} {
+		be := &netStubBackend{}
+		wg.Add(1)
+		req := httptest.NewRequest(http.MethodPost, "/unblock", strings.NewReader(`{"ip":"`+in+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "198.51.100.25:12345"
+		rr := httptest.NewRecorder()
+		makeUnblockHandler(be, t.TempDir()).ServeHTTP(rr, req)
+		wg.Wait()
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", in, rr.Code, rr.Body.String())
+		}
+		deadline := time.Now().Add(2 * time.Second) // the nft goroutine may outlive the response budget
+		for {
+			be.mu.Lock()
+			got := append([]string(nil), be.netDels...)
+			be.mu.Unlock()
+			if len(got) == 1 && got[0] == firewall.BlockV6Clients+" 2001:db8:1:2::/64" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: /64 deletes %v, want the client's /64", in, got)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}

@@ -21,9 +21,15 @@ func RunFlush(args []string, be firewall.Backend, tableExists func() bool) int {
 		}
 	}
 
-	sets := []string{"block_v4", "block_v6"}
-	for _, setName := range sets {
+	// The block sets the TTL bans live in, block_v6_clients (the automatic
+	// IPv6 client /64s) included.
+	for _, setName := range ttlban.Sets {
 		if err := be.FlushSet("inet", "cfm", setName); err != nil {
+			if setName == firewall.BlockV6Clients && firewall.IsMissingSet(err) {
+				// A table an older daemon built has no such set: nothing to flush.
+				fmt.Fprintf(os.Stderr, "warning: flush %s: %v\n", setName, err)
+				continue
+			}
 			fmt.Fprintf(os.Stderr, "flush error: %v\n", err)
 			return 1
 		}

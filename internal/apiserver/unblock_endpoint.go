@@ -102,7 +102,8 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 			}
 		}
 
-		ip := net.ParseIP(ipStr)
+		// An address, or an automatic IPv6 client ban's /64.
+		ip := firewall.ParseClientTarget(ipStr)
 		if ip == nil {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -158,12 +159,21 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 				wb = true
 			} else if found, _ := be.HasElem("block_v6", ip.String()); found {
 				wb = true
+			} else if _, ok := firewall.ClientNet(ip); ok {
+				// The address's membership in its client's /64 ban: both
+				// engines answer an address against an interval set (nftlib
+				// does not match a CIDR's text).
+				if found, _ := be.HasElem(firewall.BlockV6Clients, ip.String()); found {
+					wb = true
+				}
 			}
 			rs := time.Now()
 			logging.LogfAPI("[unblock.exec] engine=%s backend_type=%s batch_size=%d method=RemoveBlock ip=%s", engine, backendType, 1, ip.String())
 			_ = be.RemoveBlock(ip) // idempotent
+			// An IPv6 client's automatic ban is its /64: the unblock frees it.
+			_, _ = firewall.RemoveClientNet(be, ip)
 			edgeban.Unban(ip.String())
-			ttlban.Forget(ip.String()) // a restart must not restore it
+			ttlban.ForgetClient(ip.String()) // a restart must not restore it
 			logging.LogfAPI("[unblock.exec.done] engine=%s backend_type=%s batch_size=%d method=RemoveBlock ip=%s duration=%s", engine, backendType, 1, ip.String(), time.Since(rs))
 			nftDone <- wb
 		}()

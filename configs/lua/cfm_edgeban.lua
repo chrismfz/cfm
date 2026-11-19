@@ -65,6 +65,11 @@
 -- upvalues are not safe there: see waf_insp_flush_cb in cfm.lua).
 
 local shd = require "cfm_shdict" -- counters: never dict:incr(key, n, init)
+-- The client key: an IPv6 client's automatic ban is its /64, listed by the
+-- daemon as "2001:db8:1:2::/64" (internal/ipkey; docs/edge-ipv6.md). Guarded:
+-- without the module the edge still answers bans of single addresses.
+local ok_ipkey, ipkey = pcall(require, "cfm_ipkey")
+if not ok_ipkey or type(ipkey) ~= "table" or type(ipkey.client) ~= "function" then ipkey = nil end
 
 local M = {}
 
@@ -100,7 +105,8 @@ local function current(d)
 end
 M._current = current
 
--- banned reports whether ip is on the current list.
+-- banned reports whether ip is on the current list, under its address or
+-- its client's /64; the second value is the key that matched.
 local function banned(d, ip)
   if not ip or ip == "" then return false end
   -- nginx prints an IPv4-mapped peer as ::ffff:a.b.c.d; the daemon keys it
@@ -108,12 +114,18 @@ local function banned(d, ip)
   if ip:sub(1, 7) == "::ffff:" and ip:find(".", 8, true) then ip = ip:sub(8) end
   local slot, id = current(d)
   if not slot then return false end
-  return d:get("eb|" .. slot .. "|" .. ip) == id
+  local pfx = "eb|" .. slot .. "|"
+  if d:get(pfx .. ip) == id then return true, ip end
+  if ipkey and ip:find(":", 1, true) then
+    local ck = ipkey.client(ip)
+    if ck ~= ip and ck:find("/", 1, true) and d:get(pfx .. ck) == id then return true, ck end
+  end
+  return false
 end
 
 function M.banned(ip)
   local d = dict()
-  return d ~= nil and banned(d, ip)
+  return d ~= nil and (banned(d, ip)) == true
 end
 
 -- proxied reports whether realip replaced the connection's address, i.e. the
@@ -134,12 +146,16 @@ end
 local function verdict_impl(ip)
   if not proxied(ip) then return nil end
   local d = dict()
-  if not d or not banned(d, ip) then return nil end
+  if not d then return nil end
+  local hit, k = banned(d, ip)
+  if not hit then return nil end
   local mode = (d:get(MODE_KEY) == "enforce") and "block" or "log"
   shd.incr(d, (mode == "block") and BLOCK_KEY or WOULD_KEY, 1)
-  if d:add("eb:l|" .. ip, 1, LOG_SEC) then
+  -- One line per ban (the /64 for a client's /64 ban, so a client rotating
+  -- inside it cannot flood the log).
+  if d:add("eb:l|" .. k, 1, LOG_SEC) then
     ngx.log(ngx.WARN, "[cfm] ", (mode == "block") and "block" or "would_block",
-      " edge_ban ip=", ip, " (one line per address per ", LOG_SEC, "s)")
+      " edge_ban ip=", ip, (k ~= ip) and (" ban=" .. k) or "", " (one line per ban per ", LOG_SEC, "s)")
   end
   return mode
 end

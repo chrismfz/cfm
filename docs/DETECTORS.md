@@ -207,14 +207,17 @@ BLOCK_COOLDOWN = 20m
 #### TTL bans across a restart, an upgrade or a reboot
 
 A TTL block lives only as a timed element of `inet cfm block_v4` /
-`block_v6`. `cfm.deny` holds only permanent bans (it has no expiry, so a TTL
+`block_v6`, or of `block_v6_clients` for the /64 an automatic ban of an IPv6
+client takes. `cfm.deny` holds only permanent bans (it has no expiry, so a TTL
 ban there would become permanent). A restart's `EnsureBase` keeps the table,
 its sets and their elements on both engines (`LiveNFTTTLBansSurviveRestart`).
 Nothing on an upgrade may empty the table: the rpm `%post` once ran `cfm
 disable` on every upgrade and freed every TTL-banned attacker.
 
 For what still empties it (a reboot, `cfm reset`, `cfm disable`) the daemon
-persists TTL host bans in `/var/lib/cfm/ttlbans.json` (`internal/ttlban`):
+persists TTL host bans, and the IPv6 client /64s of `block_v6_clients`, in
+`/var/lib/cfm/ttlbans.json`
+(`internal/ttlban`):
 
 - **Saved** from nft every ~2 minutes (the edge ban reconcile's read of the
   block sets, which must cover both or saves nothing) and on SIGTERM / SIGINT /
@@ -224,10 +227,12 @@ persists TTL host bans in `/var/lib/cfm/ttlbans.json` (`internal/ttlban`):
   that runs EnsureBase; a `flush ruleset`): those bans stay in the file and
   the log says to restart the daemon to re-apply them. Permanent elements are
   not saved (cfm.deny re-applies them), nor are TTL'd CIDR blocks.
+  Two elements with one key keep the longer ban.
 - **Restored** after `EnsureBase`, in the background (the first edge ban
   reconcile waits up to 30 seconds for it, and nothing is saved before it
-  ends): each ban for its remaining time, through `AddBlockBatch`, which adds
-  or extends but never shortens a ban or makes a permanent one temporary. An
+  ends): each ban for its remaining time, through `AddBlockBatch` (a /64
+  through `firewall.ExtendBlockNet`), which adds or extends but never shortens
+  a ban or makes a permanent one temporary. An
   expired entry is dropped, and so is one covered by an nft allow / ignore
   set, `cfm.allow`, `cfm.ignore` or `[global] IGNORE_IPS` / `IGNORE_NETS`. The
   startup log has one `[ttlban] restore:` line with the counts.
@@ -235,7 +240,8 @@ persists TTL host bans in `/var/lib/cfm/ttlbans.json` (`internal/ttlban`):
   force-unblock, cfm-web pending unblocks) drop the entry at once, and a
   snapshot whose read began earlier cannot put it back. `cfm unblock` also
   edits the file, so an unblock while the daemon is stopped holds too. A new
-  unblock path calls `ttlban.Forget`.
+  unblock path calls `ttlban.ForgetClient` (the address and its client's
+  /64; unblocking an IPv6 address frees its /64, `firewall.RemoveClientNet`).
 - **An allow** does not remove the block element (nft accepts before it
   drops): the restore skips the entry while the allow is in place, and a ban
   that outlives a `cfm allow --ttl` comes back, as in nft.
@@ -538,10 +544,11 @@ the one-site rule, and for a site to count on the spray rule (one failed
 login, or three forms).
 
 **Client and ban subject.** A client is an IPv4 address or an IPv6 /64 (one
-subscriber, who can rotate inside it). The ban is on the /64's address with
-the most failures in the window, so a colleague's typo in an office /64 does
-not take the ban for another's spray; an attacker rotating inside its /64 gets
-one address banned per round (a known gap). In a /64 with several failing
+subscriber, who can rotate inside it). The finding names the /64's address
+with the most failures in the window, and the ban takes that client's whole
+/64 (every automatic IPv6 ban does: `docs/edge-ipv6.md` "IPv6 /64
+grouping"), so an attacker rotating inside its /64 is out after one round. In
+a /64 with several failing
 addresses, a finding is a dry run when its worst address has a single failure
 (a VPS provider's shared /64), or, on the one-site rule, no more than half of
 `SITE_FAILS` there (two colleagues who mistyped twice each). A second such

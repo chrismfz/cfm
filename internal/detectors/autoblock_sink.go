@@ -475,12 +475,16 @@ func (s *sectionSink) Publish(a core.Alert) {
 				}
 
 				if s.pol.Mode != "dryrun" {
-					// Never shortens a longer block of the address (ExtendBlock).
-					if kept, err := firewall.ExtendBlock(s.fw, ip, bttl); err == nil {
+					// Never shortens a longer block; an IPv6 client is banned
+					// as its /64 (ExtendClientBlock).
+					if elem, kept, err := firewall.ExtendClientBlock(s.fw, ip, bttl); err == nil {
 						// A web challenge escalated: the edge enforces it too
 						// (a client behind a proxy never meets the nft drop).
 						if edgeban.WebSection(s.section) {
-							edgeban.Ban(ip, &bttl, s.section, false)
+							edgeban.BanElem(elem, &bttl, s.section)
+						}
+						if elem != ip.String() {
+							out.Extra["block_net"] = elem
 						}
 						out.Extra["escalated"] = "block"
 						out.Extra["block_ttl"] = bttl.String()
@@ -672,9 +676,13 @@ func (s *sectionSink) Publish(a core.Alert) {
 		out.Extra["block_mode"] = "dryrun"
 
 	case "permanent":
-		if err := s.fw.AddBlock(ip, comment, nil); err == nil {
+		// An IPv6 client is banned as its /64 (BlockClientPermanent).
+		if elem, err := firewall.BlockClientPermanent(s.fw, ip, comment); err == nil {
 			if edgeban.WebSection(s.section) {
-				edgeban.Ban(ip, nil, s.section, false)
+				edgeban.BanElem(elem, nil, s.section)
+			}
+			if elem != ip.String() {
+				out.Extra["block_net"] = elem
 			}
 			out.Extra["blocked"] = "yes"
 			out.Extra["block_mode"] = "permanent"
@@ -702,14 +710,18 @@ func (s *sectionSink) Publish(a core.Alert) {
 		if d := maxBlockTTL(out.Extra); d > 0 && ttl > d {
 			ttl = d
 		}
-		// ExtendBlock, not AddBlock: AddBlock replaces the element, so a
+		// ExtendClientBlock, not AddBlock: AddBlock replaces the element, so a
 		// shorter block from another section (webdetector 1h) cut a longer one
-		// (waf_security 7d) short. A longer or permanent block is kept.
-		if kept, err := firewall.ExtendBlock(s.fw, ip, ttl); err == nil {
+		// (waf_security 7d) short. A longer or permanent block is kept. An
+		// IPv6 client is banned as its /64.
+		if elem, kept, err := firewall.ExtendClientBlock(s.fw, ip, ttl); err == nil {
 			// A web section's ban is enforced at the edge too: a client
 			// behind a trusted proxy (Cloudflare) never meets the nft drop.
 			if edgeban.WebSection(s.section) {
-				edgeban.Ban(ip, &ttl, s.section, false)
+				edgeban.BanElem(elem, &ttl, s.section)
+			}
+			if elem != ip.String() {
+				out.Extra["block_net"] = elem
 			}
 			out.Extra["blocked"] = "yes"
 			out.Extra["block_mode"] = "ttl"

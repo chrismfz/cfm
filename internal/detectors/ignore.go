@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -107,6 +108,38 @@ func (ig *IPIgnore) ShouldIgnore(ipStr string) bool {
 	return false
 }
 
+// OverlapsPrefix reports whether any IGNORE_IPS address or IGNORE_NETS network
+// lies in p, even in part: a /64 ban must not drop it
+// (firewall.SetClientNetExempt).
+func (ig *IPIgnore) OverlapsPrefix(p netip.Prefix) bool {
+	if ig == nil || !p.IsValid() {
+		return false
+	}
+	p = p.Masked()
+	for k := range ig.exact {
+		if a, err := netip.ParseAddr(k); err == nil && p.Contains(a.Unmap()) {
+			return true
+		}
+	}
+	for _, n := range ig.nets {
+		ones, _ := n.Mask.Size()
+		a, ok := netip.AddrFromSlice(n.IP)
+		if !ok {
+			continue
+		}
+		q := netip.PrefixFrom(a.Unmap(), ones)
+		if a.Is4In6() || a.Is4() {
+			if l := len(n.Mask); l == net.IPv6len {
+				q = netip.PrefixFrom(a.Unmap(), ones-96)
+			}
+		}
+		if q.IsValid() && q.Overlaps(p) {
+			return true
+		}
+	}
+	return false
+}
+
 // LogIgnoredReports επιστρέφει αν πρέπει να περνάνε τα ignored events στα sinks.
 // Ελέγχεται από το LOG_IGNORED στο [global].
 func (ig *IPIgnore) LogIgnoredReports() bool {
@@ -120,18 +153,18 @@ func (ig *IPIgnore) LogIgnoredReports() bool {
 // so cfm.lua's is_self_origin() helper can honour the same allowlist as the
 // Go-side challenge-engine bypass predicate. Format:
 //
-//   return {
-//     generated_at = "2026-05-19T17:35:00Z",
-//     ips = { ["1.2.3.4"] = true, ["::1"] = true },
-//     v4_ranges = {
-//       { 1412837632, 1412837887 },  -- 84.54.49.0/24 as uint32 [first, last]
-//       ...
-//     },
-//     v6_ranges = {
-//       { "2a0145f8000000000000000000000000", 32 },  -- 2a01:45f8::/32
-//       ...
-//     },
-//   }
+//	return {
+//	  generated_at = "2026-05-19T17:35:00Z",
+//	  ips = { ["1.2.3.4"] = true, ["::1"] = true },
+//	  v4_ranges = {
+//	    { 1412837632, 1412837887 },  -- 84.54.49.0/24 as uint32 [first, last]
+//	    ...
+//	  },
+//	  v6_ranges = {
+//	    { "2a0145f8000000000000000000000000", 32 },  -- 2a01:45f8::/32
+//	    ...
+//	  },
+//	}
 //
 // IPv4 CIDR blocks are precomputed to uint32 [first, last] pairs so the Lua
 // caller does a cheap numeric range check instead of bit-twiddling per

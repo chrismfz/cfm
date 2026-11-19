@@ -3,6 +3,7 @@ package detectors
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,7 +99,7 @@ func TestIPIgnore_WriteLuaCache_RoundTrip(t *testing.T) {
 		}
 	}
 	// IPv6 CIDR goes to v6_ranges (network as 32 hex digits + prefix), the
-	// form cfm_selfip.lua's ipv6_to_hex32 compares against; never v4_ranges.
+	// form cfm_ipkey.lua's ipv6_to_hex32 (used by cfm_selfip.lua) compares against; never v4_ranges.
 	v4 := s[strings.Index(s, "v4_ranges"):strings.Index(s, "v6_ranges")]
 	if strings.Contains(v4, "2001") || strings.Contains(v4, "db8") {
 		t.Errorf("IPv6 CIDR leaked into v4_ranges:\n%s", s)
@@ -254,4 +255,29 @@ func stripGenerated(s string) string {
 		return s
 	}
 	return s[:start] + s[start+end:]
+}
+
+// OverlapsPrefix (firewall.SetClientNetExempt): any IGNORE_IPS address or
+// IGNORE_NETS network touching the /64, even in part, keeps it from being
+// banned as a whole.
+func TestIPIgnoreOverlapsPrefix(t *testing.T) {
+	ig := newIPIgnoreFromGlobal(KV{
+		"IGNORE_IPS":  "203.0.113.9, 2001:db8:1:2::77",
+		"IGNORE_NETS": "2001:db8:9::/48, 198.51.100.0/24, 2001:db8:5:6:8000::/65",
+	})
+	for p, want := range map[string]bool{
+		"2001:db8:1:2::/64": true,  // an ignored address inside
+		"2001:db8:1:3::/64": false, // next door
+		"2001:db8:9:4::/64": true,  // inside an ignored /48
+		"2001:db8:5:6::/64": true,  // holds an ignored /65
+		"2001:db8:7::/64":   false,
+	} {
+		if got := ig.OverlapsPrefix(netip.MustParsePrefix(p)); got != want {
+			t.Errorf("OverlapsPrefix(%s) = %v, want %v", p, got, want)
+		}
+	}
+	var nilIG *IPIgnore
+	if nilIG.OverlapsPrefix(netip.MustParsePrefix("2001:db8:1:2::/64")) {
+		t.Error("a nil ignore list overlaps nothing")
+	}
 }

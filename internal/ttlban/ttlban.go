@@ -21,8 +21,11 @@
 // what the caller says must not be blocked (an allow, cfm.ignore,
 // IGNORE_IPS).
 //
-// Host bans only: TTL'd CIDR blocks come from cfm.deny (re-read at start)
-// or a manual `cfm block <cidr> --ttl`, and are not persisted.
+// Host bans, and block_v6_clients: the /64 an automatic ban of an IPv6 client
+// takes (firewall.ExtendClientBlock; docs/edge-ipv6.md "IPv6 /64 grouping"),
+// restored through firewall.ExtendBlockNet. TTL'd CIDR blocks (a manual
+// `cfm block <cidr> --ttl`) are not persisted; cfm.deny holds the permanent
+// ones.
 package ttlban
 
 import (
@@ -32,9 +35,11 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,7 +60,25 @@ func SetPathForTest(path string) (restore func()) {
 }
 
 // Sets are the block sets the store mirrors.
-var Sets = []string{"block_v4", "block_v6"}
+var Sets = []string{"block_v4", "block_v6", firewall.BlockV6Clients}
+
+// keyOf is the store's key for a set element: an address, or an IPv6
+// network in its canonical text ("2001:db8:1:2::/64"); "" for anything
+// else (an IPv4 network, a range).
+func keyOf(elem string) string {
+	elem = strings.TrimSpace(elem)
+	if strings.Contains(elem, "/") {
+		p, err := netip.ParsePrefix(elem)
+		if err != nil || !p.Addr().Is6() || p.Addr().Is4In6() {
+			return ""
+		}
+		return p.Masked().String()
+	}
+	if ip := net.ParseIP(elem); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
 
 // minRemaining is the least time left worth restoring: nft reports whole
 // seconds, and a ban in its last second is as good as expired.
@@ -99,6 +122,10 @@ type Store struct {
 	sleep      func(time.Duration)
 	saveMu     sync.Mutex
 	snapMu     sync.Mutex // one Snapshot at a time, its save included
+	// ExcludeNet is Restore's exclude for an IPv6 client /64: true when any
+	// address of it must not be blocked (an allow, an ignore, IGNORE_IPS).
+	// Nil: only the network address is checked, through the exclude.
+	ExcludeNet func(netip.Prefix) bool
 }
 
 // saveMaxAge: a snapshot rewrites an unchanged file this old, so its
@@ -150,11 +177,11 @@ func (s *Store) Load() error {
 	s.bans = map[string]Entry{}
 	s.savedAt = f.SavedAt
 	for k, e := range f.Bans {
-		ip := net.ParseIP(k)
-		if ip == nil || e.Expires.IsZero() {
+		kk := keyOf(k)
+		if kk == "" || e.Expires.IsZero() {
 			continue
 		}
-		s.bans[ip.String()] = Entry{Set: setFor(ip), Expires: e.Expires}
+		s.bans[kk] = Entry{Set: setFor(kk), Expires: e.Expires}
 	}
 	return nil
 }
@@ -211,9 +238,18 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 		s.bans = map[string]Entry{}
 	}
 	var entries []firewall.BlockEntry
+	type netEntry struct {
+		p   netip.Prefix
+		ttl time.Duration
+	}
+	var nets []netEntry
 	keep := map[string]Entry{}
 	for k, e := range s.bans {
 		ip := net.ParseIP(k)
+		p, perr := netip.ParsePrefix(k)
+		if perr == nil {
+			ip = net.IP(p.Addr().AsSlice()) // the exclude check reads the network address
+		}
 		left := e.Expires.Sub(now)
 		if !s.savedAt.IsZero() {
 			if atSave := e.Expires.Sub(s.savedAt); left > atSave {
@@ -224,8 +260,13 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 		switch {
 		case ip == nil, left < minRemaining:
 			res.Expired++
+		case perr == nil && s.ExcludeNet != nil && s.ExcludeNet(p):
+			res.Excluded++
 		case exclude != nil && exclude(ip):
 			res.Excluded++
+		case perr == nil:
+			keep[k] = e
+			nets = append(nets, netEntry{p, left})
 		default:
 			keep[k] = e
 			entries = append(entries, firewall.BlockEntry{IP: ip, TTL: left})
@@ -250,6 +291,37 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 			wait *= 2
 		}
 	}
+	// The networks: one extend each (never shortens), sorted.
+	var undoNets []netip.Prefix
+	if be != nil && len(nets) > 0 {
+		sort.Slice(nets, func(i, j int) bool { return nets[i].p.Addr().Less(nets[j].p.Addr()) })
+		// One batch (one guard read, one read of the set, a transaction per
+		// chunk): one by one, a thousand /64s outlasted the edge ban store's
+		// wait for the restore, and its first reconcile then dropped them.
+		bans := make([]firewall.NetBan, 0, len(nets))
+		for _, n := range nets {
+			bans = append(bans, firewall.NetBan{P: n.p, TTL: n.ttl})
+		}
+		nres, guardedNets, failedNets := firewall.ExtendBlockNets(be, bans)
+		res.Batch.Added += nres.Added
+		res.Batch.Extended += nres.Extended
+		res.Batch.Kept += nres.Kept
+		for p, nerr := range failedNets {
+			if err == nil {
+				err = fmt.Errorf("ttlban: restore %s: %w", p, nerr)
+			}
+		}
+		if len(guardedNets) > 0 {
+			// They hold an address they must not drop now: excluded, as an
+			// allowed host ban is, not a failed restore.
+			res.Excluded += len(guardedNets)
+			s.mu.Lock()
+			for _, p := range guardedNets {
+				delete(s.bans, p.String())
+			}
+			s.mu.Unlock() // saved below (Excluded > 0)
+		}
+	}
 	// An unblock that landed while the batch was writing may have removed
 	// the element before the batch re-added it: take those out again.
 	s.mu.Lock()
@@ -257,6 +329,13 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 	for _, e := range entries {
 		if t, ok := s.forgot[e.IP.String()]; ok && !t.Before(now) {
 			undo = append(undo, e.IP)
+		}
+	}
+	if be != nil {
+		for _, n := range nets {
+			if t, ok := s.forgot[n.p.String()]; ok && !t.Before(now) {
+				undoNets = append(undoNets, n.p)
+			}
 		}
 	}
 	if err != nil {
@@ -269,6 +348,11 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 	for _, ip := range undo {
 		if rerr := be.RemoveBlock(ip); rerr != nil && err == nil {
 			err = fmt.Errorf("ttlban: undo restore of unblocked %s: %w", ip, rerr)
+		}
+	}
+	for _, p := range undoNets {
+		if rerr := firewall.RemoveClientPrefix(be, p); rerr != nil && err == nil {
+			err = fmt.Errorf("ttlban: undo restore of unblocked %s: %w", p, rerr)
 		}
 	}
 	if res.Expired > 0 || res.Excluded > 0 || flushed {
@@ -328,15 +412,18 @@ func (s *Store) snapshot(readAt time.Time, elems []firewall.SetElementTimed, for
 		if el.Expires <= 0 {
 			continue
 		}
-		ip := net.ParseIP(el.Elem)
-		if ip == nil {
+		k := keyOf(el.Elem)
+		if k == "" {
 			continue
 		}
-		k := ip.String()
 		if t, ok := s.forgot[k]; ok && !t.Before(readAt) {
 			continue
 		}
-		next[k] = Entry{Set: setFor(ip), Expires: readAt.Add(el.Expires)}
+		exp := readAt.Add(el.Expires)
+		if old, dup := next[k]; dup && old.Expires.After(exp) {
+			continue // two elements, one key: the longer ban stands
+		}
+		next[k] = Entry{Set: setFor(k), Expires: exp}
 	}
 	for k, e := range s.carry {
 		if _, inNft := next[k]; inNft || !e.Expires.After(readAt) {
@@ -389,11 +476,10 @@ func (s *Store) Forget(ips ...string) error {
 	now := s.now()
 	changed := false
 	for _, raw := range ips {
-		ip := net.ParseIP(raw)
-		if ip == nil {
+		k := keyOf(raw)
+		if k == "" {
 			continue
 		}
-		k := ip.String()
 		s.forgot[k] = now
 		delete(s.carry, k)
 		if _, ok := s.bans[k]; ok {
@@ -406,6 +492,21 @@ func (s *Store) Forget(ips ...string) error {
 		return nil
 	}
 	return s.save()
+}
+
+// ForgetClient is Forget for an unblock of addresses: each address and the
+// /64 an automatic ban of its client took (firewall.RemoveClientNet).
+func ForgetClient(ips ...string) {
+	var keys []string
+	for _, raw := range ips {
+		keys = append(keys, raw)
+		if ip := net.ParseIP(strings.TrimSpace(raw)); ip != nil {
+			if p, ok := firewall.ClientNet(ip); ok {
+				keys = append(keys, p.String())
+			}
+		}
+	}
+	Forget(keys...)
 }
 
 // Forget drops ips from the daemon's store; a no-op outside the daemon.
@@ -520,9 +621,9 @@ func ForgetInFile(path string, ips ...string) error {
 	s.mu.Lock()
 	changed := false
 	for _, raw := range ips {
-		if ip := net.ParseIP(raw); ip != nil {
-			if _, ok := s.bans[ip.String()]; ok {
-				delete(s.bans, ip.String())
+		if k := keyOf(raw); k != "" {
+			if _, ok := s.bans[k]; ok {
+				delete(s.bans, k)
 				changed = true
 			}
 		}
@@ -534,8 +635,11 @@ func ForgetInFile(path string, ips ...string) error {
 	return s.save()
 }
 
-func setFor(ip net.IP) string {
-	if ip.To4() != nil {
+func setFor(k string) string {
+	if strings.Contains(k, "/") {
+		return firewall.BlockV6Clients
+	}
+	if ip := net.ParseIP(k); ip != nil && ip.To4() != nil {
 		return "block_v4"
 	}
 	return "block_v6"

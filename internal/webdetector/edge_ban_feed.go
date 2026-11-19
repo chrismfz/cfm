@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"cfm/internal/edgeban"
+	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/proxyipfilter"
 )
@@ -127,6 +129,12 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) map[strin
 	truncated := 0
 	for _, it := range items {
 		if b.bypassFunc != nil && b.bypassFunc(it.IP) {
+			continue
+		}
+		// An IPv6 client /64 ban: IGNORE_IPS / IGNORE_NETS and the trusted
+		// proxies touching any of it (the address check above cannot read a
+		// prefix).
+		if p, err := netip.ParsePrefix(it.IP); err == nil && firewall.ClientNetExempted(p) != "" {
 			continue
 		}
 		if len(cur) >= edgeBanFeedMax {
