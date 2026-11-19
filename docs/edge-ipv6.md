@@ -11,9 +11,21 @@ Eyeballs), an IPv6-only client fails.
 The listen cannot simply be `listen [::]:9043` in the reference conf: on a host
 without an IPv6 stack (`ipv6.disable=1`) it fails the config test and the edge
 does not start. So the IPv6 listens live in two generated files, and a script
-decides on each host whether they exist. **There is no setting to turn it on:**
-the edge listens on IPv6 by itself wherever the host can and the origin is
-ready for it.
+decides on each host whether they exist.
+
+**Off by default for now.** Per-IP defences (nft bans and rate / connection
+limits, waf_security autoblock, webdetector scoring, login bruteforce) key on
+the full IPv6 address, so a direct IPv6 client rotating inside its /64 (any
+VPS has one) evades them, while an edge without IPv6 refuses it and the
+browser falls back to IPv4, where they hold. Behind Cloudflare that never
+mattered (Cloudflare absorbs the volume and nft never sees the client).
+Until they group IPv6 by /64 (`docs/ROADMAP.md` §9c), a node listens on IPv6
+only when `EDGE_LISTEN_V6 = on` in `/etc/cfm/cfm.conf` allows it; then the
+default becomes automatic (`V6_DEFAULT` in the script and `edgeIPv6Default`
+in `internal/originrealip`, one switch each, pinned equal by
+`check_edge_listen_v6.sh`) and the key is no longer needed. Where it is
+allowed, the edge listens on IPv6 by itself wherever the host can and the
+origin is ready for it.
 
 ## How it works
 
@@ -30,6 +42,9 @@ ready for it.
 The edge listens on IPv6 when **all** of these hold, and stays on IPv4
 otherwise (the script logs which one failed):
 
+0. `EDGE_LISTEN_V6` allows it: `on` / `yes` / `true` / `1` / `auto`; `off` /
+   `no` / `false` / `0` / `disabled` and any unknown value forbid it; absent,
+   the default (off for now). Last uncommented line wins;
 1. the host has a global IPv6 address (`/proc/net/if_inet6`, scope `00`;
    the stack alone is not enough: earth has it, empty, and no IPv6 visitor
    can reach it);
@@ -54,7 +69,7 @@ global IPv6 address yet (SLAAC, the network still coming up), the origin not
 seen on IPv6 yet (it can start after the edge), `cfm realip` unable to confirm
 the `::1` trust (it reads the origin before it runs). Otherwise a reboot would
 silently put the edge back on IPv4. The reasons that would break the start, or
-that the operator chose, always remove them: the kill switch, no IPv6 stack at
+that the operator chose, always remove them: `EDGE_LISTEN_V6` not allowing it, no IPv6 stack at
 all, a taken port, `ss` failing, a main config without the include, a failed
 config test. A change on the origin side for good (trust removed, no more
 IPv6) keeps the edge's IPv6 until the next `render` (a package upgrade, or by
@@ -68,11 +83,10 @@ prints each engine's decision and why, and whether the files are present.
 Removing the `cfm` package (not upgrading it) removes the unit, the drop-ins
 and the files.
 
-**Kill switch, for an emergency only:** `EDGE_LISTEN_V6 = off` in
-`/etc/cfm/cfm.conf` (also `no` / `false` / `0` / `disabled`; the last such line
-wins) keeps every edge on IPv4. It is commented out in the reference
-`cfm.conf`. After setting it, **restart** the edge (a restart re-decides; a
-plain reload keeps the files), or run the script with `render` and reload.
+**Turning it on and off on a node:** uncomment `EDGE_LISTEN_V6 = on` in
+`/etc/cfm/cfm.conf` (run `cfm realip fix` first), or set `off`; then
+**restart** the edge (a restart re-decides; a plain reload keeps the files),
+or run the script with `render` and reload.
 
 ## The origin's `::1` trust
 
@@ -84,7 +98,7 @@ apps that trust localhost, and one bucket for every login limiter. So:
 
 - `cfm realip` requires both as soon as the host **can** do IPv6 (kernel IPv6
   + the origin on a global IPv6 address on 80 and 443, read from
-  `/proc/net/tcp6`; not with the kill switch), before the edge listens. Until
+  `/proc/net/tcp6`) and `EDGE_LISTEN_V6` allows IPv6, before the edge listens. Until
   then it warns "the edge does not listen on IPv6 (run: cfm realip fix, then
   restart the edge)"; once the edge listens, a gap reads "logs ::1 for every
   IPv6 visitor".
@@ -106,7 +120,7 @@ apps that trust localhost, and one bucket for every login limiter. So:
   the edge and the browser fell back to IPv4, so the right site loaded; now
   the edge answers on IPv6 and the origin serves its default vhost (cPanel's
   `defaultwebpage.cgi`), with no fallback. Fix the record or give the account
-  IPv6; the kill switch is the node-wide way back.
+  IPv6; `EDGE_LISTEN_V6 = off` is the node-wide way back.
 - The hop goes to the IPv6 address the visitor dialled, so the origin
   answers with whatever vhost it binds there. On cPanel a vhost includes the
   IPv6 address only when the account has IPv6 assigned (which is also when

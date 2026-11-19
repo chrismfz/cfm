@@ -27,7 +27,7 @@ because of that.
 
 The verdict is **trusted** when the origin trusts 127.0.0.1 (or
 `127.0.0.1/32`, `127.0.0.0/8`) *and* the client header in effect is one of the
-edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. When the edge listens on IPv6, or can (kernel IPv6 and the origin on IPv6 on 80 and 443, unless the kill switch is set: [edge-ipv6.md](edge-ipv6.md)), an IPv6 visitor's hop comes from `::1`, so the same trust must hold for `::1` too, and the verdict is trusted only when both do (`edge_ipv6` / `edge_ipv6_listening` in `--json`; a gap reads "the edge does not listen on IPv6", or "logs ::1 for every IPv6 visitor" once it listens). The `cfm realip fix` files trust both; LiteSpeed needs `::1T` as well. It is **n/a (OK)** when no edge engine runs: then the origin faces
+edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. When the edge listens on IPv6, or may and can (`EDGE_LISTEN_V6` allows it, a global IPv6 address and the origin on IPv6 on 80 and 443: [edge-ipv6.md](edge-ipv6.md)), an IPv6 visitor's hop comes from `::1`, so the same trust must hold for `::1` too, and the verdict is trusted only when both do (`edge_ipv6` / `edge_ipv6_listening` in `--json`; a gap reads "the edge does not listen on IPv6", or "logs ::1 for every IPv6 visitor" once it listens). The `cfm realip fix` files trust both; LiteSpeed needs `::1T` as well. It is **n/a (OK)** when no edge engine runs: then the origin faces
 the internet itself (avgerinos, a DirectAdmin nginx).
 
 It reads configuration only (`internal/originrealip`), the way the server loads

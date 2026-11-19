@@ -10,7 +10,8 @@
 # Before a start the script (prestart) removes the IPv6 listen files only for
 # what would break the start or what the operator chose: no IPv6 stack, a
 # taken port, ss failing, a main config without the include, a failed config
-# test, the kill switch EDGE_LISTEN_V6 = off. Files a render approved are kept
+# test, EDGE_LISTEN_V6 not allowing IPv6 (off, or absent while the default
+# is off). Files a render approved are kept
 # when only readiness is missing at boot (no global address yet, the origin
 # not up yet, cfm realip unable to confirm). It always exits 0, and the leading "-" plus Wants= (not Requires=) mean the edge
 # starts even if this unit fails or the script is missing.

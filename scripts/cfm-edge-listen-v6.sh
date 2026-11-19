@@ -16,8 +16,15 @@
 # (cfm-edge-listen-v6.service, pulled in by a drop-in on openresty.service /
 # angie.service) and from the package deploy, and decides from the host:
 #
-# There is no setting to turn it on: it listens on IPv6 by itself where ALL of
-# these hold, and stays on IPv4 otherwise:
+# Whether a node may listen on IPv6 at all is EDGE_LISTEN_V6 in cfm.conf: on
+# (yes / true / 1 / auto) or off (no / false / 0 / disabled); absent, it is
+# V6_DEFAULT below. V6_DEFAULT is off until per-IP defences group IPv6 by /64
+# (docs/ROADMAP.md §9c): today bans, rate limits and scoring key on the full
+# address, so a direct IPv6 client rotating inside its /64 evades them, while
+# an edge without IPv6 refuses it and the browser falls back to IPv4, where
+# they hold. Then V6_DEFAULT becomes auto and no node needs the key. Where it
+# is allowed, the edge listens on IPv6 by itself where ALL of these hold, and
+# stays on IPv4 otherwise:
 #   - the host has a global IPv6 address (/proc/net/if_inet6, scope 00);
 #   - nothing but the edge holds [::]:9080 / [::]:9043 (tcp) or [::]:9043
 #     (udp) — `nginx -t` does not bind, so a taken port would pass the test
@@ -31,9 +38,8 @@
 #     (`Require local`, apps that trust localhost, one login-limiter bucket
 #     for all of them). `cfm realip fix` writes it (Apache / nginx).
 #
-# Kill switch, for an emergency only: `EDGE_LISTEN_V6 = off` in cfm.conf
-# (also no / false / 0 / disabled) keeps every edge on IPv4. It is commented
-# out in the reference cfm.conf; nothing needs it to work.
+# The reference cfm.conf carries the key commented out (`# EDGE_LISTEN_V6 =
+# on`, the opt-in while V6_DEFAULT is off).
 #
 # After a change it runs the engine's own config test and, if that fails with
 # the IPv6 files in place, removes them again. Files are removed too when the
@@ -56,7 +62,7 @@
 #             trust (it cannot see the running origin yet). Otherwise a reboot
 #             would silently put the edge back on IPv4 until the next render.
 #             The reasons that would break the start, or that the operator
-#             chose, still remove them: the kill switch, no IPv6 stack at all,
+#             chose, still remove them: EDGE_LISTEN_V6 not allowing it, no IPv6 stack at all,
 #             a taken port, ss failing, a main config without the include, a
 #             failed config test. A change on the origin side for good (trust
 #             removed, no more IPv6) keeps the edge's IPv6 until the next
@@ -79,14 +85,22 @@ CFM_PROC_ROOT=${CFM_PROC_ROOT:-/proc}
 V6_HTTP_PORT=9080
 V6_HTTPS_PORT=9043
 
+# The decision with no EDGE_LISTEN_V6 in cfm.conf: off until IPv6 /64
+# grouping lands (see the header), then auto. internal/originrealip
+# edgeIPv6Default is the same switch; check_edge_listen_v6.sh pins them equal.
+V6_DEFAULT=off
+
 V6_HTTP_FILE=cfm-listen-v6-http.conf
 V6_HTTPS_FILE=cfm-listen-v6-https.conf
 
 log() { echo "CFM edge IPv6 listen: $*"; }
 
-# mode: "off" when the kill switch EDGE_LISTEN_V6 = off (no / false / 0 /
-# disable / disabled) is the last uncommented line of cfm.conf, else "auto".
-# Same reading as internal/originrealip edgeIPv6Off.
+# mode: EDGE_LISTEN_V6 from cfm.conf (last uncommented line wins; an inline ;
+# or # comment and quotes stripped; case-insensitive): "auto" for on / yes /
+# true / 1 / auto / enable / enabled, "off" for off / no / false / 0 /
+# disable / disabled, V6_DEFAULT when absent; anything else reads as off (an
+# unknown never turns a listen on). Same reading as internal/originrealip
+# edgeIPv6Wanted.
 mode() {
     m_val=""
     if [ -r "$CFM_CONF" ]; then
@@ -95,8 +109,13 @@ mode() {
             tail -n 1 | tr 'A-Z' 'a-z')
     fi
     case $m_val in
+        "") echo "$V6_DEFAULT" ;;
+        on | yes | true | 1 | auto | enable | enabled) echo auto ;;
         off | no | false | 0 | disable | disabled) echo off ;;
-        *) echo auto ;;
+        *)
+            log "WARNING: EDGE_LISTEN_V6 = \"$m_val\" in $CFM_CONF is not on/off; treating it as off" >&2
+            echo off
+            ;;
     esac
 }
 
@@ -197,7 +216,7 @@ edge_port_taken() {
 # hop too. It is asked BEFORE the files are written (so no reload can catch the
 # edge on IPv6 with an untrusting origin): a host that can do IPv6 already
 # makes it require ::1 (internal/originrealip edgeIPv6: kernel IPv6 + the
-# origin on IPv6 on 80 and 443, unless the kill switch is set), and its JSON
+# origin on IPv6 on 80 and 443, where EDGE_LISTEN_V6 allows it), and its JSON
 # then says "edge_ipv6":true. A verdict without that key is from a
 # cfm that does not know about the IPv6 hop: no verdict. 0 yes, 1 no, 2
 # cannot tell.
@@ -222,7 +241,7 @@ realip_v6_trusted() {
 want_v6() {
     case $1 in
         off)
-            echo "kill switch EDGE_LISTEN_V6 = off in $CFM_CONF"
+            echo "EDGE_LISTEN_V6 is off (set EDGE_LISTEN_V6 = on in $CFM_CONF to allow IPv6; docs/edge-ipv6.md)"
             return 1
             ;;
     esac

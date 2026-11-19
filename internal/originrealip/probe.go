@@ -110,14 +110,15 @@ type layout struct {
 	// edgeV6Files: the edge's IPv6 listen files (scripts/cfm-edge-listen-v6.sh);
 	// any of them present means the edge listens on IPv6.
 	edgeV6Files []string
-	// The edge listens on IPv6 by itself wherever the host can
-	// (scripts/cfm-edge-listen-v6.sh), but only once the origin trusts ::1.
-	// So the ::1 trust is required as soon as the host CAN (kernel IPv6, the
+	// Where IPv6 is allowed, the edge listens on IPv6 by itself wherever the
+	// host can (scripts/cfm-edge-listen-v6.sh), but only once the origin
+	// trusts ::1. So the ::1 trust is required as soon as the host CAN (a global IPv6 address, the
 	// origin listening on IPv6 on 80 and 443), before any listen file exists:
 	// the script asks `cfm realip` before it writes them, and `cfm realip fix`
 	// must then write the ::1 trust instead of answering "already trusted" on
 	// a 127.0.0.1-only origin, which would leave the edge on IPv4 for good.
-	// cfmConf: EDGE_LISTEN_V6 = off there (the kill switch) turns it off.
+	// cfmConf: EDGE_LISTEN_V6 there allows or forbids IPv6 (edgeIPv6Wanted;
+	// absent = edgeIPv6Default, off until IPv6 /64 grouping).
 	cfmConf, procIfInet6, procTCP6 string
 
 	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
@@ -180,38 +181,45 @@ var system = layout{
 	procTCP6:    "/proc/net/tcp6",
 }
 
+// edgeIPv6Default is the decision with no EDGE_LISTEN_V6 in cfm.conf: false
+// until per-IP defences group IPv6 by /64 (docs/ROADMAP.md §9c), then true.
+// scripts/cfm-edge-listen-v6.sh V6_DEFAULT is the same switch;
+// check_edge_listen_v6.sh pins them equal.
+const edgeIPv6Default = false
+
 // edgeIPv6: the edge listens on IPv6 (its listen files exist), or it would as
-// soon as the origin trusts ::1 (hostCanIPv6, unless the kill switch is set).
+// soon as the origin trusts ::1 (IPv6 allowed on this node and hostCanIPv6).
 func (l layout) edgeIPv6() bool {
-	return l.edgeListensIPv6() || (!l.edgeIPv6Off() && l.hostCanIPv6())
+	return l.edgeListensIPv6() || (l.edgeIPv6Wanted() && l.hostCanIPv6())
 }
 
 func (l layout) edgeListensIPv6() bool { return l.anyExists(l.edgeV6Files) }
 
-// edgeIPv6Off: EDGE_LISTEN_V6 = off (or no / false / 0 / disabled) in
-// cfm.conf, read like scripts/cfm-edge-listen-v6.sh: last uncommented line
-// wins, an inline ; or # comment and quotes stripped, case-insensitive.
-func (l layout) edgeIPv6Off() bool {
-	if l.cfmConf == "" {
-		return false
-	}
-	b, err := os.ReadFile(l.fs(l.cfmConf))
-	if err != nil {
-		return false
-	}
+// edgeIPv6Wanted: EDGE_LISTEN_V6 in cfm.conf allows IPv6 on this node, read
+// like scripts/cfm-edge-listen-v6.sh mode(): last uncommented line wins, an
+// inline ; or # comment and quotes stripped, case-insensitive; on / yes /
+// true / 1 / auto / enable / enabled = yes, absent = edgeIPv6Default,
+// anything else = no.
+func (l layout) edgeIPv6Wanted() bool {
 	mode := ""
-	for _, line := range strings.Split(string(b), "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
-		if !ok || strings.TrimSpace(k) != "EDGE_LISTEN_V6" {
-			continue
+	if l.cfmConf != "" {
+		if b, err := os.ReadFile(l.fs(l.cfmConf)); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+				if !ok || strings.TrimSpace(k) != "EDGE_LISTEN_V6" {
+					continue
+				}
+				if i := strings.IndexAny(v, ";#"); i >= 0 {
+					v = v[:i]
+				}
+				mode = strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"'`)))
+			}
 		}
-		if i := strings.IndexAny(v, ";#"); i >= 0 {
-			v = v[:i]
-		}
-		mode = strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"'`)))
 	}
 	switch mode {
-	case "off", "no", "false", "0", "disable", "disabled":
+	case "":
+		return edgeIPv6Default
+	case "on", "yes", "true", "1", "auto", "enable", "enabled":
 		return true
 	}
 	return false

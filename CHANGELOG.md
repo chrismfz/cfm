@@ -30,14 +30,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `169.254/16` and the node's global addresses are unchanged.
 
 ### Added
-- **The edge listens on IPv6 by itself where the host can.** The web DNAT
+- **The edge can listen on IPv6 (`EDGE_LISTEN_V6 = on`; off by default until
+  IPv6 /64 grouping).** The web DNAT
   redirect has always caught IPv6 (`table inet`), but the edge listened on
   IPv4 only, so an IPv6 visitor's connection to 80/443 was refused: browsers
   fell back to IPv4, IPv6-only clients failed. The two listener `server{}`
   blocks now include generated `cfm-listen-v6-http.conf` /
   `cfm-listen-v6-https.conf` (`[::]:9080`, `[::]:9043` ssl + quic) through a
   glob, so an absent file means IPv4 only. `scripts/cfm-edge-listen-v6.sh`
-  writes them, with nothing to configure, only when the host has a global
+  writes them, where `EDGE_LISTEN_V6` allows it, only when the host has a global
   IPv6 address,
   nothing else holds the edge's IPv6 ports, the origin listens on IPv6 on 80
   and 443, the origin trusts the edge's IPv6 hop from `::1` (below), the live
@@ -48,12 +49,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the edge's own config test, so a host without IPv6 never fails to start on
   it. A port counts as the edge's only when a ROOT process named nginx /
   openresty / angie holds it: a tenant process that names itself nginx on
-  `[::]:9080` keeps IPv6 off instead of making the edge's start fail. A change applies at the edge's next start or reload, never by itself:
-  on our nodes with IPv6 (rigel, titan, speedhost, qualityweb) the edge turns
-  IPv6 on at its next restart where the origin trusts `::1`; none has an
-  AAAA record pointing at it today. Verified on speedhost (OpenResty) and
-  qualityweb (Angie) with a scratch edge. Kill switch: `EDGE_LISTEN_V6 = off`
-  in `cfm.conf` (commented out in the reference file), then restart the
+  `[::]:9080` keeps IPv6 off instead of making the edge's start fail. A change applies at the edge's next start or reload, never by itself.
+  Off by default for now: per-IP defences key on the full IPv6 address, so a
+  direct IPv6 client rotating inside its /64 would evade them, while an edge
+  without IPv6 refuses it and the browser falls back to IPv4, where they
+  hold; once they group IPv6 by /64 the default becomes automatic (one switch
+  in the script and one in Go, pinned equal) and the key is not needed.
+  Nothing changes on a node that does not set the key. Verified on speedhost (OpenResty) and
+  qualityweb (Angie) with a scratch edge. To turn it on: uncomment
+  `EDGE_LISTEN_V6 = on` in `cfm.conf`, run `cfm realip fix`, restart the
   edge. Before a start, files a render approved are kept when only
   readiness is missing at boot (no global address yet, the origin not up
   yet), so a reboot does not silently drop IPv6. Behaviour change: a domain
@@ -61,11 +65,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   fall back to IPv4 (refused at the edge) and now gets the origin's default
   vhost over IPv6. Package removal removes the unit, the drop-ins and the
   files. The panel ports stay IPv4. `docs/edge-ipv6.md`.
-- **`cfm realip` requires `::1` trust where the edge listens, or can listen,
-  on IPv6.** An IPv6 visitor's origin hop comes from `::1`; an origin
+- **`cfm realip` requires `::1` trust where the edge listens, or may and can
+  listen, on IPv6.** An IPv6 visitor's origin hop comes from `::1`; an origin
   trusting only 127.0.0.1 would see every IPv6 visitor as `::1`, i.e. as
-  localhost. The requirement starts as soon as the host can do IPv6 (kernel
-  IPv6 + the origin on IPv6 on 80 and 443), before the edge listens, so
+  localhost. The requirement starts as soon as `EDGE_LISTEN_V6` allows IPv6
+  and the host can do it (a global IPv6 address + the origin on IPv6 on 80
+  and 443), before the edge listens, so
   `cfm realip fix` writes the `::1` trust for Apache and nginx even where the
   127.0.0.1 trust came from a file CFM did not write (Imunify's
   `i360.remoteip.conf`); LiteSpeed needs `::1T` in its allow list by hand.

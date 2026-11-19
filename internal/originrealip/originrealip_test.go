@@ -988,12 +988,12 @@ func tcp6Line(i int, addr string, port int, st string) string {
 
 const tcp6Head = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
 
-// The edge listens on IPv6 by itself wherever the host can, once the origin
-// trusts ::1. So the ::1 trust is required as soon as the host CAN (kernel
-// IPv6 + an origin on a global IPv6 address on 80 and 443), before any listen
-// file exists: otherwise `cfm realip fix` answers "already trusted" on a
-// 127.0.0.1-only origin (Imunify's i360.remoteip.conf) and the edge never
-// turns IPv6 on. EDGE_LISTEN_V6 = off in cfm.conf is the kill switch.
+// Where IPv6 is allowed (EDGE_LISTEN_V6 = on, or edgeIPv6Default), the edge
+// listens on IPv6 by itself once the origin trusts ::1. So the ::1 trust is
+// required as soon as the host CAN (a global IPv6 address + an origin on a
+// global IPv6 address on 80 and 443), before any listen file exists:
+// otherwise `cfm realip fix` answers "already trusted" on a 127.0.0.1-only
+// origin (Imunify's i360.remoteip.conf) and the edge never turns IPv6 on.
 func TestEdgeIPv6HostCapability(t *testing.T) {
 	any6 := "00000000000000000000000000000000"
 	ifGlobal := "fe80000000000000e6434bfffe54ef2f 05 40 20 80     eno4\n2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4\n00000000000000000000000000000001 01 80 10 80       lo\n"
@@ -1020,9 +1020,13 @@ func TestEdgeIPv6HostCapability(t *testing.T) {
 		{"v4-mapped does not count", true, ifGlobal, tcp6Line(0, mapped, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
 		{"not LISTEN", true, ifGlobal, tcp6Line(0, any6, 80, "01") + tcp6Line(1, any6, 443, "0A"), "", false},
 		{"other ports", true, ifGlobal, tcp6Line(0, any6, 8080, "0A") + tcp6Line(1, any6, 4430, "0A"), "", false},
-		{"kill switch", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\n", false},
-		{"kill switch, quoted + comment", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6=\"No\" ; note\n", false},
-		{"commented kill switch", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "# EDGE_LISTEN_V6 = off\n", true},
+		{"no cfm.conf: edgeIPv6Default (off until /64 grouping)", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "-", edgeIPv6Default},
+		{"no key: edgeIPv6Default", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "OTHER = 1\n", edgeIPv6Default},
+		{"yes", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6=\"Yes\" # opt in\n", true},
+		{"unknown value", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = maybe\n", false},
+		{"off", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\n", false},
+		{"no, quoted + comment", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6=\"No\" ; note\n", false},
+		{"commented key", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "# EDGE_LISTEN_V6 = off\n", edgeIPv6Default},
 		{"later line wins", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\nEDGE_LISTEN_V6 = auto\n", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1033,7 +1037,12 @@ func TestEdgeIPv6HostCapability(t *testing.T) {
 				put(t, r, "proc/net/if_inet6", c.ifs)
 			}
 			put(t, r, "proc/net/tcp6", tcp6Head+c.rows)
-			if c.conf != "" {
+			// "" = IPv6 allowed (EDGE_LISTEN_V6 = on); "-" = no cfm.conf at all.
+			switch c.conf {
+			case "":
+				put(t, r, "etc/cfm/cfm.conf", "EDGE_LISTEN_V6 = on\n")
+			case "-":
+			default:
 				put(t, r, "etc/cfm/cfm.conf", c.conf)
 			}
 			p := l.probe("httpd")
@@ -1102,6 +1111,7 @@ func TestRealipJSONContractWithTheIPv6Script(t *testing.T) {
 	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
 		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
 	put(t, r, "proc/net/if_inet6", "2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4\n")
+	put(t, r, "etc/cfm/cfm.conf", "EDGE_LISTEN_V6 = on\n")
 	put(t, r, "proc/net/tcp6", tcp6Head+
 		tcp6Line(0, "00000000000000000000000000000000", 80, "0A")+
 		tcp6Line(1, "00000000000000000000000000000000", 443, "0A"))

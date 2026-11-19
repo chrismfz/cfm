@@ -228,8 +228,9 @@ Reference: `docs/cfm-lsm.md`.
 
 ## 9c. Edge IPv6
 
-The edge listens on IPv6 by itself where the host can and the origin trusts
-`::1` (`docs/edge-ipv6.md`; kill switch `EDGE_LISTEN_V6 = off`), and the
+The edge can listen on IPv6 where the host can and the origin trusts `::1`
+(`docs/edge-ipv6.md`); for now only where `EDGE_LISTEN_V6 = on` allows it
+(default off until the /64 item below), and the
 origin hop brackets the address and binds `::1`.
 
 - **Watch the first real IPv6 traffic through the live edge** — [track].
@@ -248,9 +249,19 @@ origin hop brackets the address and binds `::1`.
   does today; no fleet site has one, so it is unproven. First real case: the
   operator node that reported the bug (AAAA records to the server). Check
   that the site (not the default vhost) answers over `curl -6`.
-- **Per-IP counters and bans by /64** — [idea]. Every detector keys an IPv6
-  client on its full address, so a client rotating inside its /64 never
-  accumulates. Already true behind Cloudflare (own IPv6 address at the edge).
+- **Per-IP counters and bans by /64, then IPv6 on by default** — [next].
+  Every per-IP control keys on the full IPv6 address: nft `connlimit` /
+  `pps_v6` / `syn_v6` / `new_v6` meters and `block_v6` bans, waf_security
+  autoblock, webdetector scoring, login_bruteforce, 403_flood, challenge rate
+  counters. A direct IPv6 client with a /64 (any VPS) gets a new identity per
+  request. Behind Cloudflare that did not matter (nft never sees the client,
+  Cloudflare absorbs the volume), but with the edge listening on IPv6 direct
+  clients reach the nft per-IP layer. Group IPv6 by /64 there (and in the
+  edge ban store), then flip `V6_DEFAULT` (scripts/cfm-edge-listen-v6.sh)
+  and `edgeIPv6Default` (internal/originrealip) together to auto/true, and
+  swap the reference cfm.conf's commented `# EDGE_LISTEN_V6 = on` for
+  `# EDGE_LISTEN_V6 = off` (check_edge_listen_v6.sh checks all three).
+
 - **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
   only on the fleet; the panel listeners stay IPv4.
 

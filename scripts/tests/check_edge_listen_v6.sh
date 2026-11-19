@@ -75,12 +75,26 @@ for pair in "configs/openresty.conf|/usr/local/openresty/nginx/conf" "configs/an
 done
 
 # No setting to turn it on: the reference cfm.conf carries only the kill
-# switch, commented out, and no active EDGE_LISTEN_V6 line.
-grep -qxF '# EDGE_LISTEN_V6 = off' configs/cfm.conf || fail "configs/cfm.conf: the commented kill switch '# EDGE_LISTEN_V6 = off' is missing"
+# The default (no EDGE_LISTEN_V6 in cfm.conf) is ONE switch on each side:
+# the script's V6_DEFAULT and Go's edgeIPv6Default (internal/originrealip),
+# off/false until IPv6 /64 grouping lands, then auto/true together. The
+# reference cfm.conf sets no active key and carries the opposite of the
+# default commented out (the opt-in now, the kill switch later).
+sdef=$(sed -n 's/^V6_DEFAULT=\([a-z]*\)$/\1/p' "$SCRIPT")
+gdef=$(sed -n 's/^const edgeIPv6Default = \([a-z]*\)$/\1/p' internal/originrealip/probe.go)
+case "$sdef/$gdef" in
+  off/false) want_commented='# EDGE_LISTEN_V6 = on' ;;
+  auto/true) want_commented='# EDGE_LISTEN_V6 = off' ;;
+  *) want_commented=''; fail "V6_DEFAULT ('$sdef', $SCRIPT) and edgeIPv6Default ('$gdef', probe.go) disagree or are missing" ;;
+esac
+if [ -n "$want_commented" ]; then
+  ok "default: V6_DEFAULT=$sdef, edgeIPv6Default=$gdef"
+  grep -qxF "$want_commented" configs/cfm.conf || fail "configs/cfm.conf: '$want_commented' (commented) is missing"
+fi
 if grep -qE '^[[:space:]]*EDGE_LISTEN_V6[[:space:]]*=' configs/cfm.conf; then
-  fail "configs/cfm.conf sets EDGE_LISTEN_V6 (it must stay commented: automatic by default)"
+  fail "configs/cfm.conf sets EDGE_LISTEN_V6 (it must stay commented: the default lives in the code)"
 else
-  ok "configs/cfm.conf: no active EDGE_LISTEN_V6, the kill switch commented"
+  ok "configs/cfm.conf: no active EDGE_LISTEN_V6 line"
 fi
 
 # --- 2. the decision -----------------------------------------------------------
@@ -188,9 +202,13 @@ printf 'EDGE_LISTEN_V6=off\r\n' >"$cfm_conf"
 run render
 expect absent "kill switch with CRLF line ending (no spaces) -> IPv4 only"
 cp configs/cfm.conf "$cfm_conf"
+run render
+expect absent "the reference cfm.conf (nothing set): V6_DEFAULT=off until /64 grouping -> IPv4 only"
+says "EDGE_LISTEN_V6 is off"
+printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 : >"$tmp/realip.calls"
 run render
-expect present "the reference cfm.conf (nothing set): kernel IPv6, ports free, origin on [::]:80/443, ::1 trusted -> listens by itself"
+expect present "EDGE_LISTEN_V6 = on: kernel IPv6, ports free, origin on [::]:80/443, ::1 trusted -> listens"
 [ "$(cat "$tmp/realip.calls")" = nofiles ] || fail "cfm realip must be asked BEFORE the IPv6 files are written: $(cat "$tmp/realip.calls")"
 grep -qxF "listen [::]:$http_port;" "$conf_dir/cfm-listen-v6-http.conf" || fail "http file content: $(cat "$conf_dir/cfm-listen-v6-http.conf")"
 grep -qxF "listen [::]:$https_port ssl;" "$conf_dir/cfm-listen-v6-https.conf" || fail "https file lacks the ssl listen"
@@ -306,10 +324,21 @@ for v in off '"off" ; note' OFF no false 0 disabled; do
 done
 printf 'EDGE_LISTEN_V6 = off\nEDGE_LISTEN_V6 = auto\n' >"$cfm_conf"
 run render
-expect present "a later non-off line wins over the kill switch"
-printf '# EDGE_LISTEN_V6 = off\n' >"$cfm_conf"
+expect present "a later on line wins over off"
+for v in on Yes true 1 auto enabled; do
+  printf 'EDGE_LISTEN_V6 = %s\n' "$v" >"$cfm_conf"
+  rm -f "$conf_dir"/cfm-listen-v6-*.conf
+  run render
+  expect present "EDGE_LISTEN_V6 = $v allows IPv6"
+done
+printf 'EDGE_LISTEN_V6 = maybe\n' >"$cfm_conf"
 run render
-expect present "a commented kill switch does nothing"
+expect absent "an unknown value reads as off"
+says 'not on/off'
+printf '# EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
+run render
+expect absent "a commented key leaves the default (off)"
+printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 
 rm -f "$proc"
 run prestart
@@ -334,7 +363,8 @@ v6_global
 rm -f "$cfm_conf"
 ss_v6
 run render
-expect present "no cfm.conf at all -> automatic"
+expect absent "no cfm.conf at all -> the default (off)"
+printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 printf 'with-v6' >"$tmp/engine.fail"
 run render
@@ -462,4 +492,4 @@ if [ "$fails" -ne 0 ]; then
   echo "[edge-listen-v6] FAILED: $fails check(s)" >&2
   exit 1
 fi
-echo "[edge-listen-v6] OK: confs and script agree on ports/includes; the decision (automatic, kill switch, IPv6 stack, taken ports, origin, ::1 trust, main-conf include, failed test, prestart keep), the deploy hook and package removal behave."
+echo "[edge-listen-v6] OK: confs and script agree on ports/includes; the decision (default + opt-in, on/off forms, IPv6 stack, taken ports, origin, ::1 trust, main-conf include, failed test, prestart keep), the deploy hook and package removal behave."
