@@ -17,6 +17,15 @@ local rawByPath = {
   ["/var/lib/cfm/lua/cfm_ignore_nets.lua"] = {
     ips = { ["9.9.9.9"] = true },
     v4_ranges = { { RANGE_LO, RANGE_HI } },
+    -- what Go writes (IPIgnore.WriteLuaCache): network as 32 hex digits + prefix.
+    v6_ranges = {
+      { "2a0145f8000000000000000000000000", 32 },   -- 2a01:45f8::/32
+      { "2a144280000100010000000000000000", 64 },   -- 2a14:4280:1:1::/64
+      { "20010db8800000000000000000000000", 33 },   -- 2001:db8:8000::/33 (partial nibble)
+      { "zz", 64 },                                 -- malformed: dropped
+      { "2a0c0000000000000000000000000000", 129 },  -- bad prefix: dropped
+      { "00000000000000000000000000000000", 80 },   -- ::/80 covers ::ffff:0:0/96
+    },
   },
 }
 
@@ -58,9 +67,40 @@ assert_true(selfip.is_self_origin("10.0.0.50"), "ignore v4 range inside")
 assert_true(selfip.is_self_origin("10.0.0.0"), "ignore v4 range low edge")
 assert_true(selfip.is_self_origin("10.0.0.255"), "ignore v4 range high edge")
 
+-- ipv6_to_hex32: the expansion Go's hex.EncodeToString(ip.To16()) gives.
+local H = selfip.ipv6_to_hex32
+assert_true(H("2001:db8::1") == "20010db8000000000000000000000001", "hex32 compressed")
+assert_true(H("::1") == "00000000000000000000000000000001", "hex32 ::1")
+assert_true(H("::") == "00000000000000000000000000000000", "hex32 ::")
+assert_true(H("2001:DB8:0:0:0:0:0:1") == "20010db8000000000000000000000001", "hex32 full + upper")
+assert_true(H("fe80::1%eth0") == nil, "hex32 refuses a zone id (as Go's ParseIP does)")
+assert_true(H("2001:db8::1%25eth0") == nil, "hex32 refuses an encoded zone id")
+assert_true(H("::ffff:1.2.3.4") == "00000000000000000000ffff01020304", "hex32 embedded v4")
+assert_true(H("::ffff:10.0.0.1") == "00000000000000000000ffff0a000001", "hex32 embedded v4 with a 0 octet")
+assert_true(H("1::") == "00010000000000000000000000000000", "hex32 trailing ::")
+for _, bad in ipairs({ "1.2.3.4", "1::2::3", "12345::1", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9",
+                       "g::1", ":1::", "1:2:3:4:5:6:7::8", "", "::ffff:1.2.3.999",
+                       "1::01.2.3.4", "1::1.2.3.04", "::ffff:010.0.0.1" }) do
+  assert_true(H(bad) == nil, "hex32 rejects " .. bad)
+end
+
+-- IGNORE_NETS v6 ranges.
+assert_true(selfip.is_self_origin("2a01:45f8:1234::5"), "ignore v6 /32 inside")
+assert_true(selfip.is_self_origin("2A01:45F8::"), "ignore v6 /32 network address, upper case")
+assert_true(not selfip.is_self_origin("2a01:45f9::1"), "ignore v6 /32: next /32 outside")
+assert_true(selfip.is_self_origin("2a14:4280:1:1:925a:8ff:fe3c:f289"), "ignore v6 /64 inside")
+assert_true(not selfip.is_self_origin("2a14:4280:1:2::1"), "ignore v6 /64: neighbour /64 outside")
+assert_true(selfip.is_self_origin("2001:db8:8000::1"), "ignore v6 /33 low half-nibble inside")
+assert_true(selfip.is_self_origin("2001:db8:ffff:ffff::1"), "ignore v6 /33 top inside")
+assert_true(not selfip.is_self_origin("2001:db8:7fff::1"), "ignore v6 /33: other half outside")
+assert_true(not selfip.is_self_origin("2a0c::1"), "malformed v6_ranges entries never match")
+assert_true(not selfip.is_self_origin("::ffff:10.0.1.1"), "v4-mapped never matches a v6 range (::/80 here), as in Go")
+assert_true(not selfip.is_self_origin("::ffff:8.8.8.8"), "v4-mapped public never matches a v6 range")
+assert_true(selfip.is_self_origin("::abcd"), "::/80 still matches a plain v6 inside it")
+
 -- Outside every bypass source → NOT self-origin.
 assert_true(not selfip.is_self_origin("10.0.1.1"), "10.0.1.1 outside range")
 assert_true(not selfip.is_self_origin("8.8.8.8"), "8.8.8.8 public")
 assert_true(not selfip.is_self_origin(""), "empty is not self-origin")
 
-print("ok: cfm_selfip self-origin / IGNORE_NETS bypass (loopback + self-IP + ignore ips/ranges)")
+print("ok: cfm_selfip self-origin / IGNORE_NETS bypass (loopback + self-IP + ignore ips + v4/v6 ranges)")

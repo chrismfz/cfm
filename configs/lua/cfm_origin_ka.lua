@@ -215,7 +215,15 @@ end
 -- (the SNI-aware Lua pooling path) here, because HTTPS pooling is disabled by
 -- policy — see the header comment. (lua-resty-core also advises against setting
 -- both the host arg and proxy_ssl_name at once.)
+--
+-- An IPv6 address goes in brackets: set_current_peer hands the string to
+-- nginx's ngx_parse_url, which treats a bare "2001:db8::1" as host "2001" with
+-- an invalid port and fails the peer. "[2001:db8::1]" takes the IPv6 parser and
+-- the separate port argument. IPv4 is passed unchanged.
 local function set_peer(addr, port)
+  if addr:find(":", 1, true) and addr:sub(1, 1) ~= "[" then
+    addr = "[" .. addr .. "]"
+  end
   local ok, err = balancer.set_current_peer(addr, port)
   if not ok then
     ngx.log(ngx.ERR, "[cfm_origin_ka] set_current_peer(", addr, ":", port,

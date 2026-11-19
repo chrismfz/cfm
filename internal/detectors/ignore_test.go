@@ -97,9 +97,50 @@ func TestIPIgnore_WriteLuaCache_RoundTrip(t *testing.T) {
 			t.Errorf("missing 10.0.0.0/8 range %s:\n%s", needle, s)
 		}
 	}
-	// IPv6 CIDR must NOT have produced a v4_ranges entry.
-	if strings.Contains(s, "2001") || strings.Contains(s, "db8") {
-		t.Errorf("IPv6 CIDR leaked into Lua cache:\n%s", s)
+	// IPv6 CIDR goes to v6_ranges (network as 32 hex digits + prefix), the
+	// form cfm_selfip.lua's ipv6_to_hex32 compares against; never v4_ranges.
+	v4 := s[strings.Index(s, "v4_ranges"):strings.Index(s, "v6_ranges")]
+	if strings.Contains(v4, "2001") || strings.Contains(v4, "db8") {
+		t.Errorf("IPv6 CIDR leaked into v4_ranges:\n%s", s)
+	}
+	if !strings.Contains(s, `{ "20010db8000000000000000000000000", 32 },`) {
+		t.Errorf("missing 2001:db8::/32 v6_ranges entry:\n%s", s)
+	}
+}
+
+// A v6 CIDR written with host bits set (2001:db8::5/48 parses to the masked
+// network) and a /128 land as their network address; a v4-mapped CIDR stays
+// out of v6_ranges (its To4() is non-nil, and its 128-bit mask is not v4's).
+func TestIPIgnore_WriteLuaCache_V6Ranges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cfm_ignore_nets.lua")
+	var nets []*net.IPNet
+	for _, c := range []string{"2001:db8:abcd:12::5/48", "2a14:4280:1:1::7/128", "::ffff:10.0.0.0/104"} {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			t.Fatalf("ParseCIDR(%s): %v", c, err)
+		}
+		nets = append(nets, n)
+	}
+	ig := &IPIgnore{exact: map[string]struct{}{}, nets: nets}
+	if err := ig.WriteLuaCache(path); err != nil {
+		t.Fatalf("WriteLuaCache: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s := string(got)
+	v6 := s[strings.Index(s, "v6_ranges"):]
+	for _, want := range []string{
+		`{ "20010db8abcd00000000000000000000", 48 },`,
+		`{ "2a144280000100010000000000000007", 128 },`,
+	} {
+		if !strings.Contains(v6, want) {
+			t.Errorf("missing %s in v6_ranges:\n%s", want, s)
+		}
+	}
+	if strings.Contains(v6, "ffff") {
+		t.Errorf("v4-mapped CIDR leaked into v6_ranges:\n%s", s)
 	}
 }
 

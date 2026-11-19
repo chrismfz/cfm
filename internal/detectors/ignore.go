@@ -3,6 +3,7 @@ package detectors
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -126,12 +127,21 @@ func (ig *IPIgnore) LogIgnoredReports() bool {
 //       { 1412837632, 1412837887 },  -- 84.54.49.0/24 as uint32 [first, last]
 //       ...
 //     },
+//     v6_ranges = {
+//       { "2a0145f8000000000000000000000000", 32 },  -- 2a01:45f8::/32
+//       ...
+//     },
 //   }
 //
 // IPv4 CIDR blocks are precomputed to uint32 [first, last] pairs so the Lua
 // caller does a cheap numeric range check instead of bit-twiddling per
-// request. IPv6 CIDR blocks are not yet supported — they fall back to the
-// exact-IP map only (which still covers the common single-/128-IP case).
+// request. IPv6 CIDR blocks are written as the network address in 32
+// lowercase hex digits plus the prefix length; cfm_selfip.lua expands the
+// client address the same way and compares the leading prefix bits (whole
+// nibbles as a string prefix, the last partial nibble numerically). Before
+// v6_ranges an IPv6 IGNORE_NETS entry was honoured by Go only: the edge
+// still challenged / WAF-checked it (a client behind Cloudflare reaches the
+// edge with its own IPv6 address today).
 //
 // A nil receiver writes an empty file (so cfm.lua sees a valid-but-empty
 // table even when no IGNORE_* keys are configured). Writes are atomic via
@@ -170,10 +180,7 @@ func (ig *IPIgnore) WriteLuaCache(path string) error {
 	}
 	buf.WriteString("  },\n")
 
-	// IPv4 CIDR ranges precomputed to uint32 pairs. IPv6 CIDRs are skipped
-	// (Lua-side CIDR matching on 128-bit addresses without bitops is more
-	// surgery than this PR can carry; operators wanting IPv6 ignore must
-	// list the exact addresses in IGNORE_IPS for now).
+	// IPv4 CIDR ranges precomputed to uint32 pairs (IPv6 ones go to v6_ranges below).
 	buf.WriteString("  v4_ranges = {\n")
 	if ig != nil {
 		type rng struct{ first, last uint32 }
@@ -181,7 +188,7 @@ func (ig *IPIgnore) WriteLuaCache(path string) error {
 		for _, n := range ig.nets {
 			ip4 := n.IP.To4()
 			if ip4 == nil {
-				continue // IPv6 — not supported in the Lua range table
+				continue // IPv6 — written to v6_ranges below
 			}
 			first := binary.BigEndian.Uint32(ip4)
 			ones, bits := n.Mask.Size()
@@ -205,6 +212,37 @@ func (ig *IPIgnore) WriteLuaCache(path string) error {
 		})
 		for _, r := range ranges {
 			buf.WriteString(fmt.Sprintf("    { %d, %d },\n", r.first, r.last))
+		}
+	}
+	buf.WriteString("  },\n")
+
+	// IPv6 CIDR blocks: network address as 32 hex digits + prefix length.
+	buf.WriteString("  v6_ranges = {\n")
+	if ig != nil {
+		type rng6 struct {
+			hex  string
+			ones int
+		}
+		var ranges6 []rng6
+		for _, n := range ig.nets {
+			if n.IP.To4() != nil {
+				continue // IPv4 (incl. v4-mapped) is v4_ranges' job
+			}
+			ip16 := n.IP.To16()
+			ones, bits := n.Mask.Size()
+			if ip16 == nil || bits != 128 {
+				continue // malformed mask; skip defensively
+			}
+			ranges6 = append(ranges6, rng6{hex: hex.EncodeToString(ip16.Mask(n.Mask)), ones: ones})
+		}
+		sort.Slice(ranges6, func(i, j int) bool {
+			if ranges6[i].hex != ranges6[j].hex {
+				return ranges6[i].hex < ranges6[j].hex
+			}
+			return ranges6[i].ones < ranges6[j].ones
+		})
+		for _, r := range ranges6 {
+			buf.WriteString(fmt.Sprintf("    { %q, %d },\n", r.hex, r.ones))
 		}
 	}
 	buf.WriteString("  },\n")

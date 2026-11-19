@@ -126,6 +126,17 @@ check((peer_by_port[443] or 0) == 0, "443 stayed unpooled across all calls")
 check(host_arg_seen == false,
       "set_current_peer is NEVER called with a 3rd host arg (proxy_ssl_name owns SNI)")
 
+-- IPv6 destination: the peer goes to set_current_peer in brackets, or nginx's
+-- ngx_parse_url reads "2001:db8::7" as host "2001" + an invalid port. IPv4 (all
+-- the calls above) is passed unchanged.
+check(calls.set_peer[1].addr == "203.0.113.7", "IPv4 peer passed unchanged")
+ngx.var.server_addr = "2001:db8::7"
+ka.balance(443)
+check(calls.set_peer[#calls.set_peer].addr == "[2001:db8::7]", "IPv6 peer bracketed (443)")
+ka.balance(80)
+check(calls.set_peer[#calls.set_peer].addr == "[2001:db8::7]", "IPv6 peer bracketed (80)")
+ngx.var.server_addr = "203.0.113.7"
+
 -- Bridge-config knob override + memoisation on table identity (port-80 pool).
 local cfg_tbl = { clearance_refresh = true, origin_ka_idle_sec = 2, origin_ka_max_reqs = 500 }
 package.loaded["cfm_bridge_cfg"].get = function() return cfg_tbl end

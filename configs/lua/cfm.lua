@@ -1284,7 +1284,11 @@ local function origin_pass_for(s_in)
   if CFG.origin_keepalive and ngx.var.cfm_origin_ka_conf == "1" then
     return (s_in == "https") and "https://cfm_origin_https" or "http://cfm_origin_http"
   end
+  -- An IPv6 destination goes in brackets: nginx parses "https://2001:db8::1:443"
+  -- as host "2001" with an invalid port and fails the request ("invalid port
+  -- in upstream"). IPv4 is byte-for-byte unchanged.
   local dst = ngx.var.server_addr or "127.0.0.1"
+  if dst:find(":", 1, true) then dst = "[" .. dst .. "]" end
   return (s_in == "https" and "https://" or "http://") .. dst ..
          (s_in == "https" and ":443" or ":80")
 end
