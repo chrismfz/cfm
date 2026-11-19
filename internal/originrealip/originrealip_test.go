@@ -3,10 +3,14 @@ package originrealip
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -840,5 +844,426 @@ func TestNginxTruncatedWalkIsNoted(t *testing.T) {
 	}
 	if p := l.probe("nginx"); !strings.Contains(p.Note, "walk stopped at a limit") {
 		t.Fatalf("probe = %+v", p)
+	}
+}
+
+// edgeV6 marks the edge as listening on IPv6, as scripts/cfm-edge-listen-v6.sh
+// does (one of its listen files present).
+func edgeV6(t *testing.T, r string) {
+	t.Helper()
+	put(t, r, "usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf", "listen [::]:9080;\n")
+}
+
+// When the edge listens on IPv6, an IPv6 visitor's hop reaches the origin from
+// ::1: a trust of 127.0.0.1 alone is no longer enough (Apache).
+func TestEdgeIPv6RequiresLoopback6Apache(t *testing.T) {
+	l, r := cpanelHost(t)
+	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
+		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+	if p := l.probe("httpd"); !p.Trusted || p.EdgeIPv6 {
+		t.Fatalf("IPv4-only edge, 127.0.0.1 trusted: %+v", p)
+	}
+	edgeV6(t, r)
+	p := l.probe("httpd")
+	if p.Trusted || !p.EdgeIPv6 || !strings.Contains(p.Note, "::1") || strings.Contains(p.Note, "127.0.0.1 in the Apache") {
+		t.Fatalf("IPv6 edge, ::1 untrusted: %+v", p)
+	}
+	if line := StatusLine(p, true); !strings.Contains(line, "logs ::1 for every IPv6 visitor") {
+		t.Errorf("verdict = %q", line)
+	}
+	pl := l.plan(p)
+	if pl.Action != ActionWrite || pl.Content != apacheTrust || !strings.Contains(pl.Content, "::1") {
+		t.Fatalf("plan = %+v", pl)
+	}
+	if err := os.WriteFile(pl.Path, []byte(pl.Content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p := l.probe("httpd"); !p.Trusted || !p.EdgeIPv6 {
+		t.Fatalf("after the fix (both loopbacks): %+v", p)
+	}
+	// ::1 alone (no 127.0.0.1) is still untrusted on an IPv6 edge: both hops occur.
+	l2, r2 := cpanelHost(t)
+	put(t, r2, "etc/apache2/conf.d/x.conf", "RemoteIPInternalProxy ::1\nRemoteIPHeader X-Real-IP\n")
+	edgeV6(t, r2)
+	if p := l2.probe("httpd"); p.Trusted {
+		t.Fatalf("::1 only: %+v", p)
+	}
+}
+
+func TestEdgeIPv6RequiresLoopback6LiteSpeed(t *testing.T) {
+	l, r := cpanelHost(t)
+	xml := "usr/local/lsws/conf/httpd_config.xml"
+	put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>2</useIpInProxyHeader>\n<security><accessControl><allow>ALL,127.0.0.1T</allow></accessControl></security></httpServerConfig>")
+	edgeV6(t, r)
+	p := l.probe("")
+	if p.Trusted || !p.EdgeIPv6 || !strings.Contains(p.Note, "::1T") {
+		t.Fatalf("127.0.0.1T only: %+v", p)
+	}
+	if pl := l.plan(p); pl.Action != ActionManual || !strings.Contains(pl.Reason, "127.0.0.1T and ::1T") {
+		t.Fatalf("plan = %+v", pl)
+	}
+	put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>2</useIpInProxyHeader>\n<security><accessControl><allow>ALL, 127.0.0.1T, ::1T</allow></accessControl></security></httpServerConfig>")
+	if p := l.probe(""); !p.Trusted {
+		t.Fatalf("127.0.0.1T + ::1T: %+v", p)
+	}
+	// ::1 without T is allowed, not trusted; a longer address ending in ::1 is not ::1.
+	for _, allow := range []string{"ALL,127.0.0.1T,::1", "ALL,127.0.0.1T,2001:db8::1T"} {
+		put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>2</useIpInProxyHeader>\n<security><accessControl><allow>"+allow+"</allow></accessControl></security></httpServerConfig>")
+		if p := l.probe(""); p.Trusted {
+			t.Fatalf("%s: %+v", allow, p)
+		}
+	}
+	put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>1</useIpInProxyHeader></httpServerConfig>")
+	if p := l.probe(""); !p.Trusted {
+		t.Fatalf("native 1 (any peer): %+v", p)
+	}
+}
+
+func TestEdgeIPv6RequiresLoopback6Nginx(t *testing.T) {
+	l, r := testLayout(t)
+	put(t, r, "etc/nginx/nginx.conf", "http {\n    include /etc/nginx/conf.d/*.conf;\n    include /etc/nginx/sites-enabled/*;\n}\n")
+	put(t, r, "etc/nginx/conf.d/a.conf", "set_real_ip_from 127.0.0.1;\n")
+	put(t, r, "etc/nginx/sites-enabled/shop", "server {\n  server_name shop.gr;\n}\n")
+	if p := l.probe("nginx"); !p.Trusted {
+		t.Fatalf("IPv4-only edge: %+v", p)
+	}
+	edgeV6(t, r)
+	p := l.probe("nginx")
+	if p.Trusted || !p.EdgeIPv6 || !strings.Contains(p.Note, "::1") {
+		t.Fatalf("IPv6 edge, http-level 127.0.0.1 only: %+v", p)
+	}
+	pl := l.plan(p)
+	if pl.Action != ActionWrite || pl.Path != filepath.Join(r, "etc/nginx/conf.d/cfm-realip.conf") {
+		t.Fatalf("plan = %+v", pl)
+	}
+	if err := os.WriteFile(pl.Path, []byte(pl.Content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p := l.probe("nginx"); !p.Trusted {
+		t.Fatalf("after the fix: %+v", p)
+	}
+}
+
+func TestAnyLoopback6(t *testing.T) {
+	for _, ok := range [][]string{{"::1"}, {"::1/128"}, {"127.0.0.1", "::1"}, {"0:0:0:0:0:0:0:1"}} {
+		if !anyLoopback6(ok) {
+			t.Errorf("%v must be ::1 trust", ok)
+		}
+	}
+	for _, bad := range [][]string{{"127.0.0.1"}, {"::/0"}, {"::/127"}, {"::2"}, {"2001:db8::1"}, {"::ffff:127.0.0.1"}, {"x"}} {
+		if anyLoopback6(bad) {
+			t.Errorf("%v must not be ::1 trust", bad)
+		}
+	}
+}
+
+// A server{} with its own list trusting 127.0.0.1 only: on an IPv6 edge the
+// verdict and the plan come from the ::1 reading (that block keeps its own
+// list, so an http-level file cannot reach it: manual, named), and one such
+// block among trusted ones reads "those sites".
+func TestEdgeIPv6NginxOwnListCarriesTheV6Verdict(t *testing.T) {
+	l, r := testLayout(t)
+	put(t, r, "etc/nginx/nginx.conf", "http {\n    include /etc/nginx/conf.d/*.conf;\n    include /etc/nginx/sites-enabled/*;\n}\n")
+	put(t, r, "etc/nginx/conf.d/cfm-realip.conf", nginxTrust)
+	put(t, r, "etc/nginx/sites-enabled/shop", "server {\n  server_name shop.gr;\n  set_real_ip_from 127.0.0.1;\n}\n")
+	put(t, r, "etc/nginx/sites-enabled/blog", "server {\n  server_name blog.gr;\n}\n")
+	if p := l.probe("nginx"); !p.Trusted {
+		t.Fatalf("IPv4-only edge: %+v", p)
+	}
+	edgeV6(t, r)
+	p := l.probe("nginx")
+	if p.Trusted || p.Servers != 2 || p.UntrustedServers != 1 || !strings.Contains(p.Note, "shop.gr") {
+		t.Fatalf("IPv6 edge, shop.gr's own list lacks ::1: %+v", p)
+	}
+	if line := StatusLine(p, true); !strings.Contains(line, "those sites log ::1 for every IPv6 visitor") {
+		t.Errorf("verdict = %q", line)
+	}
+	pl := l.plan(p)
+	if pl.Action != ActionManual || !strings.Contains(pl.Reason, "shop.gr") || !strings.Contains(pl.Reason, "::1") {
+		t.Fatalf("plan = %+v, want manual naming shop.gr", pl)
+	}
+}
+
+// tcp6Line is one /proc/net/tcp6 row: addr in the kernel's text form, port, state.
+func tcp6Line(i int, addr string, port int, st string) string {
+	return fmt.Sprintf("   %d: %s:%04X 00000000000000000000000000000000:0000 %s 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0\n", i, addr, port, st)
+}
+
+const tcp6Head = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+
+// Where IPv6 is allowed (EDGE_LISTEN_V6 = on, or edgeIPv6Default), the edge
+// listens on IPv6 by itself once the origin trusts ::1. So the ::1 trust is
+// required as soon as the host CAN (a global IPv6 address + an origin on a
+// global IPv6 address on 80 and 443), before any listen file exists:
+// otherwise `cfm realip fix` answers "already trusted" on a 127.0.0.1-only
+// origin (Imunify's i360.remoteip.conf) and the edge never turns IPv6 on.
+func TestEdgeIPv6HostCapability(t *testing.T) {
+	any6 := "00000000000000000000000000000000"
+	ifGlobal := "fe80000000000000e6434bfffe54ef2f 05 40 20 80     eno4\n2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4\n00000000000000000000000000000001 01 80 10 80       lo\n"
+	ifNoGlobal := "fe80000000000000e6434bfffe54ef2f 05 40 20 80     eno4\n00000000000000000000000000000001 01 80 10 80       lo\n"
+	lo6 := "00000000000000000000000001000000"
+	mapped := "0000000000000000FFFF00000100007F"
+	global := "804214A2010001005A9208FE01F23CFE"
+	for _, c := range []struct {
+		name    string
+		inet6   bool
+		ifs     string
+		rows    string
+		conf    string
+		capable bool
+	}{
+		{"no IPv6 stack", false, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"IPv6 stack but no global address (earth)", true, "", tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"link-local and ::1 only", true, ifNoGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"[::]:80 + [::]:443", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", true},
+		{"a global address on 443", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, global, 443, "0A"), "", true},
+		{"80 only", true, ifGlobal, tcp6Line(0, any6, 80, "0A"), "", false},
+		{"::1 and v4-mapped do not count", true, ifGlobal, tcp6Line(0, lo6, 80, "0A") + tcp6Line(1, mapped, 443, "0A") + tcp6Line(2, any6, 443, "0A"), "", false},
+		{"link-local does not count", true, ifGlobal, tcp6Line(0, "000080FE00000000FF4B43E62FEF54FE", 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"v4-mapped does not count", true, ifGlobal, tcp6Line(0, mapped, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"not LISTEN", true, ifGlobal, tcp6Line(0, any6, 80, "01") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"other ports", true, ifGlobal, tcp6Line(0, any6, 8080, "0A") + tcp6Line(1, any6, 4430, "0A"), "", false},
+		{"no cfm.conf: edgeIPv6Default (off until /64 grouping)", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "-", edgeIPv6Default},
+		{"no key: edgeIPv6Default", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "OTHER = 1\n", edgeIPv6Default},
+		{"yes", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6=\"Yes\" # opt in\n", true},
+		{"unknown value", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = maybe\n", false},
+		{"off", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\n", false},
+		{"no, quoted + comment", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6=\"No\" ; note\n", false},
+		{"commented key", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "# EDGE_LISTEN_V6 = off\n", edgeIPv6Default},
+		{"later line wins", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\nEDGE_LISTEN_V6 = auto\n", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l, r := cpanelHost(t)
+			put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
+				"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+			if c.inet6 {
+				put(t, r, "proc/net/if_inet6", c.ifs)
+			}
+			put(t, r, "proc/net/tcp6", tcp6Head+c.rows)
+			// "" = IPv6 allowed (EDGE_LISTEN_V6 = on); "-" = no cfm.conf at all.
+			switch c.conf {
+			case "":
+				put(t, r, "etc/cfm/cfm.conf", "EDGE_LISTEN_V6 = on\n")
+			case "-":
+			default:
+				put(t, r, "etc/cfm/cfm.conf", c.conf)
+			}
+			p := l.probe("httpd")
+			if p.EdgeIPv6 != c.capable || p.Trusted == c.capable || p.EdgeIPv6Listening {
+				t.Fatalf("%+v", p)
+			}
+			if !c.capable {
+				return
+			}
+			if line := StatusLine(p, true); !strings.Contains(line, "edge does not listen on IPv6") {
+				t.Errorf("verdict = %q", line)
+			}
+			pl := l.plan(p)
+			if pl.Action != ActionWrite || !strings.Contains(pl.Content, "::1") {
+				t.Fatalf("plan = %+v, want the ::1 trust written", pl)
+			}
+			if err := os.WriteFile(pl.Path, []byte(pl.Content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if p := l.probe("httpd"); !p.Trusted || !p.EdgeIPv6 {
+				t.Fatalf("after the fix: %+v", p)
+			}
+		})
+	}
+}
+
+// Every one of the four listen files counts (both engines, both listeners).
+func TestEdgeIPv6AnyListenFile(t *testing.T) {
+	// The paths scripts/cfm-edge-listen-v6.sh writes (engines(), V6_*_FILE),
+	// spelled out: a list taken from system.edgeV6Files would follow a mistake.
+	for _, f := range []string{
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf",
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf",
+		"/etc/angie/cfm-listen-v6-http.conf",
+		"/etc/angie/cfm-listen-v6-https.conf",
+	} {
+		l, r := cpanelHost(t)
+		put(t, r, "etc/apache2/conf.d/x.conf", "RemoteIPInternalProxy 127.0.0.1\nRemoteIPHeader X-Real-IP\n")
+		put(t, r, strings.TrimPrefix(f, "/"), "listen [::]:9043 ssl;\n")
+		if p := l.probe("httpd"); !p.EdgeIPv6 || p.Trusted {
+			t.Fatalf("%s: %+v", f, p)
+		}
+	}
+}
+
+// An origin that does not trust 127.0.0.1 either keeps the IPv4 wording: the
+// ::1 pass only runs on a trusted first pass.
+func TestEdgeIPv6UntrustedOriginKeepsTheIPv4Verdict(t *testing.T) {
+	l, r := cpanelHost(t)
+	edgeV6(t, r)
+	p := l.probe("httpd")
+	if p.Trusted || !p.EdgeIPv6 {
+		t.Fatalf("probe = %+v", p)
+	}
+	if line := StatusLine(p, true); !strings.Contains(line, "logs 127.0.0.1 for every visitor") || strings.Contains(line, "::1") {
+		t.Errorf("verdict = %q", line)
+	}
+}
+
+// scripts/cfm-edge-listen-v6.sh reads `cfm realip --json` by these literal
+// substrings ("edge_ipv6":true and "trusted":true|false): renaming a JSON tag
+// would silently keep every edge on IPv4. Pin the contract on a host that can
+// do IPv6, untrusted and then trusted.
+func TestRealipJSONContractWithTheIPv6Script(t *testing.T) {
+	l, r := cpanelHost(t)
+	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
+		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+	put(t, r, "proc/net/if_inet6", "2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4\n")
+	put(t, r, "etc/cfm/cfm.conf", "EDGE_LISTEN_V6 = on\n")
+	put(t, r, "proc/net/tcp6", tcp6Head+
+		tcp6Line(0, "00000000000000000000000000000000", 80, "0A")+
+		tcp6Line(1, "00000000000000000000000000000000", 443, "0A"))
+	var out bytes.Buffer
+	runCLI([]string{"--json"}, &out, l, func() bool { return true })
+	for _, want := range []string{`"edge_ipv6":true`, `"trusted":false`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("untrusted: %s missing from %s", want, out.String())
+		}
+	}
+	put(t, r, "etc/apache2/conf.d/zz.conf", "RemoteIPInternalProxy ::1\n")
+	out.Reset()
+	runCLI([]string{"--json"}, &out, l, func() bool { return true })
+	for _, want := range []string{`"edge_ipv6":true`, `"trusted":true`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("trusted: %s missing from %s", want, out.String())
+		}
+	}
+}
+
+// scripts/cfm-edge-listen-v6.sh mode() and edgeIPv6Wanted read EDGE_LISTEN_V6
+// from the same fixture (check_edge_listen_v6.sh runs the script on it): a
+// value the two read differently would leave `cfm realip` demanding ::1 for an
+// edge that will never listen, or the reverse.
+var octal0 = regexp.MustCompile(`\\0([0-7]{3})`)
+
+func TestEdgeListenV6ModeFixture(t *testing.T) {
+	b, err := os.ReadFile("../../scripts/tests/fixtures/edge_listen_v6_mode.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		want, body, ok := strings.Cut(line, "\t")
+		if !ok {
+			t.Fatalf("bad fixture line %q", line)
+		}
+		body = octal0.ReplaceAllString(body, `\$1`) // printf %b's \0ddd is Go's \ddd
+		content, err := strconv.Unquote(`"` + strings.ReplaceAll(body, `"`, `\"`) + `"`)
+		if err != nil {
+			// \" in the fixture is already escaped: unquote it as written.
+			content, err = strconv.Unquote(`"` + body + `"`)
+		}
+		if err != nil {
+			t.Fatalf("fixture %q: %v", body, err)
+		}
+		l, r := testLayout(t)
+		put(t, r, "etc/cfm/cfm.conf", content+"\n")
+		got := l.edgeIPv6Wanted()
+		var exp bool
+		switch want {
+		case "on":
+			exp = true
+		case "off":
+			exp = false
+		case "default":
+			exp = edgeIPv6Default
+		default:
+			t.Fatalf("fixture expectation %q", want)
+		}
+		if got != exp {
+			t.Errorf("EDGE_LISTEN_V6 from %q: got %v, want %v (%s)", content, got, exp, want)
+		}
+		n++
+	}
+	if n < 20 {
+		t.Fatalf("only %d fixture cases", n)
+	}
+}
+
+// cfm realip v6-bindcheck: the script's proof that the edge's IPv6 ports can
+// be bound (a bound-only tenant socket is invisible in /proc/net/tcp6).
+func TestV6BindCheck(t *testing.T) {
+	orig := v6Bind
+	t.Cleanup(func() { v6Bind = orig })
+	taken := map[string]error{
+		"tcp [::]:9080": syscall.EADDRINUSE,
+	}
+	var seen []string
+	v6Bind = func(proto, addr string) error {
+		seen = append(seen, proto+" "+addr)
+		return taken[proto+" "+addr]
+	}
+	run := func(args ...string) (int, string) {
+		var b strings.Builder
+		return runCLI(append([]string{"v6-bindcheck"}, args...), &b, layout{}, func() bool { return true }), b.String()
+	}
+	if rc, out := run("tcp:9043", "udp:9043"); rc != 0 || !strings.Contains(out, "ok") {
+		t.Fatalf("free ports: rc=%d out=%q", rc, out)
+	}
+	if seen[0] != "tcp [::]:9043" || seen[1] != "udp [::]:9043" {
+		t.Fatalf("binds: %v", seen)
+	}
+	if rc, out := run("tcp:9043", "tcp:9080"); rc != 1 || !strings.Contains(out, "port 9080 is taken") {
+		t.Fatalf("taken: rc=%d out=%q", rc, out)
+	}
+	taken["udp [::]:9043"] = syscall.EAFNOSUPPORT
+	if rc, _ := run("udp:9043"); rc != 2 {
+		t.Fatalf("no IPv6 must be 'cannot tell' (2), got %d", rc)
+	}
+	for _, bad := range [][]string{nil, {"9080"}, {"sctp:9080"}, {"tcp:0"}, {"tcp:x"}, {"tcp:70000"}} {
+		if rc, _ := run(bad...); rc != 2 {
+			t.Fatalf("args %v: rc=%d, want 2", bad, rc)
+		}
+	}
+	// The real binder, on a real socket where the sandbox has IPv6.
+	v6Bind = orig
+	ln, err := net.Listen("tcp6", "[::]:0")
+	if err != nil {
+		t.Skipf("no IPv6 here: %v", err)
+	}
+	defer ln.Close()
+	p := ln.Addr().(*net.TCPAddr).Port
+	if rc, out := run("tcp:" + strconv.Itoa(p)); rc != 1 {
+		t.Fatalf("a held [::]:%d must read taken: rc=%d out=%q", p, rc, out)
+	}
+}
+
+// An IPv6 listen the script did not write (an operator's hand-added
+// `listen [::]:9043`) still makes the edge listen on IPv6: read from the
+// kernel's root LISTEN sockets on the edge's ports.
+func TestEdgeV6KernelListen(t *testing.T) {
+	line := func(addr string, port int, st, uid string) string {
+		return fmt.Sprintf("   0: %s:%04X 00000000000000000000000000000000:0000 %s 00000000:00000000 00:00000000 00000000 %5s        0 1 1 0000000000000000 100 0 0 10 0\n", addr, port, st, uid)
+	}
+	const any6 = "00000000000000000000000000000000"
+	const glob = "B80D0120000000000000000001000000"
+	for _, c := range []struct {
+		name, tcp6 string
+		want       bool
+	}{
+		{"none", "", false},
+		{"root [::]:9043", line(any6, 9043, "0A", "0"), true},
+		{"root global addr :9080", line(glob, 9080, "0A", "0"), true},
+		{"non-root [::]:9043", line(any6, 9043, "0A", "1001"), false},
+		{"root [::1]:9043", line("00000000000000000000000001000000", 9043, "0A", "0"), false},
+		{"root v4-mapped :9080", line("0000000000000000FFFF00000100007F", 9080, "0A", "0"), false},
+		{"root link-local :9080", line("000080FE00000000FF3412AA1E8E2F6D", 9080, "0A", "0"), false},
+		{"root [::]:9043 not LISTEN", line(any6, 9043, "01", "0"), false},
+		{"root [::]:443 (origin)", line(any6, 443, "0A", "0"), false},
+	} {
+		l, r := testLayout(t)
+		put(t, r, "proc/net/tcp6", tcp6Head+c.tcp6)
+		l.procTCP6 = "/proc/net/tcp6"
+		if got := l.edgeListensIPv6(); got != c.want {
+			t.Errorf("%s: edgeListensIPv6 = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

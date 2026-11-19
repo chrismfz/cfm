@@ -26,7 +26,8 @@ LiteSpeed and NGM are reported with the manual step (CFM does not edit their con
 Only the loopback is ever trusted, never the server's public IP.
 
 Exit status: status 0 = fine (or no edge in front), 1 = the edge is in front and
-the origin logs 127.0.0.1; fix 0 = trusted afterwards, 1 = not (see the message).
+the origin logs 127.0.0.1 (or ::1 for IPv6 visitors, or the edge cannot turn
+IPv6 on for want of the ::1 trust); fix 0 = trusted afterwards, 1 = not (see the message).
 `
 
 // edgeUnits are the CFM edge engines; one active means the edge fronts the origin.
@@ -101,6 +102,9 @@ func runCLI(args []string, w io.Writer, l layout, edgeActive func() bool) int {
 			return 1
 		}
 		return 0
+	case "v6-bindcheck":
+		// Internal (scripts/cfm-edge-listen-v6.sh): not in the usage text.
+		return v6BindCheck(args, w)
 	default:
 		fmt.Fprintf(w, "unknown subcommand %q\n\n%s", sub, usage)
 		return 2
@@ -126,6 +130,12 @@ func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 		return true, fmt.Sprintf("Origin real-IP: n/a, no CFM edge in front of the %s/%s origin", p.Panel, p.Stack)
 	case p.Stack == StackUnknown:
 		return false, "Origin real-IP: " + p.Note
+	case p.v6Only && !p.EdgeIPv6Listening:
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so the edge does not listen on IPv6 (run: cfm realip fix, then sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render; docs/edge-ipv6.md)", p.Panel, p.Stack, p.Note)
+	case p.v6Only && p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so those sites log ::1 for every IPv6 visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
+	case p.v6Only:
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so it logs ::1 for every IPv6 visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	case p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
 		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so those sites log 127.0.0.1 instead of the visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	default:

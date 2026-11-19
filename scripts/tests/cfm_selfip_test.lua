@@ -12,7 +12,7 @@ local RANGE_HI = RANGE_LO + 255 -- 167772415
 
 local rawByPath = {
   ["/var/lib/cfm/lua/cfm_self_ips.lua"] = {
-    ips = { ["1.2.3.4"] = true, ["2001:DB8::1"] = true },
+    ips = { ["1.2.3.4"] = true, ["2001:DB8::1"] = true, ["fe80::abcd"] = true },
   },
   ["/var/lib/cfm/lua/cfm_ignore_nets.lua"] = {
     ips = { ["9.9.9.9"] = true },
@@ -25,6 +25,7 @@ local rawByPath = {
       { "zz", 64 },                                 -- malformed: dropped
       { "2a0c0000000000000000000000000000", 129 },  -- bad prefix: dropped
       { "00000000000000000000000000000000", 80 },   -- ::/80 covers ::ffff:0:0/96
+      { "fe800000000000000000000000000000", 10 },   -- IGNORE_NETS fe80::/10: ignored by design
     },
   },
 }
@@ -51,11 +52,40 @@ assert_true(selfip.normalize_ip("[2001:DB8::1]") == "2001:db8::1", "normalize_ip
 assert_true(selfip.normalize_ip("") == "", "normalize_ip empty")
 
 -- loopback / link-local.
-for _, ip in ipairs({ "127.0.0.1", "127.9.9.9", "::1", "fe80::1", "169.254.10.10" }) do
+for _, ip in ipairs({ "127.0.0.1", "127.9.9.9", "::1", "169.254.10.10" }) do
   assert_true(selfip.is_loopback_or_linklocal(ip), "loopback/linklocal should match " .. ip)
   assert_true(selfip.is_self_origin(ip), "is_self_origin loopback " .. ip)
 end
 assert_true(not selfip.is_loopback_or_linklocal("8.8.8.8"), "8.8.8.8 is not loopback")
+
+-- IPv6 link-local (fe80::/10) is NEVER self: with the edge listening on IPv6,
+-- a host on the same L2 segment can connect from any fe80:: address it likes,
+-- and a self bypass would skip WAF, challenge and edge bans. Even the node's
+-- own fe80:: address (Go may list it in cfm_self_ips.lua) is refused.
+for _, ip in ipairs({ "fe80::1", "fe80::1c2:3ff:fe04:506", "FE80::1", "[fe80::1]", "fe90::1", "febf::1", "fe80:0:0:0:0:0:0:1" }) do
+  assert_true(not selfip.is_loopback_or_linklocal(ip), "IPv6 link-local is not loopback " .. ip)
+  assert_true(not selfip.is_self_origin(ip), "IPv6 link-local is never self-origin " .. ip)
+end
+assert_true(not selfip.is_self_origin("fe80::abcd"), "the node's own fe80:: in the self set is still refused")
+assert_true(not selfip.is_self_origin("fec0::1"), "fec0:: (outside fe80::/10) is not self either")
+assert_true(not selfip.is_self_origin("fe80::2"), "an IGNORE_NETS fe80::/10 entry does not make link-local self (ignored by design)")
+
+-- cfm_panel.lua's fallback (cfm_selfip absent: upgrade lag) agrees: loopback
+-- and 169.254/16 only, never fe80::/10. Extracted from the source and run.
+do
+  local fh = assert(io.open("configs/lua/cfm_panel.lua", "r"))
+  local src = fh:read("*a"); fh:close()
+  local body = src:match("\n(local function panel_is_loopback%(ip%).-\nend)\n")
+  assert_true(body ~= nil, "cfm_panel.lua: panel_is_loopback not found")
+  local chunk = assert((loadstring or load)(body .. "\nreturn panel_is_loopback"))
+  local fb = chunk()
+  for _, ip in ipairs({ "::1", "[::1]", "127.0.0.1", "169.254.1.1" }) do
+    assert_true(fb(ip), "panel fallback: " .. ip .. " is self")
+  end
+  for _, ip in ipairs({ "fe80::1", "FE80::1", "[fe80::1]", "febf::1", "8.8.8.8", "" }) do
+    assert_true(not fb(ip), "panel fallback: " .. ip .. " is not self")
+  end
+end
 
 -- self-IP set (incl. IPv6 normalize on both stored and queried side).
 assert_true(selfip.is_self_origin("1.2.3.4"), "self ip 1.2.3.4")

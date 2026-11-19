@@ -27,6 +27,7 @@
 package originrealip
 
 import (
+	"bufio"
 	"net"
 	"os"
 	"path/filepath"
@@ -65,7 +66,16 @@ type Probe struct {
 	Servers          int `json:"servers,omitempty"`
 	UntrustedServers int `json:"untrusted_servers,omitempty"`
 
+	// EdgeIPv6: the edge listens on IPv6 (scripts/cfm-edge-listen-v6.sh wrote
+	// its listen files: EdgeIPv6Listening), or will as soon as the origin
+	// trusts ::1 (the host can do IPv6). An IPv6 visitor's hop reaches the
+	// origin from ::1, so Trusted requires ::1 as well as 127.0.0.1.
+	EdgeIPv6          bool `json:"edge_ipv6,omitempty"`
+	EdgeIPv6Listening bool `json:"edge_ipv6_listening,omitempty"`
+
 	ng *nginxVerdict // nginx: what the plan needs
+
+	v6Only bool // untrusted only on the ::1 pass: 127.0.0.1 is trusted (Verdict's wording)
 }
 
 // edgeHeaders are the headers every edge origin location sets to the client
@@ -84,13 +94,32 @@ var (
 	// Access Control allow list marks trusted with a trailing T (127.0.0.1T),
 	// as mars has it.
 	lsTrustedLoopbackRe = regexp.MustCompile(`(?is)<allow>[^<]*\b127\.0\.0\.1(?:/32)?T\b[^<]*</allow>`)
-	xmlCommentRe        = regexp.MustCompile(`(?s)<!--.*?-->`)
+	// The same for ::1, the source of an IPv6 hop (::1T).
+	lsTrustedLoopback6Re = regexp.MustCompile(`(?is)<allow>(?:[^<]*[\s,])?::1(?:/128)?T\b[^<]*</allow>`)
+	xmlCommentRe         = regexp.MustCompile(`(?s)<!--.*?-->`)
 )
 
 // layout is where a host keeps each piece, as logical paths; root prefixes
 // every one of them (empty on a real host, a temp dir in tests).
 type layout struct {
 	root string
+
+	// loopIP is the edge source address this probe checks the trust of:
+	// "" (127.0.0.1) or "::1" (the second pass when the edge listens on IPv6).
+	loopIP string
+	// edgeV6Files: the edge's IPv6 listen files (scripts/cfm-edge-listen-v6.sh);
+	// any of them present means the edge listens on IPv6.
+	edgeV6Files []string
+	// Where IPv6 is allowed, the edge listens on IPv6 by itself wherever the
+	// host can (scripts/cfm-edge-listen-v6.sh), but only once the origin
+	// trusts ::1. So the ::1 trust is required as soon as the host CAN (a global IPv6 address, the
+	// origin listening on IPv6 on 80 and 443), before any listen file exists:
+	// the script asks `cfm realip` before it writes them, and `cfm realip fix`
+	// must then write the ::1 trust instead of answering "already trusted" on
+	// a 127.0.0.1-only origin, which would leave the edge on IPv4 for good.
+	// cfmConf: EDGE_LISTEN_V6 there allows or forbids IPv6 (edgeIPv6Wanted;
+	// absent = edgeIPv6Default, off until IPv6 /64 grouping).
+	cfmConf, procIfInet6, procTCP6 string
 
 	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
 	lsMarkers, apMarkers, ngMarkers      []string // origin install markers
@@ -141,6 +170,170 @@ var system = layout{
 	nginxConfD:                "/etc/nginx/conf.d",
 	cpanelNginxServerIncludes: "/etc/nginx/conf.d/server-includes",
 	daNginxIncludes:           "/etc/nginx/nginx-includes.conf",
+	edgeV6Files: []string{
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf",
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf",
+		"/etc/angie/cfm-listen-v6-http.conf",
+		"/etc/angie/cfm-listen-v6-https.conf",
+	},
+	cfmConf:     "/etc/cfm/cfm.conf",
+	procIfInet6: "/proc/net/if_inet6",
+	procTCP6:    "/proc/net/tcp6",
+}
+
+// edgeIPv6Default is the decision with no EDGE_LISTEN_V6 in cfm.conf: false
+// until per-IP defences group IPv6 by /64 (docs/ROADMAP.md §9c), then true.
+// scripts/cfm-edge-listen-v6.sh V6_DEFAULT is the same switch;
+// check_edge_listen_v6.sh pins them equal.
+const edgeIPv6Default = false
+
+// edgeIPv6: the edge listens on IPv6 (its listen files exist, or the kernel
+// shows a root IPv6 listener on its ports: a `listen [::]` added by hand), or
+// it would as soon as the origin trusts ::1 (IPv6 allowed on this node and
+// hostCanIPv6).
+func (l layout) edgeIPv6() bool {
+	return l.edgeListensIPv6() || (l.edgeIPv6Wanted() && l.hostCanIPv6())
+}
+
+func (l layout) edgeListensIPv6() bool {
+	return l.anyExists(l.edgeV6Files) || l.edgeV6KernelListen()
+}
+
+// edgeV6Ports are the edge's listener ports (scripts/cfm-edge-listen-v6.sh
+// V6_HTTP_PORT / V6_HTTPS_PORT).
+var edgeV6Ports = map[uint64]bool{9080: true, 9043: true}
+
+// edgeV6KernelListen: a root-owned socket LISTENs on a global IPv6 address on
+// one of the edge's ports (/proc/net/tcp6; the edge's master binds as root).
+// Catches an IPv6 listen the script did not write (an operator's hand-added
+// `listen [::]:9043`): its visitors reach the origin from ::1 all the same.
+func (l layout) edgeV6KernelListen() bool {
+	if l.procTCP6 == "" {
+		return false
+	}
+	fh, err := os.Open(l.fs(l.procTCP6))
+	if err != nil {
+		return false
+	}
+	defer fh.Close()
+	sc := bufio.NewScanner(fh)
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) < 8 || f[3] != "0A" || f[7] != "0" {
+			continue
+		}
+		addr, port, ok := strings.Cut(f[1], ":")
+		if !ok || len(addr) != 32 || !globalV6Hex(addr) {
+			continue
+		}
+		if p, err := strconv.ParseUint(port, 16, 16); err == nil && edgeV6Ports[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// globalV6Hex: a /proc/net/tcp6 address (32 hex digits, the kernel's
+// per-word host byte order, so ::1 reads 00000000000000000000000001000000 on
+// x86) is not ::1, v4-mapped (::ffff:a.b.c.d) or link-local (fe80::/10),
+// which serve no global IPv6 address.
+func globalV6Hex(addr string) bool {
+	addr = strings.ToUpper(addr)
+	return addr != "00000000000000000000000001000000" && !strings.HasPrefix(addr, "0000000000000000FFFF0000") && !strings.HasPrefix(addr, "000080FE")
+}
+
+// edgeIPv6Wanted: EDGE_LISTEN_V6 in cfm.conf allows IPv6 on this node, read
+// like scripts/cfm-edge-listen-v6.sh mode(): last uncommented line wins, an
+// inline ; or # comment and quotes stripped, case-insensitive; on / yes /
+// true / 1 / auto / enable / enabled = yes, absent = edgeIPv6Default,
+// anything else = no.
+const asciiSpace = " \t\r\n\v\f"
+
+func (l layout) edgeIPv6Wanted() bool {
+	mode := ""
+	if l.cfmConf != "" {
+		if b, err := os.ReadFile(l.fs(l.cfmConf)); err == nil {
+			for _, line := range strings.Split(string(b), "\n") {
+				// ASCII whitespace only, as the script's [[:space:]] (it runs LC_ALL=C):
+				// strings.TrimSpace would also take a NBSP / NEL the script keeps.
+				k, v, ok := strings.Cut(strings.TrimLeft(line, asciiSpace), "=")
+				if !ok || strings.TrimRight(k, asciiSpace) != "EDGE_LISTEN_V6" {
+					continue
+				}
+				// Cut at the first ; or #, trim whitespace (CR included), then
+				// strip ONE matching pair of quotes: the script's mode() reading
+				// (both run scripts/tests/fixtures/edge_listen_v6_mode.txt).
+				if i := strings.IndexAny(v, ";#"); i >= 0 {
+					v = v[:i]
+				}
+				v = strings.Trim(v, asciiSpace)
+				if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+					v = v[1 : len(v)-1]
+				}
+				mode = strings.ToLower(v)
+			}
+		}
+	}
+	switch mode {
+	case "":
+		return edgeIPv6Default
+	case "on", "yes", "true", "1", "auto", "enable", "enabled":
+		return true
+	}
+	return false
+}
+
+// hostCanIPv6: the host has a global IPv6 address and something listens on a
+// global IPv6 address (not ::1, v4-mapped or link-local) on both 80 and 443, read from
+// /proc/net/tcp6 (state 0A = LISTEN; addresses in the kernel's per-word host
+// byte order, so ::1 reads 00000000000000000000000001000000 on x86).
+func (l layout) hostCanIPv6() bool {
+	if l.procIfInet6 == "" || l.procTCP6 == "" {
+		return false
+	}
+	// A global IPv6 address on an interface (scope 00): the stack alone is
+	// not enough (earth, mars: if_inet6 present but empty, the origin on
+	// [::] all the same, and no IPv6 visitor can reach the node).
+	ifs, err := os.ReadFile(l.fs(l.procIfInet6))
+	if err != nil {
+		return false
+	}
+	global := false
+	for _, line := range strings.Split(string(ifs), "\n") {
+		if f := strings.Fields(line); len(f) >= 4 && f[3] == "00" {
+			global = true
+			break
+		}
+	}
+	if !global {
+		return false
+	}
+	// Streamed, stopping once both are seen: the file lists every IPv6 (and,
+	// with a dual-stack origin, v4-mapped) connection too, MBs on a busy node.
+	fh, err := os.Open(l.fs(l.procTCP6))
+	if err != nil {
+		return false
+	}
+	defer fh.Close()
+	ports := map[uint64]bool{}
+	sc := bufio.NewScanner(fh)
+	for sc.Scan() && !(ports[80] && ports[443]) {
+		f := strings.Fields(sc.Text())
+		if len(f) < 4 || f[3] != "0A" {
+			continue
+		}
+		addr, port, ok := strings.Cut(f[1], ":")
+		if !ok || len(addr) != 32 {
+			continue
+		}
+		if !globalV6Hex(addr) {
+			continue
+		}
+		if p, err := strconv.ParseUint(port, 16, 16); err == nil {
+			ports[p] = true
+		}
+	}
+	return ports[80] && ports[443]
 }
 
 // fs maps a logical path to where it is on disk.
@@ -201,6 +394,23 @@ func (l layout) probe(upstream string) Probe {
 	panel := l.panel()
 	p := l.probeStack(stack, panel)
 	p.Panel = panel
+	if l.loopIP == "" && l.edgeIPv6() {
+		// The edge listens on IPv6 too: an IPv6 visitor's hop comes from ::1,
+		// so the same trust has to hold for ::1. Same reading, second address;
+		// the verdict is trusted only when both are.
+		p.EdgeIPv6, p.EdgeIPv6Listening = true, l.edgeListensIPv6()
+		if p.Trusted {
+			l6 := l
+			l6.loopIP = "::1"
+			if p6 := l6.probeStack(stack, panel); !p6.Trusted {
+				p.Trusted, p.v6Only = false, true
+				p.Note = joinNote(p.Note, "the edge also listens on IPv6 and an IPv6 visitor reaches the origin from ::1, which is not trusted: "+l6.loopNote(p6.Note))
+				// The plan (fix.go) fixes what the ::1 reading found missing.
+				// (The header in effect does not depend on the address read.)
+				p.ng, p.Servers, p.UntrustedServers = p6.ng, p6.Servers, p6.UntrustedServers
+			}
+		}
+	}
 	if !p.Trusted && p.Panel == PanelNGM && p.Stack == StackNginx {
 		p.Note += "; NGM renders nginx itself, so the trust has to come from NGM's templates (a hand-written file is overwritten on apply)"
 	}
@@ -227,7 +437,7 @@ func (l layout) probeStack(stack, panel string) Probe {
 	case StackLiteSpeed:
 		// LiteSpeed resolves the client natively (useIpInProxyHeader) or through
 		// the Apache RemoteIP conf it loads (loadApacheConf=1).
-		if b, err := os.ReadFile(l.fs(l.lsConfig)); err == nil && lsNativeMatch(b) {
+		if b, err := os.ReadFile(l.fs(l.lsConfig)); err == nil && l.lsNativeMatch(b) {
 			return Probe{Stack: StackLiteSpeed, Trusted: true, Directive: "useIpInProxyHeader", Source: l.lsConfig}
 		}
 		if ap := l.probeApache(StackLiteSpeed); ap.Trusted {
@@ -266,7 +476,7 @@ func (l layout) probeApache(stack string) Probe {
 			scoped++
 		case d.name == "remoteipheader" && len(d.args) > 0:
 			header = d.args[0]
-		case trust == "" && anyLoopback(d.args):
+		case trust == "" && l.anyLoopback(d.args):
 			trust = l.display(d.file)
 		}
 	}
@@ -325,7 +535,7 @@ func (l layout) probeNginx(panel string) Probe {
 				o.header = d.args[0]
 			case d.name == "set_real_ip_from":
 				o.list = true
-				if !o.loopback && anyLoopback(d.args) {
+				if !o.loopback && l.anyLoopback(d.args) {
 					o.loopback, o.src = true, l.display(d.file)
 				}
 			}
@@ -333,7 +543,7 @@ func (l layout) probeNginx(panel string) Probe {
 			header = d.args[0]
 		case d.name == "set_real_ip_from":
 			httpList = true
-			if trust == "" && anyLoopback(d.args) {
+			if trust == "" && l.anyLoopback(d.args) {
 				trust = l.display(d.file)
 			}
 		}
@@ -560,15 +770,55 @@ func joinSorted(set map[string]bool) string {
 	return strings.Join(out, " / ")
 }
 
+// anyLoopback is anyLoopback4, or anyLoopback6 on the ::1 pass.
+func (l layout) anyLoopback(args []string) bool {
+	if l.loopIP == "::1" {
+		return anyLoopback6(args)
+	}
+	return anyLoopback(args)
+}
+
+// loopNote rewrites a note for the address this pass checks (the notes name
+// 127.0.0.1, the first pass).
+func (l layout) loopNote(n string) string {
+	if l.loopIP == "::1" {
+		n = strings.ReplaceAll(n, "127.0.0.1T", "::1T")
+		n = strings.ReplaceAll(n, "127.0.0.1", "::1")
+	}
+	return n
+}
+
+// anyLoopback6 reports whether one of a trust directive's arguments covers
+// ::1, the source of an IPv6 hop: ::1 or ::1/128 (a wider IPv6 network is not
+// a loopback trust).
+func anyLoopback6(args []string) bool {
+	one := net.ParseIP("::1")
+	for _, a := range args {
+		if ip := net.ParseIP(a); ip != nil {
+			if ip.Equal(one) {
+				return true
+			}
+			continue
+		}
+		_, n, err := net.ParseCIDR(a)
+		if err != nil {
+			continue
+		}
+		if ones, bits := n.Mask.Size(); bits == 128 && ones == 128 && n.IP.Equal(one) {
+			return true
+		}
+	}
+	return false
+}
+
 // anyLoopback reports whether one of a trust directive's arguments covers the
 // edge's address: 127.0.0.1, alone or as a loopback-only network (127.0.0.0/8
 // .. /32). The edge proxies from 127.0.0.1 (proxy_bind), so ::1 alone does not
 // trust it: a list holding only ::1 still logs 127.0.0.1. 127.0.0.1/1 covers
 // half the internet and is not a loopback trust. An origin hop to an IPv6
 // destination binds ::1 instead ($cfm_pass_bind / $cfm_origin_bind in the
-// edge confs); the reference confs listen on IPv4 only, so ::1 is not required
-// here yet. Whatever turns on an IPv6 edge listen must make this require ::1
-// as well.
+// edge confs): when the edge listens on IPv6, probe() runs a second pass with
+// anyLoopback6.
 func anyLoopback(args []string) bool {
 	for _, a := range args {
 		if ip := net.ParseIP(a); ip != nil {
@@ -597,14 +847,21 @@ func joinNote(a, b string) string {
 
 // lsNativeMatch reports whether an XML config makes LiteSpeed take the client
 // from the edge's header, outside of an XML comment: useIpInProxyHeader 1 (from
-// any peer), or 2 (trusted peers only) with 127.0.0.1 marked trusted.
-func lsNativeMatch(b []byte) bool {
+// any peer), or 2 (trusted peers only) with the edge's address (127.0.0.1, or
+// ::1 on the IPv6 pass) marked trusted.
+func (l layout) lsNativeMatch(b []byte) bool {
 	b = xmlCommentRe.ReplaceAll(b, nil)
 	m := lsNativeRealIPRe.FindSubmatch(b)
 	if m == nil {
 		return false
 	}
-	return string(m[1]) == "1" || lsTrustedLoopbackRe.Match(b)
+	if string(m[1]) == "1" {
+		return true
+	}
+	if l.loopIP == "::1" {
+		return lsTrustedLoopback6Re.Match(b)
+	}
+	return lsTrustedLoopbackRe.Match(b)
 }
 
 // listenerNames maps the process names that can own :80 to their family. The

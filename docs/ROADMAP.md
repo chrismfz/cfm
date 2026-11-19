@@ -226,6 +226,73 @@ Reference: `docs/cfm-lsm.md`.
   `lsm=`** — [idea]. `UnmergeLSMBPF` exists but nothing calls it; only
   unmerge when kernsec added it (an operator's own `bpf` must stay).
 
+## 9c. Edge IPv6
+
+The edge can listen on IPv6 where the host can and the origin trusts `::1`
+(`docs/edge-ipv6.md`); for now only where `EDGE_LISTEN_V6 = on` allows it
+(default off until the /64 item below), and the
+origin hop brackets the address and binds `::1`.
+
+- **Watch the first real IPv6 traffic through the live edge** — [track].
+  The origin hop is verified with a scratch edge on speedhost (OpenResty
+  1.31.8.1) and qualityweb (Angie 1.12.4), 2026-11-19: all four origin paths
+  reached Apache from `::1` (200), and the old server-level
+  `proxy_bind 127.0.0.1` failed as predicted (EINVAL). Not yet seen: an
+  external IPv6 client through the DNAT into the live edge with the files
+  rendered. A failed hop would be a 502 the browser does not retry on IPv4:
+  check `edge_error_tail` for `bind(` / `set_current_peer` on the first nodes
+  that turn IPv6 on.
+- **A site with a dedicated IPv6 address through the edge** — [track]. The
+  hop goes to the IPv6 address the visitor dialled (`[$server_addr]`, the
+  DNAT keeps the destination), so a cPanel account with its own IPv6 (its
+  vhost bound to that address) should reach its own vhost, as dedicated IPv4
+  does today; no fleet site has one, so it is unproven. First real case: the
+  operator node that reported the bug (AAAA records to the server). Check
+  that the site (not the default vhost) answers over `curl -6`.
+- **Per-IP counters and bans by /64, then IPv6 on by default** — [next].
+  Every per-IP control keys on the full IPv6 address: nft `connlimit` /
+  `pps_v6` / `syn_v6` / `new_v6` meters and `block_v6` bans, waf_security
+  autoblock, webdetector scoring, login_bruteforce, 403_flood, challenge rate
+  counters. A direct IPv6 client with a /64 (any VPS) gets a new identity per
+  request. Behind Cloudflare that did not matter (nft never sees the client,
+  Cloudflare absorbs the volume), but with the edge listening on IPv6 direct
+  clients reach the nft per-IP layer. Group IPv6 by /64 there (and in the
+  edge ban store), then flip `V6_DEFAULT` (scripts/cfm-edge-listen-v6.sh)
+  and `edgeIPv6Default` (internal/originrealip) together to auto/true, and
+  swap the reference cfm.conf's commented `# EDGE_LISTEN_V6 = on` for
+  `# EDGE_LISTEN_V6 = off` (check_edge_listen_v6.sh checks all three).
+
+- **The RFC1918 peer bypass at cfm.lua Step 0a** — [open]. Found while
+  closing the `fe80::` self bypass (2026-11-19): a direct (non-Cloudflare)
+  peer in 10/8, 172.16/12 or 192.168/16 skips WAF and challenge, so a host on
+  the same private L2 segment (a provider VLAN) can too. Pre-existing and
+  IPv4 only; it exists for private-network origins and proxies. Decide
+  whether to narrow it to the node's own networks or to an explicit list.
+- **IPv6 link-local neighbours cannot be nft-banned** — [open]. The edge no
+  longer treats `fe80::/10` as self (WAF and challenge apply), but nft's
+  `self_v6` set still holds `fe80::/10` and is accepted early in the input
+  chain (`nft/nft.go`, `nftlib/lifecycle.go`), and the webdetector skips
+  link-local clients when deciding blocks. So an L2 neighbour attacking the
+  IPv6 edge from `fe80::` is WAF-blocked and challenged per request, but never
+  banned or rate-limited. Pre-existing; reachable only once the edge listens
+  on IPv6.
+- **A tenant can co-bind the edge's QUIC port (udp 9043)** — [open]. Found
+  by the edge-IPv6 review (2026-11-19, proved on a scratch socket): with the
+  edge's root UDP socket on the wildcard (`quic reuseport`), a non-root
+  process binds the same port with `SO_REUSEADDR` and receives the
+  datagrams (10/10 in the test): an HTTP/3 denial of service and a view of
+  visitors' QUIC Initial packets. Pre-existing and IPv4 too (`listen 9043
+  quic reuseport`). Candidates: an nft rule on udp 9043 by socket owner, or
+  a reuseport eBPF select. Verify on a live edge first (nginx's UDP
+  `SO_REUSEADDR` is read from its source).
+- **A root daemon on [::]:9080 / 9043 is taken for the edge** — [open, low].
+  `cfm-edge-listen-v6.sh` treats a root `[::]` listener as the edge's own
+  (skipping the bind test); at a cold start it can only be another root
+  daemon, and the edge's start would then fail. Tighten by matching the
+  socket inode to the edge unit's MainPID fds.
+- **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
+  only on the fleet; the panel listeners stay IPv4.
+
 ## 10. PHP runtime defense (CFM-managed Snuffleupagus)
 
 Design: `docs/roadmaps/php-runtime-defense.md`. CFM renders Snuffleupagus

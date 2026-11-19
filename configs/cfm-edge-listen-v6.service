@@ -1,0 +1,26 @@
+# CFM: decide, before the edge starts, whether it listens on IPv6
+# (docs/edge-ipv6.md). Installed as
+# /etc/systemd/system/cfm-edge-listen-v6.service by the package
+# (package-proxy-config-deploy.sh). It has no [Install]: the drop-in
+# configs/cfm-edge-listen-v6-dropin.conf on openresty.service / angie.service
+# pulls it in (Wants= + After=), so it runs on every start of the edge, BEFORE
+# the edge unit's own ExecStartPre config test. A drop-in ExecStartPre would
+# run AFTER that test, too late to drop a listen the host cannot open.
+#
+# Before a start the script (prestart) removes the IPv6 listen files only for
+# what would break the start or what the operator chose: no IPv6 stack, a
+# taken port, ss failing, a main config without the include, a failed config
+# test, EDGE_LISTEN_V6 not allowing IPv6 (off, or absent while the default
+# is off). Files a render approved are kept
+# when only readiness is missing at boot (no global address yet, the origin
+# not up yet, cfm realip unable to confirm). It always exits 0, and the leading "-" plus Wants= (not Requires=) mean the edge
+# starts even if this unit fails or the script is missing.
+[Unit]
+Description=CFM edge: IPv6 listen decision before the edge starts
+
+[Service]
+Type=oneshot
+# A hung ss / cfm realip / config test must not hold the edge's start for ever
+# (the edge starts anyway when this unit fails: Wants= and the "-").
+TimeoutStartSec=60
+ExecStart=-/bin/sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh prestart

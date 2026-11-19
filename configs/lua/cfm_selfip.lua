@@ -3,7 +3,7 @@
 --
 -- is_self_origin(ip) answers "should CFM leave this client entirely alone?" and
 -- is true for:
---   * loopback / link-local (127/8, ::1, fe80::-feb0::, 169.254/16),
+--   * loopback / IPv4 link-local (127/8, ::1, 169.254/16),
 --   * the server's own public IPs — /var/lib/cfm/lua/cfm_self_ips.lua, written
 --     by Go (firewall/selfip), and
 --   * [global] IGNORE_IPS / IGNORE_NETS from cfm.cfg (IPv4 and IPv6 CIDRs) — /var/lib/cfm/lua/
@@ -36,15 +36,27 @@ local function normalize_ip(raw)
   return lower(ip)
 end
 
+-- is_v6_linklocal: fe80::/10 (first hextet fe80..febf). NEVER self: once the
+-- edge listens on IPv6 (docs/edge-ipv6.md), a host on the same L2 segment (a
+-- provider VLAN) can connect to the node's global address from any fe80::
+-- address it likes, and a self bypass (cfm.lua Step 0a) skips the WAF and the
+-- challenge. The node's own requests come from ::1 or its global addresses.
+-- (Go's self-IP set, cfm_self_ips.lua, can list the node's own fe80::
+-- addresses: refused too, and so is an IGNORE_NETS entry covering fe80::/10,
+-- by design: checked first.)
+local function is_v6_linklocal(ip)
+  return ip:match("^fe[89ab]%x:") ~= nil
+end
+
+-- is_loopback_or_linklocal: loopback (127/8, ::1) and IPv4 link-local
+-- (169.254/16, not routable to the edge). IPv6 link-local is NOT included (see
+-- is_v6_linklocal).
 local function is_loopback_or_linklocal(ip)
   ip = normalize_ip(ip)
   if ip == "" then return false end
   local b2 = tonumber(ip:match("^169%.(%d+)%."))
   if ip == "::1" then return true end
   if ip:sub(1, 4) == "127." then return true end
-  if ip:sub(1, 6) == "fe80::" or ip:sub(1, 6) == "fe90::" or ip:sub(1, 6) == "fea0::" or ip:sub(1, 6) == "feb0::" then
-    return true
-  end
   if b2 and b2 == 254 then return true end
   return false
 end
@@ -132,7 +144,7 @@ end
 -- 128-bit address as 32 lowercase hex digits, in the same form Go writes the
 -- v6_ranges networks. Accepts "::" compression, an embedded IPv4 tail
 -- ("::ffff:1.2.3.4"). A zone suffix ("fe80::1%eth0") is refused like Go's
--- net.ParseIP refuses it (link-local is the loopback/link-local rule's job).
+-- net.ParseIP refuses it.
 -- Anything it cannot read as exactly 8 groups returns nil, and a nil never
 -- matches a range.
 local function ipv6_to_hex32(ip)
@@ -216,6 +228,7 @@ end
 local function is_self_origin(ip)
   local nip = normalize_ip(ip)
   if nip == "" then return false end
+  if is_v6_linklocal(nip) then return false end
   if is_loopback_or_linklocal(nip) then return true end
   local map = load_self_ip_cache()
   if map[nip] == true then return true end

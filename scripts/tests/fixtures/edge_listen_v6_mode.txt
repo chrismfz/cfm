@@ -1,0 +1,49 @@
+# EDGE_LISTEN_V6 readings shared by scripts/cfm-edge-listen-v6.sh mode() and
+# internal/originrealip edgeIPv6Wanted (check_edge_listen_v6.sh runs the script,
+# TestEdgeListenV6ModeFixture runs Go). One case per line:
+#   <expected>\t<cfm.conf content, printf %b escapes: \n \r \t \" \\ and
+#   \0ddd octal bytes (Go reads them as \ddd)>
+# expected: on | off | default (= V6_DEFAULT / edgeIPv6Default). A trailing
+# \n is added to the content.
+default	
+default	OTHER = 1
+default	# EDGE_LISTEN_V6 = on
+default	EDGE_LISTEN_V6 =
+default	EDGE_LISTEN_V6 = ""
+default	EDGE_LISTEN_V6 = ; only a comment
+on	EDGE_LISTEN_V6 = on
+on	EDGE_LISTEN_V6=on
+on	  EDGE_LISTEN_V6   =   ON  
+on	EDGE_LISTEN_V6 = "on"
+on	EDGE_LISTEN_V6 = 'on'
+on	EDGE_LISTEN_V6 = "on" ; opt in
+on	EDGE_LISTEN_V6 = on # opt in
+on	EDGE_LISTEN_V6 = on\r
+on	EDGE_LISTEN_V6 = "on"\r
+on	EDGE_LISTEN_V6 = yes
+on	EDGE_LISTEN_V6 = True
+on	EDGE_LISTEN_V6 = 1
+on	EDGE_LISTEN_V6 = auto
+on	EDGE_LISTEN_V6 = enabled
+on	EDGE_LISTEN_V6 = off\nEDGE_LISTEN_V6 = on
+off	EDGE_LISTEN_V6 = off
+off	EDGE_LISTEN_V6 = "No" ; note
+off	EDGE_LISTEN_V6 = false
+off	EDGE_LISTEN_V6 = 0
+off	EDGE_LISTEN_V6 = disabled
+off	EDGE_LISTEN_V6 = off\r
+off	EDGE_LISTEN_V6 = on\nEDGE_LISTEN_V6 = off
+off	EDGE_LISTEN_V6 = maybe
+off	EDGE_LISTEN_V6 = 'on"
+off	EDGE_LISTEN_V6 = "on
+off	EDGE_LISTEN_V6 = on"
+off	EDGE_LISTEN_V6 = ""on""
+off	EDGE_LISTEN_V6 = "on;x"
+off	EDGE_LISTEN_V6 = " on "
+off	EDGE_LISTEN_V6 = o n
+off	EDGE_LISTEN_V6 = "'on'"
+off	EDGE_LISTEN_V6 = '"on"'
+off	EDGE_LISTEN_V6 = on\0302\0240
+off	EDGE_LISTEN_V6 = on\0302\0205
+default	\0302\0240EDGE_LISTEN_V6 = on
+on	EDGE_LISTEN_V6 = \v on \f

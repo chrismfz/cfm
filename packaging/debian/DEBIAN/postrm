@@ -6,6 +6,22 @@ if command -v dpkg-maintscript-helper >/dev/null 2>&1; then
     dpkg-maintscript-helper rm_conffile /etc/cfm/webdetector_challenge_paths.txt 2026.11.19~ cfm -- "$@"
 fi
 
+# Package removed (not upgraded): drop the edge IPv6 listen guard and what it
+# generated (docs/edge-ipv6.md). Without the guard a leftover IPv6 listen
+# would outlive it, and an edge on a host that later loses IPv6 would fail to
+# start. The edge picks the removal up at its next start or reload.
+case "$1" in
+    remove|purge)
+        rm -f /etc/systemd/system/cfm-edge-listen-v6.service \
+        /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \
+        /etc/systemd/system/angie.service.d/cfm-listen-v6.conf \
+        /usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf \
+        /usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf \
+        /etc/angie/cfm-listen-v6-http.conf \
+        /etc/angie/cfm-listen-v6-https.conf || true
+        ;;
+esac
+
 # always reload daemon to drop unit if purged
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true

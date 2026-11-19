@@ -661,6 +661,23 @@ deploy_angie_conf() {
     fi
 }
 
+# ensure_edge_listen_v6: decide whether the edge listens on IPv6 too
+# (EDGE_LISTEN_V6 in /etc/cfm/cfm.conf, off by default for now; docs/edge-ipv6.md). The cfm package
+# installs the unit that repeats this before every edge start; this run makes a
+# fresh install decide now. It never fails the install: on any doubt the edge
+# stays on IPv4 only. It runs AFTER ensure_origin_realip: it listens on IPv6 only
+# once the origin trusts the edge's IPv6 hop from ::1, which `cfm realip fix`
+# writes where IPv6 is allowed and the host can do it.
+ensure_edge_listen_v6() {
+    local script=/usr/share/cfm/scripts/cfm-edge-listen-v6.sh
+    if [ ! -f "$script" ]; then
+        warn "Edge IPv6 listen: $script missing (cfm not installed yet?); the edge listens on IPv4 only until the cfm package runs it"
+        return 0
+    fi
+    sh "$script" render || true
+    return 0
+}
+
 # The edge proxies every web request to the origin from 127.0.0.1. An origin
 # that does not trust that loopback logs 127.0.0.1 for every visitor and hands
 # PHP REMOTE_ADDR=127.0.0.1 (qualityweb, 2026-10-29: cPanel without Imunify360,
@@ -841,6 +858,7 @@ main() {
     # 4. Auto-deploy angie.conf if shipped (with `angie -t` validation)
     deploy_angie_conf
     ensure_origin_realip
+    ensure_edge_listen_v6
 
     # 5. Next-steps report
     print_next_steps
