@@ -189,8 +189,17 @@ for f in "$ORT" "$ANG"; do
     /set_current_peer\(ngx\.var\.server_addr/ { bad("balancer fallback passes a bare ngx.var.server_addr") }
     /set_current_peer\(a,/ { if (prevl !~ /if a:find\(":", 1, true\) then a = "\[" \.\. a \.\. "\]" end/) bad("balancer fallback: the bracket line is not right before set_current_peer(a, ...)") }
     want != "" { if ($0 !~ want) bad("expected `" wantmsg "` right after line " NR-1); want="" }
-    /^[[:space:]]*proxy_pass[[:space:]]+\$cfm_pass;/ { want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_pass_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_pass_bind;" }
-    /^[[:space:]]*proxy_pass[[:space:]]+https?:\/\/\$cfm_origin_addr:/ { want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_origin_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_origin_bind;" }
+    # Any proxy_pass of $cfm_pass / ${cfm_pass} / $cfm_origin_addr, anywhere on
+    # the line, must be alone on its line (so the bind can be checked on the
+    # next one) and be followed by its bind.
+    /proxy_pass[[:space:]]+\$\{?cfm_pass\}?[[:space:]]*;/ {
+      if ($0 !~ /^[[:space:]]*proxy_pass[[:space:]]+\$\{?cfm_pass\}?[[:space:]]*;[[:space:]]*(#.*)?$/) bad("proxy_pass $cfm_pass must be alone on its line, followed by proxy_bind $cfm_pass_bind;")
+      want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_pass_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_pass_bind;"
+    }
+    /proxy_pass[[:space:]]+https?:\/\/\$\{?cfm_origin_addr\}?/ {
+      if ($0 !~ /^[[:space:]]*proxy_pass[[:space:]]+https?:\/\/\$\{?cfm_origin_addr\}?:[0-9]+[[:space:]]*;[[:space:]]*(#.*)?$/) bad("proxy_pass to $cfm_origin_addr must be alone on its line, followed by proxy_bind $cfm_origin_bind;")
+      want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_origin_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_origin_bind;"
+    }
     { prevl = $0 }
     END { if (want != "") bad("expected `" wantmsg "` after the last line") }
   ' "$f")

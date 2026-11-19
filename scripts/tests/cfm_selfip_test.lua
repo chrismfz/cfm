@@ -76,9 +76,11 @@ assert_true(H("2001:DB8:0:0:0:0:0:1") == "20010db8000000000000000000000001", "he
 assert_true(H("fe80::1%eth0") == nil, "hex32 refuses a zone id (as Go's ParseIP does)")
 assert_true(H("2001:db8::1%25eth0") == nil, "hex32 refuses an encoded zone id")
 assert_true(H("::ffff:1.2.3.4") == "00000000000000000000ffff01020304", "hex32 embedded v4")
+assert_true(H("::ffff:10.0.0.1") == "00000000000000000000ffff0a000001", "hex32 embedded v4 with a 0 octet")
 assert_true(H("1::") == "00010000000000000000000000000000", "hex32 trailing ::")
 for _, bad in ipairs({ "1.2.3.4", "1::2::3", "12345::1", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9",
-                       "g::1", ":1::", "1:2:3:4:5:6:7::8", "", "::ffff:1.2.3.999" }) do
+                       "g::1", ":1::", "1:2:3:4:5:6:7::8", "", "::ffff:1.2.3.999",
+                       "1::01.2.3.4", "1::1.2.3.04", "::ffff:010.0.0.1" }) do
   assert_true(H(bad) == nil, "hex32 rejects " .. bad)
 end
 

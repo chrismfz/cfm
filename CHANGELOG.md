@@ -30,8 +30,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   now bracketed (`cfm.lua` origin pass, `cfm_origin_ka.lua`, the balancer
   fallbacks, the `$cfm_origin_addr` map in `openresty.conf` / `angie.conf`),
   and every origin location binds the loopback of its upstream's family
-  (`$cfm_pass_bind` / `$cfm_origin_bind`: `::1` for IPv6, which the origin's
-  real-IP config already trusts; the local IPv4 upstreams keep `127.0.0.1`).
+  (`$cfm_pass_bind` / `$cfm_origin_bind`: `::1` for IPv6; the local IPv4
+  upstreams keep `127.0.0.1`). The origin then sees an IPv6 visitor's hop
+  from `::1`: the `cfm realip` fix trusts it, but `cfm realip` does not check
+  it yet and a LiteSpeed allow list or a hand-written trust may hold only
+  `127.0.0.1`, so add `::1` there before listening on IPv6.
   IPv4 behaviour is unchanged. Found by an operator who added `listen [::]`
   by hand; the reference confs still listen on IPv4 only (IPv6 listening
   comes separately: a listen on a host without an IPv6 stack fails the config

@@ -564,7 +564,11 @@ func joinSorted(set map[string]bool) string {
 // edge's address: 127.0.0.1, alone or as a loopback-only network (127.0.0.0/8
 // .. /32). The edge proxies from 127.0.0.1 (proxy_bind), so ::1 alone does not
 // trust it: a list holding only ::1 still logs 127.0.0.1. 127.0.0.1/1 covers
-// half the internet and is not a loopback trust.
+// half the internet and is not a loopback trust. An origin hop to an IPv6
+// destination binds ::1 instead ($cfm_pass_bind / $cfm_origin_bind in the
+// edge confs); the reference confs listen on IPv4 only, so ::1 is not required
+// here yet. Whatever turns on an IPv6 edge listen must make this require ::1
+// as well.
 func anyLoopback(args []string) bool {
 	for _, a := range args {
 		if ip := net.ParseIP(a); ip != nil {

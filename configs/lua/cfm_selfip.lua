@@ -141,6 +141,9 @@ local function ipv6_to_hex32(ip)
   ip = lower(ip)
   local head4, v4 = ip:match("^(.*:)(%d+%.%d+%.%d+%.%d+)$")
   if v4 then
+    -- Go's ParseIP refuses an octet with a leading zero ("1::01.2.3.4");
+    -- so does the edge, or it would ignore a client Go does not.
+    if ("." .. v4):find("%.0%d") then return nil end
     local n = ipv4_to_uint32(v4)
     if not n then return nil end
     ip = head4 .. string.format("%x:%x", math.floor(n / 65536), n % 65536)

@@ -27,7 +27,7 @@ because of that.
 
 The verdict is **trusted** when the origin trusts 127.0.0.1 (or
 `127.0.0.1/32`, `127.0.0.0/8`) *and* the client header in effect is one of the
-edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. It is **n/a (OK)** when no edge engine runs: then the origin faces
+edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. (An origin hop to an IPv6 destination binds `::1` instead; the reference edge confs listen on IPv4 only, so the check does not require `::1` yet. A node that listens on IPv6 must trust `::1` too: LiteSpeed `::1T`, nginx `set_real_ip_from ::1;`.) It is **n/a (OK)** when no edge engine runs: then the origin faces
 the internet itself (avgerinos, a DirectAdmin nginx).
 
 It reads configuration only (`internal/originrealip`), the way the server loads
