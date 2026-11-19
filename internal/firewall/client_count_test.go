@@ -69,3 +69,41 @@ func TestCountKeyCaches(t *testing.T) {
 		t.Fatalf("self_v6 read %d times, want once", f.reads["self_v6"])
 	}
 }
+
+// A failed guard read is answered from the cache for guardErrTTL: a spray of
+// new /64s while nft fails must not run the guard reads per /64.
+func TestCountKeyCachesAFailedGuardRead(t *testing.T) {
+	oldG, oldC := guardCacheTTL, countKeyTTL
+	guardCacheTTL, countKeyTTL = 10*time.Second, 10*time.Second
+	t.Cleanup(func() {
+		guardCacheTTL, countKeyTTL = oldG, oldC
+		SetCountBackend(nil)
+		ResetCountKeyCache()
+		ResetGuardCache()
+	})
+	ResetCountKeyCache()
+	ResetGuardCache()
+	f := newNetFake()
+	f.readErr = map[string]error{"allow_v6": errors.New("nft: busy")}
+	SetCountBackend(f)
+	for i := 0; i < 1000; i++ {
+		ip := netip.AddrFrom16([16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 7, byte(i >> 8), byte(i), 0, 0, 0, 0, 0, 0, 0, 1}).String()
+		if got := CountKey(ip); got != ip {
+			t.Fatalf("unreadable guards: %q, want the address", got)
+		}
+	}
+	if f.reads["self_v6"] != 1 {
+		t.Fatalf("self_v6 read %d times for 1000 /64s, want once", f.reads["self_v6"])
+	}
+}
+
+// A backend that cannot write block_v6_clients bans the address alone: its
+// counters count per address too.
+func TestCountKeyWithoutASetElemWriter(t *testing.T) {
+	t.Cleanup(func() { SetCountBackend(nil); ResetCountKeyCache() })
+	ResetCountKeyCache()
+	SetCountBackend(struct{ Backend }{})
+	if got := CountKey("2001:db8:1:2::a"); got != "2001:db8:1:2::a" {
+		t.Fatalf("%q, want the address", got)
+	}
+}

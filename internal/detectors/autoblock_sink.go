@@ -455,22 +455,15 @@ func (s *sectionSink) Publish(a core.Alert) {
 				now = time.Now()
 			}
 
-			// The challenge and its cooldown are per address (the edge
-			// challenges the address), the escalation counts the client: an
-			// IPv6 client's /64 (core.ClientKey), so a client challenged
-			// again from each new address of its /64 still escalates.
 			s.chalMu.Lock()
-			cur := s.chalState[ipStr]
-			cur.LastSeen = now
-			s.chalState[ipStr] = cur
-			escKey := "esc|" + core.ClientKey("|ip", ipStr)
-			st := s.chalState[escKey]
+			st := s.chalState[ipStr]
+
 			if !st.LastSeen.IsZero() && now.Sub(st.LastSeen) > defaultChallengeFailWindow {
 				st.Count = 0
 			}
 			st.Count++
 			st.LastSeen = now
-			s.chalState[escKey] = st
+			s.chalState[ipStr] = st
 			s.chalMu.Unlock()
 
 			out.Extra["challenge_fails"] = fmt.Sprintf("%d", st.Count)

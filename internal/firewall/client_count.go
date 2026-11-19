@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cfm/internal/ipkey"
+	"cfm/internal/logging"
 )
 
 // countBackend is the backend CountKey reads the guards from (the daemon's,
@@ -76,8 +77,15 @@ func countKeyGuarded(p netip.Prefix) bool {
 	guarded := ClientNetExempted(p) != ""
 	if !guarded {
 		if bp := countBackend.Load(); bp != nil {
-			why, err := clientNetGuard(*bp, p)
-			guarded = err != nil || why != "" // unknown: as the ban, the address
+			if _, ok := (*bp).(SetElemWriter); !ok {
+				guarded = true // this backend bans the address alone
+			} else {
+				why, err := clientNetGuard(*bp, p)
+				if err != nil {
+					countKeyLogErr(err)
+				}
+				guarded = err != nil || why != "" // unknown: as the ban, the address
+			}
 		}
 	}
 	countKeyCache.Lock()
@@ -94,4 +102,16 @@ func ResetCountKeyCache() {
 	countKeyCache.Lock()
 	countKeyCache.m = map[netip.Prefix]countKeyEntry{}
 	countKeyCache.Unlock()
+}
+
+var countKeyErrLogged atomic.Int64 // unix seconds of the last log line
+
+// countKeyLogErr says, at most once a minute, that IPv6 clients count per
+// address because the guards cannot be read (the ban path logs its own).
+func countKeyLogErr(err error) {
+	now := time.Now().Unix()
+	if last := countKeyErrLogged.Load(); now-last < 60 || !countKeyErrLogged.CompareAndSwap(last, now) {
+		return
+	}
+	logging.Logf("[firewall] IPv6 client counters: cannot read the /64 guards (%v); counting per address", err)
 }

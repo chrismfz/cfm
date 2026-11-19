@@ -559,9 +559,15 @@ var (
 		be   Backend
 		at   time.Time
 		view *guardView
-		sets int // the number of sets it read (the fleet allows or not)
+		err  error // a failed read, answered for guardErrTTL
+		sets int   // the number of sets it read (the fleet allows or not)
 	}
 )
+
+// guardErrTTL is how long a failed guard read is answered from the cache: a
+// counter (firewall.CountKey) asks per IPv6 event, and with nft failing each
+// new /64 would otherwise run every guard set's read again, in turn.
+var guardErrTTL = 5 * time.Second
 
 // cachedGuardView is newGuardView, reused for guardCacheTTL on one backend.
 func cachedGuardView(be Backend) (*guardView, error) {
@@ -569,14 +575,19 @@ func cachedGuardView(be Backend) (*guardView, error) {
 	guardCacheMu.Lock()
 	defer guardCacheMu.Unlock()
 	c := &guardCache
-	if guardCacheTTL > 0 && c.view != nil && c.be == be && c.sets == sets && time.Since(c.at) < guardCacheTTL {
-		return c.view, nil
+	if guardCacheTTL > 0 && c.be == be && c.sets == sets {
+		if c.view != nil && time.Since(c.at) < guardCacheTTL {
+			return c.view, nil
+		}
+		if c.err != nil && time.Since(c.at) < guardErrTTL {
+			return nil, c.err
+		}
 	}
 	v, err := newGuardView(be)
+	c.be, c.at, c.view, c.err, c.sets = be, time.Now(), v, err, sets
 	if err != nil {
 		return nil, err
 	}
-	c.be, c.at, c.view, c.sets = be, time.Now(), v, sets
 	return v, nil
 }
 
@@ -584,7 +595,7 @@ func cachedGuardView(be Backend) (*guardView, error) {
 // afresh (a test that changes a guard set behind the backend's back).
 func ResetGuardCache() {
 	guardCacheMu.Lock()
-	guardCache.view = nil
+	guardCache.view, guardCache.err = nil, nil
 	guardCacheMu.Unlock()
 }
 

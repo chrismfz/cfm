@@ -264,11 +264,14 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   probe signals; the MCP consent limit.
   - **Only where the ban would take the /64:** `firewall.CountKey` asks the
     bans' own guards (the daemon's backend, `SetCountBackend`; cached 10 s
-    per /64). A guarded /64 (this node, its gateway, an ignored, allowed or
+    per /64, a failed read 5 s, logged once a minute). A guarded /64 (this node, its gateway, an ignored, allowed or
     trusted proxy address, or nft cannot tell) counts per address, as its
     ban does: counted as one client, one address's alert would spend the
     /64's and leave the other addresses unbanned, or name an ignored
-    neighbour while the attacker went free (found by the review).
+    neighbour while the attacker went free (found by the review). Not
+    foreseen: a ban that falls back to the address because nft failed to
+    write the /64 (transient); the /64's count is then spent on one address
+    until the detector's cooldown.
   - **Only the count:** the alert keeps a real address (the one seen last;
     `Extra["client"]` is the /64), which the sink's allow / ignore / self /
     leniency checks read and `firewall.ExtendClientBlock` widens to the /64
@@ -279,8 +282,7 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     address when a guard kept the /64), so another address of a banned /64
     is not banned again while an address banned alone does not shield its
     neighbours. The sink's challenge cooldown stays per address (the edge
-    challenges the address); its challenge-to-ban escalation (off by
-    default) counts the client.
+    challenges the address).
   - **The notification** says "Banned as: <the /64>" (the sink passes
     `block_net` on).
   - `TestDetectorWindowKeysGroupIPv6Clients` fails a detector window keyed
