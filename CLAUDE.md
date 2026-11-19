@@ -208,7 +208,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   and the code disagree, trust the code and fix the comment.
 - **Edge-engine facts live in ONE table: `edgeengine.Profiles`**
   (`internal/edgeengine/profiles.go`): unit, binaries, commands, conf/log
-  dirs, the legacy Lua token dir, config hooks and process aliases. Before
+  dirs, the config-path marker (`PathMarker`, which attributes a listener
+  config path to an engine and is wider than `ConfDir` for OpenResty), the
+  legacy Lua token dir, config hooks and process aliases. Before
   it, a dozen packages each carried their own `{"angie", "openresty"}` list
   and paths. A caller derives what it needs: `Names()`, `Lookup`/`IsEdge`,
   `Units()`, `LuaTokenCandidates()`, `ConfFileCandidates`,

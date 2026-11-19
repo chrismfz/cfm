@@ -24,6 +24,10 @@ func TestDNATEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 		"/tmp/x/etc/angie/cfm-panel-listeners.conf":                      "angie",
 		"/tmp/x/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf": "openresty",
 		"configs/cfm-panel-listeners.conf.in":                            "",
+		// The marker the attribution always used: any "/openresty/" path.
+		"/opt/openresty/nginx/conf/cfm-panel-listeners.conf": "openresty",
+		"/srv/openresty/conf/x.conf":                         "openresty",
+		"/etc/angiex/cfm-panel-listeners.conf":               "",
 	} {
 		if got := panelListenerConfigPathService(path); got != want {
 			t.Errorf("panelListenerConfigPathService(%q) = %q, want %q", path, got, want)

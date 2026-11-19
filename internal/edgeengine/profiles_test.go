@@ -71,7 +71,7 @@ func TestProfilesAreComplete(t *testing.T) {
 			t.Fatalf("empty or duplicate profile name %q", p.Name)
 		}
 		seen[p.Name] = true
-		for field, v := range map[string]string{"ConfDir": p.ConfDir, "MainConf": p.MainConf, "LogDir": p.LogDir, "LegacyLuaDir": p.LegacyLuaDir} {
+		for field, v := range map[string]string{"ConfDir": p.ConfDir, "PathMarker": p.PathMarker, "MainConf": p.MainConf, "LogDir": p.LogDir, "LegacyLuaDir": p.LegacyLuaDir} {
 			if v == "" {
 				t.Errorf("%s: %s is empty", p.Name, field)
 			}

@@ -351,11 +351,12 @@ func panelListenerConfigPathsForService(service string, paths []string) []string
 	return servicePaths
 }
 
-// panelListenerConfigPathService names the edge engine whose config dir holds
-// path (Contains, not HasPrefix: tests root the same layout under a temp dir).
+// panelListenerConfigPathService names the edge engine a config path belongs
+// to: the first engine (detection order) whose PathMarker the path contains.
+// Contains, not HasPrefix: tests root the same layout under a temp dir.
 func panelListenerConfigPathService(path string) string {
 	for _, p := range edgeengine.Profiles {
-		if strings.Contains(path, p.ConfDir+"/") {
+		if strings.Contains(path, p.PathMarker) {
 			return p.Name
 		}
 	}

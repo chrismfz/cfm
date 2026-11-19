@@ -29,6 +29,11 @@ type Profile struct {
 	// ConfDir is where CFM's edge config and its sidecars live
 	// (cfm-panel-listeners.conf, trusted_proxies.conf, ...).
 	ConfDir string
+	// PathMarker attributes a config path to this engine (dnat's panel
+	// listener files): a path containing it is the engine's. Deliberately the
+	// marker the attribution always used, which is wider than ConfDir for
+	// OpenResty (any "/openresty/" path, e.g. under /opt/openresty).
+	PathMarker string
 	// MainConf is the engine's main config file.
 	MainConf string
 	// LogDir holds the edge's access/error logs.
@@ -59,6 +64,7 @@ var Profiles = []Profile{
 		Binaries:        []string{"/usr/sbin/angie", "/usr/bin/angie"},
 		Commands:        []string{"angie"},
 		ConfDir:         "/etc/angie",
+		PathMarker:      "/etc/angie/",
 		MainConf:        "/etc/angie/angie.conf",
 		LogDir:          "/var/log/angie",
 		LegacyLuaDir:    "/etc/angie/lua",
@@ -70,6 +76,7 @@ var Profiles = []Profile{
 		Binaries:        []string{"/usr/local/openresty/nginx/sbin/nginx", "/opt/openresty/nginx/sbin/nginx"},
 		Commands:        []string{"openresty"},
 		ConfDir:         "/usr/local/openresty/nginx/conf",
+		PathMarker:      "/openresty/",
 		MainConf:        "/usr/local/openresty/nginx/conf/nginx.conf",
 		LogDir:          "/usr/local/openresty/nginx/logs",
 		LegacyLuaDir:    "/usr/local/openresty/nginx/lua",
