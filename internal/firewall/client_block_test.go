@@ -398,3 +398,21 @@ func TestIsMissingSet(t *testing.T) {
 		}
 	}
 }
+
+// Until the edge ban store registers its allow snapshot ("allow_sets"), the
+// guard reads the fleet whitelist's IPv6 sets itself (boot, before the first
+// reconcile); once it is registered, it does not.
+func TestGuardReadsTheFleetWhitelistWithoutASnapshot(t *testing.T) {
+	f := newNetFake()
+	f.set("allow_ext_v6_hosts")["2001:db8:1:2::55"] = 0
+	if elem, _, _ := ExtendClientBlock(f, net.ParseIP(v6a), time.Hour); elem != v6a {
+		t.Fatalf("no snapshot: elem=%q, want the address (the fleet whitelist read directly)", elem)
+	}
+	SetClientNetExempt("allow_sets", func(netip.Prefix) bool { return false })
+	t.Cleanup(func() { SetClientNetExempt("allow_sets", nil) })
+	g := newNetFake()
+	g.set("allow_ext_v6_hosts")["2001:db8:1:2::55"] = 0
+	if elem, _, _ := ExtendClientBlock(g, net.ParseIP(v6a), time.Hour); elem != net6 {
+		t.Fatalf("with a snapshot: elem=%q, want the /64 (the snapshot decides)", elem)
+	}
+}

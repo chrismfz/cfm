@@ -2,6 +2,7 @@ package edgeban
 
 import (
 	"cfm/internal/firewall"
+	"cfm/internal/proxyipfilter"
 	"net"
 	"net/netip"
 	"testing"
@@ -169,5 +170,43 @@ func TestSlash64ExemptsRegisteredWithTheFirewall(t *testing.T) {
 	}
 	if got := firewall.ClientNetExempted(netip.MustParsePrefix("2001:db8:1:3::/64")); got != "" {
 		t.Fatalf("the next /64: %q", got)
+	}
+}
+
+// Unban lifts the proxied-client filter for the address only: forgetting the
+// client's whole /64 there would lift every source (the fleet blacklist,
+// other addresses' bans) for all of it.
+func TestUnbanForgetsTheAddressOnlyInTheProxiedFilter(t *testing.T) {
+	proxyipfilter.ResetForTest()
+	t.Cleanup(proxyipfilter.ResetForTest)
+	proxyipfilter.SetModes("enforce", "enforce")
+	proxyipfilter.SetFeed("fleet", false, nil, []string{"2001:db8:1:2::/64"})
+	if enforce, listed := proxyipfilter.Decide("2001:db8:1:2::6", "x"); !enforce || !listed {
+		t.Fatalf("setup: the fleet-listed /64 is not blocked (%v %v)", enforce, listed)
+	}
+	Unban("2001:db8:1:2::5")
+	if enforce, _ := proxyipfilter.Decide("2001:db8:1:2::5", "x"); enforce {
+		t.Error("the unblocked address is still filtered")
+	}
+	if enforce, _ := proxyipfilter.Decide("2001:db8:1:2::6", "x"); !enforce {
+		t.Error("another address of the /64 lost the fleet blacklist's block")
+	}
+}
+
+// The allow snapshot is registered with the firewall only once the Default
+// store holds one, and withdrawn on Clear (the firewall then reads the fleet
+// whitelist itself).
+func TestAllowExemptFollowsTheSnapshot(t *testing.T) {
+	p := netip.MustParsePrefix("2001:db8:1:2::/64")
+	s, now := newTestStore(t)
+	SetDefault(s)
+	t.Cleanup(func() { SetDefault(nil); firewall.SetClientNetExempt("allow_sets", nil) })
+	s.Reconcile(snap(now.Add(time.Second), []string{"2001:db8:1:2::77"}))
+	if got := firewall.ClientNetExempted(p); got != "allow_sets" {
+		t.Fatalf("after a reconcile: %q", got)
+	}
+	s.Clear()
+	if got := firewall.ClientNetExempted(p); got != "" {
+		t.Fatalf("after Clear the snapshot must be withdrawn: %q", got)
 	}
 }

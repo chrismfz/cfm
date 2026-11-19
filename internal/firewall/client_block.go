@@ -101,6 +101,16 @@ func SetClientNetExempt(name string, f func(netip.Prefix) bool) {
 	clientNetExempt.Store(&next)
 }
 
+// clientNetExemptRegistered reports whether a check is registered under name.
+func clientNetExemptRegistered(name string) bool {
+	cur := clientNetExempt.Load()
+	if cur == nil {
+		return false
+	}
+	_, ok := (*cur)[name]
+	return ok
+}
+
 // ClientNetExempted reports which registered check refuses p ("" when none).
 func ClientNetExempted(p netip.Prefix) string {
 	cur := clientNetExempt.Load()
@@ -373,6 +383,10 @@ func writeClientNet(be Backend, ip net.IP, p netip.Prefix, ttl *time.Duration) (
 // small manual allow sets (the rest of the allows: "allow_sets").
 var clientNetGuardSets = []string{"self_v6", "ignore_v6", "ignore_v6_nets", "allow_v6", "allow_dyn_v6", "allow_v6_nets"}
 
+// clientNetFleetAllowSets are the fleet whitelist's IPv6 sets, read only while
+// no "allow_sets" snapshot is registered.
+var clientNetFleetAllowSets = []string{"allow_ext_v6_hosts", "allow_ext_v6_nets"}
+
 // clientNetGuard says why p must not be banned as a whole ("" when it may).
 func clientNetGuard(be Backend, p netip.Prefix) (string, error) {
 	if name := ClientNetExempted(p); name != "" {
@@ -391,7 +405,14 @@ func clientNetGuard(be Backend, p netip.Prefix) (string, error) {
 		}
 	}
 	plo, phi := prefixRange(p)
-	for _, set := range clientNetGuardSets {
+	sets := clientNetGuardSets
+	if !clientNetExemptRegistered("allow_sets") {
+		// No allow snapshot yet (boot, before the edge ban store's first
+		// reconcile; or a store cleared after failed reads): read the fleet
+		// whitelist itself.
+		sets = append(append([]string(nil), sets...), clientNetFleetAllowSets...)
+	}
+	for _, set := range sets {
 		elems, err := be.ListSetElementsTimed(set)
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", set, err)

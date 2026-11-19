@@ -155,18 +155,28 @@ func ParseTrustedProxies(text string) []*net.IPNet {
 	return out
 }
 
-func init() {
-	enabled.Store(true)
-	// A /64 the allow sets touch (the fleet whitelist included, from the last
-	// reconcile's read) is never banned as a whole: the edge would never
-	// answer it (answers) and the TTL restore drops it, so nft bans the
-	// address instead (firewall/client_block.go).
+func init() { enabled.Store(true) }
+
+// registerAllowExempt tells the firewall, once the Default store holds an
+// allow snapshot, that a /64 the allow sets touch (the fleet whitelist
+// included) is never banned as a whole: the edge would never answer it
+// (answers) and the TTL restore drops it, so nft bans the address instead
+// (firewall/client_block.go). Until then (and after Clear) the firewall reads
+// the fleet whitelist sets itself.
+func (s *Store) registerAllowExempt(on bool) {
+	if s == nil || s != Default() {
+		return
+	}
+	if !on {
+		firewall.SetClientNetExempt("allow_sets", nil)
+		return
+	}
 	firewall.SetClientNetExempt("allow_sets", func(p netip.Prefix) bool {
-		s := Default()
-		if s == nil {
+		d := Default()
+		if d == nil {
 			return false
 		}
-		a := s.allow.Load()
+		a := d.allow.Load()
 		return a != nil && a.overlaps(p)
 	})
 }
@@ -484,6 +494,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 	}
 	allow := parseAllowSet(snap.Allows)
 	old := s.allow.Swap(allow)
+	s.registerAllowExempt(true)
 	changed := false
 	s.mu.Lock()
 	for k, e := range s.m {
@@ -533,6 +544,7 @@ func (s *Store) Clear() {
 	s.ready.Store(false)
 	s.cleared.Store(true)
 	s.allow.Store(nil)
+	s.registerAllowExempt(false)
 	version.Add(1)
 }
 

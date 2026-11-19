@@ -11,10 +11,14 @@ type flushRecorder struct {
 	firewall.Backend
 	flushed []string
 	failOn  string
+	failErr string // "" = a missing set
 }
 
 func (f *flushRecorder) FlushSet(_, _, set string) error {
 	if set == f.failOn {
+		if f.failErr != "" {
+			return errString(f.failErr)
+		}
 		return errString("Error: No such file or directory")
 	}
 	f.flushed = append(f.flushed, set)
@@ -45,5 +49,10 @@ func TestRunFlushEmptiesTheClientSlash64s(t *testing.T) {
 	g := &flushRecorder{failOn: firewall.BlockV6Clients}
 	if rc := RunFlush(nil, g, func() bool { return true }); rc != 0 {
 		t.Fatalf("missing client set: rc=%d", rc)
+	}
+	// Any other failure on it is a failed flush, never "flushed".
+	h := &flushRecorder{failOn: firewall.BlockV6Clients, failErr: "nft: netlink: operation not permitted"}
+	if rc := RunFlush(nil, h, func() bool { return true }); rc != 1 {
+		t.Fatalf("a real flush failure: rc=%d, want 1", rc)
 	}
 }
