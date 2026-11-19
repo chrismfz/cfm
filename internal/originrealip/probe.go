@@ -27,6 +27,7 @@
 package originrealip
 
 import (
+	"bufio"
 	"net"
 	"os"
 	"path/filepath"
@@ -241,13 +242,17 @@ func (l layout) hostCanIPv6() bool {
 	if !global {
 		return false
 	}
-	b, err := os.ReadFile(l.fs(l.procTCP6))
+	// Streamed, stopping once both are seen: the file lists every IPv6 (and,
+	// with a dual-stack origin, v4-mapped) connection too, MBs on a busy node.
+	fh, err := os.Open(l.fs(l.procTCP6))
 	if err != nil {
 		return false
 	}
+	defer fh.Close()
 	ports := map[uint64]bool{}
-	for _, line := range strings.Split(string(b), "\n") {
-		f := strings.Fields(line)
+	sc := bufio.NewScanner(fh)
+	for sc.Scan() && !(ports[80] && ports[443]) {
+		f := strings.Fields(sc.Text())
 		if len(f) < 4 || f[3] != "0A" {
 			continue
 		}

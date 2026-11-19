@@ -1017,6 +1017,7 @@ func TestEdgeIPv6HostCapability(t *testing.T) {
 		{"80 only", true, ifGlobal, tcp6Line(0, any6, 80, "0A"), "", false},
 		{"::1 and v4-mapped do not count", true, ifGlobal, tcp6Line(0, lo6, 80, "0A") + tcp6Line(1, mapped, 443, "0A") + tcp6Line(2, any6, 443, "0A"), "", false},
 		{"link-local does not count", true, ifGlobal, tcp6Line(0, "000080FE00000000FF4B43E62FEF54FE", 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"v4-mapped does not count", true, ifGlobal, tcp6Line(0, mapped, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
 		{"not LISTEN", true, ifGlobal, tcp6Line(0, any6, 80, "01") + tcp6Line(1, any6, 443, "0A"), "", false},
 		{"other ports", true, ifGlobal, tcp6Line(0, any6, 8080, "0A") + tcp6Line(1, any6, 4430, "0A"), "", false},
 		{"kill switch", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\n", false},
@@ -1089,5 +1090,34 @@ func TestEdgeIPv6UntrustedOriginKeepsTheIPv4Verdict(t *testing.T) {
 	}
 	if line := StatusLine(p, true); !strings.Contains(line, "logs 127.0.0.1 for every visitor") || strings.Contains(line, "::1") {
 		t.Errorf("verdict = %q", line)
+	}
+}
+
+// scripts/cfm-edge-listen-v6.sh reads `cfm realip --json` by these literal
+// substrings ("edge_ipv6":true and "trusted":true|false): renaming a JSON tag
+// would silently keep every edge on IPv4. Pin the contract on a host that can
+// do IPv6, untrusted and then trusted.
+func TestRealipJSONContractWithTheIPv6Script(t *testing.T) {
+	l, r := cpanelHost(t)
+	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
+		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+	put(t, r, "proc/net/if_inet6", "2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4\n")
+	put(t, r, "proc/net/tcp6", tcp6Head+
+		tcp6Line(0, "00000000000000000000000000000000", 80, "0A")+
+		tcp6Line(1, "00000000000000000000000000000000", 443, "0A"))
+	var out bytes.Buffer
+	runCLI([]string{"--json"}, &out, l, func() bool { return true })
+	for _, want := range []string{`"edge_ipv6":true`, `"trusted":false`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("untrusted: %s missing from %s", want, out.String())
+		}
+	}
+	put(t, r, "etc/apache2/conf.d/zz.conf", "RemoteIPInternalProxy ::1\n")
+	out.Reset()
+	runCLI([]string{"--json"}, &out, l, func() bool { return true })
+	for _, want := range []string{`"edge_ipv6":true`, `"trusted":true`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("trusted: %s missing from %s", want, out.String())
+		}
 	}
 }

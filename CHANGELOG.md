@@ -28,7 +28,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   blocks now include generated `cfm-listen-v6-http.conf` /
   `cfm-listen-v6-https.conf` (`[::]:9080`, `[::]:9043` ssl + quic) through a
   glob, so an absent file means IPv4 only. `scripts/cfm-edge-listen-v6.sh`
-  writes them, with nothing to configure, only when the kernel has IPv6,
+  writes them, with nothing to configure, only when the host has a global
+  IPv6 address,
   nothing else holds the edge's IPv6 ports, the origin listens on IPv6 on 80
   and 443, the origin trusts the edge's IPv6 hop from `::1` (below), the live
   main config includes them and the engine's config test passes; otherwise
@@ -42,8 +43,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   AAAA record pointing at it today. Verified on speedhost (OpenResty) and
   qualityweb (Angie) with a scratch edge. Kill switch: `EDGE_LISTEN_V6 = off`
   in `cfm.conf` (commented out in the reference file), then restart the
-  edge. Package removal removes the unit, the drop-ins and the files. The
-  panel ports stay IPv4. `docs/edge-ipv6.md`.
+  edge. Before a start, files a render approved are kept when only
+  readiness is missing at boot (no global address yet, the origin not up
+  yet), so a reboot does not silently drop IPv6. Behaviour change: a domain
+  with an AAAA record whose vhost is not bound to that IPv6 address used to
+  fall back to IPv4 (refused at the edge) and now gets the origin's default
+  vhost over IPv6. Package removal removes the unit, the drop-ins and the
+  files. The panel ports stay IPv4. `docs/edge-ipv6.md`.
 - **`cfm realip` requires `::1` trust where the edge listens, or can listen,
   on IPv6.** An IPv6 visitor's origin hop comes from `::1`; an origin
   trusting only 127.0.0.1 would see every IPv6 visitor as `::1`, i.e. as

@@ -226,7 +226,20 @@ rc=0
 CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
   CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" prestart >"$tmp/out" 2>&1 || rc=$?
 [ "$rc" -eq 0 ] || fail "exit $rc without cfm"
-expect absent "auto: no cfm binary to ask -> IPv4 only, even at start"
+expect present "prestart: cfm realip cannot confirm at start (boot) -> keeps files a render approved"
+says "could not confirm the ::1 trust at start"
+printf 'untrusted' >"$tmp/realip"
+run prestart
+expect present "prestart: an untrusted verdict at start keeps approved files (cfm realip warns meanwhile)"
+run render
+expect absent "render: the origin does not trust ::1 -> removed"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run prestart
+expect absent "prestart: untrusted and no approved files -> nothing written"
+printf 'trusted' >"$tmp/realip"
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
+  CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" render >"$tmp/out" 2>&1 || true
+expect absent "render: no cfm binary to ask -> IPv4 only"
 run render
 
 # A taken IPv6 edge port (nginx -t does not bind): never listen.
@@ -288,7 +301,13 @@ v6_global
 run render
 printf '%s\n' 'fe80000000000000e6434bfffe54ef2f 05 40 20 80     eno4' '00000000000000000000000000000001 01 80 10 80       lo' >"$proc"
 run prestart
-expect absent "link-local and ::1 only -> IPv4 only, even at start"
+expect present "prestart: no global address YET (SLAAC at boot) keeps approved files"
+says "kept at start: no global IPv6 address"
+run render
+expect absent "render: link-local and ::1 only -> IPv4 only"
+run prestart
+expect absent "prestart: no global address and no approved files -> nothing written"
+v6_global
 v6_global
 
 rm -f "$cfm_conf"

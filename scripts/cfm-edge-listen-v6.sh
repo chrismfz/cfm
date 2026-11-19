@@ -48,13 +48,20 @@
 #   render    (default; the package deploy, or by hand) decide and write/remove
 #             the files for every engine found
 #   prestart  (cfm-edge-listen-v6.service, before every edge start) the same,
-#             except that "ss ran and showed no IPv6 origin listener" never
-#             REMOVES files that are already there: at boot the edge can start
-#             before Apache/LiteSpeed, and that would drop IPv6 until the next
-#             restart. Every other reason (off, no IPv6 stack, a taken port,
-#             ss failing, no ::1 trust, a failed config test) still removes
-#             them. An origin that stopped listening on IPv6 for good keeps the
-#             edge's IPv6 until the next render (package upgrade, or by hand).
+#             except that files a render already approved are KEPT when the
+#             only reasons against them are about readiness, which at boot are
+#             often not there yet: no global IPv6 address yet (SLAAC / the
+#             network still coming up), the origin not seen on IPv6 (it can
+#             start after the edge), and `cfm realip` not confirming the ::1
+#             trust (it cannot see the running origin yet). Otherwise a reboot
+#             would silently put the edge back on IPv4 until the next render.
+#             The reasons that would break the start, or that the operator
+#             chose, still remove them: the kill switch, no IPv6 stack at all,
+#             a taken port, ss failing, a main config without the include, a
+#             failed config test. A change on the origin side for good (trust
+#             removed, no more IPv6) keeps the edge's IPv6 until the next
+#             render (package upgrade, or by hand), and `cfm realip` warns
+#             meanwhile ("logs ::1 for every IPv6 visitor").
 #   status    print the decision per engine, change nothing
 #
 # Test seams (scripts/tests/check_edge_listen_v6.sh): CFM_CONF,
@@ -92,12 +99,17 @@ mode() {
     esac
 }
 
-# kernel_has_v6: the host has a global IPv6 address (scope 00 in
-# /proc/net/if_inet6; the file is absent with ipv6.disable=1, and empty with
-# disable_ipv6=1 everywhere, as on earth). The stack alone is not enough:
-# without a global address no IPv6 visitor can reach the node, and
-# internal/originrealip hostCanIPv6 reads it the same way.
+# kernel_has_v6: the kernel has an IPv6 stack (/proc/net/if_inet6 exists; it
+# is absent with ipv6.disable=1, where a [::] listen cannot even be opened).
 kernel_has_v6() {
+    [ -e "$CFM_V6_PROC_FILE" ]
+}
+
+# host_has_global_v6: an interface carries a global IPv6 address (scope 00;
+# the file is empty with disable_ipv6=1 everywhere, as on earth). Without one
+# no IPv6 visitor can reach the node; internal/originrealip hostCanIPv6 reads
+# it the same way.
+host_has_global_v6() {
     [ -r "$CFM_V6_PROC_FILE" ] && awk '$4 == "00" { f = 1 } END { exit f ? 0 : 1 }' "$CFM_V6_PROC_FILE"
 }
 
@@ -176,8 +188,9 @@ realip_v6_trusted() {
     return 2
 }
 
-# want_v6 MODE: 0 (yes), 1 (no), or 3 (no, only because ss ran and showed no
-# IPv6 origin listener), with the reason on stdout. The ::1 trust is checked
+# want_v6 MODE: 0 (yes), 1 (no), or 3 (no, for a readiness reason only: no
+# global IPv6 address yet, or ss ran and showed no IPv6 origin listener; a
+# prestart keeps approved files on it), with the reason on stdout. The ::1 trust is checked
 # later, with the files in place (realip_v6_trusted).
 want_v6() {
     case $1 in
@@ -187,12 +200,16 @@ want_v6() {
             ;;
     esac
     if ! kernel_has_v6; then
-        echo "no global IPv6 address on this host ($CFM_V6_PROC_FILE)"
+        echo "no IPv6 stack in the kernel ($CFM_V6_PROC_FILE absent)"
         return 1
     fi
     if wv_taken=$(edge_port_taken); then
         echo "$wv_taken"
         return 1
+    fi
+    if ! host_has_global_v6; then
+        echo "no global IPv6 address on this host ($CFM_V6_PROC_FILE)"
+        return 3
     fi
     for wv_port in 80 443; do
         origin_has_v6 "$wv_port"
@@ -286,12 +303,13 @@ render_engine() {
         drop "$re_name" "$re_dir" "no engine binary (engine not installed?)"
         return 0
     fi
+    re_kept=0
+    [ "$re_action" = prestart ] && [ -f "$re_dir/$V6_HTTP_FILE" ] && [ -f "$re_dir/$V6_HTTPS_FILE" ] && re_kept=1
     re_reason=$(want_v6 "$re_mode")
     re_want=$?
-    if [ "$re_want" -eq 3 ] && [ "$re_action" = prestart ] &&
-        [ -f "$re_dir/$V6_HTTP_FILE" ] && [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
-        # The origin may simply not be up yet (boot): keep the decision the
-        # last full render made; the trust and the config test still apply.
+    if [ "$re_want" -eq 3 ] && [ "$re_kept" -eq 1 ]; then
+        # Not ready yet (boot): keep what the last render approved; the
+        # config test still applies.
         re_reason="kept at start: $re_reason"
         re_want=0
     fi
@@ -302,7 +320,14 @@ render_engine() {
 
     # The ::1 trust, asked before anything is written (see realip_v6_trusted).
     realip_v6_trusted
-    case $? in
+    re_trust=$?
+    if [ "$re_trust" -ne 0 ] && [ "$re_kept" -eq 1 ]; then
+        # At boot cfm realip may read the origin before it runs; keep what the
+        # last render approved (cfm realip warns if the trust is really gone).
+        log "$re_name: cfm realip could not confirm the ::1 trust at start; keeping the IPv6 listen files the last render approved"
+        re_trust=0
+    fi
+    case $re_trust in
         0) ;;
         1)
             drop "$re_name" "$re_dir" "the origin does not trust the edge's IPv6 hop from ::1 (cfm realip); run: cfm realip fix"

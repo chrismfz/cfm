@@ -127,7 +127,7 @@ func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 	case p.Stack == StackUnknown:
 		return false, "Origin real-IP: " + p.Note
 	case p.v6Only && !p.EdgeIPv6Listening:
-		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so the edge stays on IPv4 and IPv6 visitors are refused (run: cfm realip fix; docs/edge-ipv6.md)", p.Panel, p.Stack, p.Note)
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so the edge stays on IPv4 and IPv6 visitors are refused (run: cfm realip fix, then restart the edge; docs/edge-ipv6.md)", p.Panel, p.Stack, p.Note)
 	case p.v6Only && p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
 		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so those sites log ::1 for every IPv6 visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	case p.v6Only:

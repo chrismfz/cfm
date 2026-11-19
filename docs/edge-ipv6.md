@@ -30,7 +30,9 @@ ready for it.
 The edge listens on IPv6 when **all** of these hold, and stays on IPv4
 otherwise (the script logs which one failed):
 
-1. the kernel has an IPv6 stack (`/proc/net/if_inet6`);
+1. the host has a global IPv6 address (`/proc/net/if_inet6`, scope `00`;
+   the stack alone is not enough: earth has it, empty, and no IPv6 visitor
+   can reach it);
 2. nothing but the edge holds an IPv6 listener on tcp 9080 / 9043 or udp 9043
    (`nginx -t` does not bind, so a taken port would pass the test and then
    fail the edge's start, IPv4 included); an unknown owner counts as taken;
@@ -46,11 +48,17 @@ otherwise (the script logs which one failed):
 6. the engine's config test passes with them.
 
 `render` (deploy, by hand) makes the full decision. `prestart` (before every
-edge start) makes the same one, except that "`ss` ran and showed no IPv6
-origin listener" never removes files already there: at boot the edge can start
-before Apache/LiteSpeed. Every other reason removes them, `ss` failing
-included. An origin that stopped listening on IPv6 for good keeps the edge's
-IPv6 until the next `render` (a package upgrade, or by hand).
+edge start) makes the same one, except that files a `render` already approved
+are **kept** when only readiness is missing, which at boot is common: no
+global IPv6 address yet (SLAAC, the network still coming up), the origin not
+seen on IPv6 yet (it can start after the edge), `cfm realip` unable to confirm
+the `::1` trust (it reads the origin before it runs). Otherwise a reboot would
+silently put the edge back on IPv4. The reasons that would break the start, or
+that the operator chose, always remove them: the kill switch, no IPv6 stack at
+all, a taken port, `ss` failing, a main config without the include, a failed
+config test. A change on the origin side for good (trust removed, no more
+IPv6) keeps the edge's IPv6 until the next `render` (a package upgrade, or by
+hand); `cfm realip` warns meanwhile.
 
 ```bash
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
@@ -82,12 +90,23 @@ apps that trust localhost, and one bucket for every login limiter. So:
   IPv6 visitor".
 - `cfm realip fix` then writes the `::1` trust for Apache and nginx, also on
   an origin whose 127.0.0.1 trust comes from a file CFM did not write
-  (Imunify's `i360.remoteip.conf`, a hand-written one). LiteSpeed needs
-  `::1T` in its allow list by hand. The script never runs `fix` itself (it
-  edits and reloads the origin).
+  (Imunify's `i360.remoteip.conf`, a hand-written one). The script never runs
+  `fix` itself (it edits and reloads the origin), and `fix` does not render:
+  restart the edge after it (or run the script with `render` and reload).
+- LiteSpeed: `fix` only prints the step, `::1T` in its Access Control allow
+  list (the `::1T` spelling is the analogue of `127.0.0.1T` and has not been
+  tried on a real LiteSpeed yet). On rigel and titan the Apache RemoteIP trust
+  LiteSpeed loads already covers `::1` (verified on rigel, below).
 
 ## What changes for an IPv6 visitor
 
+- **A behaviour change for a domain with an AAAA record whose vhost is not
+  bound to that IPv6 address** (a customer's own AAAA at an external DNS, an
+  account without IPv6 in cPanel): until now its IPv6 visitors were refused at
+  the edge and the browser fell back to IPv4, so the right site loaded; now
+  the edge answers on IPv6 and the origin serves its default vhost (cPanel's
+  `defaultwebpage.cgi`), with no fallback. Fix the record or give the account
+  IPv6; the kill switch is the node-wide way back.
 - The hop goes to the IPv6 address the visitor dialled, so the origin
   answers with whatever vhost it binds there. On cPanel a vhost includes the
   IPv6 address only when the account has IPv6 assigned (which is also when
