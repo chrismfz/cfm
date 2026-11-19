@@ -16,7 +16,7 @@ import (
 // `listen [::]:PORT` does, and closes it at once. /proc/net/tcp6 cannot show
 // this: a socket that is bound and never listens (or that connected out from
 // a bound port) is absent or not LISTEN there, yet it makes the edge's bind
-// fail with EADDRINUSE, and `nginx -t` does not bind, so the edge's start
+// fail with EADDRINUSE, and `nginx -t` ignores a port in use, so the edge's start
 // would fail, IPv4 included. Exit 0 every port bindable, 1 one is taken (the
 // reason printed), 2 cannot tell (no IPv6, a bad argument).
 func v6BindCheck(args []string, w io.Writer) int {

@@ -52,14 +52,17 @@ otherwise (the script logs which one failed):
    the stack alone is not enough: earth has it, empty, and no IPv6 visitor
    can reach it);
 2. the edge's IPv6 ports (tcp 9080 / 9043, udp 9043) are the edge's own or
-   free (`nginx -t` does not bind, so a taken port would pass the test and
+   free (`nginx -t` ignores a port in use, so a taken port would pass the test and
    then fail the edge's start, IPv4 included). Read from the uid column of
    `/proc/net/tcp6` / `udp6`, never from `ss`: `ss` prints process names raw,
    so a tenant process can pose as root's nginx. A root listener on
    `[::]:PORT` (udp: a root socket there) is the edge's own, and while it
-   holds the port nothing else can bind it, so the other sockets on it are the
-   connections it accepted: those belong to the worker that accepted them
-   (`nobody` / `cfm`, not root: speedhost's are uid 969) and do not count.
+   holds the port nothing else can bind it (tcp), so the other sockets on it
+   are the connections it accepted: those belong to the worker that accepted
+   them (`nobody` / `cfm`, not root: speedhost's are uid 969) and do not
+   count. On udp a tenant can co-bind with `SO_REUSEADDR`; that cannot stop
+   the edge's own bind, so it is ignored there (it counts at a cold start).
+   A stopped edge's leftovers (FIN_WAIT, TIME_WAIT) read uid 0.
    With no such listener, a non-root socket on the port counts as taken in
    any state (one that bound the port and connected out holds it too) and on
    every address, `[::1]` included (it fails the edge's `[::]` bind too), and

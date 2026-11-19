@@ -211,6 +211,14 @@ for f in "$ORT" "$ANG"; do
     # geo / *_set / second map (nginx accepts a writer for a map variable and
     # the last one wins silently).
     !/^[[:space:]]*#/ && /(^|[;{}])[[:space:]]*(set|geo|map|set_by_lua[a-z_]*|perl_set|js_set)[[:space:]][^;]*\$\{?cfm_(origin_addr|origin_bind|pass_bind)([^a-zA-Z0-9_]|$)/ { writers++ }
+    # ... nor a regex named capture (?<cfm_origin_addr>...) / (?P<...>), nor a
+    # Lua write ngx.var.cfm_origin_addr = ... (a map variable can be
+    # overwritten once a directive references it), nor a map whose result
+    # variable sits on the line after `map <source>`.
+    !/^[[:space:]]*#/ && /\(\?P?<cfm_(origin_addr|origin_bind|pass_bind)>/ { bad("a regex named capture writes $cfm_origin_addr / $cfm_origin_bind / $cfm_pass_bind") }
+    !/^[[:space:]]*(#|--)/ && /ngx\.var\.cfm_(origin_addr|origin_bind|pass_bind)[[:space:]]*=[^=]/ { bad("Lua writes ngx.var.cfm_origin_addr / cfm_origin_bind / cfm_pass_bind") }
+    !/^[[:space:]]*#/ && /^[[:space:]]*map[[:space:]]+("[^"]*"|[^[:space:]{]+)[[:space:]]*$/ { mapcont = 1; prevl = $0; next }
+    mapcont { mapcont = 0; if ($0 ~ /^[[:space:]]*\$\{?cfm_(origin_addr|origin_bind|pass_bind)([^a-zA-Z0-9_]|$)/) writers++ }
     /^[[:space:]]*proxy_pass[[:space:]]/ {
       t = $0; sub(/^[[:space:]]*proxy_pass[[:space:]]+/, "", t)
       if (t !~ /^\$\{?cfm_pass/ && t !~ /^https?:\/\/\$\{?cfm_origin_addr\}?/ && t !~ /^http:\/\/cfm_challenge[;\/[:space:]]/ && t !~ /^http:\/\/127\.0\.0\.1:[0-9]+[;\/$[:space:]]/) bad("proxy_pass to " t ": an origin hop must use $cfm_pass or $cfm_origin_addr (with its bind); others go to cfm_challenge or 127.0.0.1")

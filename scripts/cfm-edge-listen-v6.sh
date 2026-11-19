@@ -27,7 +27,7 @@
 # stays on IPv4 otherwise:
 #   - the host has a global IPv6 address (/proc/net/if_inet6, scope 00);
 #   - nothing but the edge holds [::]:9080 / [::]:9043 (tcp) or [::]:9043
-#     (udp) — `nginx -t` does not bind, so a taken port would pass the test
+#     (udp) — `nginx -t` ignores a port in use (EADDRINUSE), so a taken port would pass the test
 #     and then fail the edge's START;
 #   - the origin listens on IPv6 on both 80 and 443 (ss): an IPv6 visitor's
 #     hop goes to the IPv6 address it came to;
@@ -199,18 +199,22 @@ origin_has_v6() {
 #    tenant naming itself `nginx",pid=1` passes as root's PID 1 (proved), and
 #    a name was never proof anyway. The kernel's uid column is the socket's
 #    owner and cannot be forged. A root LISTEN on [::]:PORT (udp: a root
-#    socket on [::]:PORT) is the edge's own (only root could have put another there), and
-#    while it holds the port nothing else can bind it: every other socket on
-#    the port is then a connection it accepted, owned by the WORKER that
-#    accepted it (nobody / cfm / nginx, not root: speedhost's edge, uid 969),
-#    so it does not count. With no root listener, a socket on the port owned
+#    socket on [::]:PORT) is taken as the edge's own. On tcp, while it holds
+#    the port nothing else can bind it: every other socket on the port is a
+#    connection it accepted, owned by the WORKER that accepted it (nobody /
+#    cfm / nginx, not root: speedhost's edge, uid 969), and does not count.
+#    On udp a tenant CAN co-bind it with SO_REUSEADDR (proved); such a socket
+#    cannot stop the edge's own later bind (nginx sets SO_REUSEADDR too), so
+#    it is ignored here; at a cold start it counts as taken. (It can take the
+#    edge's QUIC datagrams, IPv4 too: docs/ROADMAP.md §9c.) Leftovers of a
+#    stopped edge (FIN_WAIT, TIME_WAIT) have no owner and read uid 0. With no root listener, a socket on the port owned
 #    by anyone but root counts as taken, in ANY state and on any address, ::1
 #    and v4-mapped included (a tenant that bound the port and connected out
 #    holds it too).
 #  - A port with no root socket is then really bound, by `cfm realip
 #    v6-bindcheck` (IPv6-only, as nginx's listen [::]): a socket that is bound
 #    and never listens is not in /proc/net/tcp6 at all, yet it makes the
-#    edge's bind fail, and `nginx -t` does not bind, so the start would fail,
+#    edge's bind fail, and `nginx -t` ignores a port in use, so the start would fail,
 #    IPv4 included. A cfm that cannot run the check (absent, older, no answer)
 #    counts as taken; so does an unreadable table.
 edge_port_taken() {
@@ -405,9 +409,8 @@ reload_and_confirm() {
     rc_pre=0
     v6_listening && rc_pre=1
     if ! "$CFM_SYSTEMCTL" reload "$rc_unit" >/dev/null 2>&1; then
-        log "WARNING: $1: systemctl reload $rc_unit failed; removed the IPv6 listen files, IPv4 only"
+        log "WARNING: $1: systemctl reload $rc_unit failed; removed the IPv6 listen files (IPv4 only from its next successful reload or start)"
         remove_files "$2"
-        re_reloaded=1
         return 0
     fi
     if [ "$rc_pre" -eq 1 ]; then

@@ -331,7 +331,7 @@ CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="
 expect absent "render: no cfm binary to ask -> IPv4 only"
 run render
 
-# A taken IPv6 edge port (nginx -t does not bind): never listen. Judged from
+# A taken IPv6 edge port (nginx -t ignores a port in use): never listen. Judged from
 # the kernel's socket uid (/proc/net/tcp6, udp6), never from ss's names.
 ss_v6
 p6 tcp6 $any6 9080 0A 1001

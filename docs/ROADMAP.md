@@ -276,6 +276,20 @@ origin hop brackets the address and binds `::1`.
   IPv6 edge from `fe80::` is WAF-blocked and challenged per request, but never
   banned or rate-limited. Pre-existing; reachable only once the edge listens
   on IPv6.
+- **A tenant can co-bind the edge's QUIC port (udp 9043)** — [open]. Found
+  by the edge-IPv6 review (2026-11-19, proved on a scratch socket): with the
+  edge's root UDP socket on the wildcard (`quic reuseport`), a non-root
+  process binds the same port with `SO_REUSEADDR` and receives the
+  datagrams (10/10 in the test): an HTTP/3 denial of service and a view of
+  visitors' QUIC Initial packets. Pre-existing and IPv4 too (`listen 9043
+  quic reuseport`). Candidates: an nft rule on udp 9043 by socket owner, or
+  a reuseport eBPF select. Verify on a live edge first (nginx's UDP
+  `SO_REUSEADDR` is read from its source).
+- **A root daemon on [::]:9080 / 9043 is taken for the edge** — [open, low].
+  `cfm-edge-listen-v6.sh` treats a root `[::]` listener as the edge's own
+  (skipping the bind test); at a cold start it can only be another root
+  daemon, and the edge's start would then fail. Tighten by matching the
+  socket inode to the edge unit's MainPID fds.
 - **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
   only on the fleet; the panel listeners stay IPv4.
 
