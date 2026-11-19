@@ -481,8 +481,11 @@ func (d *customDetector) bump(now time.Time, kindKey, key, sample string, out ch
 	if key == "" {
 		return
 	}
-	count := d.counts.Add(kindKey+":"+key, now)
-	d.samples.Add(kindKey+":"+key, sample)
+	// An IPv6 client counts as its /64; the alert keeps this address.
+	sk := kindKey + ":" + core.ClientKey(kindKey, key)
+	count := d.counts.Add(sk, now)
+	addr := core.TopAddr("custom:"+d.name, sk, key, now, d.cfg.Window) // the /64's busiest address
+	d.samples.Add(sk, sample)
 
 	threshold := 0
 	switch kindKey {
@@ -491,20 +494,24 @@ func (d *customDetector) bump(now time.Time, kindKey, key, sample string, out ch
 	case "AUTHFAIL|user":
 		threshold = d.cfg.AuthFailPerUser
 	}
-	if !d.gate.Allow(kindKey+":"+key, now, count, threshold) {
+	if !d.gate.Allow(sk, now, count, threshold) {
 		return
 	}
 
+	extra := map[string]string{
+		"source": "custom",
+		"reason": kindKey,
+		"key":    addr,
+	}
+	if kindKey == "AUTHFAIL|ip" {
+		core.TagClient(extra, addr)
+	}
 	out <- core.Alert{
 		When:    now,
 		Kind:    core.AlertKind("CUSTOM/AUTHFAIL"),
-		Key:     key,
+		Key:     addr,
 		Count:   count,
-		Samples: d.samples.GetAndClear(kindKey + ":" + key),
-		Extra: map[string]string{
-			"source": "custom",
-			"reason": kindKey,
-			"key":    key,
-		},
+		Samples: d.samples.GetAndClear(sk),
+		Extra:   extra,
 	}
 }

@@ -255,8 +255,71 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     `cfm flush` do not touch the set: free a /64 there with
     `nft delete element inet cfm block_v6_clients '{ <the /64> }'`, or flush
     it, or let its TTL run out.
-- **Still per address:** counters, rate limits and the edge's shared dicts
-  (next), then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
+- **Counters (detectors, admin API: done):** a detector's sliding window,
+  ladder or solve count keys an IPv6 client on its /64 (`core.ClientKey`,
+  `firewall.CountKey`): the log detectors (ssh, ftp, dovecot, mysql, cPanel,
+  Proxmox, ngm, custom, exim, postfix, ModSecurity), waf_security,
+  `cfm_endpoints`, cookie discard, login_bruteforce; the admin API's login
+  autoblock, login and password-change throttle, embed bootstrap limit and
+  probe signals; the MCP consent limit.
+  - **Only where the ban would take the /64:** `firewall.CountKey` asks the
+    bans' own guards (the daemon's backend, `SetCountBackend`). The answer
+    is cached 10 s per /64 (a newly registered check applies at once); the
+    guard view behind it is refreshed in the background and every read runs
+    outside its lock, so a counter does not wait on nft (or on a ban's read)
+    while the reads succeed (after a failed one, or when the set list
+    changes, the next read is synchronous); a failed read is answered for 5 s and logged once
+    a minute (a /64 first seen meanwhile counts per address for up to 10 s
+    more). A guarded /64 (this node, its gateway, an ignored, allowed or
+    trusted proxy address, or nft cannot tell) counts per address, as its
+    ban does: counted as one client, one address's alert would spend the
+    /64's and leave the other addresses unbanned, or name an ignored
+    neighbour while the attacker went free (found by the review). Not
+    foreseen: a ban that falls back to the address because nft failed to
+    write the /64 (transient); the /64's count is then spent on one address
+    until the detector's cooldown (waf_security: until the family has been
+    quiet for its Window, as for an IPv4 address).
+  - **Only the count:** the alert keeps a real address, the /64's busiest
+    now (`core.TopAddr`: each hit weighs 1 and decays by e per detector
+    window, a tie goes to the address hitting now; bounded, 8 addresses per
+    key and 20000 keys in all, ~17 MB, a spray resetting only the detector
+    sprayed; `Extra["client"]` is the /64): it is what the fleet report, the
+    leniency and exclude checks and the notification name, so neither a
+    neighbour's last hit nor an address that trickled hits for hours or
+    stopped a while ago takes the blame. In a /64 shared by unrelated users
+    (a provider's shared /64, an office LAN) the busiest address may still be
+    a neighbour's: two mistyped logins outweigh an attacker rotating one hit
+    per address. The ban covers the /64 either way. `firewall.ExtendClientBlock`
+    widens it to the /64 itself. Allow lists (`ALLOW_IPS`, …) stay exact
+    matches.
+  - **A detector's own allows:** an `ALLOW_IPS` / `ALLOW_NETS` entry
+    narrower than a /64 in waf_security, cfm_endpoints, cookie discard or
+    login_bruteforce guards its /64 (`core.GuardAllows`, rebuilt with the
+    sections): that /64 is counted and banned per address by every section
+    and is not answered as a /64 at the edge, as a /64 holding an
+    nft-allowed address is, so its neighbours' hits never ban the allowed
+    address. A /64 or wider entry allows its /64s in that detector already
+    and guards nothing (it would switch the grouping off for every /64 it
+    covers).
+  - **Like IPv4 behind NAT:** every device of a home or office /64 adds to
+    one count, as every device behind one IPv4 address already does.
+  - **Section cooldown:** stamped on what the ban took (the /64, or the
+    address when a guard kept the /64), so another address of a banned /64
+    is not banned again while an address banned alone does not shield its
+    neighbours. The sink's challenge cooldown stays per address (the edge
+    challenges the address).
+  - **The notification** says "Banned as: <the /64>" (the sink passes
+    `block_net` on, the challenge escalation's ban too).
+  - `TestDetectorWindowKeysGroupIPv6Clients` fails a detector window keyed
+    on the raw address.
+- **Still per address:**
+  - the kernel nft meters (`pps_v6`, `syn_v6`, `new_v6`, `icmp6`, port flood,
+    connlimit `ct count`): they count packets whose source can be spoofed,
+    and a /64 meter would let a forged prefix throttle someone else's whole
+    /64 (decided 2026-11-19; revisit only if the burn-in shows rotation
+    there);
+  - webdetector scoring and the challenge server (next), the edge's shared
+    dicts, then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
 
 ## Verified
 

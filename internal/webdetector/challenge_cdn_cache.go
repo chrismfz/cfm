@@ -65,6 +65,7 @@ package webdetector
 //     none, and its bounces are counted for the warning, as before.
 
 import (
+	"cfm/internal/ipkey"
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
@@ -253,18 +254,10 @@ func (e *cdnSuspectEntry) pruneLocked(now time.Time) bool {
 // for IPv4, its /64 for IPv6, where one subscriber holds the whole /64 and
 // could otherwise count as any number of "distinct" clients.
 func cdnSuspectClient(ip string) string {
-	a, err := netip.ParseAddr(ip)
-	if err != nil {
-		return ip
+	if a, err := netip.ParseAddr(ip); err == nil {
+		ip = a.Unmap().String() // canonical: one spelling, one client
 	}
-	a = a.Unmap()
-	if a.Is4() {
-		return a.String()
-	}
-	if p, err := a.Prefix(64); err == nil {
-		return p.String()
-	}
-	return a.String()
+	return ipkey.Client(ip)
 }
 
 // noteCDNCachedChallenge records one cleared bounce of ip on host that a

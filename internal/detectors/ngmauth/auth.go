@@ -384,23 +384,21 @@ func kvLine(line string) map[string]string {
 }
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-	sk := kindKey + ":" + key
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
+	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	a.samples.Add(sk, line)
 	_ = a.counts.Add(sk, now)
-	if _, ok := a.pending[sk]; !ok {
-		a.pending[sk] = pend{kindKey: kindKey, key: key}
-	}
+	a.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("ngmauth", sk, key, now, a.cfg.Window)}
 }
 
 // -------- flush --------
 
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
-	for _, p := range a.pending {
+	for sk, p := range a.pending { // sk: the key bump counted on
 		limit, kindStr := a.threshold(p.kindKey)
 		if limit <= 0 {
 			continue
 		}
-		sk := p.kindKey + ":" + p.key
 		n := a.counts.Count(sk, now)
 		if n < limit {
 			continue
@@ -423,6 +421,7 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 			// overwrites Key with its own (cached, timeout-bounded) PTR/ASN
 			// decoration, so the detector does NOT do reverse-DNS on the hot path.
 			extra["ip"] = p.key
+			core.TagClient(extra, p.key)
 		}
 		if strings.Contains(p.kindKey, "|user") {
 			// Per-account signal (one username, possibly many source IPs).

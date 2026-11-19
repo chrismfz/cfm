@@ -1,6 +1,7 @@
 package detectors
 
 import (
+	"cfm/internal/ipkey"
 	"context"
 	"fmt"
 	"net"
@@ -33,7 +34,7 @@ type sectionSink struct {
 
 	fw           firewall.Backend
 	mu           sync.Mutex
-	last         map[string]time.Time // ip -> last block time (per section)
+	last         map[string]time.Time // banned element (ip, or an IPv6 client's /64) -> last block time (per section)
 	enr          *enrich.Enricher
 	ignore       *IPIgnore // global ignore from [global]
 	chalMu       sync.Mutex
@@ -595,6 +596,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 					"escalated": out.Extra["escalated"],
 					"ttl_text":  out.Extra["ttl"],
 					"key":       a.Key,
+					"block_net": out.Extra["block_net"], // an escalation ban's /64
 				},
 			})
 		}
@@ -647,8 +649,13 @@ func (s *sectionSink) Publish(a core.Alert) {
 		skip := func() bool {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			if last, ok := s.last[ipStr]; ok && time.Since(last) < effectivePol.Cooldown {
-				return true
+			// The address, or its /64 when the last ban took the /64 (an
+			// IPv6 client rotating inside it is the same client; a guarded
+			// /64 was banned per address and stamps only that address).
+			for _, k := range []string{ipStr, ipkey.Client(ipStr)} {
+				if last, ok := s.last[k]; ok && time.Since(last) < effectivePol.Cooldown {
+					return true
+				}
 			}
 			return false
 		}()
@@ -742,9 +749,13 @@ func (s *sectionSink) Publish(a core.Alert) {
 	// and its stamp would make the section skip the same IP's main finding
 	// (dovecot: a password failure's permanent ban) for the cooldown.
 	if blockOK && effectivePol.Cooldown > 0 && maxBlockTTL(out.Extra) == 0 {
+		stamp := ipStr
+		if n := out.Extra["block_net"]; n != "" {
+			stamp = n // the ban took the /64
+		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		s.last[ipStr] = time.Now()
+		s.last[stamp] = time.Now()
 	}
 
 	// --- emit notify once if a real block happened ---
@@ -865,7 +876,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 // alertFields are the detector Extra keys the alert log keeps for grouping
 // (vhost from host, and what a login_bruteforce row needs to be measured).
-var alertFields = []string{"host", "rule", "site", "leniency", "geo", "ipv6_ambiguous", "site_form_fails"}
+// block_net: the /64 an IPv6 client's ban took (the notification's
+// "Banned as:" line, internal/notify/templates.go).
+var alertFields = []string{"host", "rule", "site", "leniency", "geo", "ipv6_ambiguous", "site_form_fails", "block_net"}
 
 func copyAlertFields(dst, src map[string]string) {
 	for _, k := range alertFields {

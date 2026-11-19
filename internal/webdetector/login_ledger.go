@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/ipkey"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -272,9 +273,8 @@ func loginKeys(ip string) (client, network string) {
 		n, _ := a.Prefix(24)
 		return a.String(), n.String()
 	}
-	c, _ := a.Prefix(64)
 	n, _ := a.Prefix(48)
-	return c.String(), n.String()
+	return ipkey.Client(a.String()), n.String() // the client: its /64 (ipkey)
 }
 
 // siteCount renders a capped count, "8+" once the cap was reached.

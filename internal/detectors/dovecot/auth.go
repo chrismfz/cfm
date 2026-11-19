@@ -363,10 +363,9 @@ func (a *Auth) counter(kindKey string) *core.SlidingCounter {
 }
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-	sk := kindKey + ":" + key
-	if _, ok := a.pending[sk]; !ok {
-		a.pending[sk] = pend{kindKey: kindKey, key: key}
-	}
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
+	sk := kindKey + ":" + core.ClientKey(kindKey, key)
+	a.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("dovecot", sk, key, now, a.cfg.Window)}
 	_ = a.counter(kindKey).Add(sk, now)
 	a.samples.Add(sk, line)
 }
@@ -402,6 +401,7 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 		}
 		if strings.Contains(p.kindKey, "|ip") {
 			extra["ip"] = p.key
+			core.TagClient(extra, p.key)
 			if p.kindKey == kindDisabledIP {
 				// Someone else's verdict (Imunify's RBL) or a suspended
 				// mailbox: a capped ban, not the section's permanent one.

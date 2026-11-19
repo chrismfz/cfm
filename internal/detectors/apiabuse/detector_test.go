@@ -182,7 +182,7 @@ func TestDetectorPrunesExpiredSubThresholdSources(t *testing.T) {
 			When:   old,
 			Source: "apiserver",
 			Reason: "api_probe",
-			SrcIP:  fmt.Sprintf("2001:db8::%x", i),
+			SrcIP:  fmt.Sprintf("2001:db8:%x::1", i), // 2000 clients: one per /64
 		})
 	}
 	if err := d.RunOnce(context.Background(), out); err != nil {
@@ -221,5 +221,30 @@ func TestDetectorBoundsAndQuotesEvidenceSamples(t *testing.T) {
 	}
 	if strings.ContainsAny(alert.Samples[0], "\r\n") || !strings.Contains(alert.Samples[0], "...[truncated]") {
 		t.Fatalf("sample is not single-line and visibly truncated: %q", alert.Samples[0])
+	}
+}
+
+// An IPv6 client climbs one ladder for its /64; each alert names its
+// busiest address (a tie: the address hitting now).
+func TestDetectorIPv6ClientStagesAsItsSlash64(t *testing.T) {
+	d := New(Config{Every: time.Second, Window: time.Minute, Stage1Threshold: 2, Stage2Threshold: 3, Stage3Threshold: 4})
+	out := make(chan core.Alert, 8)
+	now := time.Now()
+	for i := 0; i < 4; i++ {
+		d.Enqueue(core.InputEvent{When: now, Source: "apiserver", Reason: "api_probe", Signal: "unknown_endpoint_burst", SrcIP: fmt.Sprintf("2001:db8:1:2::%d", i+1), Path: "/x"})
+		if err := d.RunOnce(context.Background(), out); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(out)
+	var got []string
+	for a := range out {
+		if a.Extra["client"] != "2001:db8:1:2::/64" || a.Key != a.Extra["ip"] {
+			t.Fatalf("alert: key=%q extra=%v", a.Key, a.Extra)
+		}
+		got = append(got, a.Extra["stage"]+"@"+a.Extra["ip"])
+	}
+	if strings.Join(got, ",") != "1@2001:db8:1:2::2,2@2001:db8:1:2::3,3@2001:db8:1:2::4" {
+		t.Fatalf("stages: %v", got)
 	}
 }

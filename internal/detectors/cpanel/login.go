@@ -265,24 +265,22 @@ func (l *Login) processLine(now time.Time, line string) {
 }
 
 func (l *Login) bump(now time.Time, kindKey, key, line string) {
-	sk := kindKey + ":" + key
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
+	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	l.samples.Add(sk, line)
 	_ = l.counts.Add(sk, now)
-	if _, ok := l.pending[sk]; !ok {
-		l.pending[sk] = pend{kindKey: kindKey, key: key}
-	}
+	l.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("cpanel", sk, key, now, l.cfg.Window)}
 }
 
 // -------- flush --------
 
 func (l *Login) flush(now time.Time, out chan<- core.Alert) {
 
-	for _, p := range l.pending {
+	for sk, p := range l.pending { // sk: the key bump counted on
 		limit, kindStr, baseKey := l.thresholdAndKey(p.kindKey, p.key)
 		if limit <= 0 {
 			continue
 		}
-		sk := p.kindKey + ":" + p.key
 		n := l.counts.Count(sk, now)
 		if n < limit { continue }
 		if !l.gate.Allow(sk, now, n, limit) { continue }
@@ -303,6 +301,7 @@ func (l *Login) flush(now time.Time, out chan<- core.Alert) {
         // annotate entity for sinks
         if strings.Contains(p.kindKey, "|ip") {
             extra["ip"] = p.key
+            core.TagClient(extra, p.key)
         }
         if strings.Contains(p.kindKey, "|user") {
             extra["user"] = p.key

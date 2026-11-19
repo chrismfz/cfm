@@ -337,10 +337,9 @@ func firstIP(lowercased string, regs ...*regexp.Regexp) string {
 
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-sk := kindKey + ":" + key
-	if _, ok := a.pending[sk]; !ok {
-		a.pending[sk] = pend{kindKey: kindKey, key: key}
-	}
+// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
+sk := kindKey + ":" + core.ClientKey(kindKey, key)
+	a.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("ftpd", sk, key, now, a.cfg.Window)}
 	_ = a.counts.Add(sk, now)
 	a.samples.Add(sk, line)
 }
@@ -368,6 +367,7 @@ samples := a.samples.GetAndClear(sk)
 		}
 		if isIP {
 			extra["ip"] = base
+			core.TagClient(extra, base)
 		}
 
 		out <- core.Alert{

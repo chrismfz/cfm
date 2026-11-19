@@ -456,13 +456,20 @@ func (d *PostfixSecurity) addUserIP(user, ip string) {
 // ---- bump & flush (like EximSecurity) -------------------------------------
 
 func (d *PostfixSecurity) bump(now time.Time, tag, key, line string) {
-    sk := tag + ":" + key
+    // An IPv6 client counts as its /64 (core.ClientKey): the per-IP tags,
+    // rules and RBL hits; a user key (AUTHFAIL|user, |userip) is no address,
+    // even one an attacker spells like one. pending keeps the address with the most hits (core.TopAddr).
+    ck := key
+    if !strings.Contains(tag, "|user") {
+        ck = core.ClientKey("|ip", key)
+    }
+    sk := tag + ":" + ck
     d.samples.Add(sk, line)
     _ = d.counts.Add(sk, now)
     if d.pending == nil {
         d.pending = make(map[string]secPend)
     }
-    d.pending[sk] = secPend{kindKey: tag, key: key}
+    d.pending[sk] = secPend{kindKey: tag, key: core.TopAddr("postfix", sk, key, now, d.cfg.Window)}
 }
 
 func (d *PostfixSecurity) flush(now time.Time, out chan<- core.Alert) {
@@ -498,6 +505,7 @@ func (d *PostfixSecurity) flush(now time.Time, out chan<- core.Alert) {
         }
         if isIP {
             extra["ip"] = base
+            core.TagClient(extra, base)
         } else if rp := d.userIPs[base]; rp != nil {
             csv, cnt := rp.CSV()
             if cnt > 0 {

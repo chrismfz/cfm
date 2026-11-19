@@ -666,14 +666,21 @@ func (d *EximSecurity) addUserIP(user, ip string) {
 }
 
 func (d *EximSecurity) bump(now time.Time, tag, key, line string) {
-	sk := tag + ":" + key
+	// An IPv6 client counts as its /64 (core.ClientKey): the per-IP tags,
+	// rules and RBL hits; a user key (AUTHFAIL|user, |userip) is no address,
+	// even one an attacker spells like one. pending keeps the address with the most hits (core.TopAddr).
+	ck := key
+	if !strings.Contains(tag, "|user") {
+		ck = core.ClientKey("|ip", key)
+	}
+	sk := tag + ":" + ck
 	d.samples.Add(sk, line)
 	_ = d.counts.Add(sk, now) // real counting in sliding window
 
 	if d.pending == nil {
 		d.pending = make(map[string]pend)
 	}
-	d.pending[sk] = pend{kindKey: tag, key: key} // no per-tick n here
+	d.pending[sk] = pend{kindKey: tag, key: core.TopAddr("exim", sk, key, now, d.cfg.Window)} // no per-tick n here
 }
 
 func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
@@ -736,6 +743,7 @@ func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
 		}
 		if isIP {
 			extra["ip"] = base
+			core.TagClient(extra, base)
 		} else if rp := d.userIPs[base]; rp != nil {
 			csv, n := rp.CSV()
 			if n > 0 {

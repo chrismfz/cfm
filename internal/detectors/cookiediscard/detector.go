@@ -13,8 +13,12 @@
 // It is the exact blind spot of challenge_solver_farm, and the mirror image of
 // it. That detector keys on a vhost because the farm burns a fresh address per
 // solve (~1.07 solves per IP), so no per-IP counter can ever see it. This one
-// keys on the address, for the population that does the opposite: a handful of
-// addresses solving dozens of times each. Neither sees the other's traffic.
+// keys on the client, for the population that does the opposite: a handful of
+// addresses solving dozens of times each. Neither sees the other's traffic. A
+// client is its address, an IPv6 one its /64 (core.ClientKey; a /64 a guard
+// keeps per address stays per address), as an IPv4 address behind NAT already
+// sums its devices: the calibration below was measured per address, before
+// IPv6 clients were grouped.
 //
 // Calibration, measured against the same 23h production capture (111,537 solves
 // from 97,556 distinct client addresses), replayed at its original timestamps
@@ -46,7 +50,8 @@
 // on the alert as evidence for attribution only.
 //
 // Enforcement: unlike challenge_solver_farm, the subject here IS a single real
-// address that is currently and repeatedly abusing the challenge, so an nft ban
+// client (named by its busiest address) that is currently and repeatedly
+// abusing the challenge, so an nft ban
 // is a coherent action — this detector emits a normal per-IP alert and sets
 // Extra["ip"] authoritatively, which is all the section sink needs to honour a
 // BLOCK policy. The shipped config leaves BLOCK unset (alert-only) so the
@@ -141,6 +146,9 @@ type solveRec struct {
 }
 
 type ipState struct {
+	// addr is the address with the most solves: the state is an IPv6 client's /64
+	// (core.ClientKey), the alert names a real address.
+	addr string
 	recs []solveRec
 	// truncated counts records the evidence cap dropped SINCE THE LAST
 	// EVALUATION, and is added back into the solve total so the cap cannot hide
@@ -255,6 +263,8 @@ func New(cfg Config) *Detector {
 			d.allowNets = append(d.allowNets, n)
 		}
 	}
+	// Its allows guard their /64 (counted and banned per address).
+	core.GuardAllows("challenge_cookie_discard", cfg.AllowIPs, cfg.AllowNets)
 	return d
 }
 
@@ -339,7 +349,8 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if net.ParseIP(ip) == nil {
 			continue
 		}
-		st := d.ips[ip]
+		client := core.ClientKey("|ip", ip) // an IPv6 client solves as its /64
+		st := d.ips[client]
 		if st == nil {
 			// Admit new addresses only while there is room. Existing entries keep
 			// counting either way, so a flood of one-shot solvers can delay a new
@@ -349,8 +360,9 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 				continue
 			}
 			st = &ipState{}
-			d.ips[ip] = st
+			d.ips[client] = st
 		}
+		st.addr = core.TopAddr("cookiediscard", client, ip, ev.When, d.cfg.Window)
 		if len(st.recs) >= d.cfg.MaxTrackedPerIP {
 			st.truncated++
 			continue
@@ -369,12 +381,13 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	}
 	d.ipsCapped = capped
 
-	for ip, st := range d.ips {
+	for client, st := range d.ips {
+		ip := st.addr
 		// Drop addresses that have gone quiet so state does not grow without
 		// bound. Guarded by the cooldown so state is never reclaimed while it
 		// still suppresses a repeat alert.
 		if len(st.recs) == 0 && now.Sub(st.lastAlert) > d.cfg.Cooldown {
-			delete(d.ips, ip)
+			delete(d.ips, client)
 			continue
 		}
 
@@ -528,7 +541,7 @@ func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, raw
 			truncated, d.cfg.MaxTrackedPerIP, sampled, solves))
 	}
 
-	return core.Alert{
+	alert := core.Alert{
 		When:    now,
 		Kind:    core.AlertKind("Challenge/CookieDiscard"),
 		Key:     ip,
@@ -553,6 +566,8 @@ func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, raw
 			"impossible_ua": fmt.Sprint(impossibleUA),
 		},
 	}
+	core.TagClient(alert.Extra, ip) // the solves are its /64's
+	return alert
 }
 
 func topOf(m map[string]int) (string, int) {

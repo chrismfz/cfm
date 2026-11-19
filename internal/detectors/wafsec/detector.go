@@ -110,6 +110,8 @@ func New(cfg Config) *Detector {
 			d.allowNets = append(d.allowNets, n)
 		}
 	}
+	// Its allows guard their /64 (counted and banned per address).
+	core.GuardAllows("waf_security", cfg.AllowIPs, cfg.AllowNets)
 	return d
 }
 
@@ -242,8 +244,13 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			continue // family/rule not fed into autoblock
 		}
 
-		famKey := ev.SrcIP + "|" + family
-		key := counterKey(ev.SrcIP, family, ev.Signal, limit, ruleScoped)
+		// An IPv6 client counts as its /64 (and fires once per window for it:
+		// its ban takes the /64; core.ClientKey keeps a guarded /64 per address).
+		client := core.ClientKey("|ip", ev.SrcIP)
+		famKey := client + "|" + family
+		key := counterKey(client, family, ev.Signal, limit, ruleScoped)
+		// The alert names the /64's busiest address (core.TopAddr).
+		addr := core.TopAddr("wafsec|"+family, client, ev.SrcIP, ev.When, d.cfg.Window)
 		count := d.counts.Add(key, ev.When)
 		if ev.When.After(d.famSeen[famKey]) {
 			d.famSeen[famKey] = ev.When
@@ -258,7 +265,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			continue // already alerted this window; the sink owns the live block
 		}
 		if _, done := d.fired[famKey]; done {
-			continue // the family (or one of its rules) already banned this IP this window
+			continue // the family (or one of its rules) already banned this client this window
 		}
 		d.fired[key] = famKey
 		// A rule-scoped trip also marks the family key, so a later family trip
@@ -274,7 +281,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// for WAF_CVE reasons without a CVE_* token, e.g. log4shell).
 		kindStr := "WAF/" + strings.TrimPrefix(family, "WAF_")
 		extra := map[string]string{
-			"ip":      ev.SrcIP,
+			"ip":      addr,
 			"source":  ev.Source,
 			"reason":  ev.Reason,
 			"family":  family,
@@ -283,6 +290,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			"uri":     ev.Path,
 			"method":  ev.Method,
 		}
+		core.TagClient(extra, addr)
 		if family == "WAF_CVE" {
 			if cve := cveFromReason(ev.Reason); cve != "" {
 				kindStr = "WAF/" + cve
@@ -292,7 +300,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		alert := core.Alert{
 			When:    now,
 			Kind:    core.AlertKind(kindStr),
-			Key:     ev.SrcIP,
+			Key:     addr,
 			Count:   count,
 			Samples: d.samples.GetAndClear(key),
 			Extra:   extra,

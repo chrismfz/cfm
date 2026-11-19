@@ -199,13 +199,12 @@ func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// ---- 4) flush aggregated alerts (τέλος run) ----
 
 	nowSend := time.Now()
-	for _, p := range d.pending {
+	for sk, p := range d.pending { // sk: the key bump counted on
 		thr, kind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
 		if thr <= 0 {
 			continue
 		}
 
-		sk := p.kindKey + ":" + p.key
 		n := d.counts.Count(sk, nowSend)
 		if !d.gate.Allow(sk, nowSend, n, thr) {
 			continue
@@ -342,13 +341,13 @@ func (d *Relays) processLine(now time.Time, line string, out chan<- core.Alert) 
 //func bump
 
 func (d *Relays) bump(now time.Time, kindKey, key, line string, _ chan<- core.Alert) {
-	sk := kindKey + ":" + key
+	sk := kindKey + ":" + core.ClientKey(kindKey, key) // an IPv6 client: its /64
 	d.samples.Add(sk, line)
 	_ = d.counts.Add(sk, now)
 	if d.pending == nil {
 		d.pending = make(map[string]pend)
 	}
-	d.pending[sk] = pend{kindKey: kindKey, key: key}
+	d.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("exim_relays", sk, key, now, d.cfg.Window)}
 }
 
 //fun bump end

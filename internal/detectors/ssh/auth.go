@@ -292,14 +292,15 @@ func (a *Auth) processLine(now time.Time, line string) {
 
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-    sk := kindKey + ":" + key
+    // An IPv6 client counts as its /64; p.key keeps the address with the most hits (core.TopAddr).
+    sk := kindKey + ":" + core.ClientKey(kindKey, key)
 
     // samples (ring)
     a.samples.Add(sk, line)
 
     // mark as touched this tick (no per-tick increment anymore)
     p := a.pending[sk]
-    p.kindKey, p.key = kindKey, key
+    p.kindKey, p.key = kindKey, core.TopAddr("ssh", sk, key, now, a.cfg.Window)
     a.pending[sk] = p
 
     // real counting happens in the sliding window
@@ -312,10 +313,9 @@ func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 // -------- flush --------
 
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
-    for _, p := range a.pending {
+    for sk, p := range a.pending { // sk: the key bump counted on
         limit, kindStr, baseKey := a.thresholdAndKey(p.kindKey, p.key)
 
-        sk := p.kindKey + ":" + p.key
         n := a.counts.Count(sk, now)
         if !a.gate.Allow(sk, now, n, limit) {
             continue
@@ -335,6 +335,7 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
         // tag entity for sinks (blockers/formatters)
         if strings.Contains(p.kindKey, "|ip") {
             extra["ip"] = p.key
+            core.TagClient(extra, p.key)
         }
         if strings.Contains(p.kindKey, "|user") {
             extra["user"] = p.key

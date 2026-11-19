@@ -231,6 +231,7 @@ func SetClientNetExempt(name string, f func(netip.Prefix) bool) {
 		next[name] = f
 	}
 	clientNetExempt.Store(&next)
+	ResetCountKeyCache() // CountKey asks these: a new entry applies at once
 }
 
 // clientNetExemptRegistered reports whether a check is registered under name.
@@ -559,32 +560,93 @@ var (
 		be   Backend
 		at   time.Time
 		view *guardView
-		sets int // the number of sets it read (the fleet allows or not)
+		err  error // a failed read, answered for guardErrTTL
+		sets int   // the number of sets it read (the fleet allows or not)
+
+		refreshing bool // a background refresh (staleGuardView) is running
+		gen        int  // bumped by every write and reset: a refresh started
+		// before one must not overwrite it
 	}
 )
+
+// guardErrTTL is how long a failed guard read is answered from the cache: a
+// counter (firewall.CountKey) asks per IPv6 event, and with nft failing each
+// new /64 would otherwise run every guard set's read again, in turn.
+var guardErrTTL = 5 * time.Second
 
 // cachedGuardView is newGuardView, reused for guardCacheTTL on one backend.
 func cachedGuardView(be Backend) (*guardView, error) {
 	sets := len(guardSetsNow())
 	guardCacheMu.Lock()
-	defer guardCacheMu.Unlock()
 	c := &guardCache
-	if guardCacheTTL > 0 && c.view != nil && c.be == be && c.sets == sets && time.Since(c.at) < guardCacheTTL {
-		return c.view, nil
+	if guardCacheTTL > 0 && c.be == be && c.sets == sets {
+		if c.view != nil && time.Since(c.at) < guardCacheTTL {
+			v := c.view
+			guardCacheMu.Unlock()
+			return v, nil
+		}
+		if c.err != nil && time.Since(c.at) < guardErrTTL {
+			err := c.err
+			guardCacheMu.Unlock()
+			return nil, err
+		}
 	}
+	gen := c.gen
+	guardCacheMu.Unlock()
+	// The read runs unlocked: a counter (staleGuardView) never waits on a
+	// ban's nft reads. Two readers at once both read; the later write wins
+	// unless a reset came in between.
 	v, err := newGuardView(be)
+	guardCacheMu.Lock()
+	if c.gen == gen || c.be != be {
+		c.be, c.at, c.view, c.err, c.sets = be, time.Now(), v, err, sets
+		c.gen++
+	}
+	guardCacheMu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	c.be, c.at, c.view, c.sets = be, time.Now(), v, sets
 	return v, nil
+}
+
+// staleGuardView is cachedGuardView for a hot path (firewall.CountKey, per
+// IPv6 event): a stale view is answered at once while one background
+// refresh replaces it, so no log tailer or HTTP handler waits on nft's reads.
+// With no view at all it reads as cachedGuardView does.
+func staleGuardView(be Backend) (*guardView, error) {
+	sets := len(guardSetsNow())
+	guardCacheMu.Lock()
+	c := &guardCache
+	if guardCacheTTL > 0 && c.be == be && c.sets == sets && c.view != nil {
+		v := c.view
+		if time.Since(c.at) >= guardCacheTTL && !c.refreshing {
+			c.refreshing = true
+			gen := c.gen
+			go func() {
+				nv, err := newGuardView(be)
+				guardCacheMu.Lock()
+				defer guardCacheMu.Unlock()
+				c.refreshing = false
+				if c.gen != gen || c.be != be || c.sets != sets {
+					return // replaced or reset meanwhile
+				}
+				c.at, c.view, c.err = time.Now(), nv, err
+				c.gen++
+			}()
+		}
+		guardCacheMu.Unlock()
+		return v, nil
+	}
+	guardCacheMu.Unlock()
+	return cachedGuardView(be)
 }
 
 // ResetGuardCache drops the cached guard view: the next ban reads its guards
 // afresh (a test that changes a guard set behind the backend's back).
 func ResetGuardCache() {
 	guardCacheMu.Lock()
-	guardCache.view = nil
+	guardCache.view, guardCache.err = nil, nil
+	guardCache.gen++
 	guardCacheMu.Unlock()
 }
 

@@ -335,12 +335,12 @@ func (d *Detector) tryJSON(now time.Time, raw string) bool {
 
 func (d *Detector) bump(now time.Time, ip, sample string) {
 
-	sk := "ip:" + ip
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
+	client := core.ClientKey("|ip", ip)
+	sk := "ip:" + client
 	d.samples.Add(sk, sample)
 	_ = d.counts.Add(sk, now)
-	if _, ok := d.pending[ip]; !ok {
-		d.pending[ip] = pend{key: ip}
-	}
+	d.pending[client] = pend{key: core.TopAddr("modsec", client, ip, now, d.cfg.Window)}
 
 
 }
@@ -353,8 +353,9 @@ func (d *Detector) flush(now time.Time, out chan<- core.Alert) {
 		thr = 20
 	}
 
-	for ip := range d.pending {
-		sk := "ip:" + ip
+	for client, p := range d.pending {
+		ip := p.key // a real address: the ban, the meta, the display
+		sk := "ip:" + client
 		n := d.counts.Count(sk, now)
 		if n < thr { continue }
 		if !d.gate.Allow(sk, now, n, thr) { continue }
@@ -369,6 +370,7 @@ func (d *Detector) flush(now time.Time, out chan<- core.Alert) {
 			"limit":    strconv.Itoa(thr),
 			"ip":       ip,
 		}
+		core.TagClient(extra, ip)
 		if m, ok := d.metas["ip:"+ip]; ok {
 			if m.ruleID != "" {
 				extra["rule_id"] = m.ruleID

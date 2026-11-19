@@ -267,3 +267,26 @@ func TestHandleLoginPostLimiterExecutesBeforeAuthVerification(t *testing.T) {
 		t.Fatalf("expected 429, got %d", rr.Code)
 	}
 }
+
+// An IPv6 client is throttled as its /64: rotating the address inside it
+// does not refill the per-IP bucket; another /64 has its own.
+func TestLoginRateLimiterThrottlesAnIPv6ClientsSlash64(t *testing.T) {
+	lim := newLoginRateLimiter()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	lim.now = func() time.Time { return now }
+	for i := 0; i < loginRateLimitPerIPShortTokens; i++ {
+		// No account: only the per-IP bucket counts.
+		if d := lim.Evaluate(fmt.Sprintf("2001:db8:1:2::%x", i+1), ""); !d.Allow {
+			t.Fatalf("attempt %d throttled early: %+v", i+1, d)
+		}
+	}
+	if d := lim.Evaluate("2001:db8:1:2::ffff", ""); d.Allow || d.Cause != "throttle" {
+		t.Fatalf("a fresh address of the same /64: %+v, want throttled", d)
+	}
+	if d := lim.Evaluate("2001:db8:1:3::1", ""); !d.Allow {
+		t.Fatalf("another /64: %+v, want allowed", d)
+	}
+	if d := lim.Evaluate("198.51.100.10", ""); !d.Allow {
+		t.Fatalf("IPv4: %+v, want allowed", d)
+	}
+}

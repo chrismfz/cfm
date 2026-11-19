@@ -51,6 +51,7 @@
 package loginbf
 
 import (
+	"cfm/internal/firewall"
 	"context"
 	"fmt"
 	"net/netip"
@@ -218,6 +219,8 @@ func New(cfg Config) *Detector {
 			d.allowASNs[uint(n)] = struct{}{}
 		}
 	}
+	// Its allows guard their /64 (counted and banned per address).
+	core.GuardAllows("login_bruteforce", cfg.AllowIPs, cfg.AllowNets)
 	return d
 }
 
@@ -312,15 +315,9 @@ func (d *Detector) allowed(a netip.Addr) bool {
 	return false
 }
 
-// clientKey is the address, or its /64 for IPv6.
-func clientKey(ip string) string {
-	a, err := netip.ParseAddr(ip)
-	if err != nil || a.Is4() {
-		return ip
-	}
-	p, _ := a.Prefix(64)
-	return p.String()
-}
+// clientKey is the address, or an IPv6 client's /64 where a ban could take
+// it (firewall.CountKey: a guarded /64 counts per address).
+func clientKey(ip string) string { return firewall.CountKey(ip) }
 
 func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	d.qmu.Lock()
