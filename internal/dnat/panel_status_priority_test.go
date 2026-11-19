@@ -28,6 +28,8 @@ func (b panelStatusStub) PanelDNATAcceptState() map[int]string    { return nil }
 // operator choice (PanelStartupPriority), which is correct on both firewall
 // backends (the rule text prints a priority differently per backend).
 func TestPanelStatusReportsInstalledPriority(t *testing.T) {
+	stubNoEdgeDetected(t)
+	stubNoExternalTools(t)
 	dir := t.TempDir()
 	origPath := panelDNATPriorityPath
 	panelDNATPriorityPath = filepath.Join(dir, "dnat_panel_priority")

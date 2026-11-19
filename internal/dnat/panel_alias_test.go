@@ -30,6 +30,8 @@ func (b *panelRouteStub) PanelDNATAcceptState() map[int]string { return nil }
 // panel-neutral alias of `cfm dnat cpanel …`: `panel status` must reach
 // runPanelCLI's status path (proven by the backend's PanelDNATStatus being hit).
 func TestPanelAliasRoutesToPanelCLI(t *testing.T) {
+	stubNoEdgeDetected(t)
+	stubNoExternalTools(t)
 	be := &panelRouteStub{}
 	if code := RunCLI([]string{"panel", "status"}, be); code != 0 {
 		t.Fatalf("`dnat panel status` expected code 0, got %d", code)
@@ -43,6 +45,8 @@ func TestPanelAliasRoutesToPanelCLI(t *testing.T) {
 // state-reaching subcommand (status), not a partial alias — both spellings must
 // reach the same runPanelCLI status path identically.
 func TestPanelAndCpanelRouteEquivalently(t *testing.T) {
+	stubNoEdgeDetected(t)
+	stubNoExternalTools(t)
 	pb := &panelRouteStub{}
 	if code := RunCLI([]string{"panel", "status"}, pb); code != 0 {
 		t.Fatalf("`dnat panel status` expected code 0, got %d", code)
