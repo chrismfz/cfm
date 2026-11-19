@@ -312,14 +312,39 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     `block_net` on, the challenge escalation's ban too).
   - `TestDetectorWindowKeysGroupIPv6Clients` fails a detector window keyed
     on the raw address.
+- **Counters (webdetector, challenge server: done):** the web detector's
+  per-IP rows (`IPShort`: 404 / 403 / 403waf / agent / malpath floods, the
+  40x combo, the score) and its per-IP challenge rules (unique paths /
+  hosts, `CHALLENGE_PATHS`, the rate / ratio thresholds, malformed, UA
+  churn) group an IPv6 client's addresses (`groupIPAggs`,
+  `firewall.CountKey`): their counts add up under the client's busiest
+  address, which the row and the alert name (`client`, `addrs`).
+  - **A ban** takes the /64 (the sink's `ExtendClientBlock`), once per
+    client per emit cooldown.
+  - **A challenge** is per address at the edge, so it goes to every address
+    of the client seen in the window (its 16 busiest; `fanOutChallenge`),
+    each through the same gates as the busiest (a new matching hit, the
+    burst cooldown, the host bypass, `IGNORE_IPS` / chalExclude), only the
+    busiest notifying. A new address of the client keeps the /64's count
+    up and is challenged on the next emit.
+  - The vhost uniqIP count counts clients: one client rotating inside its
+    /64 no longer looks like a crowd that arms the vhost's automatic
+    challenge.
+  - The challenge server's page / verify limits and its 4xx abuse count,
+    and the cPanel plugin's auth-failure deny, hold the /64 (a success
+    clears its own user's failures, never the /64's).
 - **Still per address:**
   - the kernel nft meters (`pps_v6`, `syn_v6`, `new_v6`, `icmp6`, port flood,
     connlimit `ct count`): they count packets whose source can be spoofed,
     and a /64 meter would let a forged prefix throttle someone else's whole
     /64 (decided 2026-11-19; revisit only if the burn-in shows rotation
     there);
-  - webdetector scoring and the challenge server (next), the edge's shared
-    dicts, then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
+  - in the webdetector, the shadow and display readings (abuse shadow
+    signals, the challenge score, the under-attack solver count, the hot-IP
+    EMA), and the malpath rung-1 reject ban (keyed on the per-address v2
+    marks);
+  - the edge's shared dicts (next), then `EDGE_LISTEN_V6` defaults to on
+    (`docs/ROADMAP.md` §9c).
 
 ## Verified
 

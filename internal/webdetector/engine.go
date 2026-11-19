@@ -437,7 +437,12 @@ type IPDetail struct {
 
 // IPSignals είναι το "full" IP-level row με score & προτάσεις.
 type IPSignals struct {
-	IP      string   `json:"ip"`
+	IP string `json:"ip"` // an IPv6 client's busiest address
+	// Client is the IPv6 /64 the row counts (firewall.CountKey), Addrs its
+	// addresses in the window, busiest first (capped); empty for IPv4 and an
+	// address counted on its own.
+	Client  string   `json:"client,omitempty"`
+	Addrs   []string `json:"addrs,omitempty"`
 	Req     int      `json:"req"`
 	Vhosts  int      `json:"vhosts"`
 	RPS     float64  `json:"rps"`
@@ -3090,7 +3095,6 @@ func (e *Engine) proposeIPActions(row IPSignals) []IPActionProposal {
 // IPShort παράγει full IP signals (με score & proposals) από το short-window state.
 func (e *Engine) IPShort(limit int) []IPSignals {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
 
 	type agg struct {
 		req     int
@@ -3224,6 +3228,36 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 
 		}
 	}
+	e.mu.RUnlock()
+
+	// An IPv6 client counts as its /64 (firewall.CountKey; per address where a
+	// ban would not take the /64): its addresses' counts add up, the row names
+	// its busiest address (Addrs: all of them, busiest first; Client: the /64).
+	// Grouped after the lock: CountKey may read the guards on a cold cache.
+	stats, addrs := groupIPAggs(stats, func(dst, src *agg) {
+		dst.req += src.req
+		for h := range src.vhosts {
+			dst.vhosts[h] = struct{}{}
+		}
+		dst.c403 += src.c403
+		dst.c403WAF += src.c403WAF
+		dst.c404 += src.c404
+		dst.cAgent += src.cAgent
+		dst.cMal += src.cMal
+		for r, n := range src.mal {
+			if dst.mal == nil {
+				dst.mal = make(map[int]int)
+			}
+			dst.mal[r] += n
+		}
+		dst.c40x += src.c40x
+		for h := range src.p40x {
+			if dst.p40x == nil {
+				dst.p40x = make(map[uint64]struct{})
+			}
+			dst.p40x[h] = struct{}{}
+		}
+	}, func(a *agg) int { return a.req }, func() *agg { return &agg{vhosts: make(map[string]struct{})} })
 
 	winSec := e.cfg.Window.Seconds()
 	if winSec <= 0 {
@@ -3318,14 +3352,18 @@ func (e *Engine) IPShort(limit int) []IPSignals {
 			score = 1.0
 		}
 
-		rows = append(rows, IPSignals{
+		row := IPSignals{
 			IP:      ip,
 			Req:     a.req,
 			Vhosts:  vhosts,
 			RPS:     rps,
 			Score:   score,
 			Reasons: reasons,
-		})
+		}
+		if g := addrs[ip]; g.client != "" {
+			row.Client, row.Addrs = g.client, g.addrs
+		}
+		rows = append(rows, row)
 	}
 
 	sort.Slice(rows, func(i, j int) bool {
@@ -3885,15 +3923,20 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 			continue
 		}
 
-		// cooldown check
+		// cooldown check: per client (an IPv6 /64 row is one client whichever
+		// of its addresses is the busiest this tick)
+		emitKey := row.IP
+		if row.Client != "" {
+			emitKey = row.Client
+		}
 		skip := func() bool {
 			e.emitMu.Lock()
 			defer e.emitMu.Unlock()
-			last, ok := e.ipLastEmit[row.IP]
+			last, ok := e.ipLastEmit[emitKey]
 			if ok && now.Sub(last) < cooldown {
 				return true
 			}
-			e.ipLastEmit[row.IP] = now
+			e.ipLastEmit[emitKey] = now
 			return false
 		}()
 		if skip {
@@ -3920,8 +3963,21 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 				ttl = 10 * time.Minute
 			}
 			e.nginxBridge.ChallengeIPWithReason(row.IP, ttl, blockReason)
+			// The edge challenges an address: every address of the client
+			// seen in the window is (its busiest ones, maxClientAddrs). A new
+			// one keeps the /64's count up and is challenged on the next emit.
+			for _, other := range row.Addrs {
+				if other != row.IP {
+					e.nginxBridge.ChallengeIPWithReason(other, ttl, blockReason)
+				}
+			}
 		}
-		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": outcome, "req": row.Req, "vhosts": row.Vhosts, "action": action}})
+		payload := map[string]interface{}{"reasons": strings.Join(row.Reasons, ","), "outcome": outcome, "req": row.Req, "vhosts": row.Vhosts, "action": action}
+		if row.Client != "" {
+			payload["client"] = row.Client
+			payload["client_addrs"] = len(row.Addrs)
+		}
+		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "block_trigger", IP: row.IP, Reason: blockReason, Score: row.Score, RPS: row.RPS, Payload: payload})
 		e.appendHistory(HistoryEvent{TsUnix: now.Unix(), Type: "suspicious_snapshot", IP: row.IP, Reason: strings.Join(row.Reasons, ","), Score: row.Score, RPS: row.RPS, Payload: map[string]interface{}{"req": row.Req, "vhosts": row.Vhosts}})
 
 		samples := e.ipSamples(row.IP, maxSamples)
@@ -3939,6 +3995,9 @@ func (e *Engine) emitIPBlocks(now time.Time, out chan<- core.Alert) {
 			"req":      strconv.Itoa(row.Req),
 			"reason":   strings.Join(row.Reasons, ","),
 			"action":   action,
+		}
+		if row.Client != "" {
+			extra["client"] = row.Client // the ban takes it (ExtendClientBlock)
 		}
 		if limit != "" {
 			extra["limit"] = limit

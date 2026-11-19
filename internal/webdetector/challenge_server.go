@@ -1807,10 +1807,13 @@ func (s *ChallengeServer) rlAllow(ip string, kind int) (allowed bool, retry time
 		s.rlLastGC = now
 	}
 
-	st := s.rlByIP[ip]
+	// An IPv6 client is limited as its /64 (firewall.CountKey; per address
+	// where its ban would be): rotating the address must not reset the limit.
+	key := firewall.CountKey(ip)
+	st := s.rlByIP[key]
 	if st == nil {
 		st = &ipRateState{winStart: now, count: 0, lastSeen: now}
-		s.rlByIP[ip] = st
+		s.rlByIP[key] = st
 	}
 	st.lastSeen = now
 
@@ -1882,11 +1885,12 @@ func (s *ChallengeServer) rlFirewallBlock(ip net.IP, kind int) {
 	now := time.Now().UTC()
 	ipStr := strings.TrimSpace(ip.String())
 
+	key := firewall.CountKey(ipStr) // rlAllow's key: one block per client
 	s.rlMu.Lock()
-	st := s.rlByIP[ipStr]
+	st := s.rlByIP[key]
 	if st == nil {
 		st = &ipRateState{winStart: now, lastSeen: now}
-		s.rlByIP[ipStr] = st
+		s.rlByIP[key] = st
 	}
 	if !st.fwBlockedUntil.IsZero() && now.Before(st.fwBlockedUntil) {
 		s.rlMu.Unlock()
@@ -1954,11 +1958,14 @@ func (s *ChallengeServer) abuseObserve(ipStr string, host, uri string, status in
 	now := time.Now().UTC()
 	ipStr = strings.TrimSpace(ipStr)
 
+	// An IPv6 client counts as its /64 (firewall.CountKey); the hook below
+	// gets this request's address (the ban widens it).
+	key := firewall.CountKey(ipStr)
 	s.abuseMu.Lock()
-	st := s.abuseByIP[ipStr]
+	st := s.abuseByIP[key]
 	if st == nil {
 		st = &abuseState{winStart: now, lastSeen: now}
-		s.abuseByIP[ipStr] = st
+		s.abuseByIP[key] = st
 	}
 	st.lastSeen = now
 

@@ -559,6 +559,25 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
             }
         }()
 
+        // An IPv6 client counts as its /64 (firewall.CountKey): its addresses'
+        // sets add up; the client's busiest address carries the row, and the
+        // challenge fans out to the others (fanOutChallenge).
+        var groups map[string]clientGroup
+        agg, groups = groupIPAggs(agg, func(dst, src *uAgg) {
+            if src.paths != nil && dst.paths == nil {
+                dst.paths = make(map[uint64]struct{}, len(src.paths))
+            }
+            for h := range src.paths {
+                dst.paths[h] = struct{}{}
+            }
+            if src.hosts != nil && dst.hosts == nil {
+                dst.hosts = make(map[uint64]struct{}, len(src.hosts))
+            }
+            for h := range src.hosts {
+                dst.hosts[h] = struct{}{}
+            }
+        }, func(a *uAgg) int { return len(a.paths) + len(a.hosts) }, func() *uAgg { return &uAgg{} })
+
         if len(agg) > 0 {
             for ipStr, a := range agg {
                 if a == nil {
@@ -646,6 +665,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     Count:   0,
                     Extra:   extra,
                 }
+                e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, rule, ttl, out)
 
                 // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
@@ -710,6 +730,30 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                 lastCtx[ip] = ctx
                         }
                 }()
+
+                // An IPv6 client counts as its /64 (firewall.CountKey): its
+                // addresses' rule counts add up under its busiest address, and
+                // the challenge fans out to the others (fanOutChallenge).
+                pm := make(map[string]*map[int]int, len(agg))
+                for ip, mm := range agg {
+                        m := mm
+                        pm[ip] = &m
+                }
+                pm, groups := groupIPAggs(pm, func(dst, src *map[int]int) {
+                        for r, n := range *src {
+                                (*dst)[r] += n
+                        }
+                }, func(m *map[int]int) int {
+                        t := 0
+                        for _, n := range *m {
+                                t += n
+                        }
+                        return t
+                }, func() *map[int]int { m := map[int]int{}; return &m })
+                agg = make(map[string]map[int]int, len(pm))
+                for ip, m := range pm {
+                        agg[ip] = *m
+                }
 
                 if len(agg) > 0 {
                         // Build candidates (first rule that breaches threshold)
@@ -829,6 +873,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 Count:   c.count,
                                                 Extra:   extra,
                                         }
+                                        e.fanOutChallenge(now, a, groups[c.ip], lastCtx, "CHALLENGE_PATHS", ttl, out)
 
             // record to challenge API store (best-effort)
 e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Status, ttl)
@@ -929,6 +974,19 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 lastCtx[ip] = ctx
             }
         }()
+
+        // An IPv6 client counts as its /64 (firewall.CountKey): its addresses'
+        // counts add up under its busiest address, and the challenge fans out
+        // to the others (fanOutChallenge).
+        st, groups := groupIPAggs(st, func(dst, src *agg2) {
+            dst.total += src.total
+            dst.c4xx += src.c4xx
+            dst.c5xx += src.c5xx
+            dst.cPOST += src.cPOST
+            dst.cNoUA += src.cNoUA
+            dst.cH10 += src.cH10
+            dst.exempt += src.exempt
+        }, func(a *agg2) int { return a.total }, func() *agg2 { return &agg2{} })
 
         winSec := e.cfg.Window.Seconds()
         if winSec <= 0 { winSec = 60 }
@@ -1037,6 +1095,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   a.total,
                 Extra:   extra,
             }
+            e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, rule, ttl, out)
             e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
                 if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
@@ -1072,7 +1131,18 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
         }()
 
-        for ipStr, cnt := range stMalf {
+        // An IPv6 client counts as its /64 (firewall.CountKey); the challenge
+        // fans out to its addresses (fanOutChallenge).
+        pmf := make(map[string]*int, len(stMalf))
+        for ip, n := range stMalf {
+            n := n
+            pmf[ip] = &n
+        }
+        pmf, groups := groupIPAggs(pmf, func(dst, src *int) { *dst += *src },
+            func(n *int) int { return *n }, func() *int { return new(int) })
+
+        for ipStr, cntp := range pmf {
+            cnt := *cntp
             if cnt < e.cfg.ChallengeIPMalformedMin { continue }
             ip := net.ParseIP(ipStr)
             if ip == nil { continue }
@@ -1118,6 +1188,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   cnt,
                 Extra:   extra,
             }
+            e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, "CHALLENGE_MALFORMED", ttl, out)
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_MALFORMED", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_MALFORMED") {
@@ -1161,6 +1232,14 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 }
             }
         }()
+
+        // An IPv6 client counts as its /64 (firewall.CountKey); the challenge
+        // fans out to its addresses (fanOutChallenge).
+        agg, groups := groupIPAggs(agg, func(dst, src *uaAgg) {
+            for h := range src.uniq {
+                dst.uniq[h] = struct{}{}
+            }
+        }, func(a *uaAgg) int { return len(a.uniq) }, func() *uaAgg { return &uaAgg{uniq: make(map[uint64]struct{}, 8)} })
 
         for ipStr, a := range agg {
             if len(a.uniq) < e.cfg.ChallengeIPUniqUAMin { continue }
@@ -1207,6 +1286,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   len(a.uniq),
                 Extra:   extra,
             }
+            e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, "CHALLENGE_UNIQUA", ttl, out)
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_UNIQUA", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_UNIQUA") {

@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/firewall"
 	"fmt"
 	"time"
 )
@@ -104,19 +105,19 @@ func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass boo
 	return false
 }
 
-// countedUniqueIPs is the vhost uniqIP count: the distinct IPs in counts that
-// sent at least one request vhostChallengeExemptClient did not exempt. An IP
-// counts as soon as one of its requests could be challenged (a crawler IP that
-// also sends a browser UA a ua= rule does not cover).
+// countedUniqueIPs is the vhost uniqIP count: the distinct clients in counts
+// that sent at least one request vhostChallengeExemptClient did not exempt.
+// An IP counts as soon as one of its requests could be challenged (a crawler
+// IP that also sends a browser UA a ua= rule does not cover). A client is its
+// address, an IPv6 one its /64 (firewall.CountKey): a client rotating its
+// address inside its /64 is one client, not a crowd that arms the vhost's
+// automatic challenge.
 func countedUniqueIPs(counts, exempt map[string]int) int {
-	if len(exempt) == 0 {
-		return len(counts)
-	}
-	n := 0
+	seen := make(map[string]struct{}, len(counts))
 	for ip, c := range counts {
 		if c > exempt[ip] {
-			n++
+			seen[firewall.CountKey(ip)] = struct{}{}
 		}
 	}
-	return n
+	return len(seen)
 }
