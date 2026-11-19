@@ -31,7 +31,8 @@ var countKeyTTL = 10 * time.Second
 
 var countKeyCache = struct {
 	sync.Mutex
-	m map[netip.Prefix]countKeyEntry
+	m   map[netip.Prefix]countKeyEntry
+	gen int // bumped by a reset: an answer computed before it is not stored
 }{m: map[netip.Prefix]countKeyEntry{}}
 
 type countKeyEntry struct {
@@ -72,6 +73,7 @@ func countKeyGuarded(p netip.Prefix) bool {
 		countKeyCache.Unlock()
 		return e.guarded
 	}
+	gen := countKeyCache.gen
 	countKeyCache.Unlock()
 
 	guarded := ClientNetExempted(p) != ""
@@ -92,11 +94,14 @@ func countKeyGuarded(p netip.Prefix) bool {
 		}
 	}
 	countKeyCache.Lock()
+	defer countKeyCache.Unlock()
+	if countKeyCache.gen != gen {
+		return guarded // the checks changed meanwhile: answered, not kept
+	}
 	if len(countKeyCache.m) > 50000 {
 		countKeyCache.m = map[netip.Prefix]countKeyEntry{} // bounded
 	}
 	countKeyCache.m[p] = countKeyEntry{guarded: guarded, at: now}
-	countKeyCache.Unlock()
 	return guarded
 }
 
@@ -104,6 +109,7 @@ func countKeyGuarded(p netip.Prefix) bool {
 func ResetCountKeyCache() {
 	countKeyCache.Lock()
 	countKeyCache.m = map[netip.Prefix]countKeyEntry{}
+	countKeyCache.gen++
 	countKeyCache.Unlock()
 }
 

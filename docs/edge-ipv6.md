@@ -277,17 +277,19 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     neighbour while the attacker went free (found by the review). Not
     foreseen: a ban that falls back to the address because nft failed to
     write the /64 (transient); the /64's count is then spent on one address
-    until the detector's cooldown (waf_security: a Window after the alert,
-    even while its addresses keep hitting; a /64 still hitting after its
-    ban, behind a proxy with `EDGE_BAN_MODE = log`, logs an alert a Window
-    without a second ban or notification).
+    until the detector's cooldown (waf_security: until the family has been
+    quiet for its Window, as for an IPv4 address).
   - **Only the count:** the alert keeps a real address, the /64's busiest
     now (`core.TopAddr`: each hit weighs 1 and decays by e per detector
     window, a tie goes to the address hitting now; bounded, 8 addresses per
-    key and 10000 keys per detector, ~10 MB; `Extra["client"]` is the /64):
-    it is what the fleet report, the leniency and exclude checks and the
-    notification name, so neither a neighbour's last hit nor an address that
-    trickled hits for hours or stopped a while ago takes the blame. `firewall.ExtendClientBlock`
+    key and 20000 keys in all, ~17 MB, a spray resetting only the detector
+    sprayed; `Extra["client"]` is the /64): it is what the fleet report, the
+    leniency and exclude checks and the notification name, so neither a
+    neighbour's last hit nor an address that trickled hits for hours or
+    stopped a while ago takes the blame. In a /64 shared by unrelated users
+    (a provider's shared /64, an office LAN) the busiest address may still be
+    a neighbour's: two mistyped logins outweigh an attacker rotating one hit
+    per address. The ban covers the /64 either way. `firewall.ExtendClientBlock`
     widens it to the /64 itself. Allow lists (`ALLOW_IPS`, …) stay exact
     matches.
   - **A detector's own allows:** an `ALLOW_IPS` / `ALLOW_NETS` entry
@@ -307,7 +309,7 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     neighbours. The sink's challenge cooldown stays per address (the edge
     challenges the address).
   - **The notification** says "Banned as: <the /64>" (the sink passes
-    `block_net` on).
+    `block_net` on, the challenge escalation's ban too).
   - `TestDetectorWindowKeysGroupIPv6Clients` fails a detector window keyed
     on the raw address.
 - **Still per address:**

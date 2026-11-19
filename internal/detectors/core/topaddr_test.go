@@ -62,8 +62,8 @@ func TestTopAddrFavoursTheAddressBusyNow(t *testing.T) {
 	}
 }
 
-// Bounded: per key, and per scope (a spray on one scope never wipes
-// another's tally).
+// Bounded: per key, and in all (a spray on one scope resets that scope,
+// never another's tally).
 func TestTopAddrBounded(t *testing.T) {
 	old := topAddrMaxKeys
 	topAddrMaxKeys = 100
@@ -86,10 +86,13 @@ func TestTopAddrBounded(t *testing.T) {
 		TopAddr("spray", fmt.Sprintf("k:2001:db8:%x::/64", i), fmt.Sprintf("2001:db8:%x::1", i), now, time.Minute)
 	}
 	topAddrs.Lock()
-	n = len(topAddrs.m["spray"])
+	n = 0
+	for _, s := range topAddrs.m {
+		n += len(s)
+	}
 	topAddrs.Unlock()
 	if n > 100 {
-		t.Fatalf("%d keys in a scope, cap 100", n)
+		t.Fatalf("%d keys in all, cap 100", n)
 	}
 	if got := TopAddr("kept", keep, "2001:db8:5:5::2", now, time.Minute); got != "2001:db8:5:5::1" {
 		t.Fatalf("a spray on another scope wiped this one: %q", got)

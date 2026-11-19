@@ -67,11 +67,6 @@ type Detector struct {
 	// rule-scoped rule after the family ban stays one alert, as it was when
 	// every rule shared the family counter.
 	famSeen map[string]time.Time
-	// firedAt: a grouped (IPv6 /64) family key -> when it fired. Its fired
-	// entry also ends a Window after the alert, hits or not: if that ban
-	// fell back to one address (nft failed to write the /64), the /64's other
-	// addresses keep hitting and must still reach an alert.
-	firedAt map[string]time.Time
 
 	allowIPs  map[string]struct{}
 	allowNets []*net.IPNet
@@ -100,7 +95,6 @@ func New(cfg Config) *Detector {
 		samples:  core.NewSampleRing(cfg.SampleLimit),
 		fired:    make(map[string]string),
 		famSeen:  make(map[string]time.Time),
-		firedAt:  make(map[string]time.Time),
 		allowIPs: make(map[string]struct{}),
 	}
 	for _, ip := range cfg.AllowIPs {
@@ -251,7 +245,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 
 		// An IPv6 client counts as its /64 (and fires once per window for it:
-		// its ban takes the /64); the alert carries this hit's address.
+		// its ban takes the /64; core.ClientKey keeps a guarded /64 per address).
 		client := core.ClientKey("|ip", ev.SrcIP)
 		famKey := client + "|" + family
 		key := counterKey(client, family, ev.Signal, limit, ruleScoped)
@@ -278,9 +272,6 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// for the same IP does not alert a second time (one ban per IP and
 		// family per window, as with the shared key).
 		d.fired[famKey] = famKey
-		if strings.Contains(famKey, "/") {
-			d.firedAt[famKey] = ev.When
-		}
 
 		// Notification identity. For the WAF_CVE family, surface the concrete
 		// CVE id (WAF_CVE:CVE_2025_34085:... -> "WAF/CVE-2025-34085") so the
@@ -325,8 +316,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// With one shared key this is exactly "its counter drained": famSeen holds
 	// the newest hit any of the family's counters took.
 	for key, fam := range d.fired {
-		at, grouped := d.firedAt[fam]
-		if now.Sub(d.famSeen[fam]) > d.cfg.Window || (grouped && now.Sub(at) > d.cfg.Window) {
+		if now.Sub(d.famSeen[fam]) > d.cfg.Window {
 			delete(d.fired, key)
 			d.samples.GetAndClear(key)
 		}
@@ -334,11 +324,6 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	for fam, at := range d.famSeen {
 		if now.Sub(at) > d.cfg.Window {
 			delete(d.famSeen, fam)
-		}
-	}
-	for fam := range d.firedAt {
-		if _, ok := d.fired[fam]; !ok {
-			delete(d.firedAt, fam)
 		}
 	}
 	return nil

@@ -11,11 +11,12 @@ import (
 // address replaces the one with the lowest weight now.
 const topAddrPerKey = 8
 
-// topAddrMaxKeys bounds the keys tallied per scope: past it that scope's
-// tally starts over (its alerts then name the address they see, as before
-// the tally; other scopes keep theirs). So a scope costs at most
-// topAddrMaxKeys x topAddrPerKey entries (80000, ~10 MB), never a sweep.
-var topAddrMaxKeys = 10000
+// topAddrMaxKeys bounds the keys tallied in all scopes together: past it
+// the largest scope (the one being sprayed) starts over, its alerts then
+// naming the address they see, as before the tally, while the other scopes
+// keep theirs. At most topAddrMaxKeys x topAddrPerKey entries (160000,
+// ~17 MB), never a sweep.
+var topAddrMaxKeys = 20000
 
 type addrHits struct {
 	w    float64 // hits, decayed with the window as time constant, at last
@@ -57,9 +58,21 @@ func TopAddr(scope, key, addr string, now time.Time, win time.Duration) string {
 	topAddrs.Lock()
 	defer topAddrs.Unlock()
 	sc := topAddrs.m[scope]
-	if sc == nil || len(sc) >= topAddrMaxKeys && sc[key] == nil {
-		sc = map[string]map[string]*addrHits{}
-		topAddrs.m[scope] = sc
+	if sc == nil || sc[key] == nil {
+		total, largest, largestN := 0, "", -1
+		for name, s := range topAddrs.m {
+			total += len(s)
+			if len(s) > largestN {
+				largest, largestN = name, len(s)
+			}
+		}
+		if total >= topAddrMaxKeys {
+			delete(topAddrs.m, largest)
+		}
+		if sc = topAddrs.m[scope]; sc == nil {
+			sc = map[string]map[string]*addrHits{}
+			topAddrs.m[scope] = sc
+		}
 	}
 	t := sc[key]
 	if t == nil {

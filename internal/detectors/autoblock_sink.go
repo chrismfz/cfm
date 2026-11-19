@@ -596,6 +596,7 @@ func (s *sectionSink) Publish(a core.Alert) {
 					"escalated": out.Extra["escalated"],
 					"ttl_text":  out.Extra["ttl"],
 					"key":       a.Key,
+					"block_net": out.Extra["block_net"], // an escalation ban's /64
 				},
 			})
 		}
