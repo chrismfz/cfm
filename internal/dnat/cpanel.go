@@ -282,10 +282,10 @@ func probePanelDecisionEndpoint(paths []string) panelDecisionEndpointProbe {
 func reloadPanelListenerService() error {
 	active := panelListenerServiceDetector()
 	if active == panelListenerServiceAmbiguous {
-		return fmt.Errorf("ambiguous active panel listener services: both angie and openresty are active/enabled; exactly one edge service must be active and enabled")
+		return fmt.Errorf("ambiguous active panel listener services: more than one of %s is active/enabled; exactly one edge service must be active and enabled", edgeengine.NameList())
 	}
 	if active == "" {
-		return fmt.Errorf("no authoritative angie/openresty edge service detected; exactly one should be active+enabled (or uniquely enabled while stopped)")
+		return fmt.Errorf("no authoritative edge service (%s) detected; exactly one should be active+enabled (or uniquely enabled while stopped)", edgeengine.NameList())
 	}
 	candidates := panelListenerServiceCandidates(active)
 	var lastErr error
@@ -310,7 +310,7 @@ func reloadPanelListenerService() error {
 		return fmt.Errorf("reload/restart listener service for active service %q failed despite fallback service success from an unconfirmed fallback service", primary)
 	}
 	if lastErr == nil {
-		return fmt.Errorf("no angie/openresty service command candidates")
+		return fmt.Errorf("no edge service (%s) command candidates", edgeengine.NameList())
 	}
 	return fmt.Errorf("reload/restart listener service failed: %w", lastErr)
 }
@@ -393,12 +393,14 @@ func detectActiveEdgeService() string {
 				active = append(active, service)
 			}
 		}
-		switch len(active) {
-		case 1:
+		switch {
+		case len(active) == 1:
 			// Runtime activity wins over enable-state mismatches and stale
 			// config files. A second active edge is always ambiguous.
 			return active[0]
-		case 2:
+		case len(active) > 1:
+			// > 1, not == 2: with three engines, three active ones fell
+			// through to the enabled-count check below.
 			return panelListenerServiceAmbiguous
 		}
 		if len(enabled) == 1 {
@@ -618,7 +620,7 @@ func runPanelLuaGuardProbe(st panelLuaGuardStatus, cmdPath string) panelLuaGuard
 		}
 		return st
 	}
-	st.LoadError = "selftest interpreter unavailable; no resty/lua/luajit/luac or angie/openresty config test found"
+	st.LoadError = "selftest interpreter unavailable; no resty/lua/luajit/luac or edge (" + edgeengine.NameList() + ") config test found"
 	return st
 }
 

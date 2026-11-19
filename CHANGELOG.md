@@ -62,6 +62,19 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   edge's fallback, used without `cfm_selfip`, agrees).
 
 ### Added
+- **The daemon knows cfm-edge**, CFM's own edge package (nginx.org nginx +
+  the OpenResty Lua set, `chrismfz/cfm-edge`), as a third engine next to
+  OpenResty and Angie: unit `cfm-edge.service`, `/usr/sbin/cfm-edge`, config
+  and sidecars in `/etc/cfm-edge/`, logs in `/var/log/cfm-edge/`, Lua from
+  the shared `/var/lib/cfm/lua/`. `cfm health` (a cfm-edge row next to
+  OpenResty and Angie, `inactive` where it is not installed), `cfm dnat`,
+  edge_health, the heartbeat (`edge = "cfm-edge"`), the edge log tools and
+  `journal_tail` recognise it. Nothing changes on a node without it: every
+  edge list keeps its order and gains a cfm-edge entry after the existing
+  engines' (a missing unit or file is skipped as before). No node runs
+  cfm-edge yet; its install script and packaging hooks come next. The agent
+  file sync and the bridge's upload directories stay closed to it (nothing
+  needs them).
 - **The edge can listen on IPv6 (`EDGE_LISTEN_V6 = on`; off by default until
   IPv6 /64 grouping).** The web DNAT
   redirect has always caught IPv6 (`table inet`), but the edge listened on

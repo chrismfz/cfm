@@ -22,6 +22,10 @@ defence-in-depth across five layers, from the HTTP edge down to the kernel:
 
 The in-path edge proxy is **OpenResty** (default) or **Angie**; the daemon,
 Lua decision files, and sslcollector socket are identical for both.
+**cfm-edge** (`chrismfz/cfm-edge`: nginx.org nginx + the OpenResty Lua set,
+`/usr/sbin/cfm-edge`, `/etc/cfm-edge`, `/var/log/cfm-edge`) is the third
+engine the daemon knows, being adopted; it runs the same shared Lua (its
+conf comes with its install script).
 
 `README.md` is the short overview (install, config files, feature tour with
 links); the reference for each subsystem is its doc under `docs/` (§7).
@@ -225,14 +229,19 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `LogFileCandidates`. Never write a new literal edge list. Adding an engine
   means one Profile plus its place in `fileOrder`. `Profiles` is the
   detection order (Angie first); `fileOrder` is the precedence of
-  first-readable-file lists (OpenResty first). Both orders are pinned, by
+  first-readable-file lists (OpenResty first). cfm-edge is LAST in both, so a
+  node without it keeps every old list plus a trailing entry; its
+  `LegacyLuaDir` is empty (it never had one). Code that counted engines must
+  count with `> 1`, not `== 2` (with `== 2`, three active edges fell through
+  the dnat resolver's ambiguity check). Both orders are pinned, by
   `profiles_test.go` and by a parity test next to each converted caller.
   `Lookup`/`IsEdge` are exact on the canonical name, like the checks they
   replaced, so a caller that needs leniency normalises first. Still
   engine-specific on purpose:
   - the process-title parsing in `healthmodel`;
   - the `debug_capture` master heuristics;
-  - Angie's native-keepalive exception in `edge_health`;
+  - Angie's native-keepalive exception in `edge_health` (cfm-edge reports
+    nginx's own version, so it takes the nginx path);
   - `status`'s per-engine output fields.
 
   Two security allowlists are OpenResty-only today and are decided per
@@ -240,7 +249,8 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   - agent file sync's `syncAllowedPrefixes`;
   - the bridge's `nginxUploadAllowedDirs`.
 
-  A new engine must decide each of them explicitly.
+  A new engine must decide each of them explicitly. cfm-edge: neither (the
+  decision is recorded next to each list).
 - **A new log file needs a rotation entry in the same change.**
   `check_logrotate_coverage.sh` fails CI if a path CFM writes (edge
   `access_log`/`error_log`, a `*_LOG_FILE` key in `cfm.conf`, a

@@ -80,6 +80,10 @@ var postUpdateActions = map[string]postAction{
 var actionSupersedes = map[string]string{actionRestartSpamd: actionReloadSpamd}
 
 // syncAllowedPrefixes are the only directories a distributed file may land in.
+// Decided per edge engine, never derived from edgeengine.Profiles (CLAUDE.md
+// §5): a remote write into an edge's config is the widest door here. Angie and
+// cfm-edge (/etc/cfm-edge/) are deliberately absent: nothing cfm-web
+// distributes lands there, and CFM's Lua ships only in /var/lib/cfm/lua.
 var syncAllowedPrefixes = []string{
 	"/etc/cfm/",
 	"/usr/local/openresty/nginx/conf/",

@@ -754,6 +754,12 @@ func normalizeFrontendProcessToken(raw string) string {
 	if strings.HasPrefix(s, "angie:") || strings.HasPrefix(s, "angie ") || s == "angie" {
 		return "angie"
 	}
+	// cfm-edge: nginx renames its processes ("nginx: master process
+	// /usr/sbin/cfm-edge", "nginx: worker process") but keeps comm, which is
+	// what ss -p prints: "cfm-edge". The cmdline's base above is the same.
+	if strings.HasPrefix(s, "cfm-edge:") || strings.HasPrefix(s, "cfm-edge ") || s == "cfm-edge" {
+		return "cfm-edge"
+	}
 	if strings.HasPrefix(s, "nginx:") || strings.HasPrefix(s, "nginx ") || s == "nginx" {
 		return "nginx"
 	}
@@ -800,7 +806,7 @@ func readProcComm(pid int) string {
 func deriveFrontendWorking(frontend, dnatState string) (string, string, FrontendDebug) {
 	frontend = strings.ToLower(strings.TrimSpace(frontend))
 	if frontend == "" || frontend == "unknown" {
-		// "unknown" means no angie/openresty/nginx at all on this host: no
+		// "unknown" means no CFM edge engine or nginx at all on this host: no
 		// binary, unit or config (a stopped edge is still detected, and is
 		// "service inactive" below). A host that serves no web through CFM —
 		// mailcow in docker (mymail), a nameserver, a backup box — is not
@@ -808,13 +814,13 @@ func deriveFrontendWorking(frontend, dnatState string) (string, string, Frontend
 		// is not there: that IS down.
 		switch strings.ToLower(strings.TrimSpace(dnatState)) {
 		case "on":
-			return "down", "frontend unknown: DNAT is on but no edge (angie/openresty/nginx) was found", FrontendDebug{}
+			return "down", "frontend unknown: DNAT is on but no edge (" + edgeengine.NameList() + "/nginx) was found", FrontendDebug{}
 		case "off":
-			return "none", "no web frontend on this host (no angie/openresty/nginx)", FrontendDebug{}
+			return "none", "no web frontend on this host (no " + edgeengine.NameList() + "/nginx)", FrontendDebug{}
 		}
 		// the DNAT state could not be read: "none" would claim more than we
 		// know (DNAT might be redirecting to the missing edge) — say unknown
-		return "unknown", "no edge (angie/openresty/nginx) found, and the DNAT state could not be read", FrontendDebug{}
+		return "unknown", "no edge (" + edgeengine.NameList() + "/nginx) found, and the DNAT state could not be read", FrontendDebug{}
 	}
 
 	candidates := map[string]frontendSignal{

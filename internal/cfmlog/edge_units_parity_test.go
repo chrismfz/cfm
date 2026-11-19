@@ -9,7 +9,7 @@ import (
 // journalUnits takes its edge engines from edgeengine.Profiles; this pins the
 // set it held as a literal before.
 func TestJournalUnitsUnchangedByTheEdgeRegistry(t *testing.T) {
-	want := []string{"cfm", "angie", "openresty", "nginx", "httpd", "apache2", "mysql", "mysqld",
+	want := []string{"cfm", "angie", "openresty", "cfm-edge", "nginx", "httpd", "apache2", "mysql", "mysqld",
 		"mariadb", "exim", "dovecot", "postfix", "sshd", "clamd", "named"}
 	var got []string
 	for k, v := range journalUnits {

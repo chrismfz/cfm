@@ -437,7 +437,7 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	edgeService := detectActivePanelListenerService()
 	edgeTarget := dnatTargetLabel(edgeService)
 	if edgeService == panelListenerServiceAmbiguous {
-		fmt.Println("WARNING: edge service is ambiguous: both Angie and OpenResty are active; exactly one should be active+enabled.")
+		fmt.Printf("WARNING: edge service is ambiguous: more than one of %s is active; exactly one should be active+enabled.\n", edgeengine.NameList())
 	}
 	if enabled {
 		s, err := backend.DNATShow(*family, *table)
@@ -567,7 +567,7 @@ func dnatTargetLabel(edgeService string) string {
 		return label
 	}
 	if edgeService == panelListenerServiceAmbiguous {
-		return label + " (ambiguous Angie/OpenResty runtime)"
+		return label + " (ambiguous edge runtime: more than one of " + edgeengine.NameList() + ")"
 	}
 	return fmt.Sprintf("%s (%s)", label, edgeService)
 }
@@ -623,6 +623,12 @@ func normalizeEdgeService(s string) string {
 	// File-precedence order: OpenResty first, because an OpenResty process
 	// line also contains "nginx".
 	for _, ep := range edgeengine.InFileOrder() {
+		if ep.Name == "cfm-edge" {
+			if isCfmEdgeProcess(s, ep) {
+				return ep.Name
+			}
+			continue
+		}
 		if strings.Contains(s, ep.Name) {
 			return ep.Name
 		}
@@ -633,10 +639,34 @@ func normalizeEdgeService(s string) string {
 	return ""
 }
 
+// isCfmEdgeProcess: the cfm-edge processes themselves, never a process that
+// merely mentions the name or the binary. A substring match (the rule the
+// older engines keep) would also take CFM's own cfm-edge-listen-v6.sh, which
+// runs before every OpenResty / Angie start, a `tail -f /var/log/cfm-edge/…`,
+// or `strace`/`vim`/`rpm -V` on /usr/sbin/cfm-edge. comm is exactly
+// "cfm-edge"; the master's retitled cmdline is "nginx: master process
+// <binary> [args]".
+func isCfmEdgeProcess(s string, ep edgeengine.Profile) bool {
+	if s == ep.Name {
+		return true
+	}
+	rest, ok := strings.CutPrefix(s, "nginx: master process ")
+	if !ok {
+		return false
+	}
+	bin, _, _ := strings.Cut(rest, " ")
+	for _, b := range ep.Binaries {
+		if bin == b {
+			return true
+		}
+	}
+	return false
+}
+
 func help() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  cfm dnat                  (show ON/OFF + rules + explanation)")
-	fmt.Fprintln(os.Stderr, "  cfm dnat on               (enable web DNAT: 80/443 -> openresty)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat on               (enable web DNAT: 80/443 -> the edge)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat off              (disable web DNAT)")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  cfm dnat panel ...        (manage the panel DNAT chain [cPanel/DirectAdmin]; alias: `cfm dnat cpanel`; see `cfm dnat panel help`)")

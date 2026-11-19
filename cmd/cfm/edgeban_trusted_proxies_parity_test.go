@@ -11,6 +11,7 @@ func TestEdgeBanTrustedProxyFilesUnchangedByTheEdgeRegistry(t *testing.T) {
 	want := []string{
 		"/usr/local/openresty/nginx/conf/trusted_proxies.conf",
 		"/etc/angie/trusted_proxies.conf",
+		"/etc/cfm-edge/trusted_proxies.conf",
 		"/usr/share/cfm/configs/trusted_proxies.conf",
 	}
 	if !reflect.DeepEqual(edgeBanTrustedProxyFiles, want) {

@@ -44,6 +44,11 @@ func TestNormalizeFrontendProcessToken(t *testing.T) {
 		"openresty: worker process":             "openresty",
 		"/usr/local/openresty/nginx/sbin/nginx": "openresty",
 		"/usr/sbin/nginx":                       "nginx",
+		// cfm-edge: ss -p prints comm ("cfm-edge"); nginx retitles the
+		// processes but the master's cmdline ends in the binary.
+		"cfm-edge":           "cfm-edge",
+		"/usr/sbin/cfm-edge": "cfm-edge",
+		"nginx: master process /usr/sbin/cfm-edge": "cfm-edge",
 	}
 	for in, want := range cases {
 		got := normalizeFrontendProcessToken(in)
@@ -295,5 +300,36 @@ func TestDeriveFrontendWorking_NoFrontendIsNotDown(t *testing.T) {
 		if v, _, _ := deriveFrontendWorking(fe, "on"); v != "down" {
 			t.Fatalf("frontend %q, DNAT on: got %q, want down", fe, v)
 		}
+	}
+}
+
+// The cfm-edge candidate carries the "nginx" alias, like Angie. On an
+// OpenResty node ss names the port owner "nginx", so every edge candidate
+// "owns" the DNAT ports and the active unit decides; on a cfm-edge node the
+// owner is "cfm-edge" and only that candidate owns them. Either way the
+// right engine wins with high confidence, through the real ownership check.
+func TestFrontendOwnershipWithCfmEdgeCandidate(t *testing.T) {
+	resolve := func(owner string, active map[string]bool) (string, string) {
+		snap := frontendListenerSnapshot{listeners: []listenerEntry{
+			{name: normalizeFrontendProcessToken(owner), port: 9080},
+			{name: normalizeFrontendProcessToken(owner), port: 9043},
+		}}
+		cands := dnatFrontendCandidates()
+		for i := range cands {
+			cands[i].ownsDNATPorts = snap.hasOwnerOnAllPorts(cands[i].processAliases, 9080, 9043)
+			cands[i].active = active[cands[i].name]
+		}
+		return resolveFrontendDeterministically(cands, true)
+	}
+	if f, c := resolve("nginx", map[string]bool{"openresty": true}); f != "openresty" || c != "high" {
+		t.Errorf("OpenResty node: got (%s,%s), want (openresty,high)", f, c)
+	}
+	if f, c := resolve("cfm-edge", map[string]bool{"cfm-edge": true}); f != "cfm-edge" || c != "high" {
+		t.Errorf("cfm-edge node: got (%s,%s), want (cfm-edge,high)", f, c)
+	}
+	// Mid-switch: OpenResty still running and owning the ports, cfm-edge
+	// installed but stopped. The live one must win.
+	if f, c := resolve("nginx", map[string]bool{"openresty": true, "cfm-edge": false}); f != "openresty" || c != "high" {
+		t.Errorf("before the switch: got (%s,%s), want (openresty,high)", f, c)
 	}
 }

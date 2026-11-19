@@ -7,7 +7,7 @@ import (
 
 // The candidate lists take their edge log paths from edgeengine.Profiles; this
 // pins the lists (order included: it is the equal-mtime tiebreak) they held as
-// literals before.
+// literals before, plus cfm-edge's paths after each engine group.
 func TestLogCandidatesUnchangedByTheEdgeRegistry(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -16,18 +16,22 @@ func TestLogCandidatesUnchangedByTheEdgeRegistry(t *testing.T) {
 		{"accessLogCandidates", accessLogCandidates, []string{
 			"/usr/local/openresty/nginx/logs/access.log",
 			"/var/log/angie/access.log",
+			"/var/log/cfm-edge/access.log",
 			"/usr/local/openresty/nginx/logs/access.cfm.log",
 			"/var/log/angie/access.cfm.log",
+			"/var/log/cfm-edge/access.cfm.log",
 			"/var/log/nginx/access.log",
 		}},
 		{"errorLogCandidates", errorLogCandidates, []string{
 			"/usr/local/openresty/nginx/logs/error.log",
 			"/var/log/angie/error.log",
+			"/var/log/cfm-edge/error.log",
 			"/var/log/nginx/error.log",
 		}},
 		{"fullAccessLogCandidates", fullAccessLogCandidates, []string{
 			"/usr/local/openresty/nginx/logs/access.log",
 			"/var/log/angie/access.log",
+			"/var/log/cfm-edge/access.log",
 		}},
 	}
 	for _, tc := range cases {

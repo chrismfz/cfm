@@ -11,11 +11,12 @@ func TestDNATEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 	if want := []string{
 		"/etc/angie/cfm-panel-listeners.conf",
 		"/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf",
+		"/etc/cfm-edge/cfm-panel-listeners.conf",
 		"configs/cfm-panel-listeners.conf.in",
 	}; !reflect.DeepEqual(panelListenerChallengeConfigPaths, want) {
 		t.Errorf("panelListenerChallengeConfigPaths = %v, want %v", panelListenerChallengeConfigPaths, want)
 	}
-	if want := []string{"angie", "openresty"}; !reflect.DeepEqual(edgeCommands(), want) {
+	if want := []string{"angie", "openresty", "cfm-edge"}; !reflect.DeepEqual(edgeCommands(), want) {
 		t.Errorf("edgeCommands() = %v, want %v", edgeCommands(), want)
 	}
 	for path, want := range map[string]string{
@@ -28,6 +29,9 @@ func TestDNATEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 		"/opt/openresty/nginx/conf/cfm-panel-listeners.conf": "openresty",
 		"/srv/openresty/conf/x.conf":                         "openresty",
 		"/etc/angiex/cfm-panel-listeners.conf":               "",
+		"/etc/cfm-edge/cfm-panel-listeners.conf":             "cfm-edge",
+		"/tmp/x/etc/cfm-edge/cfm-panel-listeners.conf":       "cfm-edge",
+		"/etc/cfm-edgex/cfm-panel-listeners.conf":            "",
 	} {
 		if got := panelListenerConfigPathService(path); got != want {
 			t.Errorf("panelListenerConfigPathService(%q) = %q, want %q", path, got, want)
@@ -36,7 +40,7 @@ func TestDNATEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 }
 
 func TestWorkerUserConfsUnchangedByTheEdgeRegistry(t *testing.T) {
-	want := []string{"/etc/nginx/nginx.conf", "/usr/local/openresty/nginx/conf/nginx.conf", "/etc/angie/angie.conf"}
+	want := []string{"/etc/nginx/nginx.conf", "/usr/local/openresty/nginx/conf/nginx.conf", "/etc/angie/angie.conf", "/etc/cfm-edge/nginx.conf"}
 	if !reflect.DeepEqual(workerUserConfs(), want) {
 		t.Fatalf("workerUserConfs() = %v, want %v", workerUserConfs(), want)
 	}

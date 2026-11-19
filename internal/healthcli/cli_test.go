@@ -342,10 +342,10 @@ func TestCollectWebStackRowsExcludesNginx(t *testing.T) {
 		},
 	}
 	rows := collectWebStackRows(s)
-	if len(rows) != 2 {
-		t.Fatalf("expected 2 web stack rows, got %d", len(rows))
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 web stack rows, got %d", len(rows))
 	}
-	if rows[0].Name != "angie" || rows[1].Name != "openresty" {
+	if rows[0].Name != "angie" || rows[1].Name != "openresty" || rows[2].Name != "cfm-edge" || rows[2].State != "inactive" {
 		t.Fatalf("unexpected rows: %+v", rows)
 	}
 }

@@ -1,6 +1,6 @@
 // Package edgeengine is the single source of truth for the in-path edge
-// engines (OpenResty, Angie): their facts (Profiles, profiles.go), detecting
-// which one is active on this host, and reading its version. The heartbeat
+// engines (OpenResty, Angie, cfm-edge): their facts (Profiles, profiles.go),
+// detecting which one is active on this host, and reading its version. The heartbeat
 // agent, edge_health, health, status, dnat, edgelog, sslcollector and the rest
 // read the engines from here; keeping ONE copy avoids the drift CLAUDE.md §5
 // warns about (a new binary path added in one place but not the other would
@@ -46,8 +46,9 @@ var (
 	Stat     = os.Stat
 )
 
-// Detect reports which edge proxy service is active ("angie", "openresty", or
-// "" when neither is) plus that edge's binary version string. ok=false means
+// Detect reports which edge proxy service is active (a Profiles name:
+// "angie", "openresty", "cfm-edge"; "" when none is) plus that edge's binary
+// version string. ok=false means
 // detection could not run at all (no systemctl); callers that persist state
 // should then keep their last known value instead of clearing it. An ok=true
 // empty name is a real "no edge running" observation.
@@ -67,7 +68,9 @@ func Detect(ctx context.Context) (name, version string, ok bool) {
 	return "", "", true
 }
 
-// Version best-effort reads the edge binary's version via `-v`. Empty when no
+// Version best-effort reads the edge binary's version via `-v`. cfm-edge
+// prints nginx's own line ("nginx version: nginx/1.31.9"): its version IS the
+// nginx version it packages. Empty when no
 // known binary path exists or the output is unparseable.
 func Version(ctx context.Context, name string) string {
 	for _, bin := range BinaryPaths[name] {

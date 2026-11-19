@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"cfm/internal/edgeengine"
 	"cfm/internal/systemdunit"
 )
 
@@ -94,7 +95,7 @@ func TestReloadPanelListenerService_NoAuthoritativeServiceFailsWithoutGuessing(t
 	if err == nil {
 		t.Fatal("expected unknown edge service to fail rather than start Angie/OpenResty arbitrarily")
 	}
-	if !strings.Contains(err.Error(), "no authoritative angie/openresty edge service") {
+	if !strings.Contains(err.Error(), "no authoritative edge service ("+edgeengine.NameList()+")") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(calls) != 0 {
@@ -183,6 +184,34 @@ func TestDetectActivePanelListenerService_BothActiveEnabledIsAmbiguous(t *testin
 
 	if got := detectActivePanelListenerService(); got != panelListenerServiceAmbiguous {
 		t.Fatalf("service=%q, want ambiguous sentinel", got)
+	}
+}
+
+// Three engines all active must stay ambiguous: the resolver once matched
+// exactly two, so three fell through to the unique-enabled rule and named
+// cfm-edge as the one live edge.
+func TestDetectActivePanelListenerService_ThreeActiveIsAmbiguous(t *testing.T) {
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
+		"angie.service":     {Active: true, Enabled: false, ActiveState: "active", EnabledState: "disabled"},
+		"openresty.service": {Active: true, Enabled: false, ActiveState: "active", EnabledState: "disabled"},
+		"cfm-edge.service":  {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
+	}, true, "", nil)
+
+	if got := detectActivePanelListenerService(); got != panelListenerServiceAmbiguous {
+		t.Fatalf("service=%q, want ambiguous sentinel", got)
+	}
+}
+
+// cfm-edge alone is an ordinary edge to the resolver.
+func TestDetectActivePanelListenerService_CfmEdgeActive(t *testing.T) {
+	withPanelServiceDetectionTest(t, map[string]systemdunit.Status{
+		"angie.service":     {Active: false, Enabled: false, ActiveState: "inactive", EnabledState: "disabled"},
+		"openresty.service": {Active: false, Enabled: true, ActiveState: "inactive", EnabledState: "enabled"},
+		"cfm-edge.service":  {Active: true, Enabled: true, ActiveState: "active", EnabledState: "enabled"},
+	}, true, "", nil)
+
+	if got := detectActivePanelListenerService(); got != "cfm-edge" {
+		t.Fatalf("service=%q, want cfm-edge", got)
 	}
 }
 

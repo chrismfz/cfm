@@ -49,9 +49,9 @@ var (
 
 	// heartbeatDNATTimeout bounds how long a heartbeat waits for the probe.
 	// A whole heartbeat is then bounded at this + edgeengine.Detect (up to
-	// 2×3s of `systemctl is-active` + 2×3s of `-v`) + the 15s HTTP client
-	// timeout — about 32s worst case, far below cfm-web's 3-minute offline
-	// threshold.
+	// 3s of `systemctl is-active` per edge engine, 3 today, + 3s per binary
+	// path of `-v` for the active one) + the 15s HTTP client timeout — about
+	// 35s worst case, far below cfm-web's 3-minute offline threshold.
 	heartbeatDNATTimeout = 5 * time.Second
 
 	// heartbeatDNATSlowLog logs a probe that answered in time but slowly, so a
