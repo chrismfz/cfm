@@ -1,40 +1,52 @@
 package core
 
 import (
+	"math"
 	"strings"
 	"sync"
 	"time"
 )
 
 // topAddrPerKey bounds the addresses tallied per key: past it, a new
-// address replaces the stalest one.
-const topAddrPerKey = 32
+// address replaces the one with the lowest weight now.
+const topAddrPerKey = 8
 
-// topAddrMaxKeys bounds the keys tallied in all: past it the tally starts
-// over (an alert then names the address it sees, as before the tally). A
-// spray of distinct /64s costs at most this many entries, never a sweep.
-var topAddrMaxKeys = 50000
+// topAddrMaxKeys bounds the keys tallied per scope: past it that scope's
+// tally starts over (its alerts then name the address they see, as before
+// the tally; other scopes keep theirs). So a scope costs at most
+// topAddrMaxKeys x topAddrPerKey entries (80000, ~10 MB), never a sweep.
+var topAddrMaxKeys = 10000
 
 type addrHits struct {
-	n    int
+	w    float64 // hits, decayed with the window as time constant, at last
 	last time.Time
 }
 
 var topAddrs = struct {
 	sync.Mutex
-	m map[string]map[string]*addrHits
-}{m: map[string]map[string]*addrHits{}}
+	m map[string]map[string]map[string]*addrHits // scope -> key -> addr
+}{m: map[string]map[string]map[string]*addrHits{}}
+
+// weightAt is h's hit weight at now: every hit counts 1, decaying by e per
+// window (a hit a window ago weighs 0.37, three windows ago 0.05).
+func (h *addrHits) weightAt(now time.Time, win time.Duration) float64 {
+	dt := now.Sub(h.last)
+	if dt <= 0 {
+		return h.w
+	}
+	return h.w * math.Exp(-float64(dt)/float64(win))
+}
 
 // TopAddr notes one hit of addr at now on a grouped counter key (scope names
 // the detector or section, key its window key, win its window) and returns
-// the address with the most hits inside the window: the address an alert on
-// an IPv6 client's /64 names (Extra["ip"]: the fleet report, the leniency
-// and exclude checks, the notification). An address idle for a window
-// starts again from zero, and a tie goes to addr (the one hitting now), so
-// the alert never names an address that did nothing in the window, nor a
-// neighbour whose one hit came last instead of the address that did the
-// rest. A key that is no /64 (IPv4, a guarded or ungrouped address, a user)
-// is addr itself and keeps no state.
+// the address that weighs most now: the address an alert on an IPv6
+// client's /64 names (Extra["ip"]: the fleet report, the leniency and
+// exclude checks, the notification). Each hit weighs 1 and decays by e per
+// window, so the address busy now outweighs one that trickled hits for hours
+// or stopped a while ago, and a tie goes to addr (the one hitting now): the
+// alert never names a neighbour whose one hit came last instead of the
+// address doing the rest. A key that is no /64 (IPv4, a guarded or
+// ungrouped address, a user) is addr itself and keeps no state.
 func TopAddr(scope, key, addr string, now time.Time, win time.Duration) string {
 	if !strings.HasSuffix(key, "/64") {
 		return addr
@@ -42,44 +54,40 @@ func TopAddr(scope, key, addr string, now time.Time, win time.Duration) string {
 	if win <= 0 {
 		win = 10 * time.Minute
 	}
-	k := scope + "\x00" + key
-	cut := now.Add(-win)
 	topAddrs.Lock()
 	defer topAddrs.Unlock()
-	t := topAddrs.m[k]
+	sc := topAddrs.m[scope]
+	if sc == nil || len(sc) >= topAddrMaxKeys && sc[key] == nil {
+		sc = map[string]map[string]*addrHits{}
+		topAddrs.m[scope] = sc
+	}
+	t := sc[key]
 	if t == nil {
-		if len(topAddrs.m) >= topAddrMaxKeys {
-			topAddrs.m = map[string]map[string]*addrHits{}
-		}
 		t = map[string]*addrHits{}
-		topAddrs.m[k] = t
+		sc[key] = t
 	}
 	h := t[addr]
 	if h == nil {
 		if len(t) >= topAddrPerKey {
-			stale, at := "", now
+			low, lowW := "", math.Inf(1)
 			for a, o := range t {
-				if !o.last.After(at) {
-					stale, at = a, o.last
+				if w := o.weightAt(now, win); w < lowW {
+					low, lowW = a, w
 				}
 			}
-			delete(t, stale)
+			delete(t, low)
 		}
-		h = &addrHits{}
+		h = &addrHits{last: now}
 		t[addr] = h
 	}
-	if h.last.Before(cut) {
-		h.n = 0 // idle a window: its old hits are not this window's
+	h.w = h.weightAt(now, win) + 1
+	if now.After(h.last) {
+		h.last = now
 	}
-	h.n++
-	h.last = now
-	best, bestN := addr, h.n
+	best, bestW := addr, h.w
 	for a, o := range t {
-		if o.last.Before(cut) {
-			continue
-		}
-		if o.n > bestN {
-			best, bestN = a, o.n
+		if w := o.weightAt(now, win); w > bestW {
+			best, bestW = a, w
 		}
 	}
 	return best

@@ -578,19 +578,31 @@ var guardErrTTL = 5 * time.Second
 func cachedGuardView(be Backend) (*guardView, error) {
 	sets := len(guardSetsNow())
 	guardCacheMu.Lock()
-	defer guardCacheMu.Unlock()
 	c := &guardCache
 	if guardCacheTTL > 0 && c.be == be && c.sets == sets {
 		if c.view != nil && time.Since(c.at) < guardCacheTTL {
-			return c.view, nil
+			v := c.view
+			guardCacheMu.Unlock()
+			return v, nil
 		}
 		if c.err != nil && time.Since(c.at) < guardErrTTL {
-			return nil, c.err
+			err := c.err
+			guardCacheMu.Unlock()
+			return nil, err
 		}
 	}
+	gen := c.gen
+	guardCacheMu.Unlock()
+	// The read runs unlocked: a counter (staleGuardView) never waits on a
+	// ban's nft reads. Two readers at once both read; the later write wins
+	// unless a reset came in between.
 	v, err := newGuardView(be)
-	c.be, c.at, c.view, c.err, c.sets = be, time.Now(), v, err, sets
-	c.gen++
+	guardCacheMu.Lock()
+	if c.gen == gen || c.be != be {
+		c.be, c.at, c.view, c.err, c.sets = be, time.Now(), v, err, sets
+		c.gen++
+	}
+	guardCacheMu.Unlock()
 	if err != nil {
 		return nil, err
 	}

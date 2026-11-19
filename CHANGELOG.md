@@ -34,7 +34,7 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   that holds this node, its gateway, an ignored, allowed or trusted proxy
   address (whose ban takes the address alone) still counts per address, so
   one address's alert never uses up its neighbours' or names an ignored one.
-  The alert names the /64's busiest address inside the window (plus
+  The alert names the /64's address busiest now (plus
   `client=<the /64>`), never a neighbour whose one hit came last: that
   address is what the fleet report and the leniency checks get. The ban takes
   the /64 as before, allow lists stay exact, and an allowed address (narrower

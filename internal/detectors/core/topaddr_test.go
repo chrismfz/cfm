@@ -24,56 +24,87 @@ func TestTopAddr(t *testing.T) {
 	if got := TopAddr("other", k, "2001:db8:1:2::b", now, win); got != "2001:db8:1:2::b" {
 		t.Fatalf("scopes share a tally: %q", got)
 	}
-	// A tie goes to the address hitting now.
 	if got := TopAddr("t", k, "2001:db8:1:2::b", now, win); got != "2001:db8:1:2::b" {
-		t.Fatalf("tie: %q", got)
+		t.Fatalf("a tie goes to the address hitting now: %q", got)
 	}
-	// An address idle for the window no longer counts: 100 old hits from ::c
-	// do not outweigh ::d's one hit a window later.
-	k3 := "x:2001:db8:3:3::/64"
-	for i := 0; i < 100; i++ {
-		TopAddr("t", k3, "2001:db8:3:3::c", now, win)
-	}
-	later := now.Add(win + time.Second)
-	if got := TopAddr("t", k3, "2001:db8:3:3::d", later, win); got != "2001:db8:3:3::d" {
-		t.Fatalf("an address idle for the window named: %q", got)
-	}
-	TopAddr("t", k3, "2001:db8:3:3::d", later, win)
-	TopAddr("t", k3, "2001:db8:3:3::d", later, win)
-	if got := TopAddr("t", k3, "2001:db8:3:3::c", later, win); got != "2001:db8:3:3::d" {
-		t.Fatalf("::c back after a window: its old 100 hits counted (%q named, want ::d with 3)", got)
-	}
-	// Bounded per key; a busy address survives a spray of one-hit ones.
-	k2 := "x:2001:db8:9:9::/64"
-	for i := 0; i < 5; i++ {
-		TopAddr("t", k2, "2001:db8:9:9::bad", now, win)
-	}
-	var got string
-	for i := 0; i < 1000; i++ {
-		got = TopAddr("t", k2, fmt.Sprintf("2001:db8:9:9::%x", i+1), now.Add(time.Duration(i+1)*time.Millisecond), win)
-	}
-	topAddrs.Lock()
-	n := len(topAddrs.m["t\x00"+k2])
-	topAddrs.Unlock()
-	if n > topAddrPerKey {
-		t.Fatalf("%d tallied, cap %d", n, topAddrPerKey)
-	}
-	_ = got // the stalest address is evicted first: the spray may evict ::bad
 }
 
-// A spray of distinct /64s never grows the tally past topAddrMaxKeys.
-func TestTopAddrKeysBounded(t *testing.T) {
+// An address trickling one hit just inside every window for hours never
+// outweighs one busy now (the decay is per window, not "since it was last
+// idle"), nor does one that stopped a while ago.
+func TestTopAddrFavoursTheAddressBusyNow(t *testing.T) {
+	const win = 10 * time.Minute
+	k := "x:2001:db8:3:3::/64"
+	at := time.Now()
+	for i := 0; i < 100; i++ {
+		TopAddr("trickle", k, "2001:db8:3:3::a", at, win)
+		at = at.Add(9 * time.Minute)
+	}
+	var got string
+	for i := 0; i < 20; i++ {
+		got = TopAddr("trickle", k, "2001:db8:3:3::b", at.Add(time.Duration(i)*time.Second), win)
+	}
+	if got != "2001:db8:3:3::b" {
+		t.Fatalf("the trickler named: %q", got)
+	}
+	// 100 hits that stopped three windows ago weigh ~5: less than 6 now.
+	k2 := "x:2001:db8:4:4::/64"
+	t0 := time.Now()
+	for i := 0; i < 100; i++ {
+		TopAddr("old", k2, "2001:db8:4:4::c", t0, win)
+	}
+	later := t0.Add(3 * win)
+	for i := 0; i < 6; i++ {
+		got = TopAddr("old", k2, "2001:db8:4:4::d", later, win)
+	}
+	if got != "2001:db8:4:4::d" {
+		t.Fatalf("an address that stopped three windows ago named: %q", got)
+	}
+}
+
+// Bounded: per key, and per scope (a spray on one scope never wipes
+// another's tally).
+func TestTopAddrBounded(t *testing.T) {
 	old := topAddrMaxKeys
 	topAddrMaxKeys = 100
 	t.Cleanup(func() { topAddrMaxKeys = old })
 	now := time.Now()
+	k := "x:2001:db8:9:9::/64"
+	for i := 0; i < 1000; i++ {
+		TopAddr("cap", k, fmt.Sprintf("2001:db8:9:9::%x", i+1), now, time.Minute)
+	}
+	topAddrs.Lock()
+	n := len(topAddrs.m["cap"][k])
+	topAddrs.Unlock()
+	if n > topAddrPerKey {
+		t.Fatalf("%d addresses on one key, cap %d", n, topAddrPerKey)
+	}
+	keep := "x:2001:db8:5:5::/64"
+	TopAddr("kept", keep, "2001:db8:5:5::1", now, time.Minute)
+	TopAddr("kept", keep, "2001:db8:5:5::1", now, time.Minute)
 	for i := 0; i < 1000; i++ {
 		TopAddr("spray", fmt.Sprintf("k:2001:db8:%x::/64", i), fmt.Sprintf("2001:db8:%x::1", i), now, time.Minute)
 	}
 	topAddrs.Lock()
-	n := len(topAddrs.m)
+	n = len(topAddrs.m["spray"])
 	topAddrs.Unlock()
 	if n > 100 {
-		t.Fatalf("%d keys, cap 100", n)
+		t.Fatalf("%d keys in a scope, cap 100", n)
+	}
+	if got := TopAddr("kept", keep, "2001:db8:5:5::2", now, time.Minute); got != "2001:db8:5:5::1" {
+		t.Fatalf("a spray on another scope wiped this one: %q", got)
+	}
+}
+
+// A tie goes to the address hitting now, whatever the map order.
+func TestTopAddrTieGoesToTheCurrentAddress(t *testing.T) {
+	now := time.Now()
+	for i := 0; i < 200; i++ {
+		k := fmt.Sprintf("tie:2001:db8:%x::/64", i)
+		TopAddr("tie", k, fmt.Sprintf("2001:db8:%x::a", i), now, time.Minute)
+		TopAddr("tie", k, fmt.Sprintf("2001:db8:%x::c", i), now, time.Minute)
+		if got := TopAddr("tie", k, fmt.Sprintf("2001:db8:%x::b", i), now, time.Minute); got != fmt.Sprintf("2001:db8:%x::b", i) {
+			t.Fatalf("tie named %q", got)
+		}
 	}
 }

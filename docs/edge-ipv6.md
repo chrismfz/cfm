@@ -265,9 +265,10 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   - **Only where the ban would take the /64:** `firewall.CountKey` asks the
     bans' own guards (the daemon's backend, `SetCountBackend`). The answer
     is cached 10 s per /64 (a newly registered check applies at once); the
-    guard view behind it is refreshed in the background, so a counter does
-    not wait on nft while the reads succeed (after a failed one, or when the
-    set list changes, the next read is synchronous); a failed read is answered for 5 s and logged once
+    guard view behind it is refreshed in the background and every read runs
+    outside its lock, so a counter does not wait on nft (or on a ban's read)
+    while the reads succeed (after a failed one, or when the set list
+    changes, the next read is synchronous); a failed read is answered for 5 s and logged once
     a minute (a /64 first seen meanwhile counts per address for up to 10 s
     more). A guarded /64 (this node, its gateway, an ignored, allowed or
     trusted proxy address, or nft cannot tell) counts per address, as its
@@ -281,11 +282,12 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     ban, behind a proxy with `EDGE_BAN_MODE = log`, logs an alert a Window
     without a second ban or notification).
   - **Only the count:** the alert keeps a real address, the /64's busiest
-    inside the detector's window (`core.TopAddr`: a tie goes to the address
-    hitting now; bounded, 32 addresses per key, 50000 keys; `Extra["client"]`
-    is the /64): it is what the fleet report, the leniency and exclude checks
-    and the notification name, so neither a neighbour's last hit nor an
-    address idle for the window takes the blame. `firewall.ExtendClientBlock`
+    now (`core.TopAddr`: each hit weighs 1 and decays by e per detector
+    window, a tie goes to the address hitting now; bounded, 8 addresses per
+    key and 10000 keys per detector, ~10 MB; `Extra["client"]` is the /64):
+    it is what the fleet report, the leniency and exclude checks and the
+    notification name, so neither a neighbour's last hit nor an address that
+    trickled hits for hours or stopped a while ago takes the blame. `firewall.ExtendClientBlock`
     widens it to the /64 itself. Allow lists (`ALLOW_IPS`, …) stay exact
     matches.
   - **A detector's own allows:** an `ALLOW_IPS` / `ALLOW_NETS` entry
