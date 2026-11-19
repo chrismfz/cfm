@@ -533,17 +533,8 @@ func setupPanelStatusLuaTest(t *testing.T, fakeResty string) string {
 	oldWD, _ := os.Getwd()
 	oldState := panelChallengeModeStatePath
 	panelChallengeModeStatePath = filepath.Join(tmp, "panel_challenge_mode")
-	// No edge engine on this "host": the status must pick the repo template
-	// (the service-neutral path). Without these stubs the detection read the
-	// REAL host (systemd, then /proc), so any process whose command line held
-	// "openresty" or "angie" (another package's `systemctl show ... angie
-	// openresty` while the suite runs in parallel, a shell, a dev box's real
-	// edge) flipped it to that engine's live listener path and the tests
-	// failed with "Panel decision endpoint: MISSING".
-	oldProbe := panelSystemdUnitProbe
-	oldProc := panelListenerProcessDetector
-	panelSystemdUnitProbe = func(string) (systemdunit.Status, bool) { return systemdunit.Status{}, false }
-	panelListenerProcessDetector = func() string { return "" }
+	// No edge engine on this "host": the status must pick the repo template.
+	stubNoEdgeDetected(t)
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
@@ -554,10 +545,37 @@ func setupPanelStatusLuaTest(t *testing.T, fakeResty string) string {
 		lookPath = oldLookPath
 		_ = os.Chdir(oldWD)
 		panelChallengeModeStatePath = oldState
+	})
+	return tmp
+}
+
+// stubNoEdgeDetected makes the panel status see a host with NO edge engine.
+// Without it the detection reads the REAL host (systemd, then /proc), so any
+// process whose command line holds "openresty" or "angie" (another package's
+// `systemctl show ... angie openresty` while the suite runs in parallel, a
+// shell, a dev box's live edge) flips it to that engine's live listener path:
+// TestPanelStatus* failed with "Panel decision endpoint: MISSING" that way.
+func stubNoEdgeDetected(t *testing.T) {
+	t.Helper()
+	oldProbe := panelSystemdUnitProbe
+	oldProc := panelListenerProcessDetector
+	panelSystemdUnitProbe = func(string) (systemdunit.Status, bool) { return systemdunit.Status{}, false }
+	panelListenerProcessDetector = func() string { return "" }
+	t.Cleanup(func() {
 		panelSystemdUnitProbe = oldProbe
 		panelListenerProcessDetector = oldProc
 	})
-	return tmp
+}
+
+// stubNoExternalTools makes every command lookup fail, so the panel status's
+// Lua-guard probe runs nothing on the host (no Lua interpreter, no live
+// `angie -t` / `openresty -t` against a dev box's real edge config). For tests
+// that assert on routing or priority, not on the guard.
+func stubNoExternalTools(t *testing.T) {
+	t.Helper()
+	old := lookPath
+	lookPath = func(file string) (string, error) { return "", exec.ErrNotFound }
+	t.Cleanup(func() { lookPath = old })
 }
 
 func TestPanelStatusSuppressesMissingSelftestHookWhenDecisionEndpointOK(t *testing.T) {
