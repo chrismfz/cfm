@@ -129,7 +129,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
 ./scripts/tests/check_package_lua_delivery.sh    # Lua ships ONLY as /var/lib/cfm/lua/*, package-owned (see §5)
 ./scripts/tests/check_package_proxy_config_deploy.sh # upgrade tests new edge sidecars staged (-T, real nginx); a failed run leaves the live dir untouched
-./scripts/tests/check_edge_listen_v6.sh          # edge IPv6 listen: script <-> conf ports/glob includes, decision (auto/on/off), deploy hook
+./scripts/tests/check_edge_listen_v6.sh          # edge IPv6 listen: script <-> conf ports/glob includes, the automatic decision + kill switch, deploy hook
 ./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments + build-dated top %changelog entry (see §5)
 ./scripts/tests/check_site_cache_config.sh       # Site Cache bypass-by-default: every proxy_cache location gated on $cfm_cache_skip (see §6)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
@@ -465,9 +465,10 @@ family/rule arming table and the decision records:
   only) and decided before every edge start by `cfm-edge-listen-v6.sh`
   (`docs/edge-ipv6.md`; `check_edge_listen_v6.sh` pins the includes). An
   IPv6 origin hop binds `::1`, so the origin must trust `::1` too: without it
-  every IPv6 visitor is localhost to the origin, which is why `auto` checks
-  `cfm realip` before it listens. `EDGE_LISTEN_V6` stays `off` by default
-  until the IPv6 hop is verified on a real IPv6 node (ROADMAP §9c).
+  every IPv6 visitor is localhost to the origin, which is why the script asks
+  `cfm realip` (which requires ::1 as soon as the host can do IPv6) before it
+  writes the files. No knob turns it on; `EDGE_LISTEN_V6 = off` is only a kill
+  switch.
 - **A connection is NAT'd once, by the first nat chain that rewrites it.**
   Imunify360 DNATs its sets (Cloudflare's ranges among them) to WebShield at
   -100, ahead of CFM's -99 default web redirect, so Cloudflare visitors
@@ -727,7 +728,7 @@ cPanel — every rule here exists because of that. Design + as-built:
 | Packaging: verifying an rpm change in an EL container | `docs/packaging.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 | Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
-| Edge IPv6 listen (`EDGE_LISTEN_V6`; generated listen files, decided before every edge start) | `docs/edge-ipv6.md` |
+| Edge IPv6 listen (automatic; generated listen files decided before every edge start; kill switch `EDGE_LISTEN_V6 = off`) | `docs/edge-ipv6.md` |
 | ClamAV upload scanning (scope, inline mode, signature excludes) | `docs/clamav.md` |
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |
 | Mail abuse findings (hacked site / contact form, mailbox spike, hijacked mailbox → detection_history) | `docs/mail-abuse.md` |

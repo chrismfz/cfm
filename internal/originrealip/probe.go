@@ -65,10 +65,12 @@ type Probe struct {
 	Servers          int `json:"servers,omitempty"`
 	UntrustedServers int `json:"untrusted_servers,omitempty"`
 
-	// EdgeIPv6: the edge also listens on IPv6 (scripts/cfm-edge-listen-v6.sh
-	// wrote its listen files), so an IPv6 visitor's hop reaches the origin from
-	// ::1, and Trusted requires ::1 to be trusted as well as 127.0.0.1.
-	EdgeIPv6 bool `json:"edge_ipv6,omitempty"`
+	// EdgeIPv6: the edge listens on IPv6 (scripts/cfm-edge-listen-v6.sh wrote
+	// its listen files: EdgeIPv6Listening), or will as soon as the origin
+	// trusts ::1 (the host can do IPv6). An IPv6 visitor's hop reaches the
+	// origin from ::1, so Trusted requires ::1 as well as 127.0.0.1.
+	EdgeIPv6          bool `json:"edge_ipv6,omitempty"`
+	EdgeIPv6Listening bool `json:"edge_ipv6_listening,omitempty"`
 
 	ng *nginxVerdict // nginx: what the plan needs
 
@@ -107,12 +109,15 @@ type layout struct {
 	// edgeV6Files: the edge's IPv6 listen files (scripts/cfm-edge-listen-v6.sh);
 	// any of them present means the edge listens on IPv6.
 	edgeV6Files []string
-	// cfmConf: CFM's cfm.conf. EDGE_LISTEN_V6 = auto / on there means the
-	// operator wants the edge on IPv6, so the ::1 trust is required before the
-	// files exist: the script asks `cfm realip` before it writes them, and
-	// `cfm realip fix` must write the ::1 trust then, not answer "already
-	// trusted" on a 127.0.0.1-only origin and leave auto unable to turn on.
-	cfmConf string
+	// The edge listens on IPv6 by itself wherever the host can
+	// (scripts/cfm-edge-listen-v6.sh), but only once the origin trusts ::1.
+	// So the ::1 trust is required as soon as the host CAN (kernel IPv6, the
+	// origin listening on IPv6 on 80 and 443), before any listen file exists:
+	// the script asks `cfm realip` before it writes them, and `cfm realip fix`
+	// must then write the ::1 trust instead of answering "already trusted" on
+	// a 127.0.0.1-only origin, which would leave the edge on IPv4 for good.
+	// cfmConf: EDGE_LISTEN_V6 = off there (the kill switch) turns it off.
+	cfmConf, procIfInet6, procTCP6 string
 
 	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
 	lsMarkers, apMarkers, ngMarkers      []string // origin install markers
@@ -169,17 +174,23 @@ var system = layout{
 		"/etc/angie/cfm-listen-v6-http.conf",
 		"/etc/angie/cfm-listen-v6-https.conf",
 	},
-	cfmConf: "/etc/cfm/cfm.conf",
+	cfmConf:     "/etc/cfm/cfm.conf",
+	procIfInet6: "/proc/net/if_inet6",
+	procTCP6:    "/proc/net/tcp6",
 }
 
-// edgeIPv6: the edge listens on IPv6 (its listen files exist), or the operator
-// asked for it (EDGE_LISTEN_V6 = auto / on in cfm.conf; read like
-// scripts/cfm-edge-listen-v6.sh: last uncommented line wins, an inline ; or #
-// comment and quotes stripped, case-insensitive).
+// edgeIPv6: the edge listens on IPv6 (its listen files exist), or it would as
+// soon as the origin trusts ::1 (hostCanIPv6, unless the kill switch is set).
 func (l layout) edgeIPv6() bool {
-	if l.anyExists(l.edgeV6Files) {
-		return true
-	}
+	return l.edgeListensIPv6() || (!l.edgeIPv6Off() && l.hostCanIPv6())
+}
+
+func (l layout) edgeListensIPv6() bool { return l.anyExists(l.edgeV6Files) }
+
+// edgeIPv6Off: EDGE_LISTEN_V6 = off (or no / false / 0 / disabled) in
+// cfm.conf, read like scripts/cfm-edge-listen-v6.sh: last uncommented line
+// wins, an inline ; or # comment and quotes stripped, case-insensitive.
+func (l layout) edgeIPv6Off() bool {
 	if l.cfmConf == "" {
 		return false
 	}
@@ -189,19 +200,72 @@ func (l layout) edgeIPv6() bool {
 	}
 	mode := ""
 	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		k, v, ok := strings.Cut(line, "=")
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if !ok || strings.TrimSpace(k) != "EDGE_LISTEN_V6" {
 			continue
 		}
 		if i := strings.IndexAny(v, ";#"); i >= 0 {
 			v = v[:i]
 		}
-		v = strings.TrimSpace(v)
-		v = strings.Trim(v, `"'`)
-		mode = strings.ToLower(strings.TrimSpace(v))
+		mode = strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"'`)))
 	}
-	return mode == "auto" || mode == "on"
+	switch mode {
+	case "off", "no", "false", "0", "disable", "disabled":
+		return true
+	}
+	return false
+}
+
+// hostCanIPv6: the host has a global IPv6 address and something listens on a
+// global IPv6 address (not ::1, v4-mapped or link-local) on both 80 and 443, read from
+// /proc/net/tcp6 (state 0A = LISTEN; addresses in the kernel's per-word host
+// byte order, so ::1 reads 00000000000000000000000001000000 on x86).
+func (l layout) hostCanIPv6() bool {
+	if l.procIfInet6 == "" || l.procTCP6 == "" {
+		return false
+	}
+	// A global IPv6 address on an interface (scope 00): the stack alone is
+	// not enough (earth, mars: if_inet6 present but empty, the origin on
+	// [::] all the same, and no IPv6 visitor can reach the node).
+	ifs, err := os.ReadFile(l.fs(l.procIfInet6))
+	if err != nil {
+		return false
+	}
+	global := false
+	for _, line := range strings.Split(string(ifs), "\n") {
+		if f := strings.Fields(line); len(f) >= 4 && f[3] == "00" {
+			global = true
+			break
+		}
+	}
+	if !global {
+		return false
+	}
+	b, err := os.ReadFile(l.fs(l.procTCP6))
+	if err != nil {
+		return false
+	}
+	ports := map[uint64]bool{}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[3] != "0A" {
+			continue
+		}
+		addr, port, ok := strings.Cut(f[1], ":")
+		if !ok || len(addr) != 32 {
+			continue
+		}
+		addr = strings.ToUpper(addr)
+		// ::1, v4-mapped (::ffff:a.b.c.d) and link-local (fe80::/10) serve no
+		// global IPv6 address.
+		if addr == "00000000000000000000000001000000" || strings.HasPrefix(addr, "0000000000000000FFFF0000") || strings.HasPrefix(addr, "000080FE") {
+			continue
+		}
+		if p, err := strconv.ParseUint(port, 16, 16); err == nil {
+			ports[p] = true
+		}
+	}
+	return ports[80] && ports[443]
 }
 
 // fs maps a logical path to where it is on disk.
@@ -266,7 +330,7 @@ func (l layout) probe(upstream string) Probe {
 		// The edge listens on IPv6 too: an IPv6 visitor's hop comes from ::1,
 		// so the same trust has to hold for ::1. Same reading, second address;
 		// the verdict is trusted only when both are.
-		p.EdgeIPv6 = true
+		p.EdgeIPv6, p.EdgeIPv6Listening = true, l.edgeListensIPv6()
 		if p.Trusted {
 			l6 := l
 			l6.loopIP = "::1"

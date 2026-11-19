@@ -3,6 +3,7 @@ package originrealip
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -980,36 +981,81 @@ func TestEdgeIPv6NginxOwnListCarriesTheV6Verdict(t *testing.T) {
 	}
 }
 
-// EDGE_LISTEN_V6 = auto / on in cfm.conf counts as the edge listening on IPv6
-// before any listen file exists: the script asks `cfm realip` before it writes
-// them, and `cfm realip fix` must then write the ::1 trust instead of answering
-// "already trusted" on a 127.0.0.1-only origin (auto could never turn on).
-func TestEdgeIPv6IntentFromCfmConf(t *testing.T) {
-	l, r := cpanelHost(t)
-	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
-		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+// tcp6Line is one /proc/net/tcp6 row: addr in the kernel's text form, port, state.
+func tcp6Line(i int, addr string, port int, st string) string {
+	return fmt.Sprintf("   %d: %s:%04X 00000000000000000000000000000000:0000 %s 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0\n", i, addr, port, st)
+}
+
+const tcp6Head = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+
+// The edge listens on IPv6 by itself wherever the host can, once the origin
+// trusts ::1. So the ::1 trust is required as soon as the host CAN (kernel
+// IPv6 + an origin on a global IPv6 address on 80 and 443), before any listen
+// file exists: otherwise `cfm realip fix` answers "already trusted" on a
+// 127.0.0.1-only origin (Imunify's i360.remoteip.conf) and the edge never
+// turns IPv6 on. EDGE_LISTEN_V6 = off in cfm.conf is the kill switch.
+func TestEdgeIPv6HostCapability(t *testing.T) {
+	any6 := "00000000000000000000000000000000"
+	ifGlobal := "fe80000000000000e6434bfffe54ef2f 05 40 20 80     eno4\n2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4\n00000000000000000000000000000001 01 80 10 80       lo\n"
+	ifNoGlobal := "fe80000000000000e6434bfffe54ef2f 05 40 20 80     eno4\n00000000000000000000000000000001 01 80 10 80       lo\n"
+	lo6 := "00000000000000000000000001000000"
+	mapped := "0000000000000000FFFF00000100007F"
+	global := "804214A2010001005A9208FE01F23CFE"
 	for _, c := range []struct {
-		conf string
-		v6   bool
+		name    string
+		inet6   bool
+		ifs     string
+		rows    string
+		conf    string
+		capable bool
 	}{
-		{"", false},
-		{"EDGE_LISTEN_V6 = off\n", false},
-		{"#EDGE_LISTEN_V6 = auto\n", false},
-		{"EDGE_LISTEN_V6 = auto\n", true},
-		{"EDGE_LISTEN_V6=\"ON\" ; note\n", true},
-		{"EDGE_LISTEN_V6 = auto\nEDGE_LISTEN_V6 = off # later wins\n", false},
-		{"EDGE_LISTEN_V6 = yes\n", false},
+		{"no IPv6 stack", false, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"IPv6 stack but no global address (earth)", true, "", tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"link-local and ::1 only", true, ifNoGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"[::]:80 + [::]:443", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", true},
+		{"a global address on 443", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, global, 443, "0A"), "", true},
+		{"80 only", true, ifGlobal, tcp6Line(0, any6, 80, "0A"), "", false},
+		{"::1 and v4-mapped do not count", true, ifGlobal, tcp6Line(0, lo6, 80, "0A") + tcp6Line(1, mapped, 443, "0A") + tcp6Line(2, any6, 443, "0A"), "", false},
+		{"link-local does not count", true, ifGlobal, tcp6Line(0, "000080FE00000000FF4B43E62FEF54FE", 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"not LISTEN", true, ifGlobal, tcp6Line(0, any6, 80, "01") + tcp6Line(1, any6, 443, "0A"), "", false},
+		{"other ports", true, ifGlobal, tcp6Line(0, any6, 8080, "0A") + tcp6Line(1, any6, 4430, "0A"), "", false},
+		{"kill switch", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\n", false},
+		{"kill switch, quoted + comment", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6=\"No\" ; note\n", false},
+		{"commented kill switch", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "# EDGE_LISTEN_V6 = off\n", true},
+		{"later line wins", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = off\nEDGE_LISTEN_V6 = auto\n", true},
 	} {
-		put(t, r, "etc/cfm/cfm.conf", c.conf)
-		p := l.probe("httpd")
-		if p.EdgeIPv6 != c.v6 || p.Trusted == c.v6 {
-			t.Fatalf("cfm.conf %q: %+v", c.conf, p)
-		}
-		if c.v6 {
-			if pl := l.plan(p); pl.Action != ActionWrite || !strings.Contains(pl.Content, "::1") {
-				t.Fatalf("cfm.conf %q: plan = %+v, want the ::1 trust written", c.conf, pl)
+		t.Run(c.name, func(t *testing.T) {
+			l, r := cpanelHost(t)
+			put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
+				"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+			if c.inet6 {
+				put(t, r, "proc/net/if_inet6", c.ifs)
 			}
-		}
+			put(t, r, "proc/net/tcp6", tcp6Head+c.rows)
+			if c.conf != "" {
+				put(t, r, "etc/cfm/cfm.conf", c.conf)
+			}
+			p := l.probe("httpd")
+			if p.EdgeIPv6 != c.capable || p.Trusted == c.capable || p.EdgeIPv6Listening {
+				t.Fatalf("%+v", p)
+			}
+			if !c.capable {
+				return
+			}
+			if line := StatusLine(p, true); !strings.Contains(line, "edge stays on IPv4") {
+				t.Errorf("verdict = %q", line)
+			}
+			pl := l.plan(p)
+			if pl.Action != ActionWrite || !strings.Contains(pl.Content, "::1") {
+				t.Fatalf("plan = %+v, want the ::1 trust written", pl)
+			}
+			if err := os.WriteFile(pl.Path, []byte(pl.Content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if p := l.probe("httpd"); !p.Trusted || !p.EdgeIPv6 {
+				t.Fatalf("after the fix: %+v", p)
+			}
+		})
 	}
 }
 

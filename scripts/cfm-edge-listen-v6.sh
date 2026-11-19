@@ -16,24 +16,24 @@
 # (cfm-edge-listen-v6.service, pulled in by a drop-in on openresty.service /
 # angie.service) and from the package deploy, and decides from the host:
 #
-#   [cfm.conf] EDGE_LISTEN_V6 = off (default) | auto | on
-#     off   never listen on IPv6 (files removed)
-#     auto  listen only when ALL of these hold:
-#             - the kernel has an IPv6 stack (/proc/net/if_inet6);
-#             - nothing but the edge holds [::]:9080 / [::]:9043 (tcp) or
-#               [::]:9043 (udp) — `nginx -t` does not bind, so a taken port
-#               would pass the test and then fail the edge's START;
-#             - the origin listens on IPv6 on both 80 and 443 (ss): an IPv6
-#               visitor's hop goes to the IPv6 address it came to;
-#             - `cfm realip` (asked before the files are written; the mode in
-#               cfm.conf alone makes it require ::1) says the origin trusts
-#               the edge for the IPv6 hop
-#               too: that hop comes from ::1, and an origin trusting only
-#               127.0.0.1 would see every IPv6 visitor as ::1, i.e. as
-#               localhost (`Require local`, apps that trust localhost, one
-#               login-limiter bucket for all of them).
-#     on    the kernel and port checks only; an origin / trust gap is logged
-#           as a warning (the operator's explicit choice).
+# There is no setting to turn it on: it listens on IPv6 by itself where ALL of
+# these hold, and stays on IPv4 otherwise:
+#   - the host has a global IPv6 address (/proc/net/if_inet6, scope 00);
+#   - nothing but the edge holds [::]:9080 / [::]:9043 (tcp) or [::]:9043
+#     (udp) — `nginx -t` does not bind, so a taken port would pass the test
+#     and then fail the edge's START;
+#   - the origin listens on IPv6 on both 80 and 443 (ss): an IPv6 visitor's
+#     hop goes to the IPv6 address it came to;
+#   - `cfm realip` (asked before the files are written; it requires ::1 as
+#     soon as the host can do IPv6) says the origin trusts the edge for the
+#     IPv6 hop too: that hop comes from ::1, and an origin trusting only
+#     127.0.0.1 would see every IPv6 visitor as ::1, i.e. as localhost
+#     (`Require local`, apps that trust localhost, one login-limiter bucket
+#     for all of them). `cfm realip fix` writes it (Apache / nginx).
+#
+# Kill switch, for an emergency only: `EDGE_LISTEN_V6 = off` in cfm.conf
+# (also no / false / 0 / disabled) keeps every edge on IPv4. It is commented
+# out in the reference cfm.conf; nothing needs it to work.
 #
 # After a change it runs the engine's own config test and, if that fails with
 # the IPv6 files in place, removes them again. Files are removed too when the
@@ -76,9 +76,9 @@ V6_HTTPS_FILE=cfm-listen-v6-https.conf
 
 log() { echo "CFM edge IPv6 listen: $*"; }
 
-# mode: EDGE_LISTEN_V6 from cfm.conf, the last uncommented line wins; absent =
-# off. A value that is not off/auto/on reads as off (an unknown never turns a
-# listen on).
+# mode: "off" when the kill switch EDGE_LISTEN_V6 = off (no / false / 0 /
+# disable / disabled) is the last uncommented line of cfm.conf, else "auto".
+# Same reading as internal/originrealip edgeIPv6Off.
 mode() {
     m_val=""
     if [ -r "$CFM_CONF" ]; then
@@ -87,20 +87,18 @@ mode() {
             tail -n 1 | tr 'A-Z' 'a-z')
     fi
     case $m_val in
-        "") echo off ;;
-        off | auto | on) echo "$m_val" ;;
-        *)
-            log "WARNING: EDGE_LISTEN_V6 = \"$m_val\" in $CFM_CONF is not off/auto/on; treating it as off" >&2
-            echo off
-            ;;
+        off | no | false | 0 | disable | disabled) echo off ;;
+        *) echo auto ;;
     esac
 }
 
-# kernel_has_v6: the IPv6 stack is loaded (the file is absent with
-# ipv6.disable=1). net.ipv6.conf.*.disable_ipv6=1 keeps the file and a
-# [::] bind still works, so it is not a reason to skip.
+# kernel_has_v6: the host has a global IPv6 address (scope 00 in
+# /proc/net/if_inet6; the file is absent with ipv6.disable=1, and empty with
+# disable_ipv6=1 everywhere, as on earth). The stack alone is not enough:
+# without a global address no IPv6 visitor can reach the node, and
+# internal/originrealip hostCanIPv6 reads it the same way.
 kernel_has_v6() {
-    [ -e "$CFM_V6_PROC_FILE" ]
+    [ -r "$CFM_V6_PROC_FILE" ] && awk '$4 == "00" { f = 1 } END { exit f ? 0 : 1 }' "$CFM_V6_PROC_FILE"
 }
 
 # ss_v6_listeners PROTO PORT: from `ss -l<n><t|u>p`, print the owner of every
@@ -158,9 +156,10 @@ edge_port_taken() {
 
 # realip_v6_trusted: `cfm realip` says the origin trusts the edge for the IPv6
 # hop too. It is asked BEFORE the files are written (so no reload can catch the
-# edge on IPv6 with an untrusting origin): EDGE_LISTEN_V6 = auto / on in
-# cfm.conf already makes it require ::1 (internal/originrealip edgeIPv6), and
-# its JSON then says "edge_ipv6":true. A verdict without that key is from a
+# edge on IPv6 with an untrusting origin): a host that can do IPv6 already
+# makes it require ::1 (internal/originrealip edgeIPv6: kernel IPv6 + the
+# origin on IPv6 on 80 and 443, unless the kill switch is set), and its JSON
+# then says "edge_ipv6":true. A verdict without that key is from a
 # cfm that does not know about the IPv6 hop: no verdict. 0 yes, 1 no, 2
 # cannot tell.
 realip_v6_trusted() {
@@ -183,36 +182,32 @@ realip_v6_trusted() {
 want_v6() {
     case $1 in
         off)
-            echo "EDGE_LISTEN_V6 = off"
+            echo "kill switch EDGE_LISTEN_V6 = off in $CFM_CONF"
             return 1
             ;;
     esac
     if ! kernel_has_v6; then
-        echo "no IPv6 stack in the kernel ($CFM_V6_PROC_FILE absent)"
+        echo "no global IPv6 address on this host ($CFM_V6_PROC_FILE)"
         return 1
     fi
     if wv_taken=$(edge_port_taken); then
         echo "$wv_taken"
         return 1
     fi
-    if [ "$1" = on ]; then
-        echo "EDGE_LISTEN_V6 = on, the kernel has IPv6 and the edge's IPv6 ports are free"
-        return 0
-    fi
     for wv_port in 80 443; do
         origin_has_v6 "$wv_port"
         case $? in
             1)
-                echo "auto: the origin does not listen on IPv6 on $wv_port"
+                echo "the origin does not listen on IPv6 on $wv_port"
                 return 3
                 ;;
             2)
-                echo "auto: ss failed, cannot tell whether the origin listens on IPv6"
+                echo "ss failed, cannot tell whether the origin listens on IPv6"
                 return 1
                 ;;
         esac
     done
-    echo "auto: the kernel has IPv6, the ports are free and the origin listens on IPv6 on 80 and 443"
+    echo "the kernel has IPv6, the ports are free and the origin listens on IPv6 on 80 and 443"
     return 0
 }
 
@@ -310,20 +305,12 @@ render_engine() {
     case $? in
         0) ;;
         1)
-            if [ "$re_mode" = on ]; then
-                log "WARNING: $re_name: EDGE_LISTEN_V6 = on, but the origin does not trust ::1 (cfm realip): every IPv6 visitor reaches it as ::1. Run: cfm realip fix"
-            else
-                drop "$re_name" "$re_dir" "the origin does not trust the edge's IPv6 hop from ::1 (cfm realip); run: cfm realip fix"
-                return 0
-            fi
+            drop "$re_name" "$re_dir" "the origin does not trust the edge's IPv6 hop from ::1 (cfm realip); run: cfm realip fix"
+            return 0
             ;;
         *)
-            if [ "$re_mode" = on ]; then
-                log "WARNING: $re_name: EDGE_LISTEN_V6 = on, but $CFM_BIN realip could not tell whether the origin trusts ::1"
-            else
-                drop "$re_name" "$re_dir" "cannot tell whether the origin trusts ::1 ($CFM_BIN realip --json gave no IPv6-aware verdict)"
-                return 0
-            fi
+            drop "$re_name" "$re_dir" "cannot tell whether the origin trusts ::1 ($CFM_BIN realip --json gave no IPv6-aware verdict)"
+            return 0
             ;;
     esac
 

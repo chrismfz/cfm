@@ -228,21 +228,19 @@ Reference: `docs/cfm-lsm.md`.
 
 ## 9c. Edge IPv6
 
-The edge can listen on IPv6 (`EDGE_LISTEN_V6`, default `off`;
-`docs/edge-ipv6.md`), and the origin hop brackets the address and binds
-`::1`.
+The edge listens on IPv6 by itself where the host can and the origin trusts
+`::1` (`docs/edge-ipv6.md`; kill switch `EDGE_LISTEN_V6 = off`), and the
+origin hop brackets the address and binds `::1`.
 
-- **Verify end to end on a real IPv6 node, then make `auto` the default** —
-  [next]. The origin hop itself is verified (speedhost, 2026-11-19, a scratch
-  OpenResty 1.31.8.1 beside the live edge): the direct URL, the keepalive
-  balancer `set_current_peer("[v6]")`, the static literal line and plain
-  HTTP all reached Apache at `[v6]:443/80` from `::1` (200), and the old
-  server-level `proxy_bind 127.0.0.1` failed exactly as predicted
-  (`bind(127.0.0.1) failed (22: Invalid argument)`). Still open: Angie, and
-  the real path (an external IPv6 client → DNAT → the live edge with the
-  files rendered) on one node with `auto`; then flip the default in the
-  script and `configs/cfm.conf`. A failed hop is a 502 the browser does not
-  retry on IPv4, which is why the default waits.
+- **Watch the first real IPv6 traffic through the live edge** — [track].
+  The origin hop is verified with a scratch edge on speedhost (OpenResty
+  1.31.8.1) and qualityweb (Angie 1.12.4), 2026-11-19: all four origin paths
+  reached Apache from `::1` (200), and the old server-level
+  `proxy_bind 127.0.0.1` failed as predicted (EINVAL). Not yet seen: an
+  external IPv6 client through the DNAT into the live edge with the files
+  rendered. A failed hop would be a 502 the browser does not retry on IPv4:
+  check `edge_error_tail` for `bind(` / `set_current_peer` on the first nodes
+  that turn IPv6 on.
 - **Per-IP counters and bans by /64** — [idea]. Every detector keys an IPv6
   client on its full address, so a client rotating inside its /64 never
   accumulates. Already true behind Cloudflare (own IPv6 address at the edge).

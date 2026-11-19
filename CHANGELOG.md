@@ -21,36 +21,40 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
-- **The edge can listen on IPv6 (`EDGE_LISTEN_V6`, off by default).** The web
-  DNAT redirect has always caught IPv6 (`table inet`), but the edge listened
-  on IPv4 only, so an IPv6 visitor's connection to 80/443 was refused:
-  browsers fell back to IPv4, IPv6-only clients failed. The two listener
-  `server{}` blocks now include generated `cfm-listen-v6-http.conf` /
+- **The edge listens on IPv6 by itself where the host can.** The web DNAT
+  redirect has always caught IPv6 (`table inet`), but the edge listened on
+  IPv4 only, so an IPv6 visitor's connection to 80/443 was refused: browsers
+  fell back to IPv4, IPv6-only clients failed. The two listener `server{}`
+  blocks now include generated `cfm-listen-v6-http.conf` /
   `cfm-listen-v6-https.conf` (`[::]:9080`, `[::]:9043` ssl + quic) through a
   glob, so an absent file means IPv4 only. `scripts/cfm-edge-listen-v6.sh`
-  writes or removes them per `EDGE_LISTEN_V6` in `cfm.conf`: `off` (default),
-  `auto` (the kernel has IPv6, nothing else holds the edge's IPv6 ports, the
-  origin listens on IPv6 on 80 and 443, and `cfm realip` says the origin
-  trusts the edge's IPv6 hop from `::1`; without that trust every IPv6
-  visitor would reach the origin as localhost), or `on`. It runs on every
+  writes them, with nothing to configure, only when the kernel has IPv6,
+  nothing else holds the edge's IPv6 ports, the origin listens on IPv6 on 80
+  and 443, the origin trusts the edge's IPv6 hop from `::1` (below), the live
+  main config includes them and the engine's config test passes; otherwise
+  the edge stays on IPv4 and the script says why (`status`). It runs on every
   package upgrade and, through `cfm-edge-listen-v6.service` and a drop-in on
   `openresty.service` / `angie.service`, before every edge start, ahead of
   the edge's own config test, so a host without IPv6 never fails to start on
-  it. A change applies at the edge's next start or reload, never by itself.
-  Off by default until the IPv6 origin hop is verified on a real IPv6 node: if
-  it failed, an IPv6 visitor would get a 502, which (unlike today's refused
-  connection) does not make a browser fall back to IPv4. Package removal
-  removes the unit, the drop-ins and the files. The panel ports stay IPv4.
-  `docs/edge-ipv6.md`.
-- **`cfm realip` requires `::1` trust when the edge listens on IPv6.** An
-  IPv6 visitor's origin hop comes from `::1`; an origin trusting only
-  127.0.0.1 logs `::1` for every IPv6 visitor, and the check now says so
-  (`edge_ipv6` in `--json`). The requirement starts as soon as
-  `EDGE_LISTEN_V6` is `auto` / `on`, before the edge listens, so
+  it. A change applies at the edge's next start or reload, never by itself:
+  on our nodes with IPv6 (rigel, titan, speedhost, qualityweb) the edge turns
+  IPv6 on at its next restart where the origin trusts `::1`; none has an
+  AAAA record pointing at it today. Verified on speedhost (OpenResty) and
+  qualityweb (Angie) with a scratch edge. Kill switch: `EDGE_LISTEN_V6 = off`
+  in `cfm.conf` (commented out in the reference file), then restart the
+  edge. Package removal removes the unit, the drop-ins and the files. The
+  panel ports stay IPv4. `docs/edge-ipv6.md`.
+- **`cfm realip` requires `::1` trust where the edge listens, or can listen,
+  on IPv6.** An IPv6 visitor's origin hop comes from `::1`; an origin
+  trusting only 127.0.0.1 would see every IPv6 visitor as `::1`, i.e. as
+  localhost. The requirement starts as soon as the host can do IPv6 (kernel
+  IPv6 + the origin on IPv6 on 80 and 443), before the edge listens, so
   `cfm realip fix` writes the `::1` trust for Apache and nginx even where the
   127.0.0.1 trust came from a file CFM did not write (Imunify's
   `i360.remoteip.conf`); LiteSpeed needs `::1T` in its allow list by hand.
-  Nothing changes while `EDGE_LISTEN_V6` is `off` (the default).
+  On such a host with an origin trusting 127.0.0.1 only, `cfm realip`,
+  `cfm health` and `edge_health` now warn ("the edge stays on IPv4 and IPv6
+  visitors are refused"), `edge_ipv6` / `edge_ipv6_listening` in `--json`.
 
 ### Fixed
 - **Edge: the origin hop works for an IPv6 destination.** It failed every
