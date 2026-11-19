@@ -39,9 +39,11 @@ end
 -- is_v6_linklocal: fe80::/10 (first hextet fe80..febf). NEVER self: once the
 -- edge listens on IPv6 (docs/edge-ipv6.md), a host on the same L2 segment (a
 -- provider VLAN) can connect to the node's global address from any fe80::
--- address it likes, and a self bypass skips WAF, challenge and edge bans. The
--- node's own requests come from ::1 or its global addresses. (Go's self-IP set,
--- cfm_self_ips.lua, can list the node's own fe80:: addresses: refused too.)
+-- address it likes, and a self bypass (cfm.lua Step 0a) skips the WAF and the
+-- challenge. The node's own requests come from ::1 or its global addresses.
+-- (Go's self-IP set, cfm_self_ips.lua, can list the node's own fe80::
+-- addresses: refused too, and so is an IGNORE_NETS entry covering fe80::/10,
+-- by design: checked first.)
 local function is_v6_linklocal(ip)
   return ip:match("^fe[89ab]%x:") ~= nil
 end

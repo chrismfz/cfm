@@ -23,11 +23,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ### Security
 - **IPv6 link-local clients (`fe80::/10`) are never self at the edge.**
   `cfm_selfip.lua` counted them as the node's own, so a request from one
-  skipped WAF, challenge and edge bans (cfm.lua Step 0a). Harmless while the
+  skipped the WAF and the challenge (cfm.lua Step 0a). Harmless while the
   edge listened on IPv4 only; with IPv6 listening, a host on the same L2
   segment (a provider VLAN) could connect from any `fe80::` address it likes.
-  Now refused as self, the node's own `fe80::` addresses included; loopback,
-  `169.254/16` and the node's global addresses are unchanged.
+  Now refused as self, the node's own `fe80::` addresses included, and an
+  `IGNORE_NETS` entry covering `fe80::/10` is ignored by design; loopback,
+  `169.254/16` and the node's global addresses are unchanged (the panel
+  edge's fallback, used without `cfm_selfip`, agrees).
 
 ### Added
 - **The edge can listen on IPv6 (`EDGE_LISTEN_V6 = on`; off by default until
@@ -47,20 +49,29 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   package upgrade and, through `cfm-edge-listen-v6.service` and a drop-in on
   `openresty.service` / `angie.service`, before every edge start, ahead of
   the edge's own config test, so a host without IPv6 never fails to start on
-  it. A port counts as the edge's only when a ROOT process named nginx /
-  openresty / angie holds it: a tenant process that names itself nginx on
-  `[::]:9080` keeps IPv6 off instead of making the edge's start fail. A change applies at the edge's next start or reload, never by itself.
+  it. The edge's IPv6 ports are judged from the kernel's socket owner
+  (`/proc/net/tcp6`, `udp6`), never from the process names `ss` prints: any
+  socket on them not owned by root (a tenant's, `[::1]` included) keeps IPv6
+  off instead of making the edge's start fail. A `render` that writes the
+  files reloads a running edge at once and checks it listens on IPv6, removing
+  them and reloading back if not; removing files applies at the next start or
+  reload.
   Off by default for now: per-IP defences key on the full IPv6 address, so a
   direct IPv6 client rotating inside its /64 would evade them, while an edge
   without IPv6 refuses it and the browser falls back to IPv4, where they
   hold; once they group IPv6 by /64 the default becomes automatic (one switch
-  in the script and one in Go, pinned equal) and the key is not needed.
-  Nothing changes on a node that does not set the key. Verified on speedhost (OpenResty) and
+  in the script and one in Go, pinned equal) and the key is not needed. The
+  script and `cfm realip` read the key the same way (a shared fixture). On a
+  node that does not set the key the edge stays on IPv4; the unit, the
+  drop-ins and the include lines are installed everywhere and the script runs
+  before every edge start. Verified on speedhost (OpenResty) and
   qualityweb (Angie) with a scratch edge. To turn it on: uncomment
   `EDGE_LISTEN_V6 = on` in `cfm.conf`, run `cfm realip fix`, restart the
   edge. Before a start, files a render approved are kept when only
   readiness is missing at boot (no global address yet, the origin not up
-  yet), so a reboot does not silently drop IPv6. Behaviour change: a domain
+  yet, `cfm realip` unable to give a verdict), so a reboot does not silently
+  drop IPv6; a definite "the origin does not trust `::1`" removes them.
+  Behaviour change: a domain
   with an AAAA record whose vhost is not bound to that IPv6 address used to
   fall back to IPv4 (refused at the edge) and now gets the origin's default
   vhost over IPv6. Package removal removes the unit, the drop-ins and the
@@ -76,7 +87,7 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `i360.remoteip.conf`); LiteSpeed needs `::1T` in its allow list by hand.
   On such a host with an origin trusting 127.0.0.1 only, `cfm realip`,
   `cfm health` and `edge_health` now warn ("the edge does not listen on IPv6";
-  whats_wrong titles it "origin does not trust the edge"), `edge_ipv6` / `edge_ipv6_listening` in `--json`.
+  whats_wrong titles it "origin does not trust the edge's loopback"), `edge_ipv6` / `edge_ipv6_listening` in `--json`.
 
 ### Fixed
 - **Edge: the origin hop works for an IPv6 destination.** It failed every

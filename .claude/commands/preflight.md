@@ -31,7 +31,7 @@ relevant output and stop (don't keep going past a hard failure).
 16. `./scripts/tests/check_package_proxy_config_deploy.sh` (the package upgrade tests
    new edge sidecars staged; a failed run leaves the live dir untouched)
 17. `./scripts/tests/check_edge_listen_v6.sh` (edge IPv6 listen: script and confs
-   agree on ports and glob includes; the auto/on/off decision; the deploy hook)
+   agree on ports and glob includes; the EDGE_LISTEN_V6 decision (default off); the deploy hook)
 18. `./scripts/tests/check_rpm_spec_macros.sh`
 19. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
    every `proxy_cache` location gated on `$cfm_cache_skip`)

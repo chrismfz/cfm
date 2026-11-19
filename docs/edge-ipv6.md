@@ -32,7 +32,7 @@ origin is ready for it.
 | Piece | What it does |
 |---|---|
 | `configs/openresty.conf`, `configs/angie.conf` | each listener `server{}` includes `cfm-listen-v6-http.con[f]` / `cfm-listen-v6-https.con[f]` from the engine's conf dir (`/usr/local/openresty/nginx/conf`, `/etc/angie`). The glob makes an **absent file mean IPv4 only**, not a failed config test. |
-| `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. Never reloads the edge: a change applies at its next start or reload. |
+| `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. A `render` that writes the files reloads a running edge at once and checks (`/proc/net/tcp6`) that it listens on `[::]:9080` and `[::]:9043`; if not, it removes them and reloads back. Removing files, and `prestart`, never reload: that applies at the next start or reload. |
 | `cfm-edge-listen-v6.service` (`configs/`, installed to `/etc/systemd/system/`) | oneshot running the script (`prestart`) before every edge start; `TimeoutStartSec=60`. |
 | drop-in `openresty.service.d/cfm-listen-v6.conf`, `angie.service.d/cfm-listen-v6.conf` | `Wants=` + `After=` that unit, so it runs **before** the edge unit's own `ExecStartPre` config test (a drop-in `ExecStartPre` would run after it, too late). `Wants=`, not `Requires=`: the edge starts if the unit fails. |
 | `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`render`) after the new edge configs are deployed. The installers (`install-openresty.sh`, `install-angie.sh`) run it too, after `cfm realip fix`. |
@@ -44,13 +44,20 @@ otherwise (the script logs which one failed):
 
 0. `EDGE_LISTEN_V6` allows it: `on` / `yes` / `true` / `1` / `auto`; `off` /
    `no` / `false` / `0` / `disabled` and any unknown value forbid it; absent,
-   the default (off for now). Last uncommented line wins;
+   the default (off for now). Last uncommented line wins; an inline `;` / `#`
+   comment and one pair of matching quotes are stripped. The script and
+   `cfm realip` read it the same way: both run
+   `scripts/tests/fixtures/edge_listen_v6_mode.txt`;
 1. the host has a global IPv6 address (`/proc/net/if_inet6`, scope `00`;
    the stack alone is not enough: earth has it, empty, and no IPv6 visitor
    can reach it);
-2. nothing but the edge holds an IPv6 listener on tcp 9080 / 9043 or udp 9043
-   (`nginx -t` does not bind, so a taken port would pass the test and then
-   fail the edge's start, IPv4 included); an unknown owner counts as taken;
+2. no IPv6 socket on tcp 9080 / 9043 (listening) or udp 9043 is owned by
+   anyone but root (`nginx -t` does not bind, so a taken port would pass the
+   test and then fail the edge's start, IPv4 included). Read from the uid
+   column of `/proc/net/tcp6` / `udp6`, never from `ss`: `ss` prints process
+   names raw, so a tenant process can pose as root's nginx. Every address
+   counts, `[::1]` included (it fails the edge's `[::]` bind too); the edge's
+   master binds as root; an unreadable table counts as taken;
 3. the origin listens on IPv6 on both 80 and 443 (`ss`: `[::]`, a specific
    IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped), because an
    IPv6 visitor's hop goes to the IPv6 address it came to;
@@ -66,14 +73,15 @@ otherwise (the script logs which one failed):
 edge start) makes the same one, except that files a `render` already approved
 are **kept** when only readiness is missing, which at boot is common: no
 global IPv6 address yet (SLAAC, the network still coming up), the origin not
-seen on IPv6 yet (it can start after the edge), `cfm realip` unable to confirm
-the `::1` trust (it reads the origin before it runs). Otherwise a reboot would
-silently put the edge back on IPv4. The reasons that would break the start, or
-that the operator chose, always remove them: `EDGE_LISTEN_V6` not allowing it, no IPv6 stack at
-all, a taken port, `ss` failing, a main config without the include, a failed
-config test. A change on the origin side for good (trust removed, no more
-IPv6) keeps the edge's IPv6 until the next `render` (a package upgrade, or by
-hand); `cfm realip` warns meanwhile.
+seen on IPv6 yet (it can start after the edge), `cfm realip` giving no
+verdict. Otherwise a reboot would silently put the edge back on IPv4. The
+reasons that would break the start, or that the operator chose, always remove
+them: `EDGE_LISTEN_V6` not allowing it, no IPv6 stack at all, a taken port,
+`ss` failing, a main config without the include, a failed config test, and a
+definite "the origin does not trust `::1`" from `cfm realip` (every IPv6
+visitor would be localhost to the origin). An origin that stops listening on
+IPv6 for good keeps the edge's IPv6 until the next `render` (a package
+upgrade, or by hand).
 
 ```bash
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
@@ -86,7 +94,8 @@ and the files.
 **Turning it on and off on a node:** uncomment `EDGE_LISTEN_V6 = on` in
 `/etc/cfm/cfm.conf` (run `cfm realip fix` first), or set `off`; then
 **restart** the edge (a restart re-decides; a plain reload keeps the files),
-or run the script with `render` and reload.
+or run the script with `render` (it reloads a running edge itself when it
+writes the files).
 
 ## The origin's `::1` trust
 
@@ -106,7 +115,7 @@ apps that trust localhost, and one bucket for every login limiter. So:
   an origin whose 127.0.0.1 trust comes from a file CFM did not write
   (Imunify's `i360.remoteip.conf`, a hand-written one). The script never runs
   `fix` itself (it edits and reloads the origin), and `fix` does not render:
-  restart the edge after it (or run the script with `render` and reload).
+  restart the edge after it (or run the script with `render`).
 - LiteSpeed: `fix` only prints the step, `::1T` in its Access Control allow
   list (the `::1T` spelling is the analogue of `127.0.0.1T` and has not been
   tried on a real LiteSpeed yet). On rigel and titan the Apache RemoteIP trust

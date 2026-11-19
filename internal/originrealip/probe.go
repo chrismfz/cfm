@@ -209,10 +209,17 @@ func (l layout) edgeIPv6Wanted() bool {
 				if !ok || strings.TrimSpace(k) != "EDGE_LISTEN_V6" {
 					continue
 				}
+				// Cut at the first ; or #, trim whitespace (CR included), then
+				// strip ONE matching pair of quotes: the script's mode() reading
+				// (both run scripts/tests/fixtures/edge_listen_v6_mode.txt).
 				if i := strings.IndexAny(v, ";#"); i >= 0 {
 					v = v[:i]
 				}
-				mode = strings.ToLower(strings.TrimSpace(strings.Trim(strings.TrimSpace(v), `"'`)))
+				v = strings.TrimSpace(v)
+				if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+					v = v[1 : len(v)-1]
+				}
+				mode = strings.ToLower(v)
 			}
 		}
 	}

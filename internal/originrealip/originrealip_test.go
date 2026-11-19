@@ -1131,3 +1131,53 @@ func TestRealipJSONContractWithTheIPv6Script(t *testing.T) {
 		}
 	}
 }
+
+// scripts/cfm-edge-listen-v6.sh mode() and edgeIPv6Wanted read EDGE_LISTEN_V6
+// from the same fixture (check_edge_listen_v6.sh runs the script on it): a
+// value the two read differently would leave `cfm realip` demanding ::1 for an
+// edge that will never listen, or the reverse.
+func TestEdgeListenV6ModeFixture(t *testing.T) {
+	b, err := os.ReadFile("../../scripts/tests/fixtures/edge_listen_v6_mode.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		want, body, ok := strings.Cut(line, "\t")
+		if !ok {
+			t.Fatalf("bad fixture line %q", line)
+		}
+		content, err := strconv.Unquote(`"` + strings.ReplaceAll(body, `"`, `\"`) + `"`)
+		if err != nil {
+			// \" in the fixture is already escaped: unquote it as written.
+			content, err = strconv.Unquote(`"` + body + `"`)
+		}
+		if err != nil {
+			t.Fatalf("fixture %q: %v", body, err)
+		}
+		l, r := testLayout(t)
+		put(t, r, "etc/cfm/cfm.conf", content+"\n")
+		got := l.edgeIPv6Wanted()
+		var exp bool
+		switch want {
+		case "on":
+			exp = true
+		case "off":
+			exp = false
+		case "default":
+			exp = edgeIPv6Default
+		default:
+			t.Fatalf("fixture expectation %q", want)
+		}
+		if got != exp {
+			t.Errorf("EDGE_LISTEN_V6 from %q: got %v, want %v (%s)", content, got, exp, want)
+		}
+		n++
+	}
+	if n < 20 {
+		t.Fatalf("only %d fixture cases", n)
+	}
+}

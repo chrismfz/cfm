@@ -262,6 +262,12 @@ origin hop brackets the address and binds `::1`.
   swap the reference cfm.conf's commented `# EDGE_LISTEN_V6 = on` for
   `# EDGE_LISTEN_V6 = off` (check_edge_listen_v6.sh checks all three).
 
+- **The RFC1918 peer bypass at cfm.lua Step 0a** — [open]. Found while
+  closing the `fe80::` self bypass (2026-11-19): a direct (non-Cloudflare)
+  peer in 10/8, 172.16/12 or 192.168/16 skips WAF and challenge, so a host on
+  the same private L2 segment (a provider VLAN) can too. Pre-existing and
+  IPv4 only; it exists for private-network origins and proxies. Decide
+  whether to narrow it to the node's own networks or to an explicit list.
 - **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
   only on the fleet; the panel listeners stay IPv4.
 

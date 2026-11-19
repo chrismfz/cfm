@@ -8,10 +8,14 @@
 #    IPv6 file right after its listen lines, through a GLOB (an absent file
 #    must mean IPv4 only, not a failed config test), from the conf dir the
 #    script writes to for that engine.
-# 2. The decision, against a fake /proc/net/if_inet6, a fake ss and a fake
-#    engine: automatic by default, the kill switch, no IPv6 stack, origin not on IPv6
-#    (render removes, prestart keeps), a config test that fails with the files
-#    (removed again), no engine binary, ss forms, and the exit status (always 0).
+# 2. The decision, against a fake /proc/net/if_inet6, /proc/net/tcp6 + udp6,
+#    ss, systemctl and engine: the default (off until IPv6 /64 grouping) and
+#    EDGE_LISTEN_V6 (read as Go reads it: scripts/tests/fixtures/
+#    edge_listen_v6_mode.txt), no IPv6 stack, taken ports (by kernel uid),
+#    origin not on IPv6 (render removes, prestart keeps), the ::1 trust, a
+#    config test that fails with the files (removed again), the reload and
+#    listen check after a render, no engine binary, ss forms, and the exit
+#    status (always 0).
 # 3. package-proxy-config-deploy.sh deploy_edge_listen_v6: installs the unit and
 #    the two drop-ins (systemd reloaded once, not again when unchanged) and runs
 #    the script.
@@ -74,7 +78,6 @@ for pair in "configs/openresty.conf|/usr/local/openresty/nginx/conf" "configs/an
   grep -qE "^[[:space:]]*listen ${https_port} quic reuseport;" "$conf" || fail "$conf: no 'listen $https_port quic reuseport;' for the IPv6 file to mirror"
 done
 
-# No setting to turn it on: the reference cfm.conf carries only the kill
 # The default (no EDGE_LISTEN_V6 in cfm.conf) is ONE switch on each side:
 # the script's V6_DEFAULT and Go's edgeIPv6Default (internal/originrealip),
 # off/false until IPv6 /64 grouping lands, then auto/true together. The
@@ -96,6 +99,26 @@ if grep -qE '^[[:space:]]*EDGE_LISTEN_V6[[:space:]]*=' configs/cfm.conf; then
 else
   ok "configs/cfm.conf: no active EDGE_LISTEN_V6 line"
 fi
+
+# The EDGE_LISTEN_V6 reading: the same fixture Go's TestEdgeListenV6ModeFixture
+# runs, so the script and `cfm realip` can never read a value differently.
+fx=scripts/tests/fixtures/edge_listen_v6_mode.txt
+[ -f "$fx" ] || fail "$fx missing"
+fxdir=$(mktemp -d)
+nfx=0
+while IFS= read -r fxl; do
+  case $fxl in '#'* | '') continue ;; esac
+  fx_want=${fxl%%	*}
+  fx_body=${fxl#*	}
+  [ "$fx_want" = default ] && fx_want=$sdef
+  [ "$fx_want" = on ] && fx_want=auto
+  printf '%b\n' "$fx_body" >"$fxdir/cfm.conf"
+  fx_got=$(CFM_CONF="$fxdir/cfm.conf" sh "$SCRIPT" mode 2>/dev/null)
+  nfx=$((nfx + 1))
+  [ "$fx_got" = "$fx_want" ] || fail "mode for $(printf '%s' "$fx_body"): got '$fx_got', want '$fx_want'"
+done <"$fx"
+rm -f "$fxdir/cfm.conf"; rmdir "$fxdir"
+[ "$nfx" -ge 20 ] && ok "EDGE_LISTEN_V6 reading: $nfx fixture cases" || fail "only $nfx fixture cases read from $fx"
 
 # --- 2. the decision -----------------------------------------------------------
 tmp=$(mktemp -d)
@@ -154,14 +177,45 @@ v6_global() {
     '2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4' \
     '00000000000000000000000000000001 01 80 10 80       lo' >"$proc"
 }
-# fake /proc: pid 20 is the edge's master (root), 21 a worker (nobody), 10 the
-# origin; 31337 a tenant process that calls itself "nginx" (uid 1001).
-for pu in 20:0 21:65534 10:0 30:1001 31337:1001; do
-  mkdir -p "$tmp/proc/${pu%%:*}"
-  printf 'Name:\tx\nUid:\t%s\t%s\t%s\t%s\n' "${pu#*:}" "${pu#*:}" "${pu#*:}" "${pu#*:}" >"$tmp/proc/${pu%%:*}/status"
-done
+# fake /proc/net/tcp6 and udp6 (the edge's ports are judged from the kernel's
+# uid column, never from the names ss prints): p6 FILE ADDR PORT STATE UID.
+mkdir -p "$tmp/proc/net"
+p6h='  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+any6=00000000000000000000000000000000
+lo6=00000000000000000000000001000000
+p6() {
+  printf '   0: %s:%04X 00000000000000000000000000000000:0000 %s 00000000:00000000 00:00000000 00000000 %5s        0 4242 1 0000000000000000 100 0 0 10 0\n' \
+    "$2" "$3" "$4" "$5" >>"$tmp/proc/net/$1"
+}
+proc_edge() { # the edge (root) on its own [::]:9043 tcp + udp, the origin on [::]:80
+  printf '%s\n' "$p6h" >"$tmp/proc/net/tcp6"
+  printf '%s\n' "$p6h" >"$tmp/proc/net/udp6"
+  p6 tcp6 $any6 9043 0A 0
+  p6 tcp6 $any6 80 0A 0
+  p6 udp6 $any6 9043 07 0
+}
+# fake systemctl for the edge unit: is-active while $tmp/edge.active exists;
+# reload fails with $tmp/reload.fail, and with $tmp/reload.listens (and the
+# IPv6 files written) the "edge" then listens on [::]:9080 and [::]:9043.
+cat >"$tmp/bin/edgectl" <<EOF
+#!/bin/sh
+echo "\$*" >> "$tmp/edgectl.calls"
+case "\$1" in
+  is-active) [ -e "$tmp/edge.active" ] ;;
+  reload)
+    [ -e "$tmp/reload.fail" ] && exit 1
+    if [ -e "$tmp/reload.listens" ] && [ -e "$conf_dir/cfm-listen-v6-http.conf" ]; then
+      printf '   1: $any6:2378 $any6:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1\n' >>"$tmp/proc/net/tcp6"
+    fi
+    exit 0 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod 0755 "$tmp/bin/edgectl"
+export CFM_SYSTEMCTL="$tmp/bin/edgectl" CFM_V6_CONFIRM_TRIES=1
 hdr='State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess'
 ss_v6() { # origin on [::]:80/443, the edge on IPv4 (and its own IPv6) only
+  proc_edge
   printf '%s\n' "$hdr" \
     'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("httpd",pid=10,fd=3))' \
     'LISTEN 0 511 [::]:80 [::]:* users:(("httpd",pid=10,fd=4))' \
@@ -172,6 +226,7 @@ ss_v6() { # origin on [::]:80/443, the edge on IPv4 (and its own IPv6) only
     'UNCONN 0 0 [::]:9043 [::]:* users:(("nginx",pid=20,fd=8))' >"$tmp/ss.udp"
 }
 ss_v4() { # origin on IPv4 only (+ ::1, v4-mapped and other ports, which do not count)
+  proc_edge
   printf '%s\n' "$hdr" \
     'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("httpd",pid=10,fd=3))' \
     'LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("httpd",pid=10,fd=4))' \
@@ -200,7 +255,7 @@ ss_v6
 printf 'trusted' >"$tmp/realip"
 printf 'EDGE_LISTEN_V6=off\r\n' >"$cfm_conf"
 run render
-expect absent "kill switch with CRLF line ending (no spaces) -> IPv4 only"
+expect absent "EDGE_LISTEN_V6=off with a CRLF line ending (no spaces) -> IPv4 only"
 cp configs/cfm.conf "$cfm_conf"
 run render
 expect absent "the reference cfm.conf (nothing set): V6_DEFAULT=off until /64 grouping -> IPv4 only"
@@ -229,14 +284,14 @@ ok "render: unchanged files are left alone (the edge's own [::]:9043 does not co
 
 printf 'untrusted' >"$tmp/realip"
 run render
-expect absent "auto: the origin does not trust ::1 -> removed (IPv6 visitors would be localhost)"
+expect absent "on: the origin does not trust ::1 -> removed (IPv6 visitors would be localhost)"
 says "cfm realip fix"
 printf 'garbage' >"$tmp/realip"
 run render
-expect absent "auto: cfm realip gives no verdict -> IPv4 only"
+expect absent "on: cfm realip gives no verdict -> IPv4 only"
 printf 'trusted-old' >"$tmp/realip"
 run render
-expect absent "auto: a trusted verdict without edge_ipv6 (a cfm unaware of the IPv6 hop) -> IPv4 only"
+expect absent "on: a trusted verdict without edge_ipv6 (a cfm unaware of the IPv6 hop) -> IPv4 only"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 : >"$tmp/realip.calls"
 printf 'untrusted' >"$tmp/realip"
@@ -251,12 +306,11 @@ CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="
   CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" prestart >"$tmp/out" 2>&1 || rc=$?
 [ "$rc" -eq 0 ] || fail "exit $rc without cfm"
 expect present "prestart: cfm realip cannot confirm at start (boot) -> keeps files a render approved"
-says "could not confirm the ::1 trust at start"
+says "gave no verdict at start"
 printf 'untrusted' >"$tmp/realip"
 run prestart
-expect present "prestart: an untrusted verdict at start keeps approved files (cfm realip warns meanwhile)"
-run render
-expect absent "render: the origin does not trust ::1 -> removed"
+expect absent "prestart: a definite untrusted verdict removes approved files (not readiness: IPv6 visitors would be ::1 to the origin)"
+says "does not trust"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 run prestart
 expect absent "prestart: untrusted and no approved files -> nothing written"
@@ -266,38 +320,70 @@ CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="
 expect absent "render: no cfm binary to ask -> IPv4 only"
 run render
 
-# A taken IPv6 edge port (nginx -t does not bind): never listen.
+# A taken IPv6 edge port (nginx -t does not bind): never listen. Judged from
+# the kernel's socket uid (/proc/net/tcp6, udp6), never from ss's names.
 ss_v6
-printf '%s\n' 'LISTEN 0 100 *:9080 *:* users:(("java",pid=30,fd=9))' >>"$tmp/ss.tcp"
+p6 tcp6 $any6 9080 0A 1001
 run render
-expect absent "a non-edge listener on *:9080 -> IPv4 only (the edge start would fail)"
-says "held by java"
-ss_v6
-printf '%s\n' 'UNCONN 0 0 [::]:9043 [::]:* users:(("someudp",pid=31,fd=3))' >>"$tmp/ss.udp"
-run prestart
-expect absent "a non-edge UDP listener on [::]:9043 -> IPv4 only"
-ss_v6
-printf '%s\n' 'LISTEN 0 100 [::]:9043 [::]:*' >>"$tmp/ss.tcp"
-run render
-expect absent "an IPv6 listener on 9043 with no owner shown -> treated as taken"
-ss_v6
-printf '%s\n' 'LISTEN 0 100 [::]:9080 [::]:* users:(("nginx",pid=31337,fd=3))' >>"$tmp/ss.tcp"
-run render
-expect absent "a tenant process calling itself nginx (not root) on [::]:9080 -> taken (no edge-killing listen)"
-says "held by nginx:31337"
+expect absent "a tenant socket (uid 1001) listening on [::]:9080 -> taken (the edge start would fail)"
+says "uid 1001"
 run prestart
 expect absent "the same at start"
 ss_v6
-printf '%s\n' 'UNCONN 0 0 [::]:9043 [::]:* users:(("angie",pid=31337,fd=3))' >>"$tmp/ss.udp"
+p6 tcp6 $lo6 9080 0A 1001
 run render
-expect absent "a tenant 'angie' on udp [::]:9043 -> taken"
+expect absent "a tenant on [::1]:9080 -> taken (it fails the edge's [::]:9080 bind too)"
 ss_v6
-printf '%s\n' 'LISTEN 0 100 [::]:9080 [::]:* users:(("nginx",pid=999999,fd=3))' >>"$tmp/ss.tcp"
+p6 udp6 $any6 9043 07 1001
 run render
-expect absent "an 'nginx' whose pid has no /proc entry (gone or hidden) -> taken"
+expect absent "a tenant's udp [::]:9043 -> taken"
 ss_v6
+p6 tcp6 $any6 9043 0A 1001
+printf '%s\n' 'LISTEN 0 100 [::]:9043 [::]:* users:(("nginx\",pid=1,fd=3),(\"x",pid=999,fd=3))' >>"$tmp/ss.tcp"
 run render
-expect present "ports free again -> listens"
+expect absent "a tenant naming itself nginx\",pid=1 in ss: the kernel uid (1001) decides -> taken"
+ss_v6
+rm -f "$tmp/proc/net/udp6"
+run render
+expect absent "an unreadable /proc/net/udp6 -> treated as taken"
+says "cannot read"
+ss_v6
+p6 tcp6 $any6 9080 01 1001
+run render
+expect present "a non-LISTEN tcp6 socket on 9080 does not count, nor the edge's root sockets -> listens"
+
+# A render that writes the files reloads a RUNNING edge and confirms the IPv6
+# listen (a later reload would leave a window for another process to take the
+# port); prestart never reloads (the edge is about to start).
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+ss_v6
+: >"$tmp/edge.active"
+: >"$tmp/reload.listens"
+: >"$tmp/edgectl.calls"
+run render
+expect present "running edge: render reloads it and confirms the IPv6 listen"
+says "reloaded test.service"
+[ "$(grep -cx 'reload test.service' "$tmp/edgectl.calls")" -eq 1 ] || fail "reload calls: $(cat "$tmp/edgectl.calls")"
+run render
+[ "$(grep -cx 'reload test.service' "$tmp/edgectl.calls")" -eq 1 ] && ok "unchanged files: no second reload" || fail "reloaded for unchanged files"
+: >"$tmp/edgectl.calls"
+run prestart
+expect present "prestart keeps the confirmed files"
+grep -q reload "$tmp/edgectl.calls" && fail "prestart must never reload the edge"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf "$tmp/reload.listens"
+ss_v6
+: >"$tmp/edgectl.calls"
+run render
+expect absent "reloaded but no IPv6 listen appeared -> files removed"
+says "does not listen on IPv6"
+[ "$(grep -cx 'reload test.service' "$tmp/edgectl.calls")" -eq 2 ] && ok "... and the edge reloaded back" || fail "no reload back: $(cat "$tmp/edgectl.calls")"
+: >"$tmp/reload.fail"
+run render
+expect absent "systemctl reload failing -> files removed"
+rm -f "$tmp/reload.fail" "$tmp/edge.active"
+run render
+expect present "edge not running: files written, apply at its next start"
+says "not running"
 
 ss_v4
 run prestart
@@ -319,7 +405,7 @@ rm -f "$tmp/ss.fail"
 for v in off '"off" ; note' OFF no false 0 disabled; do
   printf 'EDGE_LISTEN_V6 = auto\nEDGE_LISTEN_V6 = %s\n' "$v" >"$cfm_conf"
   run render
-  expect absent "kill switch EDGE_LISTEN_V6 = $v (last line) -> IPv4 only"
+  expect absent "EDGE_LISTEN_V6 = $v (last line) -> IPv4 only"
   run render
 done
 printf 'EDGE_LISTEN_V6 = off\nEDGE_LISTEN_V6 = auto\n' >"$cfm_conf"
@@ -440,6 +526,8 @@ units="$tmp/units"
 cat >"$tmp/bin/systemctl" <<EOF
 #!/bin/sh
 echo "\$*" >> "$tmp/systemctl.calls"
+[ "\$1" = is-active ] && exit 3
+exit 0
 EOF
 chmod 0755 "$tmp/bin/systemctl"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf

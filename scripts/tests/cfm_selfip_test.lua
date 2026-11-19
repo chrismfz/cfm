@@ -25,6 +25,7 @@ local rawByPath = {
       { "zz", 64 },                                 -- malformed: dropped
       { "2a0c0000000000000000000000000000", 129 },  -- bad prefix: dropped
       { "00000000000000000000000000000000", 80 },   -- ::/80 covers ::ffff:0:0/96
+      { "fe800000000000000000000000000000", 10 },   -- IGNORE_NETS fe80::/10: ignored by design
     },
   },
 }
@@ -67,6 +68,24 @@ for _, ip in ipairs({ "fe80::1", "fe80::1c2:3ff:fe04:506", "FE80::1", "[fe80::1]
 end
 assert_true(not selfip.is_self_origin("fe80::abcd"), "the node's own fe80:: in the self set is still refused")
 assert_true(not selfip.is_self_origin("fec0::1"), "fec0:: (outside fe80::/10) is not self either")
+assert_true(not selfip.is_self_origin("fe80::2"), "an IGNORE_NETS fe80::/10 entry does not make link-local self (ignored by design)")
+
+-- cfm_panel.lua's fallback (cfm_selfip absent: upgrade lag) agrees: loopback
+-- and 169.254/16 only, never fe80::/10. Extracted from the source and run.
+do
+  local fh = assert(io.open("configs/lua/cfm_panel.lua", "r"))
+  local src = fh:read("*a"); fh:close()
+  local body = src:match("\n(local function panel_is_loopback%(ip%).-\nend)\n")
+  assert_true(body ~= nil, "cfm_panel.lua: panel_is_loopback not found")
+  local chunk = assert((loadstring or load)(body .. "\nreturn panel_is_loopback"))
+  local fb = chunk()
+  for _, ip in ipairs({ "::1", "[::1]", "127.0.0.1", "169.254.1.1" }) do
+    assert_true(fb(ip), "panel fallback: " .. ip .. " is self")
+  end
+  for _, ip in ipairs({ "fe80::1", "FE80::1", "[fe80::1]", "febf::1", "8.8.8.8", "" }) do
+    assert_true(not fb(ip), "panel fallback: " .. ip .. " is not self")
+  end
+end
 
 -- self-IP set (incl. IPv6 normalize on both stored and queried side).
 assert_true(selfip.is_self_origin("1.2.3.4"), "self ip 1.2.3.4")
