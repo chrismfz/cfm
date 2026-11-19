@@ -96,6 +96,8 @@ func New(cfg Config) *Detector {
 			d.allowNets = append(d.allowNets, n)
 		}
 	}
+	// Its allows guard their /64 (counted and banned per address).
+	core.GuardAllows("cfm_endpoints", cfg.AllowIPs, cfg.AllowNets)
 	return d
 }
 
@@ -206,6 +208,9 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// event's address.
 		key := core.ClientKey("|ip", srcIP)
 		attributed := net.ParseIP(srcIP) != nil
+		if attributed {
+			srcIP = core.TopAddr("apiabuse", key, srcIP, ev.When) // the /64's busiest address
+		}
 		if !attributed {
 			key = unattributedSourceKey
 		}

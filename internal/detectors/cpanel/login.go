@@ -265,11 +265,11 @@ func (l *Login) processLine(now time.Time, line string) {
 }
 
 func (l *Login) bump(now time.Time, kindKey, key, line string) {
-	// An IPv6 client counts as its /64; pending keeps the address seen last.
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	l.samples.Add(sk, line)
 	_ = l.counts.Add(sk, now)
-	l.pending[sk] = pend{kindKey: kindKey, key: key}
+	l.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("cpanel", sk, key, now)}
 }
 
 // -------- flush --------

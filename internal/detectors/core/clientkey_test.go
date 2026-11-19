@@ -24,3 +24,26 @@ func TestClientKey(t *testing.T) {
 		t.Fatalf("IPv6 tag: %v", e)
 	}
 }
+
+// A detector's allow guards its /64: the neighbours of an allowed IPv6
+// address are counted (and banned) per address.
+func TestGuardAllows(t *testing.T) {
+	t.Cleanup(func() { GuardAllows("core-test") })
+	if got := ClientKey("AUTHFAIL|ip", "2001:db8:3:3::9"); got != "2001:db8:3:3::/64" {
+		t.Fatalf("before: %q", got)
+	}
+	GuardAllows("core-test", []string{"2001:db8:3:3::1", "203.0.113.7"}, []string{"2001:db8:4::/48", "bogus"})
+	for ip, want := range map[string]string{
+		"2001:db8:3:3::9": "2001:db8:3:3::9",
+		"2001:db8:4:5::9": "2001:db8:4:5::9",
+		"2001:db8:3:4::9": "2001:db8:3:4::/64",
+	} {
+		if got := ClientKey("AUTHFAIL|ip", ip); got != want {
+			t.Errorf("%s: %q, want %q", ip, got, want)
+		}
+	}
+	GuardAllows("core-test")
+	if got := ClientKey("AUTHFAIL|ip", "2001:db8:3:3::9"); got != "2001:db8:3:3::/64" {
+		t.Fatalf("after removal: %q", got)
+	}
+}

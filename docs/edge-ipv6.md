@@ -263,19 +263,28 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   autoblock, login and password-change throttle, embed bootstrap limit and
   probe signals; the MCP consent limit.
   - **Only where the ban would take the /64:** `firewall.CountKey` asks the
-    bans' own guards (the daemon's backend, `SetCountBackend`; cached 10 s
-    per /64, a failed read 5 s, logged once a minute). A guarded /64 (this node, its gateway, an ignored, allowed or
+    bans' own guards (the daemon's backend, `SetCountBackend`). The answer
+    is cached 10 s per /64 (a newly registered check applies at once); the
+    guard view behind it is refreshed in the background, so a counter never
+    waits on nft once warm; a failed read is answered for 5 s and logged once
+    a minute (a /64 first seen meanwhile counts per address for up to 10 s
+    more). A guarded /64 (this node, its gateway, an ignored, allowed or
     trusted proxy address, or nft cannot tell) counts per address, as its
     ban does: counted as one client, one address's alert would spend the
     /64's and leave the other addresses unbanned, or name an ignored
     neighbour while the attacker went free (found by the review). Not
     foreseen: a ban that falls back to the address because nft failed to
     write the /64 (transient); the /64's count is then spent on one address
-    until the detector's cooldown.
-  - **Only the count:** the alert keeps a real address (the one seen last;
-    `Extra["client"]` is the /64), which the sink's allow / ignore / self /
-    leniency checks read and `firewall.ExtendClientBlock` widens to the /64
-    itself. Allow lists (`ALLOW_IPS`, …) stay exact matches.
+    until the detector's cooldown (waf_security: a Window after the alert,
+    even while its addresses keep hitting).
+  - **Only the count:** the alert keeps a real address, the /64's busiest
+    (`core.TopAddr`; `Extra["client"]` is the /64): it is what the fleet
+    report, the leniency and exclude checks and the notification name, so a
+    neighbour's last hit never takes the blame. `firewall.ExtendClientBlock`
+    widens it to the /64 itself. Allow lists (`ALLOW_IPS`, …) stay exact
+    matches, and a detector's own allows (waf_security, cfm_endpoints,
+    cookie discard, login_bruteforce) also guard their /64
+    (`core.GuardAllows`): its neighbours are counted and banned per address.
   - **Like IPv4 behind NAT:** every device of a home or office /64 adds to
     one count, as every device behind one IPv4 address already does.
   - **Section cooldown:** stamped on what the ban took (the /64, or the

@@ -363,9 +363,9 @@ func (a *Auth) counter(kindKey string) *core.SlidingCounter {
 }
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-	// An IPv6 client counts as its /64; pending keeps the address seen last.
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
-	a.pending[sk] = pend{kindKey: kindKey, key: key}
+	a.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("dovecot", sk, key, now)}
 	_ = a.counter(kindKey).Add(sk, now)
 	a.samples.Add(sk, line)
 }

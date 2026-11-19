@@ -67,6 +67,11 @@ type Detector struct {
 	// rule-scoped rule after the family ban stays one alert, as it was when
 	// every rule shared the family counter.
 	famSeen map[string]time.Time
+	// firedAt: a grouped (IPv6 /64) family key -> when it fired. Its fired
+	// entry also ends a Window after the alert, hits or not: if that ban
+	// fell back to one address (nft failed to write the /64), the /64's other
+	// addresses keep hitting and must still reach an alert.
+	firedAt map[string]time.Time
 
 	allowIPs  map[string]struct{}
 	allowNets []*net.IPNet
@@ -95,6 +100,7 @@ func New(cfg Config) *Detector {
 		samples:  core.NewSampleRing(cfg.SampleLimit),
 		fired:    make(map[string]string),
 		famSeen:  make(map[string]time.Time),
+		firedAt:  make(map[string]time.Time),
 		allowIPs: make(map[string]struct{}),
 	}
 	for _, ip := range cfg.AllowIPs {
@@ -110,6 +116,8 @@ func New(cfg Config) *Detector {
 			d.allowNets = append(d.allowNets, n)
 		}
 	}
+	// Its allows guard their /64 (counted and banned per address).
+	core.GuardAllows("waf_security", cfg.AllowIPs, cfg.AllowNets)
 	return d
 }
 
@@ -247,6 +255,8 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		client := core.ClientKey("|ip", ev.SrcIP)
 		famKey := client + "|" + family
 		key := counterKey(client, family, ev.Signal, limit, ruleScoped)
+		// The alert names the /64's busiest address (core.TopAddr).
+		addr := core.TopAddr("wafsec", famKey, ev.SrcIP, ev.When)
 		count := d.counts.Add(key, ev.When)
 		if ev.When.After(d.famSeen[famKey]) {
 			d.famSeen[famKey] = ev.When
@@ -268,6 +278,9 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// for the same IP does not alert a second time (one ban per IP and
 		// family per window, as with the shared key).
 		d.fired[famKey] = famKey
+		if strings.Contains(famKey, "/") {
+			d.firedAt[famKey] = ev.When
+		}
 
 		// Notification identity. For the WAF_CVE family, surface the concrete
 		// CVE id (WAF_CVE:CVE_2025_34085:... -> "WAF/CVE-2025-34085") so the
@@ -277,7 +290,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		// for WAF_CVE reasons without a CVE_* token, e.g. log4shell).
 		kindStr := "WAF/" + strings.TrimPrefix(family, "WAF_")
 		extra := map[string]string{
-			"ip":      ev.SrcIP,
+			"ip":      addr,
 			"source":  ev.Source,
 			"reason":  ev.Reason,
 			"family":  family,
@@ -286,7 +299,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			"uri":     ev.Path,
 			"method":  ev.Method,
 		}
-		core.TagClient(extra, ev.SrcIP)
+		core.TagClient(extra, addr)
 		if family == "WAF_CVE" {
 			if cve := cveFromReason(ev.Reason); cve != "" {
 				kindStr = "WAF/" + cve
@@ -296,7 +309,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		alert := core.Alert{
 			When:    now,
 			Kind:    core.AlertKind(kindStr),
-			Key:     ev.SrcIP,
+			Key:     addr,
 			Count:   count,
 			Samples: d.samples.GetAndClear(key),
 			Extra:   extra,
@@ -312,7 +325,8 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	// With one shared key this is exactly "its counter drained": famSeen holds
 	// the newest hit any of the family's counters took.
 	for key, fam := range d.fired {
-		if now.Sub(d.famSeen[fam]) > d.cfg.Window {
+		at, grouped := d.firedAt[fam]
+		if now.Sub(d.famSeen[fam]) > d.cfg.Window || (grouped && now.Sub(at) > d.cfg.Window) {
 			delete(d.fired, key)
 			d.samples.GetAndClear(key)
 		}
@@ -320,6 +334,11 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	for fam, at := range d.famSeen {
 		if now.Sub(at) > d.cfg.Window {
 			delete(d.famSeen, fam)
+		}
+	}
+	for fam := range d.firedAt {
+		if _, ok := d.fired[fam]; !ok {
+			delete(d.firedAt, fam)
 		}
 	}
 	return nil

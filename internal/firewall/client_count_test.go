@@ -3,6 +3,7 @@ package firewall
 import (
 	"errors"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 )
@@ -105,5 +106,81 @@ func TestCountKeyWithoutASetElemWriter(t *testing.T) {
 	SetCountBackend(struct{ Backend }{})
 	if got := CountKey("2001:db8:1:2::a"); got != "2001:db8:1:2::a" {
 		t.Fatalf("%q, want the address", got)
+	}
+}
+
+// Once warm, CountKey never waits on nft: a stale guard view is answered
+// while one background refresh replaces it.
+func TestCountKeyServesAStaleGuardView(t *testing.T) {
+	oldG, oldC := guardCacheTTL, countKeyTTL
+	guardCacheTTL, countKeyTTL = 20*time.Millisecond, 0
+	t.Cleanup(func() {
+		guardCacheTTL, countKeyTTL = oldG, oldC
+		SetCountBackend(nil)
+		ResetCountKeyCache()
+		ResetGuardCache()
+	})
+	ResetGuardCache()
+	f := &lockedNetFake{netFake: newNetFake()}
+	SetCountBackend(f)
+	_ = CountKey("2001:db8:a:1::1") // the first read is synchronous
+	if f.readsOf("self_v6") != 1 {
+		t.Fatalf("first read: %d", f.readsOf("self_v6"))
+	}
+	time.Sleep(30 * time.Millisecond)
+	f.block = make(chan struct{})
+	start := time.Now()
+	if got := CountKey("2001:db8:a:2::1"); got != "2001:db8:a:2::/64" || time.Since(start) > 10*time.Millisecond {
+		t.Fatalf("stale view: %q after %s", got, time.Since(start))
+	}
+	close(f.block)
+	deadline := time.Now().Add(2 * time.Second)
+	for f.readsOf("self_v6") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("no background refresh")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// lockedNetFake is netFake safe for the background refresh, whose reads can
+// be held (block).
+type lockedNetFake struct {
+	*netFake
+	mu    sync.Mutex
+	block chan struct{}
+}
+
+func (f *lockedNetFake) ListSetElementsTimed(set string) ([]SetElementTimed, error) {
+	f.mu.Lock()
+	b := f.block
+	f.mu.Unlock()
+	if b != nil {
+		<-b
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.netFake.ListSetElementsTimed(set)
+}
+
+func (f *lockedNetFake) readsOf(set string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reads[set]
+}
+
+// A check registered (an IGNORE_IPS reload, a detector allow) applies to
+// CountKey at once, not after its cache.
+func TestCountKeyFollowsANewCheckAtOnce(t *testing.T) {
+	old := countKeyTTL
+	countKeyTTL = time.Minute
+	t.Cleanup(func() { countKeyTTL = old; SetClientNetExempt("count-new", nil); ResetCountKeyCache() })
+	ResetCountKeyCache()
+	if got := CountKey("2001:db8:b:1::9"); got != "2001:db8:b:1::/64" {
+		t.Fatalf("before: %q", got)
+	}
+	SetClientNetExempt("count-new", func(p netip.Prefix) bool { return p.String() == "2001:db8:b:1::/64" })
+	if got := CountKey("2001:db8:b:1::9"); got != "2001:db8:b:1::9" {
+		t.Fatalf("after the check: %q", got)
 	}
 }

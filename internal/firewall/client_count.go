@@ -80,8 +80,11 @@ func countKeyGuarded(p netip.Prefix) bool {
 			if _, ok := (*bp).(SetElemWriter); !ok {
 				guarded = true // this backend bans the address alone
 			} else {
-				why, err := clientNetGuard(*bp, p)
-				if err != nil {
+				why := ""
+				v, err := staleGuardView(*bp) // never waits on nft once warm
+				if err == nil {
+					why = v.refuses(p)
+				} else {
 					countKeyLogErr(err)
 				}
 				guarded = err != nil || why != "" // unknown: as the ban, the address

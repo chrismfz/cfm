@@ -341,9 +341,9 @@ func (m *MySQL) flush(now time.Time, out chan<- core.Alert) {
 
 // bump aggregates into window primitives and tracks the key for this tick
 func (m *MySQL) bump(now time.Time, kindKey, key, line string) {
-	// An IPv6 client counts as its /64; pending keeps the address seen last.
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
-	m.pending[sk] = pend{kindKey: kindKey, key: key}
+	m.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("mysql", sk, key, now)}
 	_ = m.counts.Add(sk, now)
 	m.samples.Add(sk, line)
 }

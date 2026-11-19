@@ -484,6 +484,7 @@ func (d *customDetector) bump(now time.Time, kindKey, key, sample string, out ch
 	// An IPv6 client counts as its /64; the alert keeps this address.
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	count := d.counts.Add(sk, now)
+	addr := core.TopAddr("custom", sk, key, now) // the /64's busiest address
 	d.samples.Add(sk, sample)
 
 	threshold := 0
@@ -500,15 +501,15 @@ func (d *customDetector) bump(now time.Time, kindKey, key, sample string, out ch
 	extra := map[string]string{
 		"source": "custom",
 		"reason": kindKey,
-		"key":    key,
+		"key":    addr,
 	}
 	if kindKey == "AUTHFAIL|ip" {
-		core.TagClient(extra, key)
+		core.TagClient(extra, addr)
 	}
 	out <- core.Alert{
 		When:    now,
 		Kind:    core.AlertKind("CUSTOM/AUTHFAIL"),
-		Key:     key,
+		Key:     addr,
 		Count:   count,
 		Samples: d.samples.GetAndClear(sk),
 		Extra:   extra,

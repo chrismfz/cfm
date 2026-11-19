@@ -384,11 +384,11 @@ func kvLine(line string) map[string]string {
 }
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-	// An IPv6 client counts as its /64; pending keeps the address seen last.
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	a.samples.Add(sk, line)
 	_ = a.counts.Add(sk, now)
-	a.pending[sk] = pend{kindKey: kindKey, key: key}
+	a.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("ngmauth", sk, key, now)}
 }
 
 // -------- flush --------

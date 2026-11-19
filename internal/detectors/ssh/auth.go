@@ -292,7 +292,7 @@ func (a *Auth) processLine(now time.Time, line string) {
 
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-    // An IPv6 client counts as its /64; p.key keeps the address seen last.
+    // An IPv6 client counts as its /64; p.key keeps the address with the most hits (core.TopAddr).
     sk := kindKey + ":" + core.ClientKey(kindKey, key)
 
     // samples (ring)
@@ -300,7 +300,7 @@ func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 
     // mark as touched this tick (no per-tick increment anymore)
     p := a.pending[sk]
-    p.kindKey, p.key = kindKey, key
+    p.kindKey, p.key = kindKey, core.TopAddr("ssh", sk, key, now)
     a.pending[sk] = p
 
     // real counting happens in the sliding window

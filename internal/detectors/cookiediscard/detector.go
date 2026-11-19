@@ -13,8 +13,12 @@
 // It is the exact blind spot of challenge_solver_farm, and the mirror image of
 // it. That detector keys on a vhost because the farm burns a fresh address per
 // solve (~1.07 solves per IP), so no per-IP counter can ever see it. This one
-// keys on the address, for the population that does the opposite: a handful of
-// addresses solving dozens of times each. Neither sees the other's traffic.
+// keys on the client, for the population that does the opposite: a handful of
+// addresses solving dozens of times each. Neither sees the other's traffic. A
+// client is its address, an IPv6 one its /64 (core.ClientKey; a /64 a guard
+// keeps per address stays per address), as an IPv4 address behind NAT already
+// sums its devices: the calibration below was measured per address, before
+// IPv6 clients were grouped.
 //
 // Calibration, measured against the same 23h production capture (111,537 solves
 // from 97,556 distinct client addresses), replayed at its original timestamps
@@ -46,7 +50,8 @@
 // on the alert as evidence for attribution only.
 //
 // Enforcement: unlike challenge_solver_farm, the subject here IS a single real
-// address that is currently and repeatedly abusing the challenge, so an nft ban
+// client (named by its busiest address) that is currently and repeatedly
+// abusing the challenge, so an nft ban
 // is a coherent action — this detector emits a normal per-IP alert and sets
 // Extra["ip"] authoritatively, which is all the section sink needs to honour a
 // BLOCK policy. The shipped config leaves BLOCK unset (alert-only) so the
@@ -141,7 +146,7 @@ type solveRec struct {
 }
 
 type ipState struct {
-	// addr is the address seen last: the state is an IPv6 client's /64
+	// addr is the address with the most solves: the state is an IPv6 client's /64
 	// (core.ClientKey), the alert names a real address.
 	addr string
 	recs []solveRec
@@ -258,6 +263,8 @@ func New(cfg Config) *Detector {
 			d.allowNets = append(d.allowNets, n)
 		}
 	}
+	// Its allows guard their /64 (counted and banned per address).
+	core.GuardAllows("challenge_cookie_discard", cfg.AllowIPs, cfg.AllowNets)
 	return d
 }
 
@@ -355,7 +362,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			st = &ipState{}
 			d.ips[client] = st
 		}
-		st.addr = ip
+		st.addr = core.TopAddr("cookiediscard", client, ip, ev.When)
 		if len(st.recs) >= d.cfg.MaxTrackedPerIP {
 			st.truncated++
 			continue

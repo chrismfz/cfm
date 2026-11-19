@@ -348,7 +348,7 @@ func (d *Relays) bump(now time.Time, kindKey, key, line string) {
     if d.pending == nil {
         d.pending = make(map[string]pend)
     }
-    d.pending[sk] = pend{kindKey: kindKey, key: key}
+    d.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("postfix_relays", sk, key, now)}
 }
 
 // thresholds / base alertKey

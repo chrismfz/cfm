@@ -335,12 +335,12 @@ func (d *Detector) tryJSON(now time.Time, raw string) bool {
 
 func (d *Detector) bump(now time.Time, ip, sample string) {
 
-	// An IPv6 client counts as its /64; pending keeps the address seen last.
+	// An IPv6 client counts as its /64; pending keeps the address with the most hits (core.TopAddr).
 	client := core.ClientKey("|ip", ip)
 	sk := "ip:" + client
 	d.samples.Add(sk, sample)
 	_ = d.counts.Add(sk, now)
-	d.pending[client] = pend{key: ip}
+	d.pending[client] = pend{key: core.TopAddr("modsec", client, ip, now)}
 
 
 }

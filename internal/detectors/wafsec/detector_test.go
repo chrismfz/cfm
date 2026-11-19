@@ -298,10 +298,10 @@ func TestRuleScopedHitsKeepFamilyBanAlive(t *testing.T) {
 }
 
 // An IPv6 client rotating inside its /64 fills one count and fires once
-// (its ban takes the /64); the alert names the address of the tripping hit.
+// (its ban takes the /64); the alert names its busiest address.
 func TestIPv6ClientCountsAsItsSlash64(t *testing.T) {
 	d := New(Config{Families: map[string]int{"WAF_WEBSHELL": 3}})
-	d.Enqueue(ev("2001:db8:1:2::a", "WAF_WEBSHELL:PROBE", "410"))
+	d.Enqueue(ev("2001:db8:1:2::c", "WAF_WEBSHELL:PROBE", "410"))
 	d.Enqueue(ev("2001:db8:1:2::b", "WAF_WEBSHELL:PROBE", "410"))
 	d.Enqueue(ev("2001:db8:1:3::c", "WAF_WEBSHELL:PROBE", "410")) // another /64
 	if got := drain(t, d); len(got) != 0 {
@@ -345,5 +345,28 @@ func TestGuardedSlash64CountsPerAddress(t *testing.T) {
 	}
 	if _, ok := got[0].Extra["client"]; ok {
 		t.Fatalf("a guarded address tagged with a /64: %v", got[0].Extra)
+	}
+}
+
+// A fired /64 fires again a Window after its alert even while its addresses
+// keep hitting: if that ban fell back to one address (nft failed to write
+// the /64), the others must still reach an alert.
+func TestFiredSlash64ExpiresAWindowAfterItsAlert(t *testing.T) {
+	d := New(Config{Families: map[string]int{"WAF_SQLI": 1}, Window: 20 * time.Millisecond})
+	hit := func(ip string) int {
+		e := ev(ip, "WAF_SQLI:UNION_SELECT", "301")
+		e.When = time.Now()
+		d.Enqueue(e)
+		return len(drain(t, d))
+	}
+	if n := hit("2001:db8:6:6::a"); n != 1 {
+		t.Fatalf("first: %d", n)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if n := hit("2001:db8:6:6::b"); n != 0 {
+		t.Fatalf("inside the fired state: %d", n)
+	}
+	if n := hit("2001:db8:6:6::b"); n != 1 {
+		t.Fatalf("a Window after the alert, hits continuing: %d, want 1", n)
 	}
 }

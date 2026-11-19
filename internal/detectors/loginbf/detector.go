@@ -219,6 +219,8 @@ func New(cfg Config) *Detector {
 			d.allowASNs[uint(n)] = struct{}{}
 		}
 	}
+	// Its allows guard their /64 (counted and banned per address).
+	core.GuardAllows("login_bruteforce", cfg.AllowIPs, cfg.AllowNets)
 	return d
 }
 
