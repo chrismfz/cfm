@@ -305,6 +305,8 @@ func TestApplyPanelChallengeModeToPaths_OffWhenAlreadyOffSucceeds(t *testing.T) 
 }
 
 func TestDeprecatedChallengeArgIsIgnored(t *testing.T) {
+	stubNoEdgeDetected(t)
+	stubNoExternalTools(t)
 	_, errOut := captureStreams(t, func() {
 		code := runPanelCLI([]string{"status", "--challenge", "bogus"}, nil)
 		if code != 0 {
@@ -317,6 +319,8 @@ func TestDeprecatedChallengeArgIsIgnored(t *testing.T) {
 }
 
 func TestPanelStatusSnapshotOmitsRecentHitFields(t *testing.T) {
+	stubNoEdgeDetected(t)
+	stubNoExternalTools(t)
 	out, _ := captureStreams(t, func() {
 		code := runPanelCLI([]string{"status"}, nil)
 		if code != 0 {
