@@ -1,6 +1,7 @@
 package dnat
 
 import (
+	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"context"
 	"flag"
@@ -80,7 +81,7 @@ func detectWorkerUser() string {
 			return v
 		}
 	}
-	for _, p := range []string{"/etc/nginx/nginx.conf", "/usr/local/openresty/nginx/conf/nginx.conf", "/etc/angie/angie.conf"} {
+	for _, p := range workerUserConfs() {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -571,6 +572,16 @@ func dnatTargetLabel(edgeService string) string {
 	return fmt.Sprintf("%s (%s)", label, edgeService)
 }
 
+// workerUserConfs: where the edge worker `user` line is looked for, first
+// readable wins: plain nginx, then the edge engines in file-precedence order.
+func workerUserConfs() []string {
+	confs := []string{"/etc/nginx/nginx.conf"}
+	for _, ep := range edgeengine.InFileOrder() {
+		confs = append(confs, ep.MainConf)
+	}
+	return confs
+}
+
 func detectEdgeService() string {
 	procEntries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -609,11 +620,12 @@ func normalizeEdgeService(s string) string {
 	if s == "" {
 		return ""
 	}
-	if strings.Contains(s, "openresty") || strings.Contains(s, "/openresty/") {
-		return "openresty"
-	}
-	if strings.Contains(s, "angie") {
-		return "angie"
+	// File-precedence order: OpenResty first, because an OpenResty process
+	// line also contains "nginx".
+	for _, ep := range edgeengine.InFileOrder() {
+		if strings.Contains(s, ep.Name) {
+			return ep.Name
+		}
 	}
 	if strings.Contains(s, "nginx") {
 		return "nginx"

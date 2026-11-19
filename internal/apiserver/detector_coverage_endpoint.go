@@ -25,6 +25,7 @@ import (
 
 	"cfm/internal/detectors/meta"
 	"cfm/internal/detectorstatus"
+	"cfm/internal/edgeengine"
 	"cfm/internal/svcstat"
 )
 
@@ -49,7 +50,7 @@ var detectorUnits = map[string][]string{
 	"cpanel":           {"cpanel", "cpsrvd"},
 	"modsec":           {"httpd", "apache2", "lsws", "nginx", "angie"},
 	"proxmox_auth":     {"pvedaemon", "pveproxy"},
-	"webdetector":      {"angie", "openresty", "nginx", "httpd", "apache2", "lsws"},
+	"webdetector":      append(edgeengine.Names(), "nginx", "httpd", "apache2", "lsws"),
 }
 
 func handleDetectorsCoverage(w http.ResponseWriter, r *http.Request) {

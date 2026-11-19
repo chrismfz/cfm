@@ -206,6 +206,33 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   change**, delete "for now / TODO" guard comments once the work lands, and
   never keep a second copy of a list/matcher that can drift. When a comment
   and the code disagree, trust the code and fix the comment.
+- **Edge-engine facts live in ONE table: `edgeengine.Profiles`**
+  (`internal/edgeengine/profiles.go`): unit, binaries, commands, conf/log
+  dirs, the config-path marker (`PathMarker`, which attributes a listener
+  config path to an engine and is wider than `ConfDir` for OpenResty), the
+  legacy Lua token dir, config hooks and process aliases. Before
+  it, a dozen packages each carried their own `{"angie", "openresty"}` list
+  and paths. A caller derives what it needs: `Names()`, `Lookup`/`IsEdge`,
+  `Units()`, `LuaTokenCandidates()`, `ConfFileCandidates`,
+  `LogFileCandidates`. Never write a new literal edge list. Adding an engine
+  means one Profile plus its place in `fileOrder`. `Profiles` is the
+  detection order (Angie first); `fileOrder` is the precedence of
+  first-readable-file lists (OpenResty first). Both orders are pinned, by
+  `profiles_test.go` and by a parity test next to each converted caller.
+  `Lookup`/`IsEdge` are exact on the canonical name, like the checks they
+  replaced, so a caller that needs leniency normalises first. Still
+  engine-specific on purpose:
+  - the process-title parsing in `healthmodel`;
+  - the `debug_capture` master heuristics;
+  - Angie's native-keepalive exception in `edge_health`;
+  - `status`'s per-engine output fields.
+
+  Two security allowlists are OpenResty-only today and are decided per
+  engine, never derived:
+  - agent file sync's `syncAllowedPrefixes`;
+  - the bridge's `nginxUploadAllowedDirs`.
+
+  A new engine must decide each of them explicitly.
 - **A new log file needs a rotation entry in the same change.**
   `check_logrotate_coverage.sh` fails CI if a path CFM writes (edge
   `access_log`/`error_log`, a `*_LOG_FILE` key in `cfm.conf`, a

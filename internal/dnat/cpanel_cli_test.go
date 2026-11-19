@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"cfm/internal/systemdunit"
 )
 
 func captureStreams(t *testing.T, fn func()) (string, string) {
@@ -531,6 +533,17 @@ func setupPanelStatusLuaTest(t *testing.T, fakeResty string) string {
 	oldWD, _ := os.Getwd()
 	oldState := panelChallengeModeStatePath
 	panelChallengeModeStatePath = filepath.Join(tmp, "panel_challenge_mode")
+	// No edge engine on this "host": the status must pick the repo template
+	// (the service-neutral path). Without these stubs the detection read the
+	// REAL host (systemd, then /proc), so any process whose command line held
+	// "openresty" or "angie" (another package's `systemctl show ... angie
+	// openresty` while the suite runs in parallel, a shell, a dev box's real
+	// edge) flipped it to that engine's live listener path and the tests
+	// failed with "Panel decision endpoint: MISSING".
+	oldProbe := panelSystemdUnitProbe
+	oldProc := panelListenerProcessDetector
+	panelSystemdUnitProbe = func(string) (systemdunit.Status, bool) { return systemdunit.Status{}, false }
+	panelListenerProcessDetector = func() string { return "" }
 	if err := os.Chdir(tmp); err != nil {
 		t.Fatal(err)
 	}
@@ -541,6 +554,8 @@ func setupPanelStatusLuaTest(t *testing.T, fakeResty string) string {
 		lookPath = oldLookPath
 		_ = os.Chdir(oldWD)
 		panelChallengeModeStatePath = oldState
+		panelSystemdUnitProbe = oldProbe
+		panelListenerProcessDetector = oldProc
 	})
 	return tmp
 }

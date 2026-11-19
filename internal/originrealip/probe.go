@@ -36,6 +36,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/edgeengine"
 )
 
 // Panel and stack names reported by the probe.
@@ -170,15 +172,10 @@ var system = layout{
 	nginxConfD:                "/etc/nginx/conf.d",
 	cpanelNginxServerIncludes: "/etc/nginx/conf.d/server-includes",
 	daNginxIncludes:           "/etc/nginx/nginx-includes.conf",
-	edgeV6Files: []string{
-		"/usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf",
-		"/usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf",
-		"/etc/angie/cfm-listen-v6-http.conf",
-		"/etc/angie/cfm-listen-v6-https.conf",
-	},
-	cfmConf:     "/etc/cfm/cfm.conf",
-	procIfInet6: "/proc/net/if_inet6",
-	procTCP6:    "/proc/net/tcp6",
+	edgeV6Files:               edgeV6ListenFiles(),
+	cfmConf:                   "/etc/cfm/cfm.conf",
+	procIfInet6:               "/proc/net/if_inet6",
+	procTCP6:                  "/proc/net/tcp6",
 }
 
 // edgeIPv6Default is the decision with no EDGE_LISTEN_V6 in cfm.conf: false
@@ -940,4 +937,14 @@ func (l layout) resolveOriginStack(upstream string) string {
 	default:
 		return StackUnknown
 	}
+}
+
+// edgeV6ListenFiles: each edge engine's generated IPv6 listen files
+// (edgeengine.Profiles, file-precedence order).
+func edgeV6ListenFiles() []string {
+	var out []string
+	for _, p := range edgeengine.InFileOrder() {
+		out = append(out, p.ConfPath("cfm-listen-v6-http.conf"), p.ConfPath("cfm-listen-v6-https.conf"))
+	}
+	return out
 }

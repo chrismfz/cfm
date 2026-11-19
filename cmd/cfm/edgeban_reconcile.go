@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"cfm/internal/edgeban"
+	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/ttlban"
@@ -45,11 +46,10 @@ var (
 
 // The trusted proxies' own ranges, as the edge includes them (the live copy
 // first, then the packaged reference). A var so tests point it elsewhere.
-var edgeBanTrustedProxyFiles = []string{
-	"/usr/local/openresty/nginx/conf/trusted_proxies.conf",
-	"/etc/angie/trusted_proxies.conf",
+var edgeBanTrustedProxyFiles = append(
+	edgeengine.ConfFileCandidates("trusted_proxies.conf"),
 	"/usr/share/cfm/configs/trusted_proxies.conf",
-}
+)
 
 // loadEdgeBanTrustedProxies hands the first readable trusted_proxies.conf to
 // the store (an address in it is never edge-banned).

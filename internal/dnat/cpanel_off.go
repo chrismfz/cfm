@@ -3,14 +3,20 @@ package dnat
 import (
 	"strings"
 
+	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 )
 
-var panelListenerChallengeConfigPaths = []string{
-	"/etc/angie/cfm-panel-listeners.conf",
-	"/usr/local/openresty/nginx/conf/cfm-panel-listeners.conf",
-	"configs/cfm-panel-listeners.conf.in",
-}
+// panelListenerChallengeConfigPaths: each edge engine's live copy (detection
+// order, from edgeengine.Profiles), then the repo template. A var so tests
+// point it elsewhere.
+var panelListenerChallengeConfigPaths = func() []string {
+	var out []string
+	for _, p := range edgeengine.Profiles {
+		out = append(out, p.ConfPath("cfm-panel-listeners.conf"))
+	}
+	return append(out, "configs/cfm-panel-listeners.conf.in")
+}()
 
 type panelOffResult struct {
 	FirewallChanges []string

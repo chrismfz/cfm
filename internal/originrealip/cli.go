@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"cfm/internal/edgeengine"
 )
 
 const usage = `cfm realip — does the origin web server see visitors' real IPs behind the CFM edge?
@@ -31,7 +33,7 @@ IPv6 on for want of the ::1 trust); fix 0 = trusted afterwards, 1 = not (see the
 `
 
 // edgeUnits are the CFM edge engines; one active means the edge fronts the origin.
-var edgeUnits = []string{"angie", "openresty"}
+var edgeUnits = edgeengine.Names()
 
 // EdgeActive reports whether a CFM edge engine is running on this host.
 func EdgeActive() bool {
