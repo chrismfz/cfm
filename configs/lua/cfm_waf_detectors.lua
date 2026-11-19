@@ -1006,17 +1006,20 @@ end
 -- that site's edge log: the list filter takes `<table>___<element>[value]`
 -- and, when the same element carries `[eval]` set, runs the value as PHP. The
 -- attacker sent `…___aiton[value]=1;&…___aiton[eval]=1` probes, then the
--- file-writing payloads rule 332 reads. 7 days of edge access.log on all 8
--- edge nodes (2026-11-17, ~17 800 Fabrik requests): `[eval]` came only from
--- that attacker, `=0` included, so the legitimate list filter never sends it.
+-- file-writing payloads rule 332 reads. Fabrik's own list-filter form DOES
+-- send `[eval]=0` in its POST body (cfm.waf.log, read 2026-11-19: Greek users
+-- on iatreio.babourda.gr, isrodopis.gr; the access log carries no POST body,
+-- so a first read of it saw only the attacker). A SET `[eval]` (not empty,
+-- not "0") came only from the attacker, and only that is enforced.
 --
 -- Fires on a request field (query, urlencoded or multipart POST: Fabrik
 -- reads $_REQUEST) whose key has an `[eval]` index, on a Fabrik request: an
 -- `option` field `com_fabrik`, `fabrik` in the path (the SEF
 -- /component/fabrik/ route) or the element name's `___` (a menu-alias route
 -- carries neither of the others). Tags: EVAL_ARG / EVAL_BODY for a set value
--- (not empty, not "0"), EVAL_ZERO for `=0` (the caller keeps that one
--- logonly whatever the rule's mode: it runs nothing).
+-- (not empty, not "0"), EVAL_ZERO for `=0`: the form's own value, which runs
+-- nothing, so the caller keeps it logonly whatever the rule's mode (it stays
+-- recorded as evidence of a Fabrik list on the vhost).
 --
 -- It walks each_request_field (the reader under php_request_fields) itself,
 -- not php_request_fields: that one registers `x[eval]` under `x`
