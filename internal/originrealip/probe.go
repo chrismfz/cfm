@@ -254,7 +254,7 @@ func (l layout) edgeIPv6Wanted() bool {
 	if l.cfmConf != "" {
 		if b, err := os.ReadFile(l.fs(l.cfmConf)); err == nil {
 			for _, line := range strings.Split(string(b), "\n") {
-				// ASCII whitespace only, as the script's C-locale [[:space:]]:
+				// ASCII whitespace only, as the script's [[:space:]] (it runs LC_ALL=C):
 				// strings.TrimSpace would also take a NBSP / NEL the script keeps.
 				k, v, ok := strings.Cut(strings.TrimLeft(line, asciiSpace), "=")
 				if !ok || strings.TrimRight(k, asciiSpace) != "EDGE_LISTEN_V6" {

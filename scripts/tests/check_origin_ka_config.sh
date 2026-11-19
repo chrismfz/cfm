@@ -182,8 +182,10 @@ done
 #   * every other proxy_pass goes to a local IPv4 upstream (http://cfm_challenge,
 #     http://127.0.0.1:…): an origin hop through another variable
 #     (`set $o http://$server_addr:80; proxy_pass $o;`) fails;
-#   * no other map defines those three variables, whatever its source (nginx
-#     accepts a second map for one variable and the last one wins silently),
+#   * nothing else writes those three variables: no other map, whatever its
+#     source, nor set / geo / *_set (nginx accepts a second writer for one
+#     variable and the last one wins silently); every proxy_pass starts its
+#     line,
 #     and $cfm_pass_bind stays `volatile` (cfm.lua sets $cfm_pass mid-request);
 #   * each listener server{} keeps exactly one server-level
 #     `proxy_bind 127.0.0.1;` (the challenge / admin / cpsrvd hops: binding them
@@ -203,6 +205,12 @@ for f in "$ORT" "$ANG"; do
     # Any proxy_pass of $cfm_pass / ${cfm_pass} / $cfm_origin_addr, anywhere on
     # the line, must be alone on its line (so the bind can be checked on the
     # next one) and be followed by its bind.
+    # Every proxy_pass starts its line (so the allowlist below sees it).
+    !/^[[:space:]]*#/ && /proxy_pass[[:space:]]/ && !/^[[:space:]]*proxy_pass[[:space:]]/ { bad("proxy_pass must start its line (one directive per line here)") }
+    # The three variables are written by their pinned maps only: no set /
+    # geo / *_set / second map (nginx accepts a writer for a map variable and
+    # the last one wins silently).
+    !/^[[:space:]]*#/ && /(^|[;{}])[[:space:]]*(set|geo|map|set_by_lua[a-z_]*|perl_set|js_set)[[:space:]][^;]*\$\{?cfm_(origin_addr|origin_bind|pass_bind)([^a-zA-Z0-9_]|$)/ { writers++ }
     /^[[:space:]]*proxy_pass[[:space:]]/ {
       t = $0; sub(/^[[:space:]]*proxy_pass[[:space:]]+/, "", t)
       if (t !~ /^\$\{?cfm_pass/ && t !~ /^https?:\/\/\$\{?cfm_origin_addr\}?/ && t !~ /^http:\/\/cfm_challenge[;\/[:space:]]/ && t !~ /^http:\/\/127\.0\.0\.1:[0-9]+[;\/$[:space:]]/) bad("proxy_pass to " t ": an origin hop must use $cfm_pass or $cfm_origin_addr (with its bind); others go to cfm_challenge or 127.0.0.1")
@@ -216,7 +224,10 @@ for f in "$ORT" "$ANG"; do
       want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_origin_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_origin_bind;"
     }
     { prevl = $0 }
-    END { if (want != "") bad("expected `" wantmsg "` after the last line") }
+    END {
+      if (want != "") bad("expected `" wantmsg "` after the last line")
+      if (writers != 3) bad("$cfm_origin_addr / $cfm_origin_bind / $cfm_pass_bind must be written by their three pinned maps only (found " writers + 0 " writers: set / geo / map / *_set)")
+    }
   ' "$f")
   if [ -n "$v6err" ]; then
     while IFS= read -r l; do err "$l"; done <<<"$v6err"

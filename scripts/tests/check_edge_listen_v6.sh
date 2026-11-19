@@ -202,6 +202,10 @@ proc_edge() { # the edge (root) on its own [::]:9043 tcp + udp, the origin on [:
   p6 tcp6 $any6 9043 0A 0
   p6 tcp6 $any6 80 0A 0
   p6 udp6 $any6 9043 07 0
+  # connections the edge accepted on its [::]:9043: owned by the WORKER that
+  # accepted them (speedhost: uid 969), not by root
+  p6 tcp6 2A144280000100010000000000000002 9043 01 969
+  p6 tcp6 2A144280000100010000000000000002 9043 06 0
 }
 # fake systemctl for the edge unit: is-active while $tmp/edge.active exists;
 # reload fails with $tmp/reload.fail, and with $tmp/reload.listens (and the
@@ -341,12 +345,13 @@ p6 tcp6 $lo6 9080 0A 1001
 run render
 expect absent "a tenant on [::1]:9080 -> taken (it fails the edge's [::]:9080 bind too)"
 ss_v6
+printf '%s\n' "$p6h" >"$tmp/proc/net/udp6"
 p6 udp6 $any6 9043 07 1001
 run render
-expect absent "a tenant's udp [::]:9043 -> taken"
+expect absent "a tenant's udp [::]:9043 (no edge socket there) -> taken"
 ss_v6
-p6 tcp6 $any6 9043 0A 1001
-printf '%s\n' 'LISTEN 0 100 [::]:9043 [::]:* users:(("nginx\",pid=1,fd=3),(\"x",pid=999,fd=3))' >>"$tmp/ss.tcp"
+p6 tcp6 $any6 9080 0A 1001
+printf '%s\n' 'LISTEN 0 100 [::]:9080 [::]:* users:(("nginx\",pid=1,fd=3),(\"x",pid=999,fd=3))' >>"$tmp/ss.tcp"
 run render
 expect absent "a tenant naming itself nginx\",pid=1 in ss: the kernel uid (1001) decides -> taken"
 ss_v6
@@ -394,6 +399,20 @@ p6 tcp6 $any6 9080 01 0
 printf 'taken' >"$tmp/bind"
 run render
 expect absent "a root socket on 9080 that is not LISTEN is not the edge's listener: the bind test still decides"
+ss_v6
+p6 tcp6 2A144280000100010000000000000002 9080 0A 0
+printf 'taken' >"$tmp/bind"
+run render
+expect absent "a root listener on one address only (not [::]) is not the edge's: the bind test decides"
+rm -f "$tmp/bind"
+ss_v6
+p6 tcp6 $any6 9080 0A 0
+p6 tcp6 2A144280000100010000000000000002 9080 01 969
+p6 tcp6 $any6 9043 01 65534
+run render
+expect present "the edge's [::] listeners with worker-owned accepted connections (uid 969, 65534) -> the edge's, IPv6 stays"
+run prestart
+expect present "the same at start"
 rm -f "$tmp/bind"
 ss_v6
 run render
@@ -427,6 +446,14 @@ says "does not listen on IPv6"
 run render
 expect absent "systemctl reload failing -> files removed"
 rm -f "$tmp/reload.fail"
+# Files that existed with another body, no IPv6 listen after the reload: the
+# reload back is the only one (no second reload for the removal).
+run render
+printf '# an older body\n' >>"$conf_dir/cfm-listen-v6-http.conf"
+: >"$tmp/edgectl.calls"
+run render
+expect absent "changed files, reloaded, no IPv6 listen -> removed"
+[ "$(grep -cx 'reload test.service' "$tmp/edgectl.calls")" -eq 2 ] && ok "... reload + reload back, no third reload" || fail "reload count: $(cat "$tmp/edgectl.calls")"
 # A listener already there before the reload proves nothing about it.
 ss_v6
 p6 tcp6 $any6 9080 0A 0
@@ -629,6 +656,22 @@ ss_v4
 deploy
 expect present "deploy: the origin not on IPv6 (restarting during the upgrade) -> kept"
 ss_v6
+deploy
+expect present "deploy: the edge's [::] listeners with worker-owned accepted connections -> kept"
+printf '# an older body\n' >>"$conf_dir/cfm-listen-v6-http.conf"
+cp "$conf_dir/cfm-listen-v6-http.conf" "$tmp/http.old"
+deploy
+cmp -s "$conf_dir/cfm-listen-v6-http.conf" "$tmp/http.old" && ok "deploy never rewrites a kept file whose body differs" || fail "deploy rewrote a kept file"
+says "differ from this version"
+rm -f "$tmp/edge.active"
+run render
+expect present "render rewrites the old body"
+printf 'untrusted' >"$tmp/realip"
+deploy
+expect absent "deploy: a definite untrusted verdict removes the files"
+says "reload it to apply"
+grep -vx daemon-reload "$tmp/systemctl.calls" | grep -q reload && fail "deploy reloaded the edge: $(cat "$tmp/systemctl.calls")"
+printf 'trusted' >"$tmp/realip"
 rm -f "$tmp/edge.active"
 [ "$(grep -c daemon-reload "$tmp/systemctl.calls")" -eq 1 ] && ok "unchanged units: no second daemon-reload" || fail "daemon-reload ran again for unchanged units"
 

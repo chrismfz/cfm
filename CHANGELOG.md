@@ -51,11 +51,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   test, so a host without IPv6 never fails to start on it; a package upgrade
   runs it too but only keeps or removes files, never turning IPv6 on and
   never reloading. The edge's IPv6 ports are judged from the kernel's socket
-  owner (`/proc/net/tcp6`, `udp6`), never from the process names `ss` prints:
-  any socket on them not owned by root, in any state (a tenant's, `[::1]`
-  included), keeps IPv6 off instead of making the edge's start fail, and a
-  port with no root socket is really bound first (`cfm realip v6-bindcheck`:
-  a bound-only socket is invisible in `/proc`). A `render` that writes the
+  owner (`/proc/net/tcp6`, `udp6`), never from the process names `ss` prints.
+  A root listener on `[::]:PORT` is the edge's own (its accepted connections,
+  owned by its workers, do not count); on a port without one, any socket not
+  owned by root, in any state (a tenant's, `[::1]` included), keeps IPv6 off
+  instead of making the edge's start fail, and the port is really bound first
+  (`cfm realip v6-bindcheck`: a bound-only socket is invisible in `/proc`). A `render` that writes the
   files reloads a running edge at once and checks it listens on IPv6,
   removing them and reloading back if not (a failed reload leaves nginx on
   its old config, never down); one that removes live files reloads too.

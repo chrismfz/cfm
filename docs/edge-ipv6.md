@@ -35,7 +35,7 @@ origin is ready for it.
 | `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. A `render` that writes the files reloads a running edge at once and checks (`/proc/net/tcp6`) that it listens on `[::]:9080` and `[::]:9043`; if not, it removes them and reloads back. A `render` that removes files a running edge listens with reloads it too. `prestart` and `deploy` never reload. |
 | `cfm-edge-listen-v6.service` (`configs/`, installed to `/etc/systemd/system/`) | oneshot running the script (`prestart`) before every edge start; `TimeoutStartSec=60`. |
 | drop-in `openresty.service.d/cfm-listen-v6.conf`, `angie.service.d/cfm-listen-v6.conf` | `Wants=` + `After=` that unit, so it runs **before** the edge unit's own `ExecStartPre` config test (a drop-in `ExecStartPre` would run after it, too late). `Wants=`, not `Requires=`: the edge starts if the unit fails. |
-| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`deploy`) after the new edge configs are deployed: it keeps or removes files (prestart's rules) but never writes new ones and never reloads, so an upgrade never turns IPv6 on. The installers (`install-openresty.sh`, `install-angie.sh`) run `render`, after `cfm realip fix`. |
+| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`deploy`) after the new edge configs are deployed: it keeps or removes files (prestart's rules) but never writes new ones and never reloads, so an upgrade never turns IPv6 on. It never rewrites a kept file either (a changed body is `render`'s to apply), and when it removes files a running edge listens with it says to reload. The installers (`install-openresty.sh`, `install-angie.sh`) run `render`, after `cfm realip fix`. |
 
 ## The decision
 
@@ -51,18 +51,22 @@ otherwise (the script logs which one failed):
 1. the host has a global IPv6 address (`/proc/net/if_inet6`, scope `00`;
    the stack alone is not enough: earth has it, empty, and no IPv6 visitor
    can reach it);
-2. no IPv6 socket on tcp 9080 / 9043 (listening) or udp 9043 is owned by
-   anyone but root (`nginx -t` does not bind, so a taken port would pass the
-   test and then fail the edge's start, IPv4 included). Read from the uid
-   column of `/proc/net/tcp6` / `udp6`, never from `ss`: `ss` prints process
-   names raw, so a tenant process can pose as root's nginx. A non-root socket
-   on the port counts in any state (one that bound the port and connected out
-   holds it too) and on every address, `[::1]` included (it fails the edge's
-   `[::]` bind too); the edge's master binds as root, and its accepted
-   connections are root's. A port with no root socket is then really bound,
-   IPv6-only as nginx does, by `cfm realip v6-bindcheck`: a socket that is
-   bound and never listens is not in `/proc/net/tcp6` at all. A `cfm` that
-   cannot run the check, and an unreadable table, count as taken;
+2. the edge's IPv6 ports (tcp 9080 / 9043, udp 9043) are the edge's own or
+   free (`nginx -t` does not bind, so a taken port would pass the test and
+   then fail the edge's start, IPv4 included). Read from the uid column of
+   `/proc/net/tcp6` / `udp6`, never from `ss`: `ss` prints process names raw,
+   so a tenant process can pose as root's nginx. A root listener on
+   `[::]:PORT` (udp: a root socket there) is the edge's own, and while it
+   holds the port nothing else can bind it, so the other sockets on it are the
+   connections it accepted: those belong to the worker that accepted them
+   (`nobody` / `cfm`, not root: speedhost's are uid 969) and do not count.
+   With no such listener, a non-root socket on the port counts as taken in
+   any state (one that bound the port and connected out holds it too) and on
+   every address, `[::1]` included (it fails the edge's `[::]` bind too), and
+   the port is then really bound, IPv6-only as nginx does, by
+   `cfm realip v6-bindcheck`: a socket that is bound and never listens is not
+   in `/proc/net/tcp6` at all. A `cfm` that cannot run the check, and an
+   unreadable table, count as taken;
 3. the origin listens on IPv6 on both 80 and 443 (`ss`: `[::]`, a specific
    IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped), because an
    IPv6 visitor's hop goes to the IPv6 address it came to;

@@ -81,6 +81,11 @@
 # CFM_V6_CONFIRM_TRIES, CFM_EDGE_ENGINES
 # ("Name|binary|confdir|mainconf" per line).
 
+# C locale: [[:space:]] is ASCII whitespace only, as Go's edgeIPv6Wanted
+# reads it (a UTF-8 locale's sed would also trim U+2000.. and U+3000).
+LC_ALL=C
+export LC_ALL
+
 CFM_CONF=${CFM_CONF:-/etc/cfm/cfm.conf}
 CFM_V6_PROC_FILE=${CFM_V6_PROC_FILE:-/proc/net/if_inet6}
 CFM_SS=${CFM_SS:-ss}
@@ -193,12 +198,15 @@ origin_has_v6() {
 #  - /proc/net/tcp6 and udp6, never ss: ss prints a process's name raw, so a
 #    tenant naming itself `nginx",pid=1` passes as root's PID 1 (proved), and
 #    a name was never proof anyway. The kernel's uid column is the socket's
-#    owner and cannot be forged: a socket on the port owned by anyone but root
-#    counts as taken, in ANY state and on any address, ::1 and v4-mapped
-#    included (a tenant that bound the port and connected out holds it too;
-#    the edge's accepted connections are root's, as its listener). A root
-#    LISTEN (udp: any root socket) is the edge's own: only root could have put
-#    another there.
+#    owner and cannot be forged. A root LISTEN on [::]:PORT (udp: a root
+#    socket on [::]:PORT) is the edge's own (only root could have put another there), and
+#    while it holds the port nothing else can bind it: every other socket on
+#    the port is then a connection it accepted, owned by the WORKER that
+#    accepted it (nobody / cfm / nginx, not root: speedhost's edge, uid 969),
+#    so it does not count. With no root listener, a socket on the port owned
+#    by anyone but root counts as taken, in ANY state and on any address, ::1
+#    and v4-mapped included (a tenant that bound the port and connected out
+#    holds it too).
 #  - A port with no root socket is then really bound, by `cfm realip
 #    v6-bindcheck` (IPv6-only, as nginx's listen [::]): a socket that is bound
 #    and never listens is not in /proc/net/tcp6 at all, yet it makes the
@@ -220,10 +228,10 @@ edge_port_taken() {
             {
                 n = split($2, a, ":")
                 if (n != 2 || toupper(a[2]) != hexport) next
-                if ($8 != "0") { u = $8; exit }
-                if (proto == "udp6" || $4 == "0A") root = 1
+                if ($8 == "0" && a[1] == "00000000000000000000000000000000" && (proto == "udp6" || $4 == "0A")) root = 1
+                else if ($8 != "0" && u == "") u = $8
             }
-            END { if (u != "") print "uid " u; else if (root) print "root" }' "$ept_file") || {
+            END { if (root) print "root"; else if (u != "") print "uid " u }' "$ept_file") || {
             echo "cannot parse $ept_file"
             return 0
         }
@@ -399,6 +407,7 @@ reload_and_confirm() {
     if ! "$CFM_SYSTEMCTL" reload "$rc_unit" >/dev/null 2>&1; then
         log "WARNING: $1: systemctl reload $rc_unit failed; removed the IPv6 listen files, IPv4 only"
         remove_files "$2"
+        re_reloaded=1
         return 0
     fi
     if [ "$rc_pre" -eq 1 ]; then
@@ -417,6 +426,7 @@ reload_and_confirm() {
     log "WARNING: $1: reloaded $rc_unit but it does not listen on IPv6 (a port taken meanwhile?); removed the IPv6 listen files and reloaded back, IPv4 only"
     remove_files "$2"
     "$CFM_SYSTEMCTL" reload "$rc_unit" >/dev/null 2>&1 || true
+    re_reloaded=1
     return 0
 }
 
@@ -502,6 +512,24 @@ render_engine() {
         # and files written without a reload leave a window for another
         # process to take the port (render reloads and confirms at once).
         log "$re_name: IPv4 only for now: IPv6 is allowed and the host is ready; turn it on with: sh $0 render (it reloads the edge)"
+        return 0
+    fi
+
+    if [ "$re_action" = deploy ]; then
+        # Kept files only, and never rewritten: a changed body would apply at
+        # some later reload, the window render's reload-and-confirm closes.
+        for re_pair in "$V6_HTTP_FILE http_body" "$V6_HTTPS_FILE https_body"; do
+            if [ "$(cat "$re_dir/${re_pair%% *}" 2>/dev/null)" != "$(${re_pair#* })" ]; then
+                log "$re_name: the IPv6 listen files differ from this version's; kept as they are: apply with: sh $0 render (it reloads the edge)"
+                break
+            fi
+        done
+        if engine_test "$re_name" "$re_bin"; then
+            log "$re_name: listening on IPv6 too ($re_reason); kept, config test passed"
+            return 0
+        fi
+        remove_files "$re_dir"
+        log "WARNING: $re_name: the config test fails with the kept IPv6 listens; removed them (applies at the next reload)"
         return 0
     fi
 
@@ -606,9 +634,14 @@ main() {
         else
             e_had=0
             [ -f "$e_dir/$V6_HTTP_FILE" ] && e_had=1
+            re_reloaded=0
             render_engine "$e_name" "$e_bin" "$e_dir" "$e_main" "$m" "$action"
-            if [ "$action" = render ] && [ "$e_had" -eq 1 ] && [ ! -f "$e_dir/$V6_HTTP_FILE" ]; then
-                reload_after_remove "$e_name"
+            if [ "$e_had" -eq 1 ] && [ ! -f "$e_dir/$V6_HTTP_FILE" ]; then
+                if [ "$action" = render ] && [ "$re_reloaded" -eq 0 ]; then
+                    reload_after_remove "$e_name"
+                elif [ "$action" = deploy ]; then
+                    log "$e_name: removed IPv6 listen files a running edge may still listen with: reload it to apply (systemctl reload $(unit_of "$e_name"))"
+                fi
             fi
         fi
     done
