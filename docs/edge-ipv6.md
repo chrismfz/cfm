@@ -321,18 +321,23 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   address, which the row and the alert name (`client`, `addrs`).
   - **A ban** takes the /64 (the sink's `ExtendClientBlock`), once per
     client per emit cooldown.
-  - **A challenge** is per address at the edge, so it goes to the busiest
-    address and, once that alert is out, to the client's other addresses
-    seen in the window (its 16 busiest; `fanOutChallenge`, at most 64 a
-    tick in all), each through the same gates as the busiest (a new
-    matching hit, the burst cooldown, the host bypass, `IGNORE_IPS` /
-    chalExclude) and never notifying. The busiest address's exclude decides
-    for the client: an excluded one fans out nothing. A fan-out's gate is
-    its own per rule, so it never pre-empts an address's own alert for
-    another rule (`CHALLENGE_PATHS` and its v2 mark). A new address of the
-    client keeps the /64's count up and is challenged on the next emit
-    (rotating per request still outruns it until the edge's shared dicts
-    group by /64).
+  - **A challenge** is per address at the edge. A per-IP challenge rule
+    judges every address of the client (its 16 busiest in the window) on the
+    client's summed counts (`expandClients`), and each goes through its own
+    gates exactly as an address alone does: its new matching hit, the burst
+    cooldown, its host bypass, `IGNORE_IPS` / chalExclude, its own context.
+    No address decides for another: an excluded or bypassed address, however
+    busy, is not challenged and shields no neighbour; a new malpath hit from
+    another address of the /64 is challenged on its own. Each client's first
+    alert of a tick notifies, the rest carry `challenge_notify=0`; the
+    members beyond each client's first are bounded (32 a tick in all).
+    `CHALLENGE_PATHS` has an emit gate of its own (`chalPathsGateKey`), so
+    another rule's challenge of the same address never swallows its malpath
+    hit, its v2 mark and its clearance revoke (for IPv4 too: an address
+    tripping both now gets both). Rotating per request still outruns the
+    next emit until the edge's shared dicts group by /64.
+  - The web detector's flood challenge (`emitIPBlocks`, the score rule)
+    asks the edge to challenge every listed address of the row.
   - The vhost uniqIP count counts clients (`ipkey.Client`: a count, no
     guard): one client rotating inside its /64 no longer looks like a crowd
     that arms the vhost's automatic challenge.

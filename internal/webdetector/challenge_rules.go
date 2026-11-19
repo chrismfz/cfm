@@ -480,7 +480,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 		maxSamples = 8
 	)
 
-	e.fanOutLeft = maxFanOutPerTick // fanOutChallenge's budget for this tick
+	tk := newClientTick() // grouped IPv6 clients: one notifier each, a budget for the rest
 
 	tsToTime := func(ts float64) time.Time {
 		return time.Unix(0, int64(ts*1e9))
@@ -562,8 +562,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         }()
 
         // An IPv6 client counts as its /64 (firewall.CountKey): its addresses'
-        // sets add up; the client's busiest address carries the row, and the
-        // challenge fans out to the others (fanOutChallenge).
+        // sets add up.
         var groups map[string]clientGroup
         agg, groups = groupIPAggs(agg, func(dst, src *uAgg) {
             if src.paths != nil && dst.paths == nil {
@@ -579,6 +578,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 dst.hosts[h] = struct{}{}
             }
         }, func(a *uAgg) int { return len(a.paths) + len(a.hosts) }, func() *uAgg { return &uAgg{} })
+        // Every member is judged on the client's sets, through its own gates.
+        var clientOf map[string]string
+        agg, clientOf = expandClients(agg, groups)
 
         if len(agg) > 0 {
             for ipStr, a := range agg {
@@ -660,6 +662,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 if ctx.Method != "" { extra["method"] = ctx.Method }
                 if ctx.Status != 0  { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
+                if !tk.member(clientOf[ipStr]) {
+                    continue
+                }
                 alet := core.Alert{
                     When:    now,
                     Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -667,7 +672,6 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     Count:   0,
                     Extra:   extra,
                 }
-                fanBase := clientTag(&alet, groups[ipStr])
 
                 // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
@@ -678,8 +682,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 }
                 e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
                 alet.Samples = e.ipSamples(ipStr, 8)
+                tk.notify(&alet, clientOf[ipStr])
                 select { case out <- alet: default: }
-                e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, rule, ttl, out)
             }
         }
     }
@@ -735,8 +739,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 }()
 
                 // An IPv6 client counts as its /64 (firewall.CountKey): its
-                // addresses' rule counts add up under its busiest address, and
-                // the challenge fans out to the others (fanOutChallenge).
+                // addresses' rule counts add up.
                 pm := make(map[string]*map[int]int, len(agg))
                 for ip, mm := range agg {
                         m := mm
@@ -753,6 +756,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                         }
                         return t
                 }, func() *map[int]int { m := map[int]int{}; return &m })
+                // Every member is judged on the client's counts, through its own
+                // gates (its new matching hit, its excludes, its context).
+                pm, clientOf := expandClients(pm, groups)
                 agg = make(map[string]map[int]int, len(pm))
                 for ip, m := range pm {
                         agg[ip] = *m
@@ -812,17 +818,23 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         matchAt := tsToTime(ctx.TS)
 
 
+                                        // Its own gate key (chalPathsGateKey): another
+                                        // rule's emit for this address (a uniq-paths
+                                        // challenge of its /64, say) must not swallow
+                                        // its malpath hit, and with it the v2 mark and
+                                        // the clearance revoke.
                                         skip := func() bool {
                                                 e.emitMu.Lock()
                                                 defer e.emitMu.Unlock()
-                                                last, ok := e.ipLastChalEmit[c.ip]
+                                                gk := chalPathsGateKey(c.ip)
+                                                last, ok := e.ipLastChalEmit[gk]
                                                 if ok && !matchAt.After(last) {
                                                         return true
                                                 }
                                                 if ok && now.Sub(last) < cooldown {
                                                         return true
                                                 }
-                                                e.ipLastChalEmit[c.ip] = now
+                                                e.ipLastChalEmit[gk] = now
                                                 return false
                                         }()
                                         if skip {
@@ -869,6 +881,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         if ctx := lastCtx[c.ip]; ctx.Method != "" { extra["method"] = ctx.Method }
                                         if ctx := lastCtx[c.ip]; ctx.Status != 0 { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
+                                        if !tk.member(clientOf[c.ip]) {
+                                                continue
+                                        }
                                         a := core.Alert{
                                                 When:    now,
                                                 Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -876,7 +891,6 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 Count:   c.count,
                                                 Extra:   extra,
                                         }
-                                        fanBase := clientTag(&a, groups[c.ip])
 
             // record to challenge API store (best-effort)
 e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Status, ttl)
@@ -890,11 +904,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                                         }
 
                                         a.Samples = e.ipSamples(c.ip, maxSamples)
+                                        tk.notify(&a, clientOf[c.ip])
                                         select {
                                         case out <- a:
                                         default:
                                         }
-                                        e.fanOutChallenge(now, c.ip, a.Kind, a.Count, fanBase, groups[c.ip], lastCtx, "CHALLENGE_PATHS", ttl, out)
 
                                 }
                         }
@@ -980,8 +994,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }()
 
         // An IPv6 client counts as its /64 (firewall.CountKey): its addresses'
-        // counts add up under its busiest address, and the challenge fans out
-        // to the others (fanOutChallenge).
+        // counts add up.
         st, groups := groupIPAggs(st, func(dst, src *agg2) {
             dst.total += src.total
             dst.c4xx += src.c4xx
@@ -991,6 +1004,14 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             dst.cH10 += src.cH10
             dst.exempt += src.exempt
         }, func(a *agg2) int { return a.total }, func() *agg2 { return &agg2{} })
+        // The WooCommerce exempt requests come off once per client (the loop
+        // below takes off a.exempt, now 0): the members share the aggregate.
+        for _, a := range st {
+            a.total -= a.exempt
+            a.exempt = 0
+        }
+        // Every member is judged on the client's counts, through its own gates.
+        st, clientOf := expandClients(st, groups)
 
         winSec := e.cfg.Window.Seconds()
         if winSec <= 0 { winSec = 60 }
@@ -1092,6 +1113,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ctx.Method != "" { extra["method"] = ctx.Method }
             if ctx.Status != 0  { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
+            if !tk.member(clientOf[ipStr]) {
+                continue
+            }
             alet := core.Alert{
                 When:    now,
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -1099,7 +1123,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   a.total,
                 Extra:   extra,
             }
-            fanBase := clientTag(&alet, groups[ipStr])
             e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
                 if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
@@ -1109,8 +1132,8 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 continue
             }
             alet.Samples = e.ipSamples(ipStr, maxSamples)
+            tk.notify(&alet, clientOf[ipStr])
             select { case out <- alet: default: }
-            e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, rule, ttl, out)
         }
     }
 
@@ -1136,8 +1159,8 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
         }()
 
-        // An IPv6 client counts as its /64 (firewall.CountKey); the challenge
-        // fans out to its addresses (fanOutChallenge).
+        // An IPv6 client counts as its /64 (firewall.CountKey); every member
+        // is judged on the client's count, through its own gates.
         pmf := make(map[string]*int, len(stMalf))
         for ip, n := range stMalf {
             n := n
@@ -1145,7 +1168,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         pmf, groups := groupIPAggs(pmf, func(dst, src *int) { *dst += *src },
             func(n *int) int { return *n }, func() *int { return new(int) })
+        pmf, clientOf := expandClients(pmf, groups)
 
+        if lastCtx == nil { // the sections above may not have run
+            lastCtx = e.chalLastSnapshot()
+        }
         for ipStr, cntp := range pmf {
             cnt := *cntp
             if cnt < e.cfg.ChallengeIPMalformedMin { continue }
@@ -1186,6 +1213,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ctx.URI != ""  { extra["uri"]  = ctx.URI }
             if ctx.Status != 0 { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
+            if !tk.member(clientOf[ipStr]) {
+                continue
+            }
             alet := core.Alert{
                 When:    now,
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -1193,7 +1223,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   cnt,
                 Extra:   extra,
             }
-            fanBase := clientTag(&alet, groups[ipStr])
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_MALFORMED", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_MALFORMED") {
@@ -1203,8 +1232,8 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 continue
             }
             alet.Samples = e.ipSamples(ipStr, maxSamples)
+            tk.notify(&alet, clientOf[ipStr])
             select { case out <- alet: default: }
-            e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, "CHALLENGE_MALFORMED", ttl, out)
         }
     }
 
@@ -1239,13 +1268,17 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
         }()
 
-        // An IPv6 client counts as its /64 (firewall.CountKey); the challenge
-        // fans out to its addresses (fanOutChallenge).
+        // An IPv6 client counts as its /64 (firewall.CountKey); every member
+        // is judged on the client's UAs, through its own gates.
         agg, groups := groupIPAggs(agg, func(dst, src *uaAgg) {
             for h := range src.uniq {
                 dst.uniq[h] = struct{}{}
             }
         }, func(a *uaAgg) int { return len(a.uniq) }, func() *uaAgg { return &uaAgg{uniq: make(map[uint64]struct{}, 8)} })
+        agg, clientOf := expandClients(agg, groups)
+        if lastCtx == nil { // the sections above may not have run
+            lastCtx = e.chalLastSnapshot()
+        }
 
         for ipStr, a := range agg {
             if len(a.uniq) < e.cfg.ChallengeIPUniqUAMin { continue }
@@ -1285,6 +1318,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ctx.Host != "" { extra["host"] = ctx.Host }
             if ctx.URI != ""  { extra["uri"]  = ctx.URI }
 
+            if !tk.member(clientOf[ipStr]) {
+                continue
+            }
             alet := core.Alert{
                 When:    now,
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -1292,7 +1328,6 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   len(a.uniq),
                 Extra:   extra,
             }
-            fanBase := clientTag(&alet, groups[ipStr])
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_UNIQUA", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_UNIQUA") {
@@ -1302,8 +1337,8 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 continue
             }
             alet.Samples = e.ipSamples(ipStr, maxSamples)
+            tk.notify(&alet, clientOf[ipStr])
             select { case out <- alet: default: }
-            e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, "CHALLENGE_UNIQUA", ttl, out)
         }
     }
 

@@ -106,7 +106,7 @@ func TestUniqueIPsCountsClients(t *testing.T) {
 }
 
 // A /64 over a per-IP challenge threshold is challenged on each of its
-// addresses; only the busiest one notifies.
+// addresses; only one of the alerts notifies.
 func TestChallengeFansOutToTheClientsAddresses(t *testing.T) {
 	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengeIPMalformedMin: 3, ChallengeNotify: true})
 	now := float64(time.Now().Unix())
@@ -126,8 +126,14 @@ func TestChallengeFansOutToTheClientsAddresses(t *testing.T) {
 		}
 		got[a.Key] = a.Extra["challenge_notify"]
 	}
-	if len(got) != 3 || got["2001:db8:1:2::b"] == "0" || got["2001:db8:1:2::a"] != "0" || got["2001:db8:1:2::c"] != "0" {
-		t.Fatalf("challenged %v, want all three, the busiest (::b) notifying", got)
+	notifying := 0
+	for _, n := range got {
+		if n != "0" {
+			notifying++
+		}
+	}
+	if len(got) != 3 || notifying != 1 {
+		t.Fatalf("challenged %v, want all three, one notifying", got)
 	}
 }
 
@@ -152,8 +158,9 @@ func TestChallengeServerLimitsAnIPv6ClientsSlash64(t *testing.T) {
 }
 
 // Every per-IP challenge aggregator of emitIPChallenges groups an IPv6
-// client and fans its challenge out (uniq paths/hosts, CHALLENGE_PATHS, the
-// thresholds, malformed, UA churn); the unit tests above drive malformed.
+// client and judges each member through its own gates (uniq paths/hosts,
+// CHALLENGE_PATHS, the thresholds, malformed, UA churn); the unit tests drive
+// malformed and CHALLENGE_PATHS.
 func TestEveryPerIPChallengeAggregatorGroupsClients(t *testing.T) {
 	b, err := os.ReadFile("challenge_rules.go")
 	if err != nil {
@@ -163,8 +170,10 @@ func TestEveryPerIPChallengeAggregatorGroupsClients(t *testing.T) {
 	if n := strings.Count(src, "groupIPAggs("); n != 5 {
 		t.Fatalf("groupIPAggs calls: %d, want 5", n)
 	}
-	if n := strings.Count(src, "e.fanOutChallenge("); n != 5 {
-		t.Fatalf("fanOutChallenge calls: %d, want 5", n)
+	for _, call := range []string{"expandClients(", "tk.member(", "tk.notify("} {
+		if n := strings.Count(src, call); n != 5 {
+			t.Fatalf("%s calls: %d, want 5", call, n)
+		}
 	}
 }
 
@@ -201,25 +210,24 @@ func TestEmitIPBlocksOncePerClient(t *testing.T) {
 	}
 }
 
-// The busiest address's exclude decides for the client (an excluded busiest
-// address fans out nothing, so no client is challenged with nobody
-// notified), its alert goes out before the fan-out's, and the fan-out of one
-// tick is bounded.
-func TestChallengeFanOutOrderAndBounds(t *testing.T) {
+// Every member of a grouped client goes through its own gates: an excluded
+// address (however busy) is not challenged and shields no neighbour, and
+// the members beyond each client's first are bounded per tick.
+func TestChallengeMembersOwnGatesAndBudget(t *testing.T) {
 	malformed := func(e *Engine, ips ...string) {
 		now := float64(time.Now().Unix())
 		for i, ip := range ips {
 			e.ingest(LogRec{TS: now + float64(i), IP: ip, Host: "example.com", Method: "get", URI: "/x", Status: 400, UA: "ua"}, "raw")
 		}
 	}
-	drain := func(e *Engine, n int) []core.Alert {
-		out := make(chan core.Alert, n)
+	drain := func(e *Engine) map[string]core.Alert {
+		out := make(chan core.Alert, 1024)
 		e.emitIPChallenges(time.Now(), out)
 		close(out)
-		var got []core.Alert
+		got := map[string]core.Alert{}
 		for a := range out {
 			if a.Extra["rule"] == "CHALLENGE_MALFORMED" {
-				got = append(got, a)
+				got[a.Key] = a
 			}
 		}
 		return got
@@ -230,78 +238,92 @@ func TestChallengeFanOutOrderAndBounds(t *testing.T) {
 	e.chalExcludeFunc = func(ip, host, ua, asn, ptr, rule string) (string, bool) {
 		return "monitor", ip == "2001:db8:1:2::b"
 	}
-	malformed(e, "2001:db8:1:2::a", "2001:db8:1:2::b", "2001:db8:1:2::b", "2001:db8:1:2::c")
-	if got := drain(e, 16); len(got) != 0 {
-		t.Fatalf("an excluded busiest address fanned out: %+v", got)
+	malformed(e, "2001:db8:1:2::a", "2001:db8:1:2::b", "2001:db8:1:2::b", "2001:db8:1:2::b", "2001:db8:1:2::c")
+	got := drain(e)
+	if _, ok := got["2001:db8:1:2::b"]; ok || got["2001:db8:1:2::a"].Key == "" || got["2001:db8:1:2::c"].Key == "" {
+		t.Fatalf("the excluded busiest address shielded its neighbours or was challenged: %v", keys(got))
+	}
+	if n := got["2001:db8:1:2::a"].Extra["challenge_notify"] + got["2001:db8:1:2::c"].Extra["challenge_notify"]; strings.Count(n, "0") != 1 {
+		t.Fatalf("notify flags %q, want exactly one of the two notifying", n)
 	}
 
-	// 20 addresses into a 4-slot channel: the busiest address's alert is
-	// the first one in it.
 	e = NewEngine(cfg)
-	ips := []string{"2001:db8:1:2::bad", "2001:db8:1:2::bad"}
-	for i := 0; i < 20; i++ {
-		ips = append(ips, fmt.Sprintf("2001:db8:1:2::%x", i+1))
-	}
-	malformed(e, ips...)
-	if got := drain(e, 4); len(got) == 0 || got[0].Key != "2001:db8:1:2::bad" || got[0].Extra["challenge_notify"] == "0" {
-		t.Fatalf("the busiest address's alert is not first: %+v", got)
-	}
-
-	// The budget: at most maxFanOutPerTick fan-out alerts a tick.
-	e = NewEngine(cfg)
-	ips = nil
-	for c := 0; c < 5; c++ { // 5 clients x 15 others: past the cap
+	var ips []string
+	for c := 0; c < 5; c++ { // 5 clients x 16 members: past the budget
 		for i := 0; i < maxClientAddrs; i++ {
 			ips = append(ips, fmt.Sprintf("2001:db8:%x:1::%x", c, i+1))
 		}
-		ips = append(ips, fmt.Sprintf("2001:db8:%x:1::1", c), fmt.Sprintf("2001:db8:%x:1::1", c))
 	}
 	malformed(e, ips...)
-	got := drain(e, 1024)
-	fan := 0
-	for _, a := range got {
-		if a.Extra["challenge_notify"] == "0" {
-			fan++
-		}
-	}
-	if fan > maxFanOutPerTick || len(got)-fan != 5 {
-		t.Fatalf("fan-out %d (cap %d), busiest %d (want 5)", fan, maxFanOutPerTick, len(got)-fan)
+	if n := len(drain(e)); n != 5+maxExtraMembersPerTick {
+		t.Fatalf("challenged %d members, want %d (each client's first + the budget)", n, 5+maxExtraMembersPerTick)
 	}
 }
 
-// A fan-out's gate is its own per rule: an address fanned out for one rule
-// still emits its own alert for another rule the same tick (CHALLENGE_PATHS
-// and its v2 mark must not be pre-empted by another rule's fan-out).
-func TestFanOutNeverPreemptsAnAddressesOwnRule(t *testing.T) {
-	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengeIPMalformedMin: 3, ChallengeIPUniqUAMin: 3, ChallengeNotify: true})
-	now := float64(time.Now().Unix())
-	rec := func(i int, ip, ua string, status int) {
-		e.ingest(LogRec{TS: now + float64(i), IP: ip, Host: "example.com", Method: "get", URI: "/x", Status: status, UA: ua}, "raw")
+func keys(m map[string]core.Alert) []string {
+	var out []string
+	for k := range m {
+		out = append(out, k)
 	}
-	// ::a is the busiest malformed sender; ::b is fanned out for it, and is
-	// itself the client's busiest UA rotator.
-	rec(0, "2001:db8:1:2::a", "ua", 400)
-	rec(1, "2001:db8:1:2::a", "ua", 400)
-	rec(2, "2001:db8:1:2::a", "ua", 400)
-	rec(3, "2001:db8:1:2::b", "ua1", 400)
-	rec(4, "2001:db8:1:2::b", "ua2", 200)
-	rec(5, "2001:db8:1:2::b", "ua3", 200)
-	out := make(chan core.Alert, 32)
+	return out
+}
+
+// A new malpath hit from another address of a /64 is challenged on its own
+// gate, though an earlier, busier address of the /64 was challenged already
+// (CHALLENGE_PATHS carries the v2 mark and the clearance revoke).
+func TestChallengePathsNewMemberHitIsChallenged(t *testing.T) {
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengePathsEnabled: true, ChallengePathsList: []string{"/.env"}, ChallengePathsCount: 1})
+	t0 := float64(time.Now().Unix())
+	hit := func(ts float64, ip string) {
+		e.ingest(LogRec{TS: ts, IP: ip, Host: "example.com", Method: "get", URI: "/.env", Status: 404, UA: "ua"}, "raw")
+	}
+	tick := func(at time.Time) []string {
+		out := make(chan core.Alert, 32)
+		e.emitIPChallenges(at, out)
+		close(out)
+		var got []string
+		for a := range out {
+			if a.Extra["rule"] == "CHALLENGE_PATHS" {
+				got = append(got, a.Key)
+			}
+		}
+		return got
+	}
+	hit(t0, "2001:db8:1:2::1")
+	hit(t0+1, "2001:db8:1:2::1")
+	if got := tick(time.Now()); len(got) != 1 || got[0] != "2001:db8:1:2::1" {
+		t.Fatalf("first tick: %v", got)
+	}
+	hit(t0+10, "2001:db8:1:2::9")
+	got := tick(time.Now().Add(10 * time.Second))
+	found := false
+	for _, k := range got {
+		found = found || k == "2001:db8:1:2::9"
+	}
+	if !found {
+		t.Fatalf("the new member's malpath hit was not challenged: %v", got)
+	}
+}
+
+// CHALLENGE_PATHS has its own emit gate: another rule's challenge of the
+// same address in the tick (unique paths here) does not swallow its malpath
+// hit, and with it the v2 mark and the clearance revoke.
+func TestChallengePathsOwnGate(t *testing.T) {
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute,
+		ChallengePathsEnabled: true, ChallengePathsList: []string{"/.env"}, ChallengePathsCount: 1,
+		ChallengeIPUniqPathsEnabled: true, ChallengeIPUniqPathsMin: 2})
+	t0 := float64(time.Now().Unix())
+	for i, uri := range []string{"/a", "/.env"} {
+		e.ingest(LogRec{TS: t0 + float64(i), IP: "203.0.113.9", Host: "example.com", Method: "get", URI: uri, Status: 404, UA: "ua"}, "raw")
+	}
+	out := make(chan core.Alert, 16)
 	e.emitIPChallenges(time.Now(), out)
 	close(out)
-	var malfB, uaB bool
+	rules := map[string]bool{}
 	for a := range out {
-		if a.Key != "2001:db8:1:2::b" {
-			continue
-		}
-		switch a.Extra["rule"] {
-		case "CHALLENGE_MALFORMED":
-			malfB = a.Extra["challenge_notify"] == "0"
-		case "CHALLENGE_UNIQUA":
-			uaB = true
-		}
+		rules[a.Extra["rule"]] = true
 	}
-	if !malfB || !uaB {
-		t.Fatalf("::b fanned out for MALFORMED=%v, its own UNIQUA alert=%v; want both", malfB, uaB)
+	if !rules["CHALLENGE_PATHS"] || !rules["CHALLENGE_UNIQPATHS_IP"] {
+		t.Fatalf("rules emitted: %v, want both", rules)
 	}
 }

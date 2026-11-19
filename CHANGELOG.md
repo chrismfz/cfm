@@ -28,11 +28,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `CHALLENGE_PATHS`, the rate and ratio thresholds, malformed requests, UA
   churn). They now add up the /64's addresses (per address where a ban would
   not take the /64), named by its busiest address. A ban takes the /64 as
-  before; a challenge, which the edge applies per address, goes to the
-  busiest address and then to the client's other addresses seen in the
-  window (its 16 busiest, at most 64 a tick), each through the usual
-  exemptions and never notifying; an excluded busiest address challenges
-  none of them. The vhost unique-IP count counts clients, so one rotating
+  before. A challenge, which the edge applies per address, judges every
+  address of the client seen in the window (its 16 busiest) on the client's
+  counts, each through its own exemptions and gates (an excluded address
+  shields no neighbour), one alert per client notifying. The malpath
+  challenge (`CHALLENGE_PATHS`) has its own emit gate, so another rule's
+  challenge of the same address no longer swallows its malpath hit and the
+  ChallengeV2 mark it sets. The malformed and UA-churn challenges now read
+  the request context (host, UA) their excludes match on: it was empty
+  unless an earlier challenge rule was enabled. The vhost unique-IP count counts clients, so one rotating
   client no longer arms a vhost's automatic challenge. The challenge
   server's rate limits and abuse count hold the /64 too. `docs/edge-ipv6.md`
   "IPv6 /64 grouping".

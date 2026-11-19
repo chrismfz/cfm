@@ -1,15 +1,11 @@
 package webdetector
 
 import (
-	"net"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	core "cfm/internal/detectors/core"
 	"cfm/internal/firewall"
-	"cfm/internal/logging"
 )
 
 // maxClientAddrs caps the addresses a grouped row lists (and a challenge
@@ -74,102 +70,91 @@ func groupIPAggs[T any](perIP map[string]*T, merge func(dst, src *T), weight fun
 	return out, groups
 }
 
-// maxFanOutPerTick bounds the fan-out alerts one emitIPChallenges tick sends
-// in all (each costs the sink an exclude check, maybe a PTR lookup): a spray
-// of fresh addresses must not crowd the busiest addresses' own alerts, nor a
-// ban's, out of the shared channel.
-const maxFanOutPerTick = 64
+// maxExtraMembersPerTick bounds, per emitIPChallenges tick, the members of
+// grouped clients challenged beyond each client's first: each costs an
+// exclude check (maybe a PTR lookup) here and in the sink, so a spray of
+// fresh addresses must not stall the tick nor crowd the alert channel.
+const maxExtraMembersPerTick = 32
 
-// clientTag tags a, the challenge alert of a grouped client's busiest
-// address, with the client and returns a copy of its Extra for
-// fanOutChallenge (taken before a is sent: the sink writes into a.Extra).
-// nil for an ungrouped row.
-func clientTag(a *core.Alert, g clientGroup) map[string]string {
-	if g.client == "" || a.Extra == nil {
-		return nil
+// expandClients maps each address of a grouped client back to the client's
+// summed aggregate: a per-IP challenge rule then judges every member on the
+// client's counts while each member keeps its own per-address gates (a new
+// matching hit, the burst cooldown, its host bypass and excludes, its
+// context): no address decides for another. clientOf names each member's
+// client (/64).
+func expandClients[T any](grouped map[string]*T, groups map[string]clientGroup) (map[string]*T, map[string]string) {
+	out := make(map[string]*T, len(grouped))
+	clientOf := make(map[string]string)
+	for top, a := range grouped {
+		g, ok := groups[top]
+		if !ok {
+			out[top] = a
+			continue
+		}
+		for _, m := range g.addrs {
+			out[m] = a
+			clientOf[m] = g.client
+		}
 	}
-	a.Extra["client"] = g.client
-	base := make(map[string]string, len(a.Extra))
-	for k, v := range a.Extra {
-		base[k] = v
-	}
-	return base
+	return out, clientOf
 }
 
-// fanOutChallenge sends a grouped client's challenge to its other addresses
-// in the window: the edge challenges an address, and the client is all of
-// them. Called only after the busiest address's own alert went out (so its
-// exclude and bypass decide for the client: an excluded busiest address
-// fans out nothing). Each address goes through the same per-address gates
-// (a new matching hit since its last fan-out for this rule, the burst
-// cooldown, the host bypass, IGNORE_IPS / chalExclude) and is recorded on
-// its own; it never notifies (the busiest address's alert does). Its gate
-// key is its own per rule, so it never pre-empts the address's own emit of
-// another rule (CHALLENGE_PATHS and its v2 mark).
-func (e *Engine) fanOutChallenge(now time.Time, top string, kind core.AlertKind, count int, base map[string]string, g clientGroup, lastCtx map[string]chalCtx, rule string, ttl time.Duration, out chan<- core.Alert) {
-	if base == nil {
+// clientTick is one emitIPChallenges tick's state for grouped clients.
+type clientTick struct {
+	extraLeft int
+	seen      map[string]bool // client -> a member reached the checks
+	notified  map[string]bool // client -> a member's alert notified
+}
+
+func newClientTick() *clientTick {
+	return &clientTick{extraLeft: maxExtraMembersPerTick, seen: map[string]bool{}, notified: map[string]bool{}}
+}
+
+// member says whether a grouped client's member may go on to the exclude
+// checks and the alert: its client's first this tick always, the others while
+// the tick's budget lasts. An ungrouped address (client "") always may.
+func (t *clientTick) member(client string) bool {
+	if client == "" {
+		return true
+	}
+	if !t.seen[client] {
+		t.seen[client] = true
+		return true
+	}
+	if t.extraLeft <= 0 {
+		return false
+	}
+	t.extraLeft--
+	return true
+}
+
+// notify tags a, about to be sent, with its client; only the client's first
+// alert this tick notifies (the others carry challenge_notify=0).
+func (t *clientTick) notify(a *core.Alert, client string) {
+	if client == "" || a.Extra == nil {
 		return
 	}
-	const cooldown = 5 * time.Second
-	for _, other := range g.addrs {
-		if other == top {
-			continue
-		}
-		if e.fanOutLeft <= 0 {
-			return
-		}
-		ip := net.ParseIP(other)
-		if ip == nil || isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-			continue
-		}
-		ctx := lastCtx[other]
-		matchAt := time.Unix(0, int64(ctx.TS*1e9))
-		gate := "fan|" + rule + "|" + other
-		skip := func() bool {
-			e.emitMu.Lock()
-			defer e.emitMu.Unlock()
-			last, ok := e.ipLastChalEmit[gate]
-			// A new matching hit since its last fan-out (when the hit is
-			// known), and the burst cooldown.
-			if ok && ((ctx.TS != 0 && !matchAt.After(last)) || now.Sub(last) < cooldown) {
-				return true
-			}
-			e.ipLastChalEmit[gate] = now
-			return false
-		}()
-		if skip || e.hostBypassed(ctx.Host) {
-			continue
-		}
-		e.fanOutLeft--
-		if e.isBypassed(other) || e.isExcluded(other, ctx.Host, ctx.UA, rule) {
-			if e.cfg.ChallengeLogSuppressed {
-				logging.Logf("[challenge_suppressed] ip=%s host=%s rule=%s reason=bypass_or_exclude", other, ctx.Host, rule)
-			}
-			continue
-		}
-		e.RecordIPChallenge(other, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
-		extra := make(map[string]string, len(base))
-		for k, v := range base {
-			extra[k] = v
-		}
-		extra["ip"] = other
-		extra["challenge_notify"] = "0" // the busiest address's alert notifies
-		for k, v := range map[string]string{"host": ctx.Host, "uri": ctx.URI, "method": ctx.Method} {
-			if v != "" {
-				extra[k] = v
-			} else {
-				delete(extra, k)
-			}
-		}
-		if ctx.Status != 0 {
-			extra["status"] = strconv.Itoa(ctx.Status)
-		} else {
-			delete(extra, "status")
-		}
-		b := core.Alert{When: now, Kind: kind, Key: other, Count: count, Extra: extra, Samples: e.ipSamples(other, 4)}
-		select {
-		case out <- b:
-		default:
-		}
+	a.Extra["client"] = client
+	if t.notified[client] {
+		a.Extra["challenge_notify"] = "0"
+		return
 	}
+	t.notified[client] = true
+}
+
+// chalPathsGateKey is CHALLENGE_PATHS' own emit-gate key for ip in
+// ipLastChalEmit (the other per-IP rules share the plain address key).
+func chalPathsGateKey(ip string) string { return "paths|" + ip }
+
+// chalLastSnapshot copies chalLast (each address's last challenge-matching
+// request): a per-IP challenge section reads its host / URI / UA for the
+// excludes and the alert.
+func (e *Engine) chalLastSnapshot() map[string]chalCtx {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	out := make(map[string]chalCtx, len(e.chalLast))
+	for ip, ctx := range e.chalLast {
+		out[ip] = ctx
+	}
+	return out
 }

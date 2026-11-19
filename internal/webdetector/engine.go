@@ -2,6 +2,7 @@
 package webdetector
 
 import (
+	"cfm/internal/ipkey"
 	"context"
 	"encoding/json"
 	"errors"
@@ -569,9 +570,6 @@ type Engine struct {
 
 	// Challenge emit cooldown separate from blocks
 	ipLastChalEmit map[string]time.Time
-	// fanOutLeft is fanOutChallenge's budget for the running emitIPChallenges
-	// tick (maxFanOutPerTick; that tick's goroutine only).
-	fanOutLeft int
 
 	// Subnet challenge emit cooldown
 	subnetLastChalEmit map[string]time.Time
@@ -2304,7 +2302,9 @@ func (e *Engine) pruneEmitMaps(now time.Time) {
 		// If no emit exists (already pruned above), the ctx is also stale.
 		e.emitMu.Lock()
 		for ip := range e.chalLast {
-			if _, active := e.ipLastChalEmit[ip]; !active {
+			_, active := e.ipLastChalEmit[ip]
+			_, activePaths := e.ipLastChalEmit[chalPathsGateKey(ip)]
+			if !active && !activePaths {
 				delete(e.chalLast, ip)
 			}
 		}
@@ -2324,7 +2324,13 @@ func (e *Engine) pruneEmitMaps(now time.Time) {
 				// Simple proxy: evict if not in ipLastEmit and not in ipLastChalEmit.
 				e.emitMu.Lock()
 				_, inEmit := e.ipLastEmit[ip]
+				if !inEmit { // a grouped IPv6 client's emit is keyed on its /64
+					_, inEmit = e.ipLastEmit[ipkey.Client(ip)]
+				}
 				_, inChal := e.ipLastChalEmit[ip]
+				if !inChal {
+					_, inChal = e.ipLastChalEmit[chalPathsGateKey(ip)]
+				}
 				e.emitMu.Unlock()
 				if !inEmit && !inChal {
 					delete(e.ipLong.stats, ip)
