@@ -20,7 +20,26 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Edge: an IPv6 destination no longer fails every request with `invalid
+  port in upstream`.** The origin URL was built as `https://<addr>:443`, so
+  an IPv6 `$server_addr` read as host `2001` plus an invalid port (500 on
+  every request). `cfm.lua`'s origin pass, the opt-in origin keepalive
+  balancer (`cfm_origin_ka.lua`, which hit the same parse in
+  `set_current_peer`) and the static-cache `proxy_pass` lines (new
+  `$cfm_origin_addr` map in `openresty.conf` / `angie.conf`) now put an IPv6
+  address in brackets. IPv4 is byte-for-byte unchanged. Found by an operator
+  who added `listen [::]` by hand; the reference confs still listen on IPv4
+  only (IPv6 listening comes separately: a listen on a host without an IPv6
+  stack fails the config test).
+- **`IGNORE_NETS` IPv6 networks now bypass the edge too.** They were written
+  to the Lua cache as nothing (only exact IPv6 addresses were), so an IPv6
+  network the Go engine ignored was still WAF-checked and challenged at the
+  edge, including clients behind Cloudflare, which reach the edge with their
+  own IPv6 address. `cfm_ignore_nets.lua` gains `v6_ranges`. **This widens an
+  exemption on upgrade:** an IPv6 CIDR already in `IGNORE_NETS` now also skips
+  the edge WAF, the challenge and the panel WAF, so review those entries
+  before upgrading (none on our own nodes as of 2026-11-19).
 
 ## 2026.11.18
 

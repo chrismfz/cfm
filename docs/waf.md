@@ -1861,10 +1861,13 @@ return {
   v4_ranges = {
     { 1412837632, 1412837887 },  -- 84.54.49.0/24 as uint32 [first, last]
   },
+  v6_ranges = {
+    { "2a144280000100010000000000000000", 64 },  -- 2a14:4280:1:1::/64: network as 32 hex digits + prefix
+  },
 }
 ```
 
-**IPv6 limitation:** `IGNORE_NETS` entries that are IPv6 CIDRs are silently skipped in `v4_ranges`. IPv6 *exact* IPs in `IGNORE_IPS` still work (they land in `ips`). Operators wanting IPv6 CIDR support need to list the specific addresses for now.
+**IPv6 CIDRs** land in `v6_ranges`; `cfm_selfip.lua` expands the client address to the same 32 hex digits and compares the leading prefix bits. Until 2026-11 they were skipped (only exact IPv6 addresses in `IGNORE_IPS` reached the edge), so an IPv6 network in `IGNORE_NETS` was honoured by the Go challenge engine but still WAF-checked at the edge — and clients behind Cloudflare reach the edge with their own IPv6 address.
 
 **Trigger:** the file is rewritten on every config reload that touches `[global]` (the same path that rebuilds `IPIgnore`), plus once on engine startup.
 
@@ -2078,8 +2081,6 @@ only on a clean window.
   fixed token) slip past the substring detectors. libinjection was measured
   on the fleet and not adopted ("SQLi gaps, 2026-11-18"); a shape that
   passes gets its own measured rule.
-- **IPv6 CIDRs in `IGNORE_NETS`** are skipped by the Lua self-bypass (exact
-  IPv6 addresses in `IGNORE_IPS` work).
 - **A rule after a short-circuiting `block`** is never evaluated on that
   request, so it never appears in `also_rule_ids` (cost design; see the
   autoblock decision record).

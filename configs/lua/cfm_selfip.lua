@@ -6,7 +6,7 @@
 --   * loopback / link-local (127/8, ::1, fe80::-feb0::, 169.254/16),
 --   * the server's own public IPs — /var/lib/cfm/lua/cfm_self_ips.lua, written
 --     by Go (firewall/selfip), and
---   * [global] IGNORE_IPS / IGNORE_NETS from cfm.cfg — /var/lib/cfm/lua/
+--   * [global] IGNORE_IPS / IGNORE_NETS from cfm.cfg (IPv4 and IPv6 CIDRs) — /var/lib/cfm/lua/
 --     cfm_ignore_nets.lua, written by Go (detectors.IPIgnore.WriteLuaCache),
 --     so the Lua self-bypass honours the SAME allowlist as the challenge-engine
 --     bypass predicate (an operator-ignored network bypasses the whole CFM
@@ -76,7 +76,7 @@ end
 -- ignored for the first half-minute. Re-poll every 2s instead.
 local _IGNORE_NETS_MISSING_TTL_SEC = 2
 
-local _EMPTY_IGNORE = { ips = {}, v4_ranges = {} }
+local _EMPTY_IGNORE = { ips = {}, v4_ranges = {}, v6_ranges = {} }
 
 local function load_ignore_cache()
   local cache = fc.get(_IGNORE_NETS_FILE, {
@@ -84,7 +84,7 @@ local function load_ignore_cache()
     missing_ttl = _IGNORE_NETS_MISSING_TTL_SEC,
     transform = function(val)
       if type(val) ~= "table" then error("non-table value") end
-      local ips, v4_ranges = {}, {}
+      local ips, v4_ranges, v6_ranges = {}, {}, {}
       if type(val.ips) == "table" then
         for k, v in pairs(val.ips) do
           if v then
@@ -101,7 +101,19 @@ local function load_ignore_cache()
           end
         end
       end
-      return { ips = ips, v4_ranges = v4_ranges }
+      -- { "<32 hex digits>", prefix } per IPv6 CIDR (Go: IPIgnore.WriteLuaCache).
+      -- An entry that is not exactly that shape is dropped, never widened.
+      if type(val.v6_ranges) == "table" then
+        for i = 1, #val.v6_ranges do
+          local r = val.v6_ranges[i]
+          if type(r) == "table" and type(r[1]) == "string" and type(r[2]) == "number"
+             and #r[1] == 32 and not r[1]:find("[^0-9a-f]")
+             and r[2] >= 0 and r[2] <= 128 and r[2] == math.floor(r[2]) then
+            v6_ranges[#v6_ranges + 1] = { r[1], r[2] }
+          end
+        end
+      end
+      return { ips = ips, v4_ranges = v4_ranges, v6_ranges = v6_ranges }
     end,
   })
   return cache or _EMPTY_IGNORE
@@ -116,6 +128,61 @@ local function ipv4_to_uint32(ip)
   return a * 16777216 + b * 65536 + c * 256 + d
 end
 
+-- ipv6_to_hex32("2001:db8::1") -> "20010db8000000000000000000000001": the full
+-- 128-bit address as 32 lowercase hex digits, in the same form Go writes the
+-- v6_ranges networks. Accepts "::" compression, an embedded IPv4 tail
+-- ("::ffff:1.2.3.4") and a zone suffix ("fe80::1%eth0", dropped). Anything it
+-- cannot read as exactly 8 groups returns nil, and a nil never matches a range.
+local function ipv6_to_hex32(ip)
+  if type(ip) ~= "string" or not ip:find(":", 1, true) then return nil end
+  ip = lower(ip)
+  local pct = ip:find("%", 1, true)
+  if pct then ip = ip:sub(1, pct - 1) end
+  local head4, v4 = ip:match("^(.*:)(%d+%.%d+%.%d+%.%d+)$")
+  if v4 then
+    local n = ipv4_to_uint32(v4)
+    if not n then return nil end
+    ip = head4 .. string.format("%x:%x", math.floor(n / 65536), n % 65536)
+  end
+  local function groups(part)
+    local out = {}
+    if part == "" then return out end
+    for g in (part .. ":"):gmatch("([^:]*):") do
+      if not g:match("^[0-9a-f][0-9a-f]?[0-9a-f]?[0-9a-f]?$") then return nil end
+      out[#out + 1] = string.rep("0", 4 - #g) .. g
+    end
+    return out
+  end
+  local hd, tl, gs
+  local dc = ip:find("::", 1, true)
+  if dc then
+    if ip:find("::", dc + 1, true) then return nil end
+    hd, tl = groups(ip:sub(1, dc - 1)), groups(ip:sub(dc + 2))
+    if not hd or not tl or #hd + #tl > 7 then return nil end
+    gs = hd
+    for _ = 1, 8 - #hd - #tl do gs[#gs + 1] = "0000" end
+    for i = 1, #tl do gs[#gs + 1] = tl[i] end
+  else
+    gs = groups(ip)
+    if not gs or #gs ~= 8 then return nil end
+  end
+  return table.concat(gs)
+end
+
+-- hex32_in_prefix: do the first `bits` bits of hex32 equal those of net_hex?
+-- Whole nibbles compare as a string prefix; a trailing partial nibble compares
+-- its top (bits % 4) bits numerically.
+local function hex32_in_prefix(hex32, net_hex, bits)
+  local whole = math.floor(bits / 4)
+  if whole > 0 and hex32:sub(1, whole) ~= net_hex:sub(1, whole) then return false end
+  local rem = bits % 4
+  if rem == 0 then return true end
+  local shift = 2 ^ (4 - rem)
+  local a = tonumber(hex32:sub(whole + 1, whole + 1), 16)
+  local b = tonumber(net_hex:sub(whole + 1, whole + 1), 16)
+  return math.floor(a / shift) == math.floor(b / shift)
+end
+
 local function is_in_ignore_nets(ip)
   local cache = load_ignore_cache()
   if cache.ips[ip] then return true end
@@ -124,6 +191,16 @@ local function is_in_ignore_nets(ip)
     local ranges = cache.v4_ranges
     for i = 1, #ranges do
       if n >= ranges[i][1] and n <= ranges[i][2] then return true end
+    end
+    return false
+  end
+  local ranges6 = cache.v6_ranges
+  if ranges6 and #ranges6 > 0 then
+    local h = ipv6_to_hex32(ip)
+    if h then
+      for i = 1, #ranges6 do
+        if hex32_in_prefix(h, ranges6[i][1], ranges6[i][2]) then return true end
+      end
     end
   end
   return false
@@ -143,4 +220,5 @@ return {
   normalize_ip           = normalize_ip,
   is_loopback_or_linklocal = is_loopback_or_linklocal,
   is_self_origin         = is_self_origin,
+  ipv6_to_hex32          = ipv6_to_hex32,
 }

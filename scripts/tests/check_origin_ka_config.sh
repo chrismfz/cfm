@@ -34,6 +34,11 @@
 #       would trip this too — that is by design: it forces a conscious SNI/
 #       session-reuse decision + a gate update rather than silently passing.)
 #
+#   both confs (IPv6)
+#     * no `proxy_pass http(s)://$server_addr…` (must be $cfm_origin_addr), the
+#       $cfm_origin_addr map exists, and no balancer fallback hands a bare
+#       ngx.var.server_addr to set_current_peer.
+#
 # It does NOT replace the live two-vhost integration test (which needs the
 # deployed engine) — it just stops the trivial "someone deleted a line" regress.
 
@@ -162,8 +167,37 @@ for f in "$ORT" "$ANG"; do
   fi
 done
 
+# IPv6 origin hop: a literal origin proxy_pass must use $cfm_origin_addr (the
+# map that brackets an IPv6 $server_addr), never a bare $server_addr, which
+# nginx reads as host "2001" plus an invalid port ("invalid port in upstream").
+# The Lua sides (cfm.lua origin_pass_for, cfm_origin_ka.lua set_peer and the
+# balancer fallbacks) bracket in Lua; their tests are cfm_origin_ka_test.lua
+# and cfm_origin_pass_v6_test.lua.
+# grep_lines PATTERN FILE: matching line numbers, space-separated. "No match"
+# (grep exit 1) is an empty answer; a grep that cannot run (exit 2) FAILS.
+grep_lines() {
+  local out rc=0
+  out=$(grep -nE "$1" "$2") || rc=$?
+  # Runs in $( ): exit, so set -e aborts the whole check (err() would set fail in the subshell only).
+  if [ "$rc" -gt 1 ]; then echo "❌ [origin-ka-config] grep failed (exit $rc) on $2" >&2; exit 2; fi
+  printf '%s' "$out" | cut -d: -f1 | tr '\n' ' '
+}
+for f in "$ORT" "$ANG"; do
+  bare=$(grep_lines '^[[:space:]]*proxy_pass[[:space:]]+https?://\$server_addr' "$f")
+  if [ -n "$bare" ]; then
+    err "$f: proxy_pass to a bare \$server_addr at line(s) [$bare] — use \$cfm_origin_addr (IPv6 needs brackets)."
+  fi
+  if ! grep -qE '^[[:space:]]*map[[:space:]]+\$server_addr[[:space:]]+\$cfm_origin_addr' "$f"; then
+    err "$f: the \$cfm_origin_addr map (IPv6 bracketing of \$server_addr) is missing."
+  fi
+  fb=$(grep_lines 'set_current_peer\(ngx\.var\.server_addr' "$f")
+  if [ -n "$fb" ]; then
+    err "$f: balancer fallback passes a bare ngx.var.server_addr at line(s) [$fb] — bracket an IPv6 address first."
+  fi
+done
+
 if [ "$fail" -ne 0 ]; then
   echo "[origin-ka-config] FAILED — see errors above (invariant: 443 origin reuse blocked at every layer)." >&2
   exit 1
 fi
-echo "[origin-ka-config] OK: OpenResty origin upstreams set keepalive 0; Angie carries none; every 443 origin location disables TLS session reuse."
+echo "[origin-ka-config] OK: OpenResty origin upstreams set keepalive 0; Angie carries none; every 443 origin location disables TLS session reuse; origin hops bracket IPv6."

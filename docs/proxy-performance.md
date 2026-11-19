@@ -14,7 +14,7 @@ measure the split on any box, and which knobs shave them.
 |---|---|---|
 | Client TLS handshake | Full handshake against OpenResty/Angie on a cold connection. A shared `ssl_session_cache` (now on by default) lets *reconnecting* clients resume abbreviated handshakes. | 1 RTT + crypto |
 | Access-phase Lua (`cfm.lua`) | Clearance validation, WAF regex battery, shdict lookups. Bridge RPC + GeoIP are cached (90 s / 5 min); the former per-request `loadfile()` churn (self-ips, ignore-nets, bridge token/config, clamav config) is now cached in `cfm_filecache.lua`. | ≲ 1–2 ms warm |
-| Backend hop to Apache | `proxy_pass http(s)://$server_addr` opens a **fresh TCP connection per request**, and on 443 pays a **full upstream TLS handshake per request**. This is usually the largest avoidable slice. | several ms on 443 |
+| Backend hop to Apache | `proxy_pass http(s)://$server_addr` (IPv6 bracketed: `$cfm_origin_addr` in the confs, `origin_pass_for` in cfm.lua) opens a **fresh TCP connection per request**, and on 443 pays a **full upstream TLS handshake per request**. This is usually the largest avoidable slice. | several ms on 443 |
 | Response relay | Buffered proxying, loopback. | negligible |
 
 ## Measuring the split (do this before and after tuning)
@@ -78,7 +78,7 @@ no-op (direct proxying continues) instead of a fleet-wide 502 from
 Once on, cfm.lua's `origin_pass_for()` routes allow-traffic through the
 `cfm_origin_http` / `cfm_origin_https` upstream blocks, where
 `cfm_origin_ka.lua` (balancer_by_lua) sets the peer to `$server_addr`
-per request — dedicated-IP routing is preserved:
+(an IPv6 address in brackets, as `set_current_peer` needs) per request — dedicated-IP routing is preserved:
 
 `origin_pass_for()` picks the upstream by the **client's scheme**: an HTTPS
 client is proxied to `cfm_origin_https:443`, an HTTP client to
