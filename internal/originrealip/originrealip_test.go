@@ -952,3 +952,41 @@ func TestAnyLoopback6(t *testing.T) {
 		}
 	}
 }
+
+// A server{} with its own list trusting 127.0.0.1 only: on an IPv6 edge the
+// verdict and the plan come from the ::1 reading (that block keeps its own
+// list, so an http-level file cannot reach it: manual, named), and one such
+// block among trusted ones reads "those sites".
+func TestEdgeIPv6NginxOwnListCarriesTheV6Verdict(t *testing.T) {
+	l, r := testLayout(t)
+	put(t, r, "etc/nginx/nginx.conf", "http {\n    include /etc/nginx/conf.d/*.conf;\n    include /etc/nginx/sites-enabled/*;\n}\n")
+	put(t, r, "etc/nginx/conf.d/cfm-realip.conf", nginxTrust)
+	put(t, r, "etc/nginx/sites-enabled/shop", "server {\n  server_name shop.gr;\n  set_real_ip_from 127.0.0.1;\n}\n")
+	put(t, r, "etc/nginx/sites-enabled/blog", "server {\n  server_name blog.gr;\n}\n")
+	if p := l.probe("nginx"); !p.Trusted {
+		t.Fatalf("IPv4-only edge: %+v", p)
+	}
+	edgeV6(t, r)
+	p := l.probe("nginx")
+	if p.Trusted || p.Servers != 2 || p.UntrustedServers != 1 || !strings.Contains(p.Note, "shop.gr") {
+		t.Fatalf("IPv6 edge, shop.gr's own list lacks ::1: %+v", p)
+	}
+	if line := StatusLine(p, true); !strings.Contains(line, "those sites log ::1 for every IPv6 visitor") {
+		t.Errorf("verdict = %q", line)
+	}
+	pl := l.plan(p)
+	if pl.Action != ActionManual || !strings.Contains(pl.Reason, "shop.gr") || !strings.Contains(pl.Reason, "::1") {
+		t.Fatalf("plan = %+v, want manual naming shop.gr", pl)
+	}
+}
+
+// The ::1 reading's header is the one reported when it decides the verdict.
+func TestEdgeIPv6CarriesTheHeader(t *testing.T) {
+	l, r := cpanelHost(t)
+	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
+		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+	edgeV6(t, r)
+	if p := l.probe("httpd"); p.Trusted || p.Header != "X-Forwarded-For" {
+		t.Fatalf("probe = %+v", p)
+	}
+}

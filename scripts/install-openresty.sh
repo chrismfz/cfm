@@ -649,19 +649,13 @@ validate_panel_lua_guard_preflight() {
     return 0
 }
 
-# The edge proxies every web request to the origin from 127.0.0.1. An origin
-# that does not trust that loopback logs 127.0.0.1 for every visitor and hands
-# PHP REMOTE_ADDR=127.0.0.1 (qualityweb, 2026-10-29: cPanel without Imunify360,
-# whose i360.remoteip.conf carries the trust on the rest of the fleet).
-# `cfm realip fix` adds the trust where it is missing (Apache/nginx on cPanel,
-# DirectAdmin or plain: config test + graceful reload, rolled back on failure)
-# and only prints the manual step for LiteSpeed and NGM. Never fatal: the edge
-# works either way, only the origin's logs are wrong. docs/origin-real-ip.md.
 # ensure_edge_listen_v6: decide whether the edge listens on IPv6 too
 # (EDGE_LISTEN_V6 in /etc/cfm/cfm.conf, docs/edge-ipv6.md). The cfm package
 # installs the unit that repeats this before every edge start; this run makes a
 # fresh install decide now. It never fails the install: on any doubt the edge
-# stays on IPv4 only.
+# stays on IPv4 only. It runs AFTER ensure_origin_realip: with EDGE_LISTEN_V6 =
+# auto it listens on IPv6 only once the origin trusts the edge's IPv6 hop from
+# ::1, which `cfm realip fix` writes.
 ensure_edge_listen_v6() {
     local script=/usr/share/cfm/scripts/cfm-edge-listen-v6.sh
     if [ ! -f "$script" ]; then
@@ -672,6 +666,14 @@ ensure_edge_listen_v6() {
     return 0
 }
 
+# The edge proxies every web request to the origin from 127.0.0.1. An origin
+# that does not trust that loopback logs 127.0.0.1 for every visitor and hands
+# PHP REMOTE_ADDR=127.0.0.1 (qualityweb, 2026-10-29: cPanel without Imunify360,
+# whose i360.remoteip.conf carries the trust on the rest of the fleet).
+# `cfm realip fix` adds the trust where it is missing (Apache/nginx on cPanel,
+# DirectAdmin or plain: config test + graceful reload, rolled back on failure)
+# and only prints the manual step for LiteSpeed and NGM. Never fatal: the edge
+# works either way, only the origin's logs are wrong. docs/origin-real-ip.md.
 ensure_origin_realip() {
     if [ "${CFM_SKIP_REALIP:-0}" = "1" ]; then
         log "Origin real-IP: skipped (CFM_SKIP_REALIP=1); run 'cfm realip fix' later"

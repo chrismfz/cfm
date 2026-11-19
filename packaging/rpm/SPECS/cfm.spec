@@ -316,6 +316,19 @@ fi
 
 %postun
 %systemd_postun_with_restart cfm.service
+# Package removed, not upgraded ($1 is 0): drop the edge IPv6 listen guard and
+# what it generated (docs/edge-ipv6.md), so a leftover IPv6 listen never
+# outlives it. The edge picks the removal up at its next start or reload.
+if [ "$1" -eq 0 ]; then
+    rm -f /etc/systemd/system/cfm-edge-listen-v6.service \
+    /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \
+    /etc/systemd/system/angie.service.d/cfm-listen-v6.conf \
+    /usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf \
+    /usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf \
+    /etc/angie/cfm-listen-v6-http.conf \
+    /etc/angie/cfm-listen-v6-https.conf || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
 
 %changelog
 * %{cfm_changelog_date} CFM Maintainers <maintainers@cfm.local> - %{version}-%{release}

@@ -626,7 +626,7 @@ func anyLoopback6(args []string) bool {
 	one := net.ParseIP("::1")
 	for _, a := range args {
 		if ip := net.ParseIP(a); ip != nil {
-			if ip.Equal(one) && ip.To4() == nil {
+			if ip.Equal(one) {
 				return true
 			}
 			continue

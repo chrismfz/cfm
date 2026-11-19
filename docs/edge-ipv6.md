@@ -24,35 +24,45 @@ decides on each host whether they exist.
 
 ## The decision
 
-`EDGE_LISTEN_V6` in `/etc/cfm/cfm.conf` (absent = `auto`; anything that is not
+`EDGE_LISTEN_V6` in `/etc/cfm/cfm.conf` (absent = `off`; anything that is not
 `off`/`auto`/`on` reads as `off`):
 
 | Mode | Listens on IPv6 when |
 |---|---|
-| `auto` (default) | the kernel has an IPv6 stack (`/proc/net/if_inet6` exists) **and** the origin listens on IPv6 on both 80 and 443 (`ss -ltn`: `[::]`, a specific IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped). The origin hop of an IPv6 visitor goes to the IPv6 address it came to, so an origin that does not listen there would 502 it. |
-| `on` | the kernel has an IPv6 stack (origin not checked) |
-| `off` | never |
+| `off` (default) | never. The default until the IPv6 origin hop has been verified on a real IPv6 node (`docs/ROADMAP.md` §9c): if that hop failed, an IPv6 visitor would get a 502 instead of today's refused connection, and a 502 does not make a browser fall back to IPv4. |
+| `auto` | all of: the kernel has an IPv6 stack (`/proc/net/if_inet6`); nothing but the edge holds an IPv6 listener on tcp 9080 / 9043 or udp 9043 (`nginx -t` does not bind, so a taken port would pass the test and then fail the edge's start, IPv4 included); the origin listens on IPv6 on both 80 and 443 (`ss`: `[::]`, a specific IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped), because an IPv6 visitor's hop goes to the IPv6 address it came to; and `cfm realip`, asked with the files in place, says the origin trusts the edge's IPv6 hop from `::1`. |
+| `on` | the kernel and port checks only; an origin or `::1`-trust gap is logged as a warning. |
+
+In every mode the files are removed when the engine's live main config does
+not include them (an older main config, a refused package deploy): there they
+listen nowhere and would only make `cfm realip` demand a `::1` trust.
 
 `render` (deploy, by hand) makes the full decision. `prestart` (before every
-edge start) makes the same one, except that "the origin was not seen on IPv6"
-never removes files already there: at boot the edge can start before
-Apache/LiteSpeed. The safety reasons (`off`, no IPv6 stack, a failed config
-test) always remove them. Anything unknown (no `ss`, no engine binary to test
-with) leaves the edge on IPv4.
+edge start) makes the same one, except that "`ss` ran and showed no IPv6
+origin listener" never removes files already there: at boot the edge can start
+before Apache/LiteSpeed. Every other reason removes them: `off`, no IPv6 stack,
+a taken port, `ss` failing, no `::1` trust (or no `cfm` to ask), no engine
+binary to test with, a failed config test. An origin that stopped listening
+on IPv6 for good keeps the edge's IPv6 until the next `render` (a package
+upgrade, or by hand).
 
 ```bash
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
 ```
 
-prints each engine's decision and whether the files are present.
+prints each engine's decision and whether the files are present. Removing the
+`cfm` package (not upgrading it) removes the unit, the drop-ins and the files.
 
 ## What changes for an IPv6 visitor
 
 - The origin hop binds `::1` (`$cfm_pass_bind` / `$cfm_origin_bind` in the
   confs) and goes to the bracketed IPv6 destination. **The origin must trust
-  `::1` as well as 127.0.0.1** to log the visitor: `cfm realip` requires both
-  once the files are present, and `cfm realip fix` writes both
-  ([origin-real-ip.md](origin-real-ip.md)); LiteSpeed needs `::1T` by hand.
+  `::1` as well as 127.0.0.1**, or every IPv6 visitor reaches it as `::1`:
+  localhost to `Require local`, to apps that trust localhost, and one bucket
+  for every login limiter. `auto` refuses to listen without it; `cfm realip`
+  requires both once the files are present, and `cfm realip fix` writes both
+  for Apache and nginx ([origin-real-ip.md](origin-real-ip.md)); LiteSpeed
+  needs `::1T` by hand.
 - The panel ports (2083/2087/2096 …) stay IPv4 only: cpsrvd does not listen
   on IPv6 on the fleet, and opening the panel to IPv6 is a separate decision.
 - Per-IP counters and bans see each IPv6 address on its own. That was already
@@ -60,6 +70,15 @@ prints each engine's decision and whether the files are present.
   IPv6 address; aggregation by /64 is open (`docs/ROADMAP.md`).
 
 ## Verify on a node
+
+Set `EDGE_LISTEN_V6 = auto` (or `on`) in `/etc/cfm/cfm.conf`, then:
+
+```bash
+sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render
+systemctl reload openresty   # or angie
+```
+
+and check:
 
 ```bash
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status

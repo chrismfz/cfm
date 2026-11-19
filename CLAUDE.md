@@ -464,8 +464,10 @@ family/rule arming table and the decision records:
   `cfm-listen-v6-{http,https}.conf`, included through a glob (absent = IPv4
   only) and decided before every edge start by `cfm-edge-listen-v6.sh`
   (`docs/edge-ipv6.md`; `check_edge_listen_v6.sh` pins the includes). An
-  IPv6 origin hop binds `::1`, so the origin must trust `::1` too
-  (`cfm realip`).
+  IPv6 origin hop binds `::1`, so the origin must trust `::1` too: without it
+  every IPv6 visitor is localhost to the origin, which is why `auto` checks
+  `cfm realip` before it listens. `EDGE_LISTEN_V6` stays `off` by default
+  until the IPv6 hop is verified on a real IPv6 node (ROADMAP §9c).
 - **A connection is NAT'd once, by the first nat chain that rewrites it.**
   Imunify360 DNATs its sets (Cloudflare's ranges among them) to WebShield at
   -100, ahead of CFM's -99 default web redirect, so Cloudflare visitors

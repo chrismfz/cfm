@@ -74,20 +74,31 @@ for pair in "configs/openresty.conf|/usr/local/openresty/nginx/conf" "configs/an
   grep -qE "^[[:space:]]*listen ${https_port} quic reuseport;" "$conf" || fail "$conf: no 'listen $https_port quic reuseport;' for the IPv6 file to mirror"
 done
 
+# The default is the same in the script (no key = ...) and the reference cfm.conf.
+sdef=$(sed -n 's/^        "") echo \([a-z]*\) ;;$/\1/p' "$SCRIPT")
+cdef=$(sed -n 's/^EDGE_LISTEN_V6 = \([a-z]*\)$/\1/p' configs/cfm.conf)
+if [ -n "$sdef" ] && [ "$sdef" = "$cdef" ]; then ok "default EDGE_LISTEN_V6 = $sdef in the script and configs/cfm.conf"; else fail "default differs: script '$sdef', configs/cfm.conf '$cdef'"; fi
+
 # --- 2. the decision -----------------------------------------------------------
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 conf_dir="$tmp/conf"
 mkdir -p "$conf_dir" "$tmp/bin"
+main_conf="$conf_dir/nginx.conf"
+printf 'http {\n  server {\n    listen 9080;\n    include %s/cfm-listen-v6-http.con[f];\n  }\n}\n' "$conf_dir" >"$main_conf"
 proc="$tmp/if_inet6"
 cfm_conf="$tmp/cfm.conf"
 
-# fake ss: prints $tmp/ss.out, or fails when $tmp/ss.fail exists.
+# fake ss: `-lntp` prints $tmp/ss.tcp, `-lnup` $tmp/ss.udp; fails when
+# $tmp/ss.fail exists.
 cat >"$tmp/bin/ss" <<EOF
 #!/bin/sh
 [ -e "$tmp/ss.fail" ] && exit 1
-[ "\$1" = "-ltn" ] || exit 2
-cat "$tmp/ss.out"
+case "\$1" in
+  -lntp) cat "$tmp/ss.tcp" ;;
+  -lnup) cat "$tmp/ss.udp" 2>/dev/null; exit 0 ;;
+  *) exit 2 ;;
+esac
 EOF
 # fake engine: -t passes unless $tmp/engine.fail ("always") or, with
 # "with-v6", only while the IPv6 http file exists.
@@ -101,34 +112,47 @@ case "\$(cat "$tmp/engine.fail" 2>/dev/null)" in
 esac
 exit 0
 EOF
-chmod 0755 "$tmp/bin/ss" "$tmp/bin/engine"
-
-ss_v6() {
-  cat >"$tmp/ss.out" <<'EOF'
-State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
-LISTEN 0      511          0.0.0.0:80         0.0.0.0:*
-LISTEN 0      511          0.0.0.0:443        0.0.0.0:*
-LISTEN 0      511             [::]:80            [::]:*
-LISTEN 0      511             [::]:443           [::]:*
-LISTEN 0      511          0.0.0.0:9043       0.0.0.0:*
+# fake cfm: `realip --json` answers from $tmp/realip ("trusted", "untrusted",
+# anything else = no verdict); it records whether the IPv6 files existed when
+# it was asked (the trust must be read WITH them in place).
+cat >"$tmp/bin/cfm" <<EOF
+#!/bin/sh
+[ "\$1 \$2" = "realip --json" ] || exit 2
+[ -e "$conf_dir/cfm-listen-v6-http.conf" ] && echo files >> "$tmp/realip.calls" || echo nofiles >> "$tmp/realip.calls"
+case "\$(cat "$tmp/realip" 2>/dev/null)" in
+  trusted) echo '{"edge_active":true,"ok":true,"probe":{"panel":"cpanel","stack":"apache","trusted":true,"edge_ipv6":true}}' ;;
+  untrusted) echo '{"edge_active":true,"ok":false,"probe":{"panel":"cpanel","stack":"apache","trusted":false,"edge_ipv6":true}}'; exit 1 ;;
+  *) echo 'garbage' ;;
+esac
 EOF
+chmod 0755 "$tmp/bin/ss" "$tmp/bin/engine" "$tmp/bin/cfm"
+
+hdr='State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess'
+ss_v6() { # origin on [::]:80/443, the edge on IPv4 (and its own IPv6) only
+  printf '%s\n' "$hdr" \
+    'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("httpd",pid=10,fd=3))' \
+    'LISTEN 0 511 [::]:80 [::]:* users:(("httpd",pid=10,fd=4))' \
+    'LISTEN 0 511 [::]:443 [::]:* users:(("httpd",pid=10,fd=5))' \
+    'LISTEN 0 511 0.0.0.0:9043 0.0.0.0:* users:(("nginx",pid=20,fd=6))' \
+    'LISTEN 0 511 [::]:9043 [::]:* users:(("nginx",pid=20,fd=7))' >"$tmp/ss.tcp"
+  printf '%s\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess' \
+    'UNCONN 0 0 [::]:9043 [::]:* users:(("nginx",pid=20,fd=8))' >"$tmp/ss.udp"
 }
-ss_v4() {
-  cat >"$tmp/ss.out" <<'EOF'
-State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
-LISTEN 0      511          0.0.0.0:80         0.0.0.0:*
-LISTEN 0      511          0.0.0.0:443        0.0.0.0:*
-LISTEN 0      511            [::1]:80            [::]:*
-LISTEN 0      511 [::ffff:127.0.0.1]:443         [::]:*
-LISTEN 0      511             [::]:8080          [::]:*
-LISTEN 0      511             [::]:4430          [::]:*
-EOF
+ss_v4() { # origin on IPv4 only (+ ::1, v4-mapped and other ports, which do not count)
+  printf '%s\n' "$hdr" \
+    'LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("httpd",pid=10,fd=3))' \
+    'LISTEN 0 511 0.0.0.0:443 0.0.0.0:* users:(("httpd",pid=10,fd=4))' \
+    'LISTEN 0 511 [::1]:80 [::]:* users:(("httpd",pid=10,fd=5))' \
+    'LISTEN 0 511 [::ffff:127.0.0.1]:443 [::]:* users:(("httpd",pid=10,fd=6))' \
+    'LISTEN 0 511 [::]:8080 [::]:* users:(("httpd",pid=10,fd=7))' >"$tmp/ss.tcp"
+  : >"$tmp/ss.udp"
 }
 
+ENGINES="Test|$tmp/bin/engine|$conf_dir|$main_conf"
 run() { # run ACTION -> output in $tmp/out, exit status checked to be 0
   local rc=0
-  CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" \
-    CFM_EDGE_ENGINES="Test|$tmp/bin/engine|$conf_dir" sh "$SCRIPT" "$@" >"$tmp/out" 2>&1 || rc=$?
+  CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+    CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" "$@" >"$tmp/out" 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "exit status $rc for '$*' (must always be 0)"
 }
 present() { [ -f "$conf_dir/cfm-listen-v6-http.conf" ] && [ -f "$conf_dir/cfm-listen-v6-https.conf" ]; }
@@ -136,16 +160,28 @@ absent() { [ ! -e "$conf_dir/cfm-listen-v6-http.conf" ] && [ ! -e "$conf_dir/cfm
 expect() { # expect present|absent DESC
   if "$1"; then ok "$2"; else fail "$2 (files $( (present && echo present) || (absent && echo absent) || echo partial)); output: $(cat "$tmp/out")"; fi
 }
+says() { grep -q -- "$1" "$tmp/out" || fail "expected '$1' in: $(cat "$tmp/out")"; }
 
 : >"$proc"
 ss_v6
+printf 'trusted' >"$tmp/realip"
 rm -f "$cfm_conf"
 run render
-expect present "auto (no cfm.conf): kernel IPv6 + origin on [::]:80/443 -> listens"
+expect absent "no EDGE_LISTEN_V6 in cfm.conf -> off (the default)"
+
+printf 'EDGE_LISTEN_V6=auto\r\n' >"$cfm_conf"
+run render
+expect present "EDGE_LISTEN_V6=auto with CRLF line ending (no spaces) reads as auto"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+printf 'EDGE_LISTEN_V6=auto\n' >"$cfm_conf"
+: >"$tmp/realip.calls"
+run render
+expect present "auto: kernel IPv6, ports free, origin on [::]:80/443, ::1 trusted -> listens"
+grep -qx files "$tmp/realip.calls" || fail "cfm realip must be asked with the IPv6 files in place: $(cat "$tmp/realip.calls")"
 grep -qxF "listen [::]:$http_port;" "$conf_dir/cfm-listen-v6-http.conf" || fail "http file content: $(cat "$conf_dir/cfm-listen-v6-http.conf")"
 grep -qxF "listen [::]:$https_port ssl;" "$conf_dir/cfm-listen-v6-https.conf" || fail "https file lacks the ssl listen"
 grep -qxF "listen [::]:$https_port quic reuseport;" "$conf_dir/cfm-listen-v6-https.conf" || fail "https file lacks the quic listen"
-grep -q "config test passed" "$tmp/out" || fail "a new file must be proven by the engine test: $(cat "$tmp/out")"
+says "config test passed"
 # Listen lines only: check_site_cache_config.sh allows these includes because
 # they can carry no cache directive or map.
 for f in "$conf_dir"/cfm-listen-v6-*.conf; do
@@ -156,26 +192,72 @@ done
 : >"$tmp/engine.calls"
 run render
 [ ! -s "$tmp/engine.calls" ] || fail "render with unchanged files ran the engine test again"
-grep -q "files unchanged" "$tmp/out" && ok "render: unchanged files are left alone" || fail "unchanged render output: $(cat "$tmp/out")"
+says "files unchanged"
+ok "render: unchanged files are left alone (the edge's own [::]:9043 does not count as taken)"
+
+printf 'untrusted' >"$tmp/realip"
+run render
+expect absent "auto: the origin does not trust ::1 -> removed (IPv6 visitors would be localhost)"
+says "cfm realip fix"
+printf 'garbage' >"$tmp/realip"
+run render
+expect absent "auto: cfm realip gives no verdict -> IPv4 only"
+printf 'trusted' >"$tmp/realip"
+run render
+expect present "back on"
+rc=0
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
+  CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" prestart >"$tmp/out" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] || fail "exit $rc without cfm"
+expect absent "auto: no cfm binary to ask -> IPv4 only, even at start"
+run render
+
+# A taken IPv6 edge port (nginx -t does not bind): never listen.
+ss_v6
+printf '%s\n' 'LISTEN 0 100 *:9080 *:* users:(("java",pid=30,fd=9))' >>"$tmp/ss.tcp"
+run render
+expect absent "a non-edge listener on *:9080 -> IPv4 only (the edge start would fail)"
+says "held by java"
+ss_v6
+printf '%s\n' 'UNCONN 0 0 [::]:9043 [::]:* users:(("someudp",pid=31,fd=3))' >>"$tmp/ss.udp"
+run prestart
+expect absent "a non-edge UDP listener on [::]:9043 -> IPv4 only"
+ss_v6
+printf '%s\n' 'LISTEN 0 100 [::]:9043 [::]:*' >>"$tmp/ss.tcp"
+run render
+expect absent "an IPv6 listener on 9043 with no owner shown -> treated as taken"
+ss_v6
+run render
+expect present "ports free again -> listens"
 
 ss_v4
 run prestart
-expect present "prestart: origin not seen on IPv6 (boot order) keeps the files"
-grep -q "kept at start" "$tmp/out" || fail "prestart keep message: $(cat "$tmp/out")"
+expect present "prestart: ss ran and showed no IPv6 origin (boot order) -> keeps the files"
+says "kept at start"
 run render
 expect absent "render: origin not on IPv6 ([::1], v4-mapped, other ports only) -> removed"
 run prestart
 expect absent "prestart: origin not on IPv6 and no files -> stays IPv4 only"
 
 ss_v6
-printf '# x\nEDGE_LISTEN_V6 = auto\nEDGE_LISTEN_V6 = "off" ; later line wins\n' >"$cfm_conf"
+run render
+expect present "back on"
+: >"$tmp/ss.fail"
+run prestart
+expect absent "prestart: ss failing is an unknown, not 'origin not up yet' -> removed"
+rm -f "$tmp/ss.fail"
+
+printf 'EDGE_LISTEN_V6 = auto\nEDGE_LISTEN_V6 = "off" ; later line wins\n' >"$cfm_conf"
 run render
 expect absent "EDGE_LISTEN_V6 = \"off\" (last line, quoted, comment) -> IPv4 only"
 
 printf 'EDGE_LISTEN_V6 = On\n' >"$cfm_conf"
 ss_v4
+printf 'untrusted' >"$tmp/realip"
 run render
-expect present "EDGE_LISTEN_V6 = on (any case): kernel IPv6, origin not checked -> listens"
+expect present "on (any case): origin and trust not required"
+says "does not trust ::1"
+printf 'trusted' >"$tmp/realip"
 
 rm -f "$proc"
 run prestart
@@ -186,23 +268,17 @@ printf 'EDGE_LISTEN_V6 = yes\n' >"$cfm_conf"
 ss_v6
 run render
 expect absent "unknown mode reads as off"
-grep -q 'not off/auto/on' "$tmp/out" || fail "unknown mode warning: $(cat "$tmp/out")"
+says 'not off/auto/on'
 
-rm -f "$cfm_conf"
-ss_v6
-: >"$tmp/ss.fail"
-run render
-expect absent "ss failing -> unknown -> IPv4 only"
-rm -f "$tmp/ss.fail"
-
+printf 'EDGE_LISTEN_V6 = auto\n' >"$cfm_conf"
 printf 'with-v6' >"$tmp/engine.fail"
 run render
 expect absent "config test fails only with the IPv6 files -> removed again"
-grep -q 'failed with the IPv6 listens' "$tmp/out" || fail "revert message: $(cat "$tmp/out")"
+says 'failed with the IPv6 listens'
 printf 'always' >"$tmp/engine.fail"
 run render
 expect absent "config test fails either way -> IPv4 only, not blamed on IPv6"
-grep -q 'with or without' "$tmp/out" || fail "either-way message: $(cat "$tmp/out")"
+says 'with or without'
 rm -f "$tmp/engine.fail"
 
 run render
@@ -212,44 +288,54 @@ run prestart
 expect absent "prestart re-tests kept files and drops them when the test fails"
 rm -f "$tmp/engine.fail"
 
-# ss forms that must NOT count, each alone next to a good one: a ::1-only
-# listener and a v4-mapped one serve no global IPv6 address.
+# ss forms: a dual-stack *:80 and a specific IPv6 address count; ::1-only and
+# v4-mapped do not, each alone next to a good one.
+printf '%s\n' "$hdr" 'LISTEN 0 511 *:80 *:* users:(("httpd",pid=1,fd=3))' \
+  'LISTEN 0 511 [2001:db8::1]:443 [::]:* users:(("httpd",pid=1,fd=4))' >"$tmp/ss.tcp"
+: >"$tmp/ss.udp"
+run render
+expect present "ss: *:80 and [2001:db8::1]:443 count as IPv6 origin listeners"
 for bad in '[::1]:80' '[::ffff:127.0.0.1]:80'; do
-  printf 'State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess\nLISTEN 0 511 %s [::]:*\nLISTEN 0 511 [::]:443 [::]:*\n' "$bad" >"$tmp/ss.out"
+  printf '%s\n' "$hdr" "LISTEN 0 511 $bad [::]:* users:((\"httpd\",pid=1,fd=3))" \
+    'LISTEN 0 511 [::]:443 [::]:* users:(("httpd",pid=1,fd=4))' >"$tmp/ss.tcp"
   run render
   expect absent "ss: $bad is not an IPv6 origin listener"
 done
+ss_v6
 
-# ss forms: a dual-stack *:80 and specific IPv6 addresses count.
-cat >"$tmp/ss.out" <<'EOF'
-State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess
-LISTEN 0      511                *:80               *:*
-LISTEN 0      511  [2001:db8::1]:443             [::]:*
-EOF
+# The live main config must include the files, or they listen nowhere.
 run render
-expect present "ss: *:80 and [2001:db8::1]:443 count as IPv6 origin listeners"
+expect present "back on"
+cp "$main_conf" "$tmp/main.bak"
+printf 'http { server { listen 9080; } }\n' >"$main_conf"
+run render
+expect absent "main config without the include (old conf / refused deploy) -> removed"
+says 'does not include'
+printf 'http { server { listen 9080; # include %s/cfm-listen-v6-http.con[f];\n } }\n' "$conf_dir" >"$main_conf"
+run render
+expect absent "a commented-out include does not count"
+cp "$tmp/main.bak" "$main_conf"
 
-# No engine binary: nothing can prove the files.
-rc=0
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" \
-  CFM_EDGE_ENGINES="Test|$tmp/bin/none|$conf_dir" sh "$SCRIPT" render >"$tmp/out" 2>&1 || rc=$?
-[ "$rc" -eq 0 ] || fail "exit $rc without an engine binary"
+# No engine binary: nothing can prove new files.
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" \
-  CFM_EDGE_ENGINES="Test|$tmp/bin/none|$conf_dir" sh "$SCRIPT" render >"$tmp/out" 2>&1 || true
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+  CFM_EDGE_ENGINES="Test|$tmp/bin/none|$conf_dir|$main_conf" sh "$SCRIPT" render >"$tmp/out" 2>&1 || fail "exit status without an engine binary"
 expect absent "no engine binary to test with -> IPv4 only"
 
 run status
 expect absent "status changes nothing"
-grep -q 'wants IPv6' "$tmp/out" || fail "status output: $(cat "$tmp/out")"
+says 'wants IPv6'
 run bogus-action
 ok "an unknown action exits 0"
 
-# Missing conf dir: skipped, exit 0.
 rc=0
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" \
-  CFM_EDGE_ENGINES="Test|$tmp/bin/engine|$tmp/nope" sh "$SCRIPT" render >"$tmp/out" 2>&1 || rc=$?
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+  CFM_EDGE_ENGINES="Test|$tmp/bin/engine|$tmp/nope|$tmp/nope/nginx.conf" sh "$SCRIPT" render >"$tmp/out" 2>&1 || rc=$?
 [ "$rc" -eq 0 ] && [ ! -e "$tmp/nope" ] && ok "missing conf dir: skipped" || fail "missing conf dir: rc=$rc"
+
+# The default engine table points at each engine's real main config.
+grep -qF "'OpenResty|%s|%s|%s\\n' \"\$e_bin\" /usr/local/openresty/nginx/conf /usr/local/openresty/nginx/conf/nginx.conf" "$SCRIPT" || fail "OpenResty engine row"
+grep -qF "'Angie|%s|%s|%s\\n' \"\$e_bin\" /etc/angie /etc/angie/angie.conf" "$SCRIPT" || fail "Angie engine row"
 
 # --- 3. package deploy hook ----------------------------------------------------
 awk '/^deploy_logrotate_config$/{exit} {print}' scripts/package-proxy-config-deploy.sh >"$tmp/functions.sh"
@@ -266,7 +352,7 @@ rm -f "$conf_dir"/cfm-listen-v6-*.conf
 deploy() {
   CFM_CONFIG_DIR="$PWD/configs" CFM_SYSTEMD_UNIT_DIR="$units" CFM_SYSTEMCTL="$tmp/bin/systemctl" \
     CFM_EDGE_LISTEN_V6_SCRIPT="$PWD/$SCRIPT" CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" \
-    CFM_SS="$tmp/bin/ss" CFM_EDGE_ENGINES="Test|$tmp/bin/engine|$conf_dir" \
+    CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" CFM_EDGE_ENGINES="$ENGINES" \
     bash -c '. "$1"; deploy_edge_listen_v6' sh "$tmp/functions.sh" >"$tmp/out" 2>&1
 }
 deploy
@@ -288,8 +374,21 @@ grep -qxF 'Wants=cfm-edge-listen-v6.service' configs/cfm-edge-listen-v6-dropin.c
 grep -qxF 'After=cfm-edge-listen-v6.service' configs/cfm-edge-listen-v6-dropin.conf || fail "drop-in After"
 grep -q '^Requires=' configs/cfm-edge-listen-v6-dropin.conf && fail "drop-in must not Require (the edge must start if the unit fails)"
 
+# Package removal (not upgrade) removes the units, the drop-ins and the
+# generated files, so a leftover IPv6 listen never outlives its guard.
+for pkg in packaging/debian/DEBIAN/postrm packaging/rpm/SPECS/cfm.spec; do
+  for f in /etc/systemd/system/cfm-edge-listen-v6.service \
+    /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \
+    /etc/systemd/system/angie.service.d/cfm-listen-v6.conf \
+    /usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf /usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf \
+    /etc/angie/cfm-listen-v6-http.conf /etc/angie/cfm-listen-v6-https.conf; do
+    grep -qE "^[[:space:]]*(rm -f )?$(printf '%s' "$f" | sed 's/[.]/\\./g')( \\\\)?( \\|\\| true)?$" "$pkg" \
+      || fail "$pkg does not remove $f on package removal"
+  done
+done
+
 if [ "$fails" -ne 0 ]; then
   echo "[edge-listen-v6] FAILED: $fails check(s)" >&2
   exit 1
 fi
-echo "[edge-listen-v6] OK: confs and script agree on ports/includes; the decision (auto/on/off, no IPv6 stack, origin, failed test, prestart keep) and the deploy hook behave."
+echo "[edge-listen-v6] OK: confs and script agree on ports/includes; the decision (off default, auto/on, IPv6 stack, taken ports, origin, ::1 trust, main-conf include, failed test, prestart keep), the deploy hook and package removal behave."

@@ -126,6 +126,8 @@ func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 		return true, fmt.Sprintf("Origin real-IP: n/a, no CFM edge in front of the %s/%s origin", p.Panel, p.Stack)
 	case p.Stack == StackUnknown:
 		return false, "Origin real-IP: " + p.Note
+	case p.v6Only && p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so those sites log ::1 for every IPv6 visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	case p.v6Only:
 		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so it logs ::1 for every IPv6 visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	case p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
