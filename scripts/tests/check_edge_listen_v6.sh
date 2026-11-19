@@ -140,6 +140,12 @@ v6_global() {
     '2a14428000010001e6434bfffe54ef2f 05 40 00 00     eno4' \
     '00000000000000000000000000000001 01 80 10 80       lo' >"$proc"
 }
+# fake /proc: pid 20 is the edge's master (root), 21 a worker (nobody), 10 the
+# origin; 31337 a tenant process that calls itself "nginx" (uid 1001).
+for pu in 20:0 21:65534 10:0 30:1001 31337:1001; do
+  mkdir -p "$tmp/proc/${pu%%:*}"
+  printf 'Name:\tx\nUid:\t%s\t%s\t%s\t%s\n' "${pu#*:}" "${pu#*:}" "${pu#*:}" "${pu#*:}" >"$tmp/proc/${pu%%:*}/status"
+done
 hdr='State  Recv-Q Send-Q Local Address:Port  Peer Address:PortProcess'
 ss_v6() { # origin on [::]:80/443, the edge on IPv4 (and its own IPv6) only
   printf '%s\n' "$hdr" \
@@ -147,7 +153,7 @@ ss_v6() { # origin on [::]:80/443, the edge on IPv4 (and its own IPv6) only
     'LISTEN 0 511 [::]:80 [::]:* users:(("httpd",pid=10,fd=4))' \
     'LISTEN 0 511 [::]:443 [::]:* users:(("httpd",pid=10,fd=5))' \
     'LISTEN 0 511 0.0.0.0:9043 0.0.0.0:* users:(("nginx",pid=20,fd=6))' \
-    'LISTEN 0 511 [::]:9043 [::]:* users:(("nginx",pid=20,fd=7))' >"$tmp/ss.tcp"
+    'LISTEN 0 511 [::]:9043 [::]:* users:(("nginx",pid=21,fd=7),("nginx",pid=20,fd=7))' >"$tmp/ss.tcp"
   printf '%s\n' 'State Recv-Q Send-Q Local Address:Port Peer Address:PortProcess' \
     'UNCONN 0 0 [::]:9043 [::]:* users:(("nginx",pid=20,fd=8))' >"$tmp/ss.udp"
 }
@@ -164,7 +170,7 @@ ss_v4() { # origin on IPv4 only (+ ::1, v4-mapped and other ports, which do not 
 ENGINES="Test|$tmp/bin/engine|$conf_dir|$main_conf"
 run() { # run ACTION -> output in $tmp/out, exit status checked to be 0
   local rc=0
-  CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+  CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
     CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" "$@" >"$tmp/out" 2>&1 || rc=$?
   [ "$rc" -eq 0 ] || fail "exit status $rc for '$*' (must always be 0)"
 }
@@ -223,7 +229,7 @@ printf 'trusted' >"$tmp/realip"
 run render
 expect present "back on"
 rc=0
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
   CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" prestart >"$tmp/out" 2>&1 || rc=$?
 [ "$rc" -eq 0 ] || fail "exit $rc without cfm"
 expect present "prestart: cfm realip cannot confirm at start (boot) -> keeps files a render approved"
@@ -237,7 +243,7 @@ rm -f "$conf_dir"/cfm-listen-v6-*.conf
 run prestart
 expect absent "prestart: untrusted and no approved files -> nothing written"
 printf 'trusted' >"$tmp/realip"
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
   CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" render >"$tmp/out" 2>&1 || true
 expect absent "render: no cfm binary to ask -> IPv4 only"
 run render
@@ -256,6 +262,21 @@ ss_v6
 printf '%s\n' 'LISTEN 0 100 [::]:9043 [::]:*' >>"$tmp/ss.tcp"
 run render
 expect absent "an IPv6 listener on 9043 with no owner shown -> treated as taken"
+ss_v6
+printf '%s\n' 'LISTEN 0 100 [::]:9080 [::]:* users:(("nginx",pid=31337,fd=3))' >>"$tmp/ss.tcp"
+run render
+expect absent "a tenant process calling itself nginx (not root) on [::]:9080 -> taken (no edge-killing listen)"
+says "held by nginx:31337"
+run prestart
+expect absent "the same at start"
+ss_v6
+printf '%s\n' 'UNCONN 0 0 [::]:9043 [::]:* users:(("angie",pid=31337,fd=3))' >>"$tmp/ss.udp"
+run render
+expect absent "a tenant 'angie' on udp [::]:9043 -> taken"
+ss_v6
+printf '%s\n' 'LISTEN 0 100 [::]:9080 [::]:* users:(("nginx",pid=999999,fd=3))' >>"$tmp/ss.tcp"
+run render
+expect absent "an 'nginx' whose pid has no /proc entry (gone or hidden) -> taken"
 ss_v6
 run render
 expect present "ports free again -> listens"
@@ -362,7 +383,7 @@ cp "$tmp/main.bak" "$main_conf"
 
 # No engine binary: nothing can prove new files.
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
   CFM_EDGE_ENGINES="Test|$tmp/bin/none|$conf_dir|$main_conf" sh "$SCRIPT" render >"$tmp/out" 2>&1 || fail "exit status without an engine binary"
 expect absent "no engine binary to test with -> IPv4 only"
 
@@ -373,7 +394,7 @@ run bogus-action
 ok "an unknown action exits 0"
 
 rc=0
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
   CFM_EDGE_ENGINES="Test|$tmp/bin/engine|$tmp/nope|$tmp/nope/nginx.conf" sh "$SCRIPT" render >"$tmp/out" 2>&1 || rc=$?
 [ "$rc" -eq 0 ] && [ ! -e "$tmp/nope" ] && ok "missing conf dir: skipped" || fail "missing conf dir: rc=$rc"
 
@@ -395,7 +416,7 @@ rm -f "$conf_dir"/cfm-listen-v6-*.conf
 : >"$tmp/systemctl.calls"
 deploy() {
   CFM_CONFIG_DIR="$PWD/configs" CFM_SYSTEMD_UNIT_DIR="$units" CFM_SYSTEMCTL="$tmp/bin/systemctl" \
-    CFM_EDGE_LISTEN_V6_SCRIPT="$PWD/$SCRIPT" CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" \
+    CFM_EDGE_LISTEN_V6_SCRIPT="$PWD/$SCRIPT" CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" \
     CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" CFM_EDGE_ENGINES="$ENGINES" \
     bash -c '. "$1"; deploy_edge_listen_v6' sh "$tmp/functions.sh" >"$tmp/out" 2>&1
 }

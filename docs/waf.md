@@ -1848,7 +1848,7 @@ A reason in this list, when fired with `challenge` action under valid clearance,
 
 `cfm.lua`'s `is_self_origin(ip)` short-circuits the WAF (and the rest of `cfm.lua`) before any rule runs. It honours three sources:
 
-1. **Loopback / link-local** (`127.0.0.0/8`, `::1`, `169.254.0.0/16`, `fe80::/10`) — hard-coded.
+1. **Loopback / IPv4 link-local** (`127.0.0.0/8`, `::1`, `169.254.0.0/16`) — hard-coded. IPv6 link-local (`fe80::/10`) is **never** self, not even the node's own `fe80::` addresses: once the edge listens on IPv6 ([edge-ipv6.md](edge-ipv6.md)), a host on the same L2 segment could connect from any `fe80::` address and skip WAF, challenge and edge bans.
 2. **Local interface IPs** of this box, written by `nft.go:writeSelfIPsLua()` to `/var/lib/cfm/lua/cfm_self_ips.lua`.
 3. **`[global] IGNORE_IPS` / `IGNORE_NETS`** from `detectors.conf`, written by `detectors.IPIgnore.WriteLuaCache()` to `/var/lib/cfm/lua/cfm_ignore_nets.lua`. Same allowlist the Go challenge engine uses via `SetBypassFunc(ipIgnore.ShouldIgnore)` — wiring them through to the Lua WAF closes the operator-expectation gap where "WAF runs on traffic from my own subnet."
 

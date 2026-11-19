@@ -12,7 +12,7 @@ local RANGE_HI = RANGE_LO + 255 -- 167772415
 
 local rawByPath = {
   ["/var/lib/cfm/lua/cfm_self_ips.lua"] = {
-    ips = { ["1.2.3.4"] = true, ["2001:DB8::1"] = true },
+    ips = { ["1.2.3.4"] = true, ["2001:DB8::1"] = true, ["fe80::abcd"] = true },
   },
   ["/var/lib/cfm/lua/cfm_ignore_nets.lua"] = {
     ips = { ["9.9.9.9"] = true },
@@ -51,11 +51,22 @@ assert_true(selfip.normalize_ip("[2001:DB8::1]") == "2001:db8::1", "normalize_ip
 assert_true(selfip.normalize_ip("") == "", "normalize_ip empty")
 
 -- loopback / link-local.
-for _, ip in ipairs({ "127.0.0.1", "127.9.9.9", "::1", "fe80::1", "169.254.10.10" }) do
+for _, ip in ipairs({ "127.0.0.1", "127.9.9.9", "::1", "169.254.10.10" }) do
   assert_true(selfip.is_loopback_or_linklocal(ip), "loopback/linklocal should match " .. ip)
   assert_true(selfip.is_self_origin(ip), "is_self_origin loopback " .. ip)
 end
 assert_true(not selfip.is_loopback_or_linklocal("8.8.8.8"), "8.8.8.8 is not loopback")
+
+-- IPv6 link-local (fe80::/10) is NEVER self: with the edge listening on IPv6,
+-- a host on the same L2 segment can connect from any fe80:: address it likes,
+-- and a self bypass would skip WAF, challenge and edge bans. Even the node's
+-- own fe80:: address (Go may list it in cfm_self_ips.lua) is refused.
+for _, ip in ipairs({ "fe80::1", "fe80::1c2:3ff:fe04:506", "FE80::1", "[fe80::1]", "fe90::1", "febf::1", "fe80:0:0:0:0:0:0:1" }) do
+  assert_true(not selfip.is_loopback_or_linklocal(ip), "IPv6 link-local is not loopback " .. ip)
+  assert_true(not selfip.is_self_origin(ip), "IPv6 link-local is never self-origin " .. ip)
+end
+assert_true(not selfip.is_self_origin("fe80::abcd"), "the node's own fe80:: in the self set is still refused")
+assert_true(not selfip.is_self_origin("fec0::1"), "fec0:: (outside fe80::/10) is not self either")
 
 -- self-IP set (incl. IPv6 normalize on both stored and queried side).
 assert_true(selfip.is_self_origin("1.2.3.4"), "self ip 1.2.3.4")

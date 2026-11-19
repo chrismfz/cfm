@@ -1043,7 +1043,7 @@ func TestEdgeIPv6HostCapability(t *testing.T) {
 			if !c.capable {
 				return
 			}
-			if line := StatusLine(p, true); !strings.Contains(line, "edge stays on IPv4") {
+			if line := StatusLine(p, true); !strings.Contains(line, "edge does not listen on IPv6") {
 				t.Errorf("verdict = %q", line)
 			}
 			pl := l.plan(p)

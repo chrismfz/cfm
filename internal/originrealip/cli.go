@@ -26,7 +26,8 @@ LiteSpeed and NGM are reported with the manual step (CFM does not edit their con
 Only the loopback is ever trusted, never the server's public IP.
 
 Exit status: status 0 = fine (or no edge in front), 1 = the edge is in front and
-the origin logs 127.0.0.1; fix 0 = trusted afterwards, 1 = not (see the message).
+the origin logs 127.0.0.1 (or ::1 for IPv6 visitors, or the edge cannot turn
+IPv6 on for want of the ::1 trust); fix 0 = trusted afterwards, 1 = not (see the message).
 `
 
 // edgeUnits are the CFM edge engines; one active means the edge fronts the origin.
@@ -127,7 +128,7 @@ func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 	case p.Stack == StackUnknown:
 		return false, "Origin real-IP: " + p.Note
 	case p.v6Only && !p.EdgeIPv6Listening:
-		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so the edge stays on IPv4 and IPv6 visitors are refused (run: cfm realip fix, then restart the edge; docs/edge-ipv6.md)", p.Panel, p.Stack, p.Note)
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so the edge does not listen on IPv6 (run: cfm realip fix, then restart the edge; docs/edge-ipv6.md)", p.Panel, p.Stack, p.Note)
 	case p.v6Only && p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
 		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so those sites log ::1 for every IPv6 visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	case p.v6Only:

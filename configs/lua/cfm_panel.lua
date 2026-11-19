@@ -285,14 +285,14 @@ end
 local ok_selfip, selfip = pcall(require, "cfm_selfip")
 if not ok_selfip then selfip = nil end
 
--- Fallback loopback/link-local check for when cfm_selfip is absent (upgrade lag).
+-- Fallback loopback / IPv4 link-local check for when cfm_selfip is absent
+-- (upgrade lag). IPv6 link-local is never self (cfm_selfip.lua is_v6_linklocal).
 local function panel_is_loopback(ip)
     local s = tostring(ip or ""):lower()
     if s == "" then return false end
     if s:sub(1, 1) == "[" and s:sub(-1) == "]" then s = s:sub(2, -2) end
     if s == "::1" then return true end
     if s:sub(1, 4) == "127." then return true end
-    if s:sub(1, 6) == "fe80::" then return true end
     if s:sub(1, 8) == "169.254." then return true end
     return false
 end

@@ -65,13 +65,14 @@
 #   status    print the decision per engine, change nothing
 #
 # Test seams (scripts/tests/check_edge_listen_v6.sh): CFM_CONF,
-# CFM_V6_PROC_FILE, CFM_SS, CFM_BIN, CFM_EDGE_ENGINES
+# CFM_V6_PROC_FILE, CFM_SS, CFM_BIN, CFM_PROC_ROOT, CFM_EDGE_ENGINES
 # ("Name|binary|confdir|mainconf" per line).
 
 CFM_CONF=${CFM_CONF:-/etc/cfm/cfm.conf}
 CFM_V6_PROC_FILE=${CFM_V6_PROC_FILE:-/proc/net/if_inet6}
 CFM_SS=${CFM_SS:-ss}
 CFM_BIN=${CFM_BIN:-/usr/bin/cfm}
+CFM_PROC_ROOT=${CFM_PROC_ROOT:-/proc}
 
 # The edge's listener ports (configs/openresty.conf / angie.conf `listen 9080;`
 # and `listen 9043 ssl;`). check_edge_listen_v6.sh pins them to the confs.
@@ -130,9 +131,17 @@ ss_v6_listeners() {
             if (substr(a, length(a) - n + 1) != ":" port) next
             h = substr(a, 1, length(a) - n)
             if (!(h == "*" || (h ~ /^\[.*\]$/ && h != "[::1]" && h !~ /^\[::ffff:/))) next
-            o = "-"
-            if (match($0, /users:\(\("[^"]*"/)) o = substr($0, RSTART + 9, RLENGTH - 10)
-            print o
+            # Every owner: name:pid,name:pid (a socket shared by the master
+            # and its workers lists them all); "-" when ss showed none.
+            o = ""
+            rest = $0
+            while (match(rest, /\("[^"]*",pid=[0-9]+/)) {
+                m = substr(rest, RSTART + 2, RLENGTH - 2)
+                sub(/",pid=/, ":", m)
+                o = o (o == "" ? "" : ",") m
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            print (o == "" ? "-" : o)
         }'
     return 0
 }
@@ -143,9 +152,30 @@ origin_has_v6() {
     [ -n "$ohv" ]
 }
 
-# edge_port_taken: 0 when something other than the edge (nginx / openresty /
-# angie) holds an IPv6 listener on the edge's ports, or ss could not tell;
-# the reason on stdout.
+# owned_by_edge OWNERS: one of the processes holding the socket (name:pid,…)
+# is the edge's master: named nginx / openresty / angie AND running as root
+# (real uid 0 in /proc/PID/status). The name alone is not enough: any process
+# can call itself "nginx" (/proc/self/comm, or exec a file of that name), and
+# a tenant holding [::]:9080 under that name would otherwise make the script
+# write a listen the edge then cannot bind, failing its whole start, IPv4
+# included. A tenant cannot run as root. (Not the systemd cgroup: an edge
+# master started by hand, as on rigel, lives in a session scope.)
+owned_by_edge() {
+    obe_list=$(printf '%s' "$1" | tr ',' ' ')
+    for obe in $obe_list; do
+        obe_name=${obe%%:*}
+        obe_pid=${obe##*:}
+        case $obe_name in nginx | openresty | angie) ;; *) continue ;; esac
+        case $obe_pid in '' | *[!0-9]*) continue ;; esac
+        obe_uid=$(awk '$1 == "Uid:" { print $2; exit }' "$CFM_PROC_ROOT/$obe_pid/status" 2>/dev/null)
+        [ "$obe_uid" = 0 ] && return 0
+    done
+    return 1
+}
+
+# edge_port_taken: 0 when something other than the edge holds an IPv6
+# listener on the edge's ports (see owned_by_edge), or ss could not tell; the
+# reason on stdout.
 edge_port_taken() {
     for ept in "tcp $V6_HTTP_PORT" "tcp $V6_HTTPS_PORT" "udp $V6_HTTPS_PORT"; do
         # shellcheck disable=SC2086
@@ -154,13 +184,10 @@ edge_port_taken() {
             return 0
         }
         for ept_o in $ept_owners; do
-            case $ept_o in
-                nginx | openresty | angie) ;;
-                *)
-                    echo "IPv6 ${ept%% *} port ${ept#* } is held by ${ept_o} (- = unknown owner): the edge could not start with it"
-                    return 0
-                    ;;
-            esac
+            if ! owned_by_edge "$ept_o"; then
+                echo "IPv6 ${ept%% *} port ${ept#* } is held by ${ept_o} (name:pid; - = unknown), not by the edge's root master: the edge could not start with it"
+                return 0
+            fi
         done
     done
     return 1

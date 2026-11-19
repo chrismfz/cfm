@@ -85,8 +85,8 @@ apps that trust localhost, and one bucket for every login limiter. So:
 - `cfm realip` requires both as soon as the host **can** do IPv6 (kernel IPv6
   + the origin on a global IPv6 address on 80 and 443, read from
   `/proc/net/tcp6`; not with the kill switch), before the edge listens. Until
-  then it warns "the edge stays on IPv4 and IPv6 visitors are refused (run:
-  cfm realip fix)"; once the edge listens, a gap reads "logs ::1 for every
+  then it warns "the edge does not listen on IPv6 (run: cfm realip fix, then
+  restart the edge)"; once the edge listens, a gap reads "logs ::1 for every
   IPv6 visitor".
 - `cfm realip fix` then writes the `::1` trust for Apache and nginx, also on
   an origin whose 127.0.0.1 trust comes from a file CFM did not write
