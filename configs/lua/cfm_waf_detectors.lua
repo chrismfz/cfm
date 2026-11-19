@@ -1007,7 +1007,7 @@ end
 -- and, when the same element carries `[eval]` set, runs the value as PHP. The
 -- attacker sent `…___aiton[value]=1;&…___aiton[eval]=1` probes, then the
 -- file-writing payloads rule 332 reads. Fabrik's own list-filter form DOES
--- send `[eval]=0` in its POST body (cfm.waf.log, 2026-11-17..19: Greek users
+-- send `[eval]=0` in its POST body (cfm.waf.log, read 2026-11-19: Greek users
 -- on iatreio.babourda.gr, isrodopis.gr; the access log carries no POST body,
 -- so a first read of it saw only the attacker). A SET `[eval]` (not empty,
 -- not "0") came only from the attacker, and only that is enforced.
