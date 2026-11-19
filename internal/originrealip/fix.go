@@ -89,8 +89,13 @@ func (l layout) plan(p Probe) Plan {
 	case StackNginx:
 		l.planNginx(&pl)
 	case StackLiteSpeed:
+		trusted := "127.0.0.1T"
+		if p.EdgeIPv6 {
+			// The edge listens on IPv6 too: its IPv6 hops come from ::1.
+			trusted = "127.0.0.1T and ::1T"
+		}
 		pl.Reason = "LiteSpeed: in WebAdmin set Server > General > Use Client IP in Header = \"Trusted IP Only\" " +
-			"and add 127.0.0.1T to Security > Access Control > Allowed List, then restart LiteSpeed " +
+			"and add " + trusted + " to Security > Access Control > Allowed List, then restart LiteSpeed " +
 			"(CFM does not edit httpd_config.xml)"
 	default:
 		pl.Reason = "no apache/litespeed/nginx origin detected; nothing to configure"

@@ -65,7 +65,14 @@ type Probe struct {
 	Servers          int `json:"servers,omitempty"`
 	UntrustedServers int `json:"untrusted_servers,omitempty"`
 
+	// EdgeIPv6: the edge also listens on IPv6 (scripts/cfm-edge-listen-v6.sh
+	// wrote its listen files), so an IPv6 visitor's hop reaches the origin from
+	// ::1, and Trusted requires ::1 to be trusted as well as 127.0.0.1.
+	EdgeIPv6 bool `json:"edge_ipv6,omitempty"`
+
 	ng *nginxVerdict // nginx: what the plan needs
+
+	v6Only bool // untrusted only on the ::1 pass: 127.0.0.1 is trusted (Verdict's wording)
 }
 
 // edgeHeaders are the headers every edge origin location sets to the client
@@ -84,13 +91,22 @@ var (
 	// Access Control allow list marks trusted with a trailing T (127.0.0.1T),
 	// as mars has it.
 	lsTrustedLoopbackRe = regexp.MustCompile(`(?is)<allow>[^<]*\b127\.0\.0\.1(?:/32)?T\b[^<]*</allow>`)
-	xmlCommentRe        = regexp.MustCompile(`(?s)<!--.*?-->`)
+	// The same for ::1, the source of an IPv6 hop (::1T).
+	lsTrustedLoopback6Re = regexp.MustCompile(`(?is)<allow>(?:[^<]*[\s,])?::1(?:/128)?T\b[^<]*</allow>`)
+	xmlCommentRe         = regexp.MustCompile(`(?s)<!--.*?-->`)
 )
 
 // layout is where a host keeps each piece, as logical paths; root prefixes
 // every one of them (empty on a real host, a temp dir in tests).
 type layout struct {
 	root string
+
+	// loopIP is the edge source address this probe checks the trust of:
+	// "" (127.0.0.1) or "::1" (the second pass when the edge listens on IPv6).
+	loopIP string
+	// edgeV6Files: the edge's IPv6 listen files (scripts/cfm-edge-listen-v6.sh);
+	// any of them present means the edge listens on IPv6.
+	edgeV6Files []string
 
 	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
 	lsMarkers, apMarkers, ngMarkers      []string // origin install markers
@@ -141,6 +157,12 @@ var system = layout{
 	nginxConfD:                "/etc/nginx/conf.d",
 	cpanelNginxServerIncludes: "/etc/nginx/conf.d/server-includes",
 	daNginxIncludes:           "/etc/nginx/nginx-includes.conf",
+	edgeV6Files: []string{
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf",
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf",
+		"/etc/angie/cfm-listen-v6-http.conf",
+		"/etc/angie/cfm-listen-v6-https.conf",
+	},
 }
 
 // fs maps a logical path to where it is on disk.
@@ -201,6 +223,25 @@ func (l layout) probe(upstream string) Probe {
 	panel := l.panel()
 	p := l.probeStack(stack, panel)
 	p.Panel = panel
+	if l.loopIP == "" && l.anyExists(l.edgeV6Files) {
+		// The edge listens on IPv6 too: an IPv6 visitor's hop comes from ::1,
+		// so the same trust has to hold for ::1. Same reading, second address;
+		// the verdict is trusted only when both are.
+		p.EdgeIPv6 = true
+		if p.Trusted {
+			l6 := l
+			l6.loopIP = "::1"
+			if p6 := l6.probeStack(stack, panel); !p6.Trusted {
+				p.Trusted, p.v6Only = false, true
+				p.Note = joinNote(p.Note, "the edge also listens on IPv6 and an IPv6 visitor reaches the origin from ::1, which is not trusted: "+l6.loopNote(p6.Note))
+				// The plan (fix.go) fixes what the ::1 reading found missing.
+				p.ng, p.Servers, p.UntrustedServers = p6.ng, p6.Servers, p6.UntrustedServers
+				if p6.Header != "" {
+					p.Header = p6.Header
+				}
+			}
+		}
+	}
 	if !p.Trusted && p.Panel == PanelNGM && p.Stack == StackNginx {
 		p.Note += "; NGM renders nginx itself, so the trust has to come from NGM's templates (a hand-written file is overwritten on apply)"
 	}
@@ -227,7 +268,7 @@ func (l layout) probeStack(stack, panel string) Probe {
 	case StackLiteSpeed:
 		// LiteSpeed resolves the client natively (useIpInProxyHeader) or through
 		// the Apache RemoteIP conf it loads (loadApacheConf=1).
-		if b, err := os.ReadFile(l.fs(l.lsConfig)); err == nil && lsNativeMatch(b) {
+		if b, err := os.ReadFile(l.fs(l.lsConfig)); err == nil && l.lsNativeMatch(b) {
 			return Probe{Stack: StackLiteSpeed, Trusted: true, Directive: "useIpInProxyHeader", Source: l.lsConfig}
 		}
 		if ap := l.probeApache(StackLiteSpeed); ap.Trusted {
@@ -266,7 +307,7 @@ func (l layout) probeApache(stack string) Probe {
 			scoped++
 		case d.name == "remoteipheader" && len(d.args) > 0:
 			header = d.args[0]
-		case trust == "" && anyLoopback(d.args):
+		case trust == "" && l.anyLoopback(d.args):
 			trust = l.display(d.file)
 		}
 	}
@@ -325,7 +366,7 @@ func (l layout) probeNginx(panel string) Probe {
 				o.header = d.args[0]
 			case d.name == "set_real_ip_from":
 				o.list = true
-				if !o.loopback && anyLoopback(d.args) {
+				if !o.loopback && l.anyLoopback(d.args) {
 					o.loopback, o.src = true, l.display(d.file)
 				}
 			}
@@ -333,7 +374,7 @@ func (l layout) probeNginx(panel string) Probe {
 			header = d.args[0]
 		case d.name == "set_real_ip_from":
 			httpList = true
-			if trust == "" && anyLoopback(d.args) {
+			if trust == "" && l.anyLoopback(d.args) {
 				trust = l.display(d.file)
 			}
 		}
@@ -560,15 +601,55 @@ func joinSorted(set map[string]bool) string {
 	return strings.Join(out, " / ")
 }
 
+// anyLoopback is anyLoopback4, or anyLoopback6 on the ::1 pass.
+func (l layout) anyLoopback(args []string) bool {
+	if l.loopIP == "::1" {
+		return anyLoopback6(args)
+	}
+	return anyLoopback(args)
+}
+
+// loopNote rewrites a note for the address this pass checks (the notes name
+// 127.0.0.1, the first pass).
+func (l layout) loopNote(n string) string {
+	if l.loopIP == "::1" {
+		n = strings.ReplaceAll(n, "127.0.0.1T", "::1T")
+		n = strings.ReplaceAll(n, "127.0.0.1", "::1")
+	}
+	return n
+}
+
+// anyLoopback6 reports whether one of a trust directive's arguments covers
+// ::1, the source of an IPv6 hop: ::1 or ::1/128 (a wider IPv6 network is not
+// a loopback trust).
+func anyLoopback6(args []string) bool {
+	one := net.ParseIP("::1")
+	for _, a := range args {
+		if ip := net.ParseIP(a); ip != nil {
+			if ip.Equal(one) && ip.To4() == nil {
+				return true
+			}
+			continue
+		}
+		_, n, err := net.ParseCIDR(a)
+		if err != nil {
+			continue
+		}
+		if ones, bits := n.Mask.Size(); bits == 128 && ones == 128 && n.IP.Equal(one) {
+			return true
+		}
+	}
+	return false
+}
+
 // anyLoopback reports whether one of a trust directive's arguments covers the
 // edge's address: 127.0.0.1, alone or as a loopback-only network (127.0.0.0/8
 // .. /32). The edge proxies from 127.0.0.1 (proxy_bind), so ::1 alone does not
 // trust it: a list holding only ::1 still logs 127.0.0.1. 127.0.0.1/1 covers
 // half the internet and is not a loopback trust. An origin hop to an IPv6
 // destination binds ::1 instead ($cfm_pass_bind / $cfm_origin_bind in the
-// edge confs); the reference confs listen on IPv4 only, so ::1 is not required
-// here yet. Whatever turns on an IPv6 edge listen must make this require ::1
-// as well.
+// edge confs): when the edge listens on IPv6, probe() runs a second pass with
+// anyLoopback6.
 func anyLoopback(args []string) bool {
 	for _, a := range args {
 		if ip := net.ParseIP(a); ip != nil {
@@ -597,14 +678,21 @@ func joinNote(a, b string) string {
 
 // lsNativeMatch reports whether an XML config makes LiteSpeed take the client
 // from the edge's header, outside of an XML comment: useIpInProxyHeader 1 (from
-// any peer), or 2 (trusted peers only) with 127.0.0.1 marked trusted.
-func lsNativeMatch(b []byte) bool {
+// any peer), or 2 (trusted peers only) with the edge's address (127.0.0.1, or
+// ::1 on the IPv6 pass) marked trusted.
+func (l layout) lsNativeMatch(b []byte) bool {
 	b = xmlCommentRe.ReplaceAll(b, nil)
 	m := lsNativeRealIPRe.FindSubmatch(b)
 	if m == nil {
 		return false
 	}
-	return string(m[1]) == "1" || lsTrustedLoopbackRe.Match(b)
+	if string(m[1]) == "1" {
+		return true
+	}
+	if l.loopIP == "::1" {
+		return lsTrustedLoopback6Re.Match(b)
+	}
+	return lsTrustedLoopbackRe.Match(b)
 }
 
 // listenerNames maps the process names that can own :80 to their family. The

@@ -27,7 +27,7 @@ because of that.
 
 The verdict is **trusted** when the origin trusts 127.0.0.1 (or
 `127.0.0.1/32`, `127.0.0.0/8`) *and* the client header in effect is one of the
-edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. (An origin hop to an IPv6 destination binds `::1` instead; the reference edge confs listen on IPv4 only, so the check does not require `::1` yet. A node that listens on IPv6 must trust `::1` too: LiteSpeed `::1T`, nginx `set_real_ip_from ::1;`.) It is **n/a (OK)** when no edge engine runs: then the origin faces
+edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. When the edge also listens on IPv6 (its listen files are present: [edge-ipv6.md](edge-ipv6.md)), an IPv6 visitor's hop comes from `::1`, so the same trust must hold for `::1` too, and the verdict is trusted only when both do (`edge_ipv6` in `--json`; a gap reads "logs ::1 for every IPv6 visitor"). The `cfm realip fix` files trust both; LiteSpeed needs `::1T` as well. It is **n/a (OK)** when no edge engine runs: then the origin faces
 the internet itself (avgerinos, a DirectAdmin nginx).
 
 It reads configuration only (`internal/originrealip`), the way the server loads
@@ -107,7 +107,7 @@ has a deadline.
 | DirectAdmin nginx | a marked block in `/etc/nginx/nginx-includes.conf` (loaded inside `http{}`) |
 | nginx | `/etc/nginx/conf.d/cfm-realip.conf` (when `nginx.conf` includes `conf.d/*.conf`) |
 | nginx, every untrusted block with its own list | nothing: an http-level trust would not reach them; the blocks are named, add `set_real_ip_from 127.0.0.1;` to their lists |
-| LiteSpeed | nothing: WebAdmin → Server → General → *Use Client IP in Header* = "Trusted IP Only", add `127.0.0.1T` to Security → Access Control → Allowed List, restart |
+| LiteSpeed | nothing: WebAdmin → Server → General → *Use Client IP in Header* = "Trusted IP Only", add `127.0.0.1T` (and `::1T` when the edge listens on IPv6) to Security → Access Control → Allowed List, restart |
 | NGM | nothing: NGM renders nginx itself, and a hand-written file is overwritten on apply. The trust has to come from NGM's templates (NGM `docs/cfm-integration-map.md`, "real_ip gap") |
 
 The Apache file is

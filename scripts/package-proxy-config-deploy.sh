@@ -808,6 +808,59 @@ deploy_logrotate_dropin() {
     return 0
 }
 
+# The IPv6 listen decision (docs/edge-ipv6.md): install the oneshot unit that
+# runs scripts/cfm-edge-listen-v6.sh before every edge start and the drop-in
+# that pulls it into openresty.service / angie.service (refreshed when they
+# differ, systemd reloaded only then; skipped on a host without systemd), then
+# run the script once (render): it writes or removes the two listen sidecars
+# for every engine and proves the change with the engine's own config test.
+# It runs after the configs were deployed, so that test reads the new main
+# config. Nothing here reloads the edge: a change applies at its next start or
+# reload. Any failure is a warning, never fatal.
+deploy_edge_listen_v6() {
+    delv_script=${CFM_EDGE_LISTEN_V6_SCRIPT:-/usr/share/cfm/scripts/cfm-edge-listen-v6.sh}
+    delv_unit_dir=${CFM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
+    delv_systemctl=${CFM_SYSTEMCTL:-systemctl}
+
+    if [ -n "${CFM_SYSTEMD_UNIT_DIR:-}" ] || [ -d /run/systemd/system ]; then
+        delv_reload=0
+        for delv_pair in \
+            "cfm-edge-listen-v6.service cfm-edge-listen-v6.service" \
+            "cfm-edge-listen-v6-dropin.conf openresty.service.d/cfm-listen-v6.conf" \
+            "cfm-edge-listen-v6-dropin.conf angie.service.d/cfm-listen-v6.conf"; do
+            delv_src="$CFM_CONFIG_DIR/${delv_pair%% *}"
+            delv_dst="$delv_unit_dir/${delv_pair#* }"
+            if [ ! -f "$delv_src" ]; then
+                echo "WARNING: CFM edge IPv6 listen: packaged file missing: $delv_src"
+                continue
+            fi
+            if [ -f "$delv_dst" ] &&
+                [ "$(sha256sum "$delv_src" 2>/dev/null | awk '{print $1}')" = "$(sha256sum "$delv_dst" 2>/dev/null | awk '{print $1}')" ]; then
+                continue
+            fi
+            mkdir -p "$(dirname "$delv_dst")" 2>/dev/null || true
+            if cp -f "$delv_src" "$delv_dst" 2>/dev/null; then
+                chmod 0644 "$delv_dst" 2>/dev/null || true
+                echo "CFM edge IPv6 listen: deployed $delv_dst"
+                delv_reload=1
+            else
+                echo "WARNING: CFM edge IPv6 listen: failed to deploy $delv_dst"
+            fi
+        done
+        if [ "$delv_reload" -eq 1 ]; then
+            "$delv_systemctl" daemon-reload >/dev/null 2>&1 ||
+                echo "WARNING: CFM edge IPv6 listen: systemctl daemon-reload failed; the units apply after the next reload"
+        fi
+    fi
+
+    if [ -f "$delv_script" ]; then
+        sh "$delv_script" render || true
+    else
+        echo "WARNING: CFM edge IPv6 listen: $delv_script missing; the edge stays on IPv4 only"
+    fi
+    return 0
+}
+
 validate_logrotate_config() {
     vlc_dst=$1
 
@@ -877,6 +930,8 @@ if [ -n "$OPENRESTY_BIN" ]; then
 else
     echo "CFM proxy config: OpenResty not detected; skipping"
 fi
+
+deploy_edge_listen_v6
 
 print_proxy_config_summary
 

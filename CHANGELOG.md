@@ -20,6 +20,30 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **The edge listens on IPv6 where the host can.** The web DNAT redirect has
+  always caught IPv6 (`table inet`), but the edge listened on IPv4 only, so
+  an IPv6 visitor's connection to 80/443 was refused: browsers fell back to
+  IPv4, IPv6-only clients failed. The two listener `server{}` blocks now
+  include generated `cfm-listen-v6-http.conf` / `cfm-listen-v6-https.conf`
+  (`[::]:9080`, `[::]:9043` ssl + quic) through a glob, so an absent file
+  means IPv4 only. `scripts/cfm-edge-listen-v6.sh` writes or removes them per
+  `EDGE_LISTEN_V6` in `cfm.conf`: `auto` (default; the kernel has IPv6 and
+  the origin listens on IPv6 on 80 and 443), `on`, `off`. It runs on every
+  package upgrade and, through `cfm-edge-listen-v6.service` and a drop-in on
+  `openresty.service` / `angie.service`, before every edge start, ahead of
+  the edge's own config test, so a host without IPv6 never fails to start on
+  it. A change applies at the edge's next start or reload, never by itself.
+  The panel ports stay IPv4. `docs/edge-ipv6.md`.
+- **`cfm realip` requires `::1` trust when the edge listens on IPv6.** An
+  IPv6 visitor's origin hop comes from `::1`; an origin trusting only
+  127.0.0.1 logs `::1` for every IPv6 visitor, and the check now says so
+  (`edge_ipv6` in `--json`). `cfm realip fix` already writes both for Apache
+  and nginx; LiteSpeed needs `::1T` in its allow list by hand. On a node
+  that turns IPv6 on with such an origin (LiteSpeed allowing `127.0.0.1T`
+  only, a hand-written trust), `cfm realip`, `cfm health` and `edge_health`
+  start warning.
+
 ### Fixed
 - **Edge: the origin hop works for an IPv6 destination.** It failed every
   request with a 500, twice over. The origin URL was built as

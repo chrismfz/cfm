@@ -842,3 +842,113 @@ func TestNginxTruncatedWalkIsNoted(t *testing.T) {
 		t.Fatalf("probe = %+v", p)
 	}
 }
+
+// edgeV6 marks the edge as listening on IPv6, as scripts/cfm-edge-listen-v6.sh
+// does (one of its listen files present).
+func edgeV6(t *testing.T, r string) {
+	t.Helper()
+	put(t, r, "usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf", "listen [::]:9080;\n")
+}
+
+// When the edge listens on IPv6, an IPv6 visitor's hop reaches the origin from
+// ::1: a trust of 127.0.0.1 alone is no longer enough (Apache).
+func TestEdgeIPv6RequiresLoopback6Apache(t *testing.T) {
+	l, r := cpanelHost(t)
+	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
+		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+	if p := l.probe("httpd"); !p.Trusted || p.EdgeIPv6 {
+		t.Fatalf("IPv4-only edge, 127.0.0.1 trusted: %+v", p)
+	}
+	edgeV6(t, r)
+	p := l.probe("httpd")
+	if p.Trusted || !p.EdgeIPv6 || !strings.Contains(p.Note, "::1") || strings.Contains(p.Note, "127.0.0.1 in the Apache") {
+		t.Fatalf("IPv6 edge, ::1 untrusted: %+v", p)
+	}
+	if line := StatusLine(p, true); !strings.Contains(line, "logs ::1 for every IPv6 visitor") {
+		t.Errorf("verdict = %q", line)
+	}
+	pl := l.plan(p)
+	if pl.Action != ActionWrite || pl.Content != apacheTrust || !strings.Contains(pl.Content, "::1") {
+		t.Fatalf("plan = %+v", pl)
+	}
+	if err := os.WriteFile(pl.Path, []byte(pl.Content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p := l.probe("httpd"); !p.Trusted || !p.EdgeIPv6 {
+		t.Fatalf("after the fix (both loopbacks): %+v", p)
+	}
+	// ::1 alone (no 127.0.0.1) is still untrusted on an IPv6 edge: both hops occur.
+	l2, r2 := cpanelHost(t)
+	put(t, r2, "etc/apache2/conf.d/x.conf", "RemoteIPInternalProxy ::1\nRemoteIPHeader X-Real-IP\n")
+	edgeV6(t, r2)
+	if p := l2.probe("httpd"); p.Trusted {
+		t.Fatalf("::1 only: %+v", p)
+	}
+}
+
+func TestEdgeIPv6RequiresLoopback6LiteSpeed(t *testing.T) {
+	l, r := cpanelHost(t)
+	xml := "usr/local/lsws/conf/httpd_config.xml"
+	put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>2</useIpInProxyHeader>\n<security><accessControl><allow>ALL,127.0.0.1T</allow></accessControl></security></httpServerConfig>")
+	edgeV6(t, r)
+	p := l.probe("")
+	if p.Trusted || !p.EdgeIPv6 || !strings.Contains(p.Note, "::1T") {
+		t.Fatalf("127.0.0.1T only: %+v", p)
+	}
+	if pl := l.plan(p); pl.Action != ActionManual || !strings.Contains(pl.Reason, "127.0.0.1T and ::1T") {
+		t.Fatalf("plan = %+v", pl)
+	}
+	put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>2</useIpInProxyHeader>\n<security><accessControl><allow>ALL, 127.0.0.1T, ::1T</allow></accessControl></security></httpServerConfig>")
+	if p := l.probe(""); !p.Trusted {
+		t.Fatalf("127.0.0.1T + ::1T: %+v", p)
+	}
+	// ::1 without T is allowed, not trusted; a longer address ending in ::1 is not ::1.
+	for _, allow := range []string{"ALL,127.0.0.1T,::1", "ALL,127.0.0.1T,2001:db8::1T"} {
+		put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>2</useIpInProxyHeader>\n<security><accessControl><allow>"+allow+"</allow></accessControl></security></httpServerConfig>")
+		if p := l.probe(""); p.Trusted {
+			t.Fatalf("%s: %+v", allow, p)
+		}
+	}
+	put(t, r, xml, "<httpServerConfig><useIpInProxyHeader>1</useIpInProxyHeader></httpServerConfig>")
+	if p := l.probe(""); !p.Trusted {
+		t.Fatalf("native 1 (any peer): %+v", p)
+	}
+}
+
+func TestEdgeIPv6RequiresLoopback6Nginx(t *testing.T) {
+	l, r := testLayout(t)
+	put(t, r, "etc/nginx/nginx.conf", "http {\n    include /etc/nginx/conf.d/*.conf;\n    include /etc/nginx/sites-enabled/*;\n}\n")
+	put(t, r, "etc/nginx/conf.d/a.conf", "set_real_ip_from 127.0.0.1;\n")
+	put(t, r, "etc/nginx/sites-enabled/shop", "server {\n  server_name shop.gr;\n}\n")
+	if p := l.probe("nginx"); !p.Trusted {
+		t.Fatalf("IPv4-only edge: %+v", p)
+	}
+	edgeV6(t, r)
+	p := l.probe("nginx")
+	if p.Trusted || !p.EdgeIPv6 || !strings.Contains(p.Note, "::1") {
+		t.Fatalf("IPv6 edge, http-level 127.0.0.1 only: %+v", p)
+	}
+	pl := l.plan(p)
+	if pl.Action != ActionWrite || pl.Path != filepath.Join(r, "etc/nginx/conf.d/cfm-realip.conf") {
+		t.Fatalf("plan = %+v", pl)
+	}
+	if err := os.WriteFile(pl.Path, []byte(pl.Content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p := l.probe("nginx"); !p.Trusted {
+		t.Fatalf("after the fix: %+v", p)
+	}
+}
+
+func TestAnyLoopback6(t *testing.T) {
+	for _, ok := range [][]string{{"::1"}, {"::1/128"}, {"127.0.0.1", "::1"}, {"0:0:0:0:0:0:0:1"}} {
+		if !anyLoopback6(ok) {
+			t.Errorf("%v must be ::1 trust", ok)
+		}
+	}
+	for _, bad := range [][]string{{"127.0.0.1"}, {"::/0"}, {"::/127"}, {"::2"}, {"2001:db8::1"}, {"::ffff:127.0.0.1"}, {"x"}} {
+		if anyLoopback6(bad) {
+			t.Errorf("%v must not be ::1 trust", bad)
+		}
+	}
+}

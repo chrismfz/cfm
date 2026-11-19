@@ -226,6 +226,21 @@ Reference: `docs/cfm-lsm.md`.
   `lsm=`** — [idea]. `UnmergeLSMBPF` exists but nothing calls it; only
   unmerge when kernsec added it (an operator's own `bpf` must stay).
 
+## 9c. Edge IPv6
+
+The edge listens on IPv6 where the host can (`EDGE_LISTEN_V6`, default
+`auto`; `docs/edge-ipv6.md`), and the origin hop brackets the address and
+binds `::1`.
+
+- **Verify on a real IPv6 node** — [track]. No dev box or CI runner has
+  IPv6: `set_current_peer("[v6]")` on OpenResty / Angie and a `::1`-bound hop
+  to the node's own global address are unproven until then.
+- **Per-IP counters and bans by /64** — [idea]. Every detector keys an IPv6
+  client on its full address, so a client rotating inside its /64 never
+  accumulates. Already true behind Cloudflare (own IPv6 address at the edge).
+- **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
+  only on the fleet; the panel listeners stay IPv4.
+
 ## 10. PHP runtime defense (CFM-managed Snuffleupagus)
 
 Design: `docs/roadmaps/php-runtime-defense.md`. CFM renders Snuffleupagus
