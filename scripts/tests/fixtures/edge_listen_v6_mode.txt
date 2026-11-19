@@ -1,7 +1,8 @@
 # EDGE_LISTEN_V6 readings shared by scripts/cfm-edge-listen-v6.sh mode() and
 # internal/originrealip edgeIPv6Wanted (check_edge_listen_v6.sh runs the script,
 # TestEdgeListenV6ModeFixture runs Go). One case per line:
-#   <expected>\t<cfm.conf content, printf %b escapes: \n \r \t \" \\>
+#   <expected>\t<cfm.conf content, printf %b escapes: \n \r \t \" \\ and
+#   \0ddd octal bytes (Go reads them as \ddd)>
 # expected: on | off | default (= V6_DEFAULT / edgeIPv6Default). A trailing
 # \n is added to the content.
 default	
@@ -40,3 +41,9 @@ off	EDGE_LISTEN_V6 = ""on""
 off	EDGE_LISTEN_V6 = "on;x"
 off	EDGE_LISTEN_V6 = " on "
 off	EDGE_LISTEN_V6 = o n
+off	EDGE_LISTEN_V6 = "'on'"
+off	EDGE_LISTEN_V6 = '"on"'
+off	EDGE_LISTEN_V6 = on\0302\0240
+off	EDGE_LISTEN_V6 = on\0302\0205
+default	\0302\0240EDGE_LISTEN_V6 = on
+on	EDGE_LISTEN_V6 = \v on \f

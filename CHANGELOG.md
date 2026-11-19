@@ -45,17 +45,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   nothing else holds the edge's IPv6 ports, the origin listens on IPv6 on 80
   and 443, the origin trusts the edge's IPv6 hop from `::1` (below), the live
   main config includes them and the engine's config test passes; otherwise
-  the edge stays on IPv4 and the script says why (`status`). It runs on every
-  package upgrade and, through `cfm-edge-listen-v6.service` and a drop-in on
-  `openresty.service` / `angie.service`, before every edge start, ahead of
-  the edge's own config test, so a host without IPv6 never fails to start on
-  it. The edge's IPv6 ports are judged from the kernel's socket owner
-  (`/proc/net/tcp6`, `udp6`), never from the process names `ss` prints: any
-  socket on them not owned by root (a tenant's, `[::1]` included) keeps IPv6
-  off instead of making the edge's start fail. A `render` that writes the
-  files reloads a running edge at once and checks it listens on IPv6, removing
-  them and reloading back if not; removing files applies at the next start or
-  reload.
+  the edge stays on IPv4 and the script says why (`status`). It runs,
+  through `cfm-edge-listen-v6.service` and a drop-in on `openresty.service` /
+  `angie.service`, before every edge start, ahead of the edge's own config
+  test, so a host without IPv6 never fails to start on it; a package upgrade
+  runs it too but only keeps or removes files, never turning IPv6 on and
+  never reloading. The edge's IPv6 ports are judged from the kernel's socket
+  owner (`/proc/net/tcp6`, `udp6`), never from the process names `ss` prints:
+  any socket on them not owned by root, in any state (a tenant's, `[::1]`
+  included), keeps IPv6 off instead of making the edge's start fail, and a
+  port with no root socket is really bound first (`cfm realip v6-bindcheck`:
+  a bound-only socket is invisible in `/proc`). A `render` that writes the
+  files reloads a running edge at once and checks it listens on IPv6,
+  removing them and reloading back if not (a failed reload leaves nginx on
+  its old config, never down); one that removes live files reloads too.
   Off by default for now: per-IP defences key on the full IPv6 address, so a
   direct IPv6 client rotating inside its /64 would evade them, while an edge
   without IPv6 refuses it and the browser falls back to IPv4, where they
@@ -66,8 +69,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   drop-ins and the include lines are installed everywhere and the script runs
   before every edge start. Verified on speedhost (OpenResty) and
   qualityweb (Angie) with a scratch edge. To turn it on: uncomment
-  `EDGE_LISTEN_V6 = on` in `cfm.conf`, run `cfm realip fix`, restart the
-  edge. Before a start, files a render approved are kept when only
+  `EDGE_LISTEN_V6 = on` in `cfm.conf`, run `cfm realip fix`, then
+  `sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render`. Before a start, files a render approved are kept when only
   readiness is missing at boot (no global address yet, the origin not up
   yet, `cfm realip` unable to give a verdict), so a reboot does not silently
   drop IPv6; a definite "the origin does not trust `::1`" removes them.
@@ -101,9 +104,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   and every origin location binds the loopback of its upstream's family
   (`$cfm_pass_bind` / `$cfm_origin_bind`: `::1` for IPv6; the local IPv4
   upstreams keep `127.0.0.1`). The origin then sees an IPv6 visitor's hop
-  from `::1`: the `cfm realip` fix trusts it, but `cfm realip` does not check
-  it yet and a LiteSpeed allow list or a hand-written trust may hold only
-  `127.0.0.1`, so add `::1` there before listening on IPv6.
+  from `::1`, which an origin trusting only `127.0.0.1` treats as localhost
+  (`Require local`, cPanel's server-status, apps that trust localhost, one
+  bucket for every login limiter): `cfm realip` now requires the `::1` trust
+  wherever the edge listens on IPv6, a hand-added `listen [::]` included
+  (below). `$cfm_pass_bind` is a `volatile` map, so an early read of it can
+  never pin an IPv6 hop to `127.0.0.1`, and `check_origin_ka_config.sh` now
+  also fails an origin `proxy_pass` through another variable, a second map
+  for these variables, and a changed server-level bind.
   IPv4 behaviour is unchanged. Found by an operator who added `listen [::]`
   by hand; the reference confs still listen on IPv4 only (IPv6 listening
   comes separately: a listen on a host without an IPv6 stack fails the config

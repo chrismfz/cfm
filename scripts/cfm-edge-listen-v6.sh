@@ -48,12 +48,14 @@
 # `cfm realip` demand a ::1 trust nothing uses. It never fails its caller: the
 # exit status is always 0 (the edge must start, on IPv4, whatever happens
 # here). A `render` that writes the files reloads a running edge at once and
-# confirms the IPv6 listen (reload_and_confirm); removing them applies at the
-# next start or reload.
+# confirms the IPv6 listen (reload_and_confirm); a `render` that removes files
+# a running edge listens with reloads it too (reload_after_remove). prestart
+# and deploy never reload.
 #
-# Usage: cfm-edge-listen-v6.sh [render|prestart|status]
-#   render    (default; the package deploy, or by hand) decide and write/remove
-#             the files for every engine found
+# Usage: cfm-edge-listen-v6.sh [render|prestart|deploy|status]
+#   render    (default; by hand, the installers) decide and write/remove the
+#             files for every engine found; the ONLY action that turns IPv6 on
+#             for a running edge (it reloads it and confirms the listen)
 #   prestart  (cfm-edge-listen-v6.service, before every edge start) the same,
 #             except that files a render already approved are KEPT when the
 #             only reasons against them are about readiness, which at boot are
@@ -68,7 +70,10 @@
 #             without the include, a failed config test, and a definite "the
 #             origin does not trust ::1" from cfm realip. An origin that stops
 #             listening on IPv6 for good keeps the edge's IPv6 until the next
-#             render (package upgrade, or by hand).
+#             render (by hand).
+#   deploy    (the package deploy, package-proxy-config-deploy.sh) prestart's
+#             keep / remove rules, but it never writes files that are not
+#             there (it tells the operator to run render) and never reloads
 #   status    print the decision per engine, change nothing
 #
 # Test seams (scripts/tests/check_edge_listen_v6.sh): CFM_CONF,
@@ -113,7 +118,8 @@ mode() {
         # edgeIPv6Wanted reads it the same way; both run
         # scripts/tests/fixtures/edge_listen_v6_mode.txt.
         m_val=$(sed -n 's/^[[:space:]]*EDGE_LISTEN_V6[[:space:]]*=//p' "$CFM_CONF" |
-            sed 's/[;#].*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; s/^"\(.*\)"$/\1/; s/^'"'"'\(.*\)'"'"'$/\1/' |
+            sed 's/[;#].*$//; s/^[[:space:]]*//; s/[[:space:]]*$//' |
+            sed -e 's/^"\(.*\)"$/\1/' -e t -e 's/^'"'"'\(.*\)'"'"'$/\1/' |
             tail -n 1 | tr 'A-Z' 'a-z')
     fi
     case $m_val in
@@ -182,17 +188,25 @@ origin_has_v6() {
 }
 
 # edge_port_taken: 0 when an IPv6 socket on one of the edge's ports (tcp
-# 9080 / 9043 listening, udp 9043 bound) is NOT root's, or the kernel tables
-# cannot be read; the reason on stdout. Read from /proc/net/tcp6 and
-# /proc/net/udp6, never from ss: ss prints a process's name raw, so a tenant
-# naming itself `nginx",pid=1` passes as root's PID 1 (proved), and a name was
-# never proof anyway (any process can call itself nginx). The kernel's uid
-# column is the socket owner and cannot be forged: the edge's master binds as
-# root, a tenant cannot. Any IPv6 address counts, ::1 and v4-mapped included:
-# a tenant on [::1]:9080 also makes the edge's [::]:9080 bind fail, and
-# `nginx -t` does not bind, so the start, IPv4 included, would fail. A root
-# socket is trusted to be the edge's (only root could have put another there).
+# 9080 / 9043, udp 9043) could make the edge's `listen [::]` fail, the reason
+# on stdout; 1 when the ports are the edge's or free.
+#  - /proc/net/tcp6 and udp6, never ss: ss prints a process's name raw, so a
+#    tenant naming itself `nginx",pid=1` passes as root's PID 1 (proved), and
+#    a name was never proof anyway. The kernel's uid column is the socket's
+#    owner and cannot be forged: a socket on the port owned by anyone but root
+#    counts as taken, in ANY state and on any address, ::1 and v4-mapped
+#    included (a tenant that bound the port and connected out holds it too;
+#    the edge's accepted connections are root's, as its listener). A root
+#    LISTEN (udp: any root socket) is the edge's own: only root could have put
+#    another there.
+#  - A port with no root socket is then really bound, by `cfm realip
+#    v6-bindcheck` (IPv6-only, as nginx's listen [::]): a socket that is bound
+#    and never listens is not in /proc/net/tcp6 at all, yet it makes the
+#    edge's bind fail, and `nginx -t` does not bind, so the start would fail,
+#    IPv4 included. A cfm that cannot run the check (absent, older, no answer)
+#    counts as taken; so does an unreadable table.
 edge_port_taken() {
+    ept_free=""
     for ept in "tcp6 $V6_HTTP_PORT" "tcp6 $V6_HTTPS_PORT" "udp6 $V6_HTTPS_PORT"; do
         ept_proto=${ept%% *}
         ept_port=${ept#* }
@@ -201,23 +215,41 @@ edge_port_taken() {
             echo "cannot read $ept_file: cannot tell whether $ept_proto port $ept_port is free"
             return 0
         fi
-        ept_uid=$(awk -v hexport="$(printf '%04X' "$ept_port")" -v proto="$ept_proto" '
+        ept_res=$(awk -v hexport="$(printf '%04X' "$ept_port")" -v proto="$ept_proto" '
             NR == 1 { next }
             {
                 n = split($2, a, ":")
                 if (n != 2 || toupper(a[2]) != hexport) next
-                if (proto == "tcp6" && $4 != "0A") next
-                if ($8 != "0") { print $8; exit }
-            }' "$ept_file") || {
+                if ($8 != "0") { u = $8; exit }
+                if (proto == "udp6" || $4 == "0A") root = 1
+            }
+            END { if (u != "") print "uid " u; else if (root) print "root" }' "$ept_file") || {
             echo "cannot parse $ept_file"
             return 0
         }
-        if [ -n "$ept_uid" ]; then
-            echo "IPv6 ${ept_proto%6} port $ept_port is held by a socket of uid $ept_uid, not by the edge (root): the edge could not start with an IPv6 listen there"
-            return 0
-        fi
+        case $ept_res in
+            uid\ *)
+                echo "IPv6 ${ept_proto%6} port $ept_port is held by a socket of uid ${ept_res#uid }, not by the edge (root): the edge could not start with an IPv6 listen there"
+                return 0
+                ;;
+            root) ;;
+            *) ept_free="$ept_free ${ept_proto%6}:$ept_port" ;;
+        esac
     done
-    return 1
+    [ -n "$ept_free" ] || return 1
+    if [ ! -x "$CFM_BIN" ]; then
+        echo "cannot test-bind the IPv6 ports ($CFM_BIN missing)"
+        return 0
+    fi
+    # shellcheck disable=SC2086
+    if ept_out=$("$CFM_BIN" realip v6-bindcheck $ept_free 2>&1); then
+        return 1
+    fi
+    case $ept_out in
+        *"is taken"*) echo "$(printf '%s' "$ept_out" | tail -n 1): the edge could not start with an IPv6 listen there" ;;
+        *) echo "cannot test-bind the IPv6 ports ($CFM_BIN realip v6-bindcheck:$(printf '%s' "$ept_out" | tail -n 1 | cut -c1-120 | sed 's/^/ /'))" ;;
+    esac
+    return 0
 }
 
 # realip_v6_trusted: `cfm realip` says the origin trusts the edge for the IPv6
@@ -354,14 +386,23 @@ v6_listening() {
 # config (certificates, panel listeners) until a restart. If the listen does
 # not appear, the files are removed and the edge reloaded back.
 reload_and_confirm() {
-    rc_unit=$(printf '%s' "$1" | tr 'A-Z' 'a-z').service
+    rc_unit=$(unit_of "$1")
     if ! "$CFM_SYSTEMCTL" is-active --quiet "$rc_unit" 2>/dev/null; then
         log "$1: listening on IPv6 too ($3); config test passed ($rc_unit not running: applies at its next start)"
         return 0
     fi
+    # Listeners already there before the reload (a hand-added listen, files
+    # that existed with other content) would "confirm" a reload that failed:
+    # then the listen proves nothing, and says so.
+    rc_pre=0
+    v6_listening && rc_pre=1
     if ! "$CFM_SYSTEMCTL" reload "$rc_unit" >/dev/null 2>&1; then
         log "WARNING: $1: systemctl reload $rc_unit failed; removed the IPv6 listen files, IPv4 only"
         remove_files "$2"
+        return 0
+    fi
+    if [ "$rc_pre" -eq 1 ]; then
+        log "$1: listening on IPv6 too ($3); reloaded $rc_unit (it listened on IPv6 before the reload, so the listen cannot confirm it: check the edge's error log)"
         return 0
     fi
     rc_i=0
@@ -377,6 +418,25 @@ reload_and_confirm() {
     remove_files "$2"
     "$CFM_SYSTEMCTL" reload "$rc_unit" >/dev/null 2>&1 || true
     return 0
+}
+
+# unit_of ENGINE: its systemd unit (OpenResty -> openresty.service).
+unit_of() {
+    printf '%s.service' "$(printf '%s' "$1" | tr 'A-Z' 'a-z')"
+}
+
+# reload_after_remove ENGINE: a render removed files a running edge was
+# listening with: reload it now, or IPv6 visitors keep reaching an origin
+# that (for one) no longer trusts ::1 until some later reload. Removing a
+# listen cannot make a reload fail to bind.
+reload_after_remove() {
+    rar_unit=$(unit_of "$1")
+    "$CFM_SYSTEMCTL" is-active --quiet "$rar_unit" 2>/dev/null || return 0
+    if "$CFM_SYSTEMCTL" reload "$rar_unit" >/dev/null 2>&1; then
+        log "$1: reloaded $rar_unit: it no longer listens on IPv6"
+    else
+        log "WARNING: $1: systemctl reload $rar_unit failed; it may still listen on IPv6 until its next reload or restart"
+    fi
 }
 
 render_engine() {
@@ -400,7 +460,7 @@ render_engine() {
         return 0
     fi
     re_kept=0
-    [ "$re_action" = prestart ] && [ -f "$re_dir/$V6_HTTP_FILE" ] && [ -f "$re_dir/$V6_HTTPS_FILE" ] && re_kept=1
+    [ "$re_action" != render ] && [ -f "$re_dir/$V6_HTTP_FILE" ] && [ -f "$re_dir/$V6_HTTPS_FILE" ] && re_kept=1
     re_reason=$(want_v6 "$re_mode")
     re_want=$?
     if [ "$re_want" -eq 3 ] && [ "$re_kept" -eq 1 ]; then
@@ -436,6 +496,14 @@ render_engine() {
             return 0
             ;;
     esac
+
+    if [ "$re_action" = deploy ] && [ "$re_kept" -eq 0 ]; then
+        # The package deploy never turns IPv6 on: it must not reload the edge,
+        # and files written without a reload leave a window for another
+        # process to take the port (render reloads and confirms at once).
+        log "$re_name: IPv4 only for now: IPv6 is allowed and the host is ready; turn it on with: sh $0 render (it reloads the edge)"
+        return 0
+    fi
 
     re_changed=0
     for re_pair in "$V6_HTTP_FILE http_body" "$V6_HTTPS_FILE https_body"; do
@@ -519,14 +587,14 @@ engines() {
 main() {
     action=${1:-render}
     case $action in
-        render | prestart | status) ;;
+        render | prestart | deploy | status) ;;
         mode)
             # Test seam: the EDGE_LISTEN_V6 reading alone (check_edge_listen_v6.sh).
             mode
             return 0
             ;;
         *)
-            echo "usage: $0 [render|prestart|status]" >&2
+            echo "usage: $0 [render|prestart|deploy|status]" >&2
             return 0
             ;;
     esac
@@ -536,7 +604,12 @@ main() {
         if [ "$action" = status ]; then
             status_engine "$e_name" "$e_bin" "$e_dir" "$e_main" "$m"
         else
+            e_had=0
+            [ -f "$e_dir/$V6_HTTP_FILE" ] && e_had=1
             render_engine "$e_name" "$e_bin" "$e_dir" "$e_main" "$m" "$action"
+            if [ "$action" = render ] && [ "$e_had" -eq 1 ] && [ ! -f "$e_dir/$V6_HTTP_FILE" ]; then
+                reload_after_remove "$e_name"
+            fi
         fi
     done
     return 0

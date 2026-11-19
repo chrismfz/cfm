@@ -160,6 +160,15 @@ EOF
 # before they are written, so no reload can catch an untrusting origin).
 cat >"$tmp/bin/cfm" <<EOF
 #!/bin/sh
+if [ "\$1 \$2" = "realip v6-bindcheck" ]; then
+  shift 2
+  echo "\$*" >> "$tmp/bind.calls"
+  case "\$(cat "$tmp/bind" 2>/dev/null)" in
+    taken) echo "IPv6 tcp port 9080 is taken: bind: address already in use"; exit 1 ;;
+    old) echo 'unknown subcommand "v6-bindcheck"'; exit 2 ;;
+    *) echo ok; exit 0 ;;
+  esac
+fi
 [ "\$1 \$2" = "realip --json" ] || exit 2
 [ -e "$conf_dir/cfm-listen-v6-http.conf" ] && echo files >> "$tmp/realip.calls" || echo nofiles >> "$tmp/realip.calls"
 case "\$(cat "$tmp/realip" 2>/dev/null)" in
@@ -301,11 +310,9 @@ expect absent "untrusted: nothing was written"
 printf 'trusted' >"$tmp/realip"
 run render
 expect present "back on"
-rc=0
-CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
-  CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" prestart >"$tmp/out" 2>&1 || rc=$?
-[ "$rc" -eq 0 ] || fail "exit $rc without cfm"
-expect present "prestart: cfm realip cannot confirm at start (boot) -> keeps files a render approved"
+printf 'garbage' >"$tmp/realip"
+run prestart
+expect present "prestart: cfm realip gives no verdict at start (boot) -> keeps files a render approved"
 says "gave no verdict at start"
 printf 'untrusted' >"$tmp/realip"
 run prestart
@@ -350,7 +357,46 @@ says "cannot read"
 ss_v6
 p6 tcp6 $any6 9080 01 1001
 run render
-expect present "a non-LISTEN tcp6 socket on 9080 does not count, nor the edge's root sockets -> listens"
+expect absent "a tenant's connected (non-LISTEN) socket from port 9080 -> taken (it holds the port all the same)"
+says "uid 1001"
+
+# A socket that is bound and never listens is not in /proc/net/tcp6 at all:
+# the ports with no root socket are really bound by `cfm realip v6-bindcheck`.
+ss_v6
+: >"$tmp/bind.calls"
+run render
+expect present "free ports: the bind test passes -> listens"
+[ "$(cat "$tmp/bind.calls")" = "tcp:9080" ] || fail "bind test args (the edge's root tcp+udp 9043 skip it): $(cat "$tmp/bind.calls")"
+printf 'taken' >"$tmp/bind"
+run render
+expect absent "a port the bind test cannot bind (a bound-only tenant socket) -> taken"
+says "is taken"
+run prestart
+expect absent "the same at start"
+printf 'old' >"$tmp/bind"
+run render
+expect absent "a cfm without v6-bindcheck (older) -> cannot test, taken"
+says "cannot test-bind"
+rm -f "$tmp/bind"
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/no-cfm" \
+  CFM_EDGE_ENGINES="$ENGINES" sh "$SCRIPT" render >"$tmp/out" 2>&1 || true
+expect absent "no cfm binary: cannot test-bind -> IPv4 only"
+says "cannot test-bind"
+ss_v6
+p6 tcp6 $any6 9080 0A 0
+p6 tcp6 $any6 9080 01 0
+: >"$tmp/bind.calls"
+run render
+expect present "root sockets on every port (the edge's own, and its accepted connections) -> no bind test needed"
+[ ! -s "$tmp/bind.calls" ] || fail "bind test ran for root-held ports: $(cat "$tmp/bind.calls")"
+ss_v6
+p6 tcp6 $any6 9080 01 0
+printf 'taken' >"$tmp/bind"
+run render
+expect absent "a root socket on 9080 that is not LISTEN is not the edge's listener: the bind test still decides"
+rm -f "$tmp/bind"
+ss_v6
+run render
 
 # A render that writes the files reloads a RUNNING edge and confirms the IPv6
 # listen (a later reload would leave a window for another process to take the
@@ -380,10 +426,36 @@ says "does not listen on IPv6"
 : >"$tmp/reload.fail"
 run render
 expect absent "systemctl reload failing -> files removed"
-rm -f "$tmp/reload.fail" "$tmp/edge.active"
+rm -f "$tmp/reload.fail"
+# A listener already there before the reload proves nothing about it.
+ss_v6
+p6 tcp6 $any6 9080 0A 0
+: >"$tmp/edgectl.calls"
+run render
+expect present "IPv6 listeners there before the reload: kept, the listen not taken as proof"
+says "listened on IPv6 before the reload"
+# A render that removes files a running edge listens with reloads it.
+printf 'untrusted' >"$tmp/realip"
+: >"$tmp/edgectl.calls"
+run render
+expect absent "render: the origin no longer trusts ::1 -> removed"
+grep -qx 'reload test.service' "$tmp/edgectl.calls" && ok "... and the running edge reloaded (no IPv6 visitor reaches it as ::1 meanwhile)" || fail "no reload after removing live files: $(cat "$tmp/edgectl.calls")"
+: >"$tmp/edgectl.calls"
+run render
+grep -q reload "$tmp/edgectl.calls" && fail "reloaded with no files to remove"
+printf 'trusted' >"$tmp/realip"
+rm -f "$tmp/edge.active"
+ss_v6
 run render
 expect present "edge not running: files written, apply at its next start"
 says "not running"
+printf 'untrusted' >"$tmp/realip"
+: >"$tmp/edgectl.calls"
+run render
+expect absent "removed while the edge is not running"
+grep -q reload "$tmp/edgectl.calls" && fail "reloaded an edge that is not running"
+printf 'trusted' >"$tmp/realip"
+run render
 
 ss_v4
 run prestart
@@ -545,8 +617,19 @@ done
 cmp -s configs/cfm-edge-listen-v6.service "$units/cfm-edge-listen-v6.service" || fail "unit content differs"
 cmp -s configs/cfm-edge-listen-v6-dropin.conf "$units/openresty.service.d/cfm-listen-v6.conf" || fail "drop-in content differs"
 [ "$(grep -c daemon-reload "$tmp/systemctl.calls")" -eq 1 ] || fail "daemon-reload count after first deploy: $(cat "$tmp/systemctl.calls")"
-expect present "deploy runs the script (render)"
+expect absent "deploy runs the script (deploy): it never turns IPv6 on"
+says "turn it on with"
+run render
+expect present "render turns it on"
+: >"$tmp/edge.active"
 deploy
+expect present "deploy keeps files a render approved"
+grep -vx daemon-reload "$tmp/systemctl.calls" | grep -q reload && fail "deploy reloaded the edge: $(cat "$tmp/systemctl.calls")"
+ss_v4
+deploy
+expect present "deploy: the origin not on IPv6 (restarting during the upgrade) -> kept"
+ss_v6
+rm -f "$tmp/edge.active"
 [ "$(grep -c daemon-reload "$tmp/systemctl.calls")" -eq 1 ] && ok "unchanged units: no second daemon-reload" || fail "daemon-reload ran again for unchanged units"
 
 # The unit runs prestart, ignores failure, and the drop-in is Wants + After.

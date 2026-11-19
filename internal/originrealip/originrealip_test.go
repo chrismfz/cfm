@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1136,6 +1139,8 @@ func TestRealipJSONContractWithTheIPv6Script(t *testing.T) {
 // from the same fixture (check_edge_listen_v6.sh runs the script on it): a
 // value the two read differently would leave `cfm realip` demanding ::1 for an
 // edge that will never listen, or the reverse.
+var octal0 = regexp.MustCompile(`\\0([0-7]{3})`)
+
 func TestEdgeListenV6ModeFixture(t *testing.T) {
 	b, err := os.ReadFile("../../scripts/tests/fixtures/edge_listen_v6_mode.txt")
 	if err != nil {
@@ -1150,6 +1155,7 @@ func TestEdgeListenV6ModeFixture(t *testing.T) {
 		if !ok {
 			t.Fatalf("bad fixture line %q", line)
 		}
+		body = octal0.ReplaceAllString(body, `\$1`) // printf %b's \0ddd is Go's \ddd
 		content, err := strconv.Unquote(`"` + strings.ReplaceAll(body, `"`, `\"`) + `"`)
 		if err != nil {
 			// \" in the fixture is already escaped: unquote it as written.
@@ -1179,5 +1185,85 @@ func TestEdgeListenV6ModeFixture(t *testing.T) {
 	}
 	if n < 20 {
 		t.Fatalf("only %d fixture cases", n)
+	}
+}
+
+// cfm realip v6-bindcheck: the script's proof that the edge's IPv6 ports can
+// be bound (a bound-only tenant socket is invisible in /proc/net/tcp6).
+func TestV6BindCheck(t *testing.T) {
+	orig := v6Bind
+	t.Cleanup(func() { v6Bind = orig })
+	taken := map[string]error{
+		"tcp [::]:9080": syscall.EADDRINUSE,
+	}
+	var seen []string
+	v6Bind = func(proto, addr string) error {
+		seen = append(seen, proto+" "+addr)
+		return taken[proto+" "+addr]
+	}
+	run := func(args ...string) (int, string) {
+		var b strings.Builder
+		return runCLI(append([]string{"v6-bindcheck"}, args...), &b, layout{}, func() bool { return true }), b.String()
+	}
+	if rc, out := run("tcp:9043", "udp:9043"); rc != 0 || !strings.Contains(out, "ok") {
+		t.Fatalf("free ports: rc=%d out=%q", rc, out)
+	}
+	if seen[0] != "tcp [::]:9043" || seen[1] != "udp [::]:9043" {
+		t.Fatalf("binds: %v", seen)
+	}
+	if rc, out := run("tcp:9043", "tcp:9080"); rc != 1 || !strings.Contains(out, "port 9080 is taken") {
+		t.Fatalf("taken: rc=%d out=%q", rc, out)
+	}
+	taken["udp [::]:9043"] = syscall.EAFNOSUPPORT
+	if rc, _ := run("udp:9043"); rc != 2 {
+		t.Fatalf("no IPv6 must be 'cannot tell' (2), got %d", rc)
+	}
+	for _, bad := range [][]string{nil, {"9080"}, {"sctp:9080"}, {"tcp:0"}, {"tcp:x"}, {"tcp:70000"}} {
+		if rc, _ := run(bad...); rc != 2 {
+			t.Fatalf("args %v: rc=%d, want 2", bad, rc)
+		}
+	}
+	// The real binder, on a real socket where the sandbox has IPv6.
+	v6Bind = orig
+	ln, err := net.Listen("tcp6", "[::]:0")
+	if err != nil {
+		t.Skipf("no IPv6 here: %v", err)
+	}
+	defer ln.Close()
+	p := ln.Addr().(*net.TCPAddr).Port
+	if rc, out := run("tcp:" + strconv.Itoa(p)); rc != 1 {
+		t.Fatalf("a held [::]:%d must read taken: rc=%d out=%q", p, rc, out)
+	}
+}
+
+// An IPv6 listen the script did not write (an operator's hand-added
+// `listen [::]:9043`) still makes the edge listen on IPv6: read from the
+// kernel's root LISTEN sockets on the edge's ports.
+func TestEdgeV6KernelListen(t *testing.T) {
+	line := func(addr string, port int, st, uid string) string {
+		return fmt.Sprintf("   0: %s:%04X 00000000000000000000000000000000:0000 %s 00000000:00000000 00:00000000 00000000 %5s        0 1 1 0000000000000000 100 0 0 10 0\n", addr, port, st, uid)
+	}
+	const any6 = "00000000000000000000000000000000"
+	const glob = "B80D0120000000000000000001000000"
+	for _, c := range []struct {
+		name, tcp6 string
+		want       bool
+	}{
+		{"none", "", false},
+		{"root [::]:9043", line(any6, 9043, "0A", "0"), true},
+		{"root global addr :9080", line(glob, 9080, "0A", "0"), true},
+		{"non-root [::]:9043", line(any6, 9043, "0A", "1001"), false},
+		{"root [::1]:9043", line("00000000000000000000000001000000", 9043, "0A", "0"), false},
+		{"root v4-mapped :9080", line("0000000000000000FFFF00000100007F", 9080, "0A", "0"), false},
+		{"root link-local :9080", line("000080FE00000000FF3412AA1E8E2F6D", 9080, "0A", "0"), false},
+		{"root [::]:9043 not LISTEN", line(any6, 9043, "01", "0"), false},
+		{"root [::]:443 (origin)", line(any6, 443, "0A", "0"), false},
+	} {
+		l, r := testLayout(t)
+		put(t, r, "proc/net/tcp6", tcp6Head+c.tcp6)
+		l.procTCP6 = "/proc/net/tcp6"
+		if got := l.edgeListensIPv6(); got != c.want {
+			t.Errorf("%s: edgeListensIPv6 = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

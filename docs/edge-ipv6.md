@@ -32,10 +32,10 @@ origin is ready for it.
 | Piece | What it does |
 |---|---|
 | `configs/openresty.conf`, `configs/angie.conf` | each listener `server{}` includes `cfm-listen-v6-http.con[f]` / `cfm-listen-v6-https.con[f]` from the engine's conf dir (`/usr/local/openresty/nginx/conf`, `/etc/angie`). The glob makes an **absent file mean IPv4 only**, not a failed config test. |
-| `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. A `render` that writes the files reloads a running edge at once and checks (`/proc/net/tcp6`) that it listens on `[::]:9080` and `[::]:9043`; if not, it removes them and reloads back. Removing files, and `prestart`, never reload: that applies at the next start or reload. |
+| `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. A `render` that writes the files reloads a running edge at once and checks (`/proc/net/tcp6`) that it listens on `[::]:9080` and `[::]:9043`; if not, it removes them and reloads back. A `render` that removes files a running edge listens with reloads it too. `prestart` and `deploy` never reload. |
 | `cfm-edge-listen-v6.service` (`configs/`, installed to `/etc/systemd/system/`) | oneshot running the script (`prestart`) before every edge start; `TimeoutStartSec=60`. |
 | drop-in `openresty.service.d/cfm-listen-v6.conf`, `angie.service.d/cfm-listen-v6.conf` | `Wants=` + `After=` that unit, so it runs **before** the edge unit's own `ExecStartPre` config test (a drop-in `ExecStartPre` would run after it, too late). `Wants=`, not `Requires=`: the edge starts if the unit fails. |
-| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`render`) after the new edge configs are deployed. The installers (`install-openresty.sh`, `install-angie.sh`) run it too, after `cfm realip fix`. |
+| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`deploy`) after the new edge configs are deployed: it keeps or removes files (prestart's rules) but never writes new ones and never reloads, so an upgrade never turns IPv6 on. The installers (`install-openresty.sh`, `install-angie.sh`) run `render`, after `cfm realip fix`. |
 
 ## The decision
 
@@ -55,9 +55,14 @@ otherwise (the script logs which one failed):
    anyone but root (`nginx -t` does not bind, so a taken port would pass the
    test and then fail the edge's start, IPv4 included). Read from the uid
    column of `/proc/net/tcp6` / `udp6`, never from `ss`: `ss` prints process
-   names raw, so a tenant process can pose as root's nginx. Every address
-   counts, `[::1]` included (it fails the edge's `[::]` bind too); the edge's
-   master binds as root; an unreadable table counts as taken;
+   names raw, so a tenant process can pose as root's nginx. A non-root socket
+   on the port counts in any state (one that bound the port and connected out
+   holds it too) and on every address, `[::1]` included (it fails the edge's
+   `[::]` bind too); the edge's master binds as root, and its accepted
+   connections are root's. A port with no root socket is then really bound,
+   IPv6-only as nginx does, by `cfm realip v6-bindcheck`: a socket that is
+   bound and never listens is not in `/proc/net/tcp6` at all. A `cfm` that
+   cannot run the check, and an unreadable table, count as taken;
 3. the origin listens on IPv6 on both 80 and 443 (`ss`: `[::]`, a specific
    IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped), because an
    IPv6 visitor's hop goes to the IPv6 address it came to;
@@ -80,8 +85,9 @@ them: `EDGE_LISTEN_V6` not allowing it, no IPv6 stack at all, a taken port,
 `ss` failing, a main config without the include, a failed config test, and a
 definite "the origin does not trust `::1`" from `cfm realip` (every IPv6
 visitor would be localhost to the origin). An origin that stops listening on
-IPv6 for good keeps the edge's IPv6 until the next `render` (a package
-upgrade, or by hand).
+IPv6 for good keeps the edge's IPv6 until the next `render` (by hand). The
+package deploy (`deploy`) applies the same keep / remove rules, and never
+writes files that are not there.
 
 ```bash
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
@@ -92,10 +98,20 @@ Removing the `cfm` package (not upgrading it) removes the unit, the drop-ins
 and the files.
 
 **Turning it on and off on a node:** uncomment `EDGE_LISTEN_V6 = on` in
-`/etc/cfm/cfm.conf` (run `cfm realip fix` first), or set `off`; then
-**restart** the edge (a restart re-decides; a plain reload keeps the files),
-or run the script with `render` (it reloads a running edge itself when it
-writes the files).
+`/etc/cfm/cfm.conf` (run `cfm realip fix` first), or set `off`; then run the
+script with `render`. When it writes the files it reloads a running edge and
+checks (`/proc/net/tcp6`) that it listens on IPv6, else removes them and
+reloads back: a failed reload leaves nginx on its old config, never down.
+When it removes files a running edge listens with, it reloads it too. A
+restart re-decides as well (`prestart`), but a plain `systemctl reload` does
+not. A package upgrade (`deploy`) never turns IPv6 on.
+
+**Limits.** A hand-written `listen [::]` with `ipv6only=off` is not
+supported: IPv4 visitors then arrive as `::ffff:a.b.c.d`, and the origin hop
+(bracketed, bound to `::1`) cannot reach that. A downgrade to a cfm without
+this script leaves the unit, the drop-ins and the files behind (the unit's
+`-` and the drop-in's `Wants=` keep the edge starting); remove them by hand
+or run `render` with `EDGE_LISTEN_V6 = off` before downgrading.
 
 ## The origin's `::1` trust
 
@@ -107,15 +123,18 @@ apps that trust localhost, and one bucket for every login limiter. So:
 
 - `cfm realip` requires both as soon as the host **can** do IPv6 (kernel IPv6
   + the origin on a global IPv6 address on 80 and 443, read from
-  `/proc/net/tcp6`) and `EDGE_LISTEN_V6` allows IPv6, before the edge listens. Until
+  `/proc/net/tcp6`) and `EDGE_LISTEN_V6` allows IPv6, before the edge listens,
+  and whenever the edge does listen on IPv6: the files exist, or the kernel
+  shows a root listener on a global IPv6 address on 9080 / 9043 (a
+  `listen [::]` added by hand). Until
   then it warns "the edge does not listen on IPv6 (run: cfm realip fix, then
-  restart the edge)"; once the edge listens, a gap reads "logs ::1 for every
+  then run the script with render)"; once the edge listens, a gap reads "logs ::1 for every
   IPv6 visitor".
 - `cfm realip fix` then writes the `::1` trust for Apache and nginx, also on
   an origin whose 127.0.0.1 trust comes from a file CFM did not write
   (Imunify's `i360.remoteip.conf`, a hand-written one). The script never runs
   `fix` itself (it edits and reloads the origin), and `fix` does not render:
-  restart the edge after it (or run the script with `render`).
+  run the script with `render` after it.
 - LiteSpeed: `fix` only prints the step, `::1T` in its Access Control allow
   list (the `::1T` spelling is the analogue of `127.0.0.1T` and has not been
   tried on a real LiteSpeed yet). On rigel and titan the Apache RemoteIP trust

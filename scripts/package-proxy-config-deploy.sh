@@ -812,11 +812,13 @@ deploy_logrotate_dropin() {
 # runs scripts/cfm-edge-listen-v6.sh before every edge start and the drop-in
 # that pulls it into openresty.service / angie.service (refreshed when they
 # differ, systemd reloaded only then; skipped on a host without systemd), then
-# run the script once (render): it writes or removes the two listen sidecars
-# for every engine and proves the change with the engine's own config test.
-# It runs after the configs were deployed, so that test reads the new main
-# config. Nothing here reloads the edge: a change applies at its next start or
-# reload. Any failure is a warning, never fatal.
+# run the script once (`deploy`): it keeps or removes the two listen sidecars
+# for every engine and re-tests kept ones with the engine's own config test,
+# but never writes new ones (turning IPv6 on is `render`, by hand: it reloads
+# the edge and confirms the listen). It runs after the configs were deployed,
+# so that test reads the new main config. Nothing here reloads the edge: a
+# change applies at its next start or reload. Any failure is a warning, never
+# fatal.
 deploy_edge_listen_v6() {
     delv_script=${CFM_EDGE_LISTEN_V6_SCRIPT:-/usr/share/cfm/scripts/cfm-edge-listen-v6.sh}
     delv_unit_dir=${CFM_SYSTEMD_UNIT_DIR:-/etc/systemd/system}
@@ -854,7 +856,7 @@ deploy_edge_listen_v6() {
     fi
 
     if [ -f "$delv_script" ]; then
-        sh "$delv_script" render || true
+        sh "$delv_script" deploy || true
     else
         echo "WARNING: CFM edge IPv6 listen: $delv_script missing; the edge stays on IPv4 only"
     fi

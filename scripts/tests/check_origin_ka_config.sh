@@ -177,7 +177,17 @@ done
 #   * the $cfm_origin_addr, $cfm_origin_bind and $cfm_pass_bind maps exist
 #     with exactly their pinned bodies;
 #   * every `proxy_pass $cfm_pass;` is followed by `proxy_bind $cfm_pass_bind;`
-#     and every $cfm_origin_addr proxy_pass by `proxy_bind $cfm_origin_bind;`;
+#     and every $cfm_origin_addr proxy_pass by `proxy_bind $cfm_origin_bind;`
+#     (a $cfm_pass with anything after it, `$cfm_pass$request_uri`, fails);
+#   * every other proxy_pass goes to a local IPv4 upstream (http://cfm_challenge,
+#     http://127.0.0.1:…): an origin hop through another variable
+#     (`set $o http://$server_addr:80; proxy_pass $o;`) fails;
+#   * no other map defines those three variables, whatever its source (nginx
+#     accepts a second map for one variable and the last one wins silently),
+#     and $cfm_pass_bind stays `volatile` (cfm.lua sets $cfm_pass mid-request);
+#   * each listener server{} keeps exactly one server-level
+#     `proxy_bind 127.0.0.1;` (the challenge / admin / cpsrvd hops: binding them
+#     to $cfm_origin_bind would send an IPv6 client's hop from ::1 to 127.0.0.1);
 #   * every balancer fallback brackets its peer on the line before
 #     set_current_peer(a, …), and none passes ngx.var.server_addr directly.
 # The Lua sides are tested by cfm_origin_ka_test.lua and
@@ -193,7 +203,11 @@ for f in "$ORT" "$ANG"; do
     # Any proxy_pass of $cfm_pass / ${cfm_pass} / $cfm_origin_addr, anywhere on
     # the line, must be alone on its line (so the bind can be checked on the
     # next one) and be followed by its bind.
-    /proxy_pass[[:space:]]+\$\{?cfm_pass\}?[[:space:]]*;/ {
+    /^[[:space:]]*proxy_pass[[:space:]]/ {
+      t = $0; sub(/^[[:space:]]*proxy_pass[[:space:]]+/, "", t)
+      if (t !~ /^\$\{?cfm_pass/ && t !~ /^https?:\/\/\$\{?cfm_origin_addr\}?/ && t !~ /^http:\/\/cfm_challenge[;\/[:space:]]/ && t !~ /^http:\/\/127\.0\.0\.1:[0-9]+[;\/$[:space:]]/) bad("proxy_pass to " t ": an origin hop must use $cfm_pass or $cfm_origin_addr (with its bind); others go to cfm_challenge or 127.0.0.1")
+    }
+    !/^[[:space:]]*#/ && /proxy_pass[[:space:]]+\$\{?cfm_pass/ {
       if ($0 !~ /^[[:space:]]*proxy_pass[[:space:]]+\$\{?cfm_pass\}?[[:space:]]*;[[:space:]]*(#.*)?$/) bad("proxy_pass $cfm_pass must be alone on its line, followed by proxy_bind $cfm_pass_bind;")
       want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_pass_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_pass_bind;"
     }
@@ -209,7 +223,7 @@ for f in "$ORT" "$ANG"; do
   fi
   # Pinned map bodies: the map line, then its body lines, whitespace-normalised.
   maps=$(awk '
-    /^[[:space:]]*map[[:space:]]+(\$server_addr|"\$cfm_pass\|\$server_addr")[[:space:]]+\$cfm_(origin_addr|origin_bind|pass_bind)[[:space:]]*\{/ { inmap=1 }
+    /^[[:space:]]*map[[:space:]]+("[^"]*"|[^[:space:]]+)[[:space:]]+\$cfm_(origin_addr|origin_bind|pass_bind)[[:space:]]*\{/ { inmap=1 }
     inmap { l=$0; gsub(/[[:space:]]+/, " ", l); sub(/^ /, "", l); sub(/ $/, "", l); print l; if ($0 ~ /^[[:space:]]*\}/) inmap=0 }
   ' "$f")
   want_maps='map $server_addr $cfm_origin_addr {
@@ -221,13 +235,27 @@ map $server_addr $cfm_origin_bind {
 default 127.0.0.1;
 }
 map "$cfm_pass|$server_addr" $cfm_pass_bind {
+volatile;
 "~^https?://\[" "::1";
 "~^https?://cfm_origin_https?\|.*:" "::1";
 default 127.0.0.1;
 }'
   if [ "$maps" != "$want_maps" ]; then
-    err "$f: the IPv6 origin maps (\$cfm_origin_addr / \$cfm_origin_bind / \$cfm_pass_bind) are missing or changed; got:
+    err "$f: the IPv6 origin maps (\$cfm_origin_addr / \$cfm_origin_bind / \$cfm_pass_bind) are missing, changed or defined twice; got:
 $maps"
+  fi
+  # One server-level `proxy_bind 127.0.0.1;` per listener server{} (9080, 9043).
+  sb=$(awk '
+    /^[[:space:]]*server[[:space:]]*\{/ { depth_srv = depth + 1; listener = 0; nb = 0 }
+    depth_srv && depth == depth_srv && /^[[:space:]]*listen[[:space:]]+(9080|9043)[;[:space:]]/ { listener = 1 }
+    depth_srv && depth == depth_srv && /^[[:space:]]*proxy_bind[[:space:]]+127\.0\.0\.1[[:space:]]*;/ { nb++ }
+    {
+      o = gsub(/\{/, "{"); c = gsub(/\}/, "}"); depth += o - c
+      if (depth_srv && depth < depth_srv) { if (listener) print nb; depth_srv = 0 }
+    }
+  ' "$f" | tr '\n' ' ')
+  if [ "$sb" != "1 1 " ]; then
+    err "$f: each listener server{} (9080, 9043) must keep exactly one server-level 'proxy_bind 127.0.0.1;' (got per server: [$sb])"
   fi
 done
 

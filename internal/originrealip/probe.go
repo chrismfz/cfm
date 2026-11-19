@@ -187,26 +187,77 @@ var system = layout{
 // check_edge_listen_v6.sh pins them equal.
 const edgeIPv6Default = false
 
-// edgeIPv6: the edge listens on IPv6 (its listen files exist), or it would as
-// soon as the origin trusts ::1 (IPv6 allowed on this node and hostCanIPv6).
+// edgeIPv6: the edge listens on IPv6 (its listen files exist, or the kernel
+// shows a root IPv6 listener on its ports: a `listen [::]` added by hand), or
+// it would as soon as the origin trusts ::1 (IPv6 allowed on this node and
+// hostCanIPv6).
 func (l layout) edgeIPv6() bool {
 	return l.edgeListensIPv6() || (l.edgeIPv6Wanted() && l.hostCanIPv6())
 }
 
-func (l layout) edgeListensIPv6() bool { return l.anyExists(l.edgeV6Files) }
+func (l layout) edgeListensIPv6() bool {
+	return l.anyExists(l.edgeV6Files) || l.edgeV6KernelListen()
+}
+
+// edgeV6Ports are the edge's listener ports (scripts/cfm-edge-listen-v6.sh
+// V6_HTTP_PORT / V6_HTTPS_PORT).
+var edgeV6Ports = map[uint64]bool{9080: true, 9043: true}
+
+// edgeV6KernelListen: a root-owned socket LISTENs on a global IPv6 address on
+// one of the edge's ports (/proc/net/tcp6; the edge's master binds as root).
+// Catches an IPv6 listen the script did not write (an operator's hand-added
+// `listen [::]:9043`): its visitors reach the origin from ::1 all the same.
+func (l layout) edgeV6KernelListen() bool {
+	if l.procTCP6 == "" {
+		return false
+	}
+	fh, err := os.Open(l.fs(l.procTCP6))
+	if err != nil {
+		return false
+	}
+	defer fh.Close()
+	sc := bufio.NewScanner(fh)
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
+		if len(f) < 8 || f[3] != "0A" || f[7] != "0" {
+			continue
+		}
+		addr, port, ok := strings.Cut(f[1], ":")
+		if !ok || len(addr) != 32 || !globalV6Hex(addr) {
+			continue
+		}
+		if p, err := strconv.ParseUint(port, 16, 16); err == nil && edgeV6Ports[p] {
+			return true
+		}
+	}
+	return false
+}
+
+// globalV6Hex: a /proc/net/tcp6 address (32 hex digits, the kernel's
+// per-word host byte order, so ::1 reads 00000000000000000000000001000000 on
+// x86) is not ::1, v4-mapped (::ffff:a.b.c.d) or link-local (fe80::/10),
+// which serve no global IPv6 address.
+func globalV6Hex(addr string) bool {
+	addr = strings.ToUpper(addr)
+	return addr != "00000000000000000000000001000000" && !strings.HasPrefix(addr, "0000000000000000FFFF0000") && !strings.HasPrefix(addr, "000080FE")
+}
 
 // edgeIPv6Wanted: EDGE_LISTEN_V6 in cfm.conf allows IPv6 on this node, read
 // like scripts/cfm-edge-listen-v6.sh mode(): last uncommented line wins, an
 // inline ; or # comment and quotes stripped, case-insensitive; on / yes /
 // true / 1 / auto / enable / enabled = yes, absent = edgeIPv6Default,
 // anything else = no.
+const asciiSpace = " \t\r\n\v\f"
+
 func (l layout) edgeIPv6Wanted() bool {
 	mode := ""
 	if l.cfmConf != "" {
 		if b, err := os.ReadFile(l.fs(l.cfmConf)); err == nil {
 			for _, line := range strings.Split(string(b), "\n") {
-				k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
-				if !ok || strings.TrimSpace(k) != "EDGE_LISTEN_V6" {
+				// ASCII whitespace only, as the script's C-locale [[:space:]]:
+				// strings.TrimSpace would also take a NBSP / NEL the script keeps.
+				k, v, ok := strings.Cut(strings.TrimLeft(line, asciiSpace), "=")
+				if !ok || strings.TrimRight(k, asciiSpace) != "EDGE_LISTEN_V6" {
 					continue
 				}
 				// Cut at the first ; or #, trim whitespace (CR included), then
@@ -215,7 +266,7 @@ func (l layout) edgeIPv6Wanted() bool {
 				if i := strings.IndexAny(v, ";#"); i >= 0 {
 					v = v[:i]
 				}
-				v = strings.TrimSpace(v)
+				v = strings.Trim(v, asciiSpace)
 				if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
 					v = v[1 : len(v)-1]
 				}
@@ -275,10 +326,7 @@ func (l layout) hostCanIPv6() bool {
 		if !ok || len(addr) != 32 {
 			continue
 		}
-		addr = strings.ToUpper(addr)
-		// ::1, v4-mapped (::ffff:a.b.c.d) and link-local (fe80::/10) serve no
-		// global IPv6 address.
-		if addr == "00000000000000000000000001000000" || strings.HasPrefix(addr, "0000000000000000FFFF0000") || strings.HasPrefix(addr, "000080FE") {
+		if !globalV6Hex(addr) {
 			continue
 		}
 		if p, err := strconv.ParseUint(port, 16, 16); err == nil {

@@ -102,6 +102,9 @@ func runCLI(args []string, w io.Writer, l layout, edgeActive func() bool) int {
 			return 1
 		}
 		return 0
+	case "v6-bindcheck":
+		// Internal (scripts/cfm-edge-listen-v6.sh): not in the usage text.
+		return v6BindCheck(args, w)
 	default:
 		fmt.Fprintf(w, "unknown subcommand %q\n\n%s", sub, usage)
 		return 2
@@ -128,7 +131,7 @@ func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 	case p.Stack == StackUnknown:
 		return false, "Origin real-IP: " + p.Note
 	case p.v6Only && !p.EdgeIPv6Listening:
-		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so the edge does not listen on IPv6 (run: cfm realip fix, then restart the edge; docs/edge-ipv6.md)", p.Panel, p.Stack, p.Note)
+		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so the edge does not listen on IPv6 (run: cfm realip fix, then sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render; docs/edge-ipv6.md)", p.Panel, p.Stack, p.Note)
 	case p.v6Only && p.UntrustedServers > 0 && p.UntrustedServers < p.Servers:
 		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so those sites log ::1 for every IPv6 visitor (run: cfm realip fix)", p.Panel, p.Stack, p.Note)
 	case p.v6Only:

@@ -268,6 +268,14 @@ origin hop brackets the address and binds `::1`.
   the same private L2 segment (a provider VLAN) can too. Pre-existing and
   IPv4 only; it exists for private-network origins and proxies. Decide
   whether to narrow it to the node's own networks or to an explicit list.
+- **IPv6 link-local neighbours cannot be nft-banned** — [open]. The edge no
+  longer treats `fe80::/10` as self (WAF and challenge apply), but nft's
+  `self_v6` set still holds `fe80::/10` and is accepted early in the input
+  chain (`nft/nft.go`, `nftlib/lifecycle.go`), and the webdetector skips
+  link-local clients when deciding blocks. So an L2 neighbour attacking the
+  IPv6 edge from `fe80::` is WAF-blocked and challenged per request, but never
+  banned or rate-limited. Pre-existing; reachable only once the edge listens
+  on IPv6.
 - **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
   only on the fleet; the panel listeners stay IPv4.
 
