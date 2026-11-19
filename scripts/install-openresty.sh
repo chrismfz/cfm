@@ -6,7 +6,7 @@ readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
 # configs/lua/*.lua by scripts/tests/check_shared_lua_layout.sh — that directory
 # is the source of truth and this array is a mechanically verified copy, so the
 # two can never drift apart again. Two severities behind this pre-flight: a
-# missing HARD require (cfm_filecache, cfm_bridge_cfg, cfm_cfg, cfm_selfip,
+# missing HARD require (cfm_filecache, cfm_bridge_cfg, cfm_cfg, cfm_selfip, cfm_ipkey,
 # cfm_decision, cfm_waf_excl, cfm_shdict) takes the edge down outright, while a missing
 # pcall-guarded module (cfm_fppolicy, cfm_tlsfp, cfm_waf, cfm_clearance, ...)
 # fails OPEN and silently disables its feature - an armed security control that
@@ -14,7 +14,7 @@ readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
 readonly CFM_LUA_MANIFEST=(
     cfm.lua cfm_bridge_cfg.lua cfm_cache.lua cfm_cache_log.lua cfm_cfg.lua
     cfm_clamav.lua cfm_clearance.lua cfm_decision.lua cfm_edgeban.lua cfm_filecache.lua
-    cfm_fppolicy.lua cfm_geo.lua cfm_h3_config.lua cfm_hostmatch.lua cfm_lockdown.lua
+    cfm_fppolicy.lua cfm_geo.lua cfm_h3_config.lua cfm_hostmatch.lua cfm_ipkey.lua cfm_lockdown.lua
     cfm_origin_ka.lua cfm_panel.lua cfm_panel_hosts.lua cfm_panel_tunnel.lua
     cfm_pcw.lua cfm_purge.lua cfm_rules.lua cfm_selfip.lua cfm_shdict.lua cfm_stats.lua
     cfm_tlsfp.lua cfm_ua_emergency.lua cfm_waf.lua cfm_waf_detectors.lua

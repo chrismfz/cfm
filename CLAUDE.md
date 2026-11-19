@@ -288,6 +288,11 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   and `/run` and a tmpfs over the CFM dirs (seeded), then look at what landed.
 - **Match surrounding style.** Go packages are small and single-purpose;
   keep new code in the right package rather than widening `main.go`.
+- **A per-client key is `ipkey.Client` (Go) / `cfm_ipkey.client` (Lua):** an
+  IPv6 client is its /64 (`docs/edge-ipv6.md` "IPv6 /64 grouping"). Never key
+  an allow, an exact match, a clearance cookie or a log line on it, and never
+  add another private "IPv4 or /64" helper: both twins run
+  `scripts/tests/fixtures/ipkey.txt`.
 - **`detectors.conf` readers tolerate an inline `;`/`#` comment — don't
   regress it.** `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`)
   strip it via `cleanScalar`; before that, `KEY = 5 ; note` failed to parse and

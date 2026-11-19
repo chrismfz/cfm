@@ -20,6 +20,7 @@
 -- routing through cfm_filecache fixes that here for both edges at once.
 
 local fc = require("cfm_filecache")
+local ipkey = require("cfm_ipkey")
 
 local lower = string.lower
 
@@ -131,59 +132,9 @@ local function load_ignore_cache()
   return cache or _EMPTY_IGNORE
 end
 
-local function ipv4_to_uint32(ip)
-  local a, b, c, d = ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
-  if not a then return nil end
-  a, b, c, d = tonumber(a), tonumber(b), tonumber(c), tonumber(d)
-  if not (a and b and c and d) then return nil end
-  if a > 255 or b > 255 or c > 255 or d > 255 then return nil end
-  return a * 16777216 + b * 65536 + c * 256 + d
-end
-
--- ipv6_to_hex32("2001:db8::1") -> "20010db8000000000000000000000001": the full
--- 128-bit address as 32 lowercase hex digits, in the same form Go writes the
--- v6_ranges networks. Accepts "::" compression, an embedded IPv4 tail
--- ("::ffff:1.2.3.4"). A zone suffix ("fe80::1%eth0") is refused like Go's
--- net.ParseIP refuses it.
--- Anything it cannot read as exactly 8 groups returns nil, and a nil never
--- matches a range.
-local function ipv6_to_hex32(ip)
-  if type(ip) ~= "string" or not ip:find(":", 1, true) then return nil end
-  if ip:find("%", 1, true) then return nil end
-  ip = lower(ip)
-  local head4, v4 = ip:match("^(.*:)(%d+%.%d+%.%d+%.%d+)$")
-  if v4 then
-    -- Go's ParseIP refuses an octet with a leading zero ("1::01.2.3.4");
-    -- so does the edge, or it would ignore a client Go does not.
-    if ("." .. v4):find("%.0%d") then return nil end
-    local n = ipv4_to_uint32(v4)
-    if not n then return nil end
-    ip = head4 .. string.format("%x:%x", math.floor(n / 65536), n % 65536)
-  end
-  local function groups(part)
-    local out = {}
-    if part == "" then return out end
-    for g in (part .. ":"):gmatch("([^:]*):") do
-      if not g:match("^[0-9a-f][0-9a-f]?[0-9a-f]?[0-9a-f]?$") then return nil end
-      out[#out + 1] = string.rep("0", 4 - #g) .. g
-    end
-    return out
-  end
-  local hd, tl, gs
-  local dc = ip:find("::", 1, true)
-  if dc then
-    if ip:find("::", dc + 1, true) then return nil end
-    hd, tl = groups(ip:sub(1, dc - 1)), groups(ip:sub(dc + 2))
-    if not hd or not tl or #hd + #tl > 7 then return nil end
-    gs = hd
-    for _ = 1, 8 - #hd - #tl do gs[#gs + 1] = "0000" end
-    for i = 1, #tl do gs[#gs + 1] = tl[i] end
-  else
-    gs = groups(ip)
-    if not gs or #gs ~= 8 then return nil end
-  end
-  return table.concat(gs)
-end
+-- The address parsers live in cfm_ipkey (one copy, shared with the client key).
+local ipv4_to_uint32 = ipkey.ipv4_to_uint32
+local ipv6_to_hex32 = ipkey.ipv6_to_hex32
 
 -- hex32_in_prefix: do the first `bits` bits of hex32 equal those of net_hex?
 -- Whole nibbles compare as a string prefix; a trailing partial nibble compares

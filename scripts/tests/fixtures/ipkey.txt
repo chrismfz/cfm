@@ -1,0 +1,37 @@
+# The client key (internal/ipkey Client, configs/lua/cfm_ipkey.lua client):
+# <input>\t<expected>. Run by internal/ipkey/ipkey_test.go and
+# scripts/tests/cfm_ipkey_test.lua; a change here is a behaviour change for
+# every per-client counter and ban.
+1.2.3.4	1.2.3.4
+203.0.113.250	203.0.113.250
+0.0.0.0	0.0.0.0
+2001:db8:1:2:a:b:c:d	2001:db8:1:2::/64
+2001:db8:1:2::	2001:db8:1:2::/64
+2001:db8:1:2::1	2001:db8:1:2::/64
+2001:DB8:1:2:A:B:C:D	2001:db8:1:2::/64
+2001:0db8:0001:0002:000a:000b:000c:000d	2001:db8:1:2::/64
+2001:db8:0:2::1	2001:db8:0:2::/64
+2001:db8:0:0:1::1	2001:db8::/64
+2001:0:0:5::9	2001:0:0:5::/64
+2001::	2001::/64
+::abcd:1	::/64
+2a14:4280:1:1:e643:4bff:fe54:ef2f	2a14:4280:1:1::/64
+2001:db8:1:2:0:0:1.2.3.4	2001:db8:1:2::/64
+ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff	ffff:ffff:ffff:ffff::/64
+::ffff:1.2.3.4	1.2.3.4
+::ffff:102:304	1.2.3.4
+::FFFF:203.0.113.9	203.0.113.9
+::1	::1
+fe80::1	fe80::1
+fe80::1c2:3ff:fe04:506	fe80::1c2:3ff:fe04:506
+FE80::1	FE80::1
+febf::1	febf::1
+fec0::1	fec0::/64
+fe80::1%eth0	fe80::1%eth0
+2001:db8::1%eth0	2001:db8::1%eth0
+	
+not-an-ip	not-an-ip
+01.2.3.4	01.2.3.4
+2001:db8::1::2	2001:db8::1::2
+2001:db8:1:2:3:4:5:6:7	2001:db8:1:2:3:4:5:6:7
+2001:db8::g	2001:db8::g

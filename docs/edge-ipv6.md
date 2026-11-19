@@ -167,7 +167,31 @@ apps that trust localhost, and one bucket for every login limiter. So:
   on IPv6 on the fleet, and opening the panel to IPv6 is a separate decision.
 - Per-IP counters and bans see each IPv6 address on its own. That was already
   true for visitors behind Cloudflare, which reach the edge with their own
-  IPv6 address; aggregation by /64 is open (`docs/ROADMAP.md` §9c).
+  IPv6 address; aggregation by /64 is in progress (below).
+
+## IPv6 /64 grouping
+
+An IPv6 client is its /64: any VPS or ISP line hands its customer one, and a
+client rotating its address inside it would get a fresh identity per address.
+So per-client counters, rate limits and bans key on the /64 (an IPv4 client
+on its address), always the whole /64 for a ban, with no per-node switch.
+
+- **One key, two twins:** `internal/ipkey` (Go) and `configs/lua/cfm_ipkey.lua`
+  (edge), pinned by the shared `scripts/tests/fixtures/ipkey.txt` (plus a
+  Go↔Lua differential fuzz, 50k addresses, no difference). The key is the
+  prefix text (`2001:db8:1:2::/64`); a v4-mapped address is IPv4; loopback,
+  link-local (a /64 there is the whole link), zoned and unparsable addresses
+  stay as they are.
+- **Never on an allow or an exact match** (an allow widened to a /64 allows a
+  whole customer prefix), nor on a clearance cookie or a log line.
+- **nft:** a masked key (`ip6 saddr and ffff:ffff:ffff:ffff::`) in a dynamic
+  set, a `limit` meter and a `ct count` works on the fleet's kernels: two
+  addresses of one /64 make one element and share one limit (2026-11-19, in
+  a throwaway netns on earth, 4.18, and rigel, 5.14). `block_v6_nets`
+  (interval, timeout) already holds a /64 ban.
+- **Status:** the key exists; the controls move to it one area at a time
+  (bans, counters, the edge's shared dicts), then `EDGE_LISTEN_V6` defaults
+  to on (`docs/ROADMAP.md` §9c).
 
 ## Verified
 
