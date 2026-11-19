@@ -70,7 +70,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   OpenResty and Angie, `inactive` where it is not installed), `cfm dnat`,
   edge_health, the heartbeat (`edge = "cfm-edge"`), the edge log tools and
   `journal_tail` recognise it. Nothing changes on a node without it: every
-  edge list keeps its order and only gains a trailing entry. No node runs
+  edge list keeps its order and gains a cfm-edge entry after the existing
+  engines' (a missing unit or file is skipped as before). No node runs
   cfm-edge yet; its install script and packaging hooks come next. The agent
   file sync and the bridge's upload directories stay closed to it (nothing
   needs them).

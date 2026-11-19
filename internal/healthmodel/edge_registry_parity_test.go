@@ -8,7 +8,10 @@ import (
 // These lists take their edge engines from edgeengine.Profiles; the tests pin
 // what they held as literals before (order included: the service-status
 // order is output, and the frontend candidates' order is the scoring tiebreak).
-// cfm-edge is appended after the old entries in each, so it never wins a tie.
+// cfm-edge comes after the old edge entries (before plain nginx, which the
+// list always appended last). The fallback scorer keeps the FIRST maximum, so
+// it never wins a tie against OpenResty or Angie, and with no unit, binary or
+// config it scores only the shared "nginx" alias, as Angie does.
 func TestHealthEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 	if want := []string{"cfm.service", "nginx.service", "openresty.service", "angie.service", "cfm-edge.service"}; !reflect.DeepEqual(serviceStatusUnits(), want) {
 		t.Errorf("serviceStatusUnits() = %v, want %v", serviceStatusUnits(), want)

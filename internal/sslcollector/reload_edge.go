@@ -16,8 +16,8 @@ import (
 
 // NudgeEdgeOnFirstReady runs once per cfm daemon lifetime. It waits for
 // the sslcollector socket to be bound AND the daemon's cert index to
-// have at least one entry; if the active edge service (angie or
-// openresty) was started before that ready state, it issues one
+// have at least one entry; if the active edge service (an edgeengine
+// engine) was started before that ready state, it issues one
 // `systemctl reload <edge>` so the worker pool re-runs init_worker_by_lua_block
 // against a now-ready socket (and, after the snapshot-writer change, a
 // freshly-written dump.json on disk).
@@ -162,8 +162,8 @@ func nudgeEdge(ctx context.Context, col *Collector) {
 }
 
 // activeEdgeService returns the first edge service systemd reports as
-// active. Returns ok=false when none are active. When both angie and
-// openresty are active simultaneously (rare; manual switchover), it
+// active. Returns ok=false when none are active. When more than one edge
+// is active simultaneously (rare; manual switchover), it
 // logs and returns the first match — reloading both is wasteful and the
 // usual case is one of them in flight.
 func activeEdgeService(ctx context.Context) (svc string, ok bool) {

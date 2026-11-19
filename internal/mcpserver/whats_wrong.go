@@ -201,7 +201,7 @@ func evaluateWhatsWrong(sections map[string]json.RawMessage) whatsWrongResult {
 		return true
 	}
 
-	// Resolve the active edge engine (angie|openresty|nginx) from the health
+	// Resolve the active edge engine (angie|openresty|cfm-edge|nginx) from the health
 	// snapshot. A node runs ONE edge; the idle alternate is installed-but-
 	// disabled and legitimately reports failed/inactive, so evalServices uses
 	// this to suppress that false "service failed" critical. When the edge can't

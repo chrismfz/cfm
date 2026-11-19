@@ -38,6 +38,9 @@ func TestNormalizeEdgeService(t *testing.T) {
 		{input: "/bin/sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh prestart", want: ""},
 		{input: "tail -f /var/log/cfm-edge/error.log", want: ""},
 		{input: "less /etc/cfm-edge/trusted_proxies.conf", want: ""},
+		{input: "strace -p 1 /usr/sbin/cfm-edge", want: ""},
+		{input: "rpm -v /usr/sbin/cfm-edge", want: ""},
+		{input: "nginx: master process /usr/sbin/cfm-edge -c /etc/cfm-edge/nginx.conf", want: "cfm-edge"},
 		{input: "apache2", want: ""},
 	}
 

@@ -24,7 +24,8 @@ The in-path edge proxy is **OpenResty** (default) or **Angie**; the daemon,
 Lua decision files, and sslcollector socket are identical for both.
 **cfm-edge** (`chrismfz/cfm-edge`: nginx.org nginx + the OpenResty Lua set,
 `/usr/sbin/cfm-edge`, `/etc/cfm-edge`, `/var/log/cfm-edge`) is the third
-engine the daemon knows, being adopted; it runs the same Lua and conf.
+engine the daemon knows, being adopted; it runs the same shared Lua (its
+conf comes with its install script).
 
 `README.md` is the short overview (install, config files, feature tour with
 links); the reference for each subsystem is its doc under `docs/` (§7).
@@ -231,8 +232,8 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   first-readable-file lists (OpenResty first). cfm-edge is LAST in both, so a
   node without it keeps every old list plus a trailing entry; its
   `LegacyLuaDir` is empty (it never had one). Code that counted engines must
-  count with `> 1`, not `== 2` (the dnat resolver read three active edges as
-  one). Both orders are pinned, by
+  count with `> 1`, not `== 2` (with `== 2`, three active edges fell through
+  the dnat resolver's ambiguity check). Both orders are pinned, by
   `profiles_test.go` and by a parity test next to each converted caller.
   `Lookup`/`IsEdge` are exact on the canonical name, like the checks they
   replaced, so a caller that needs leniency normalises first. Still
