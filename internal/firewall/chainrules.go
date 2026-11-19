@@ -84,6 +84,25 @@ var BaseRuleAnchors = []AnchoredRule{
 	{Expr: `ct state established,related ip6 saddr @block_v6_clients drop`, Anchor: `ct state established,related ip6 saddr @block_v6_nets drop`},
 }
 
+// Present is Has, except for an anchored rule (BaseRuleAnchors), which must be
+// present as itself: Has matches a rule inside a longer one, and the plain
+// drop reads present inside its `ct state established,related …` twin, so a
+// missing one would never be added back.
+func (c *ChainRules) Present(expr string) bool {
+	k := ruleKey(expr)
+	for _, a := range BaseRuleAnchors {
+		if ruleKey(a.Expr) == k {
+			for _, r := range c.rules {
+				if r.key == k {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return c.Has(expr)
+}
+
 // AnchorHandle is the handle a missing expr must be added after on this
 // chain, or "" when expr is not anchored or its anchor is not (yet) listed.
 func (c *ChainRules) AnchorHandle(expr string) string {

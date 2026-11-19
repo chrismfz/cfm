@@ -422,7 +422,7 @@ func errTail(err error, n int) string {
 func baseRulesScript(chain string, ins, adds []string) []string {
 	have := firewall.ParseChainRules(chain)
 	missing := func(expr string) bool {
-		if have.Has(expr) {
+		if have.Present(expr) {
 			return false
 		}
 		have.Add(expr)

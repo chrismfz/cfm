@@ -39,5 +39,8 @@ func (b *Backend) WriteSetElem(set, elem string, ttl *time.Duration, replace boo
 // DeleteSetElem deletes elem (a CIDR of an interval set) from set; an element
 // the set does not hold is not an error.
 func (b *Backend) DeleteSetElem(set, elem string) error {
-	return b.delCIDRElem(set, elem)
+	if err := b.delCIDRElem(set, elem); err != nil && !isNotFound(err) {
+		return err // a missing set (a table an older daemon built) is no error
+	}
+	return nil
 }

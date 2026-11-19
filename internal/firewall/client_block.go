@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -30,11 +31,13 @@ import (
 // A /64 is only ever added or extended, as ExtendBlock does for a host, and
 // an extend replaces the element in one transaction (SetElemWriter). The
 // address is banned instead when:
-//   - the /64 holds an address of this node (self_v6: a provider handing one
-//     /64 to several customers' VPSes) or an ignored address or network
-//     (ignore_v6 / ignore_v6_nets, and IGNORE_IPS / IGNORE_NETS through
-//     SetClientNetExempt): nft has no accept for those, so the ban would
-//     drop them;
+//   - the /64 holds an address of this node (its interfaces, and self_v6: a
+//     provider handing one /64 to several customers' VPSes), an ignored
+//     address or network (ignore_v6 / ignore_v6_nets, and IGNORE_IPS /
+//     IGNORE_NETS), or a trusted proxy's range (Cloudflare's: a detector that
+//     saw a proxy's own address must not ban the proxy's /64). The last two
+//     come through SetClientNetExempt. nft has no accept for any of them
+//     before its drops;
 //   - the backend cannot write the set (no SetElemWriter, a read or write
 //     error).
 // Allowed addresses need no such care: every allow set is accepted before
@@ -58,20 +61,55 @@ type SetElemWriter interface {
 // /64 racing would let the shorter write land last.
 var netBlockMu sync.Mutex
 
-// clientNetExempt is the daemon's global IGNORE_IPS / IGNORE_NETS check for a
-// /64 (SetClientNetExempt).
-var clientNetExempt atomic.Pointer[func(netip.Prefix) bool]
+// ErrClientNetGuarded is ExtendBlockNet's answer for a /64 a guard refuses
+// (it holds this node's address, an ignored one, a trusted proxy's): the
+// TTL ban restore counts it excluded, not failed.
+var ErrClientNetGuarded = errors.New("the /64 holds an address it must not drop")
 
-// SetClientNetExempt registers f: a /64 for which it returns true is never
-// banned as a whole (the address is). The detectors manager sets it to the
-// [global] IGNORE_IPS / IGNORE_NETS overlap on every config load; nil clears.
-func SetClientNetExempt(f func(netip.Prefix) bool) {
-	if f == nil {
-		clientNetExempt.Store(nil)
-		return
+// clientNetExempt holds the daemon's checks for a /64, by name
+// (SetClientNetExempt).
+var (
+	clientNetExemptMu sync.Mutex
+	clientNetExempt   atomic.Pointer[map[string]func(netip.Prefix) bool]
+)
+
+// SetClientNetExempt registers f under name: a /64 for which it returns true
+// is never banned as a whole (the address is). The detectors manager
+// registers "ignore" ([global] IGNORE_IPS / IGNORE_NETS, on every config
+// load), the edge ban store "trusted_proxies"; nil removes name.
+func SetClientNetExempt(name string, f func(netip.Prefix) bool) {
+	clientNetExemptMu.Lock()
+	defer clientNetExemptMu.Unlock()
+	next := map[string]func(netip.Prefix) bool{}
+	if cur := clientNetExempt.Load(); cur != nil {
+		for k, v := range *cur {
+			next[k] = v
+		}
 	}
-	clientNetExempt.Store(&f)
+	if f == nil {
+		delete(next, name)
+	} else {
+		next[name] = f
+	}
+	clientNetExempt.Store(&next)
 }
+
+// ClientNetExempted reports which registered check refuses p ("" when none).
+func ClientNetExempted(p netip.Prefix) string {
+	cur := clientNetExempt.Load()
+	if cur == nil {
+		return ""
+	}
+	for name, f := range *cur {
+		if f(p) {
+			return name
+		}
+	}
+	return ""
+}
+
+// localAddrs are this node's interface addresses (a var: tests replace it).
+var localAddrs = net.InterfaceAddrs
 
 // ClientNet is the /64 an automatic ban of ip takes; ok is false for IPv4 and
 // for the IPv6 addresses ipkey does not group, which are banned as they are.
@@ -127,11 +165,84 @@ func ExtendBlockNet(be Backend, p netip.Prefix, ttl time.Duration) (BlockBatchRe
 	if !p.IsValid() || !p.Addr().Is6() || p.Addr().Is4In6() || p != p.Masked() {
 		return BlockBatchResult{}, fmt.Errorf("not an IPv6 network: %v", p)
 	}
+	if why, err := clientNetGuard(be, p); err == nil && why != "" {
+		return BlockBatchResult{}, fmt.Errorf("%s: %s: %w", p, why, ErrClientNetGuarded)
+	}
 	res, done := extendClientNet(be, nil, p, ttl)
 	if !done {
 		return res, fmt.Errorf("%s: not written to %s (see the log)", p, BlockV6Clients)
 	}
 	return res, nil
+}
+
+// RemoveClientNets is RemoveClientNet for many addresses (a mass unblock):
+// the /64s deduplicated, block_v6_clients read once, only the /64s it holds
+// deleted. The result maps each address whose /64 could not be checked or
+// deleted to the error (an address not grouped, or whose /64 is not held,
+// has none).
+func RemoveClientNets(be Backend, ips []net.IP) map[string]error {
+	byNet := map[netip.Prefix][]string{}
+	for _, ip := range ips {
+		if p, ok := ClientNet(ip); ok {
+			byNet[p] = append(byNet[p], ip.String())
+		}
+	}
+	if len(byNet) == 0 {
+		return nil
+	}
+	w, ok := be.(SetElemWriter)
+	if !ok {
+		return nil // nothing can have written them
+	}
+	fail := func(nets []netip.Prefix, err error) map[string]error {
+		out := map[string]error{}
+		for _, p := range nets {
+			for _, ip := range byNet[p] {
+				out[ip] = err
+			}
+		}
+		return out
+	}
+	netBlockMu.Lock()
+	defer netBlockMu.Unlock()
+	elems, err := be.ListSetElementsTimed(BlockV6Clients)
+	if err != nil {
+		all := make([]netip.Prefix, 0, len(byNet))
+		for p := range byNet {
+			all = append(all, p)
+		}
+		if isMissingSet(err) {
+			return nil // a table from before the set: nothing to free
+		}
+		return fail(all, fmt.Errorf("read %s: %w", BlockV6Clients, err))
+	}
+	held := map[netip.Prefix]bool{}
+	for _, e := range elems {
+		if p, err := netip.ParsePrefix(strings.TrimSpace(e.Elem)); err == nil {
+			held[p.Masked()] = true
+		}
+	}
+	var out map[string]error
+	for p := range byNet {
+		if !held[p] {
+			continue
+		}
+		if err := w.DeleteSetElem(BlockV6Clients, p.String()); err != nil {
+			if out == nil {
+				out = map[string]error{}
+			}
+			for k, v := range fail([]netip.Prefix{p}, err) {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
+// isMissingSet: nft's (or nftlib's) error for a set that does not exist.
+func isMissingSet(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no such file") || strings.Contains(s, "does not exist") || strings.Contains(s, "not found")
 }
 
 // RemoveClientNet is the unblock side: it removes the /64 an automatic ban
@@ -149,7 +260,10 @@ func RemoveClientNet(be Backend, ip net.IP) (net string, err error) {
 	}
 	netBlockMu.Lock()
 	defer netBlockMu.Unlock()
-	return p.String(), w.DeleteSetElem(BlockV6Clients, p.String())
+	if err := w.DeleteSetElem(BlockV6Clients, p.String()); err != nil && !isMissingSet(err) {
+		return p.String(), err
+	}
+	return p.String(), nil // removed, not held, or a table from before the set
 }
 
 // RemoveClientPrefix removes the /64 ban p from block_v6_clients (the TTL ban
@@ -235,8 +349,20 @@ var clientNetGuardSets = []string{"self_v6", "ignore_v6", "ignore_v6_nets"}
 
 // clientNetGuard says why p must not be banned as a whole ("" when it may).
 func clientNetGuard(be Backend, p netip.Prefix) (string, error) {
-	if f := clientNetExempt.Load(); f != nil && (*f)(p) {
-		return "the /64 holds an IGNORE_IPS / IGNORE_NETS address", nil
+	if name := ClientNetExempted(p); name != "" {
+		return fmt.Sprintf("the /64 is refused by the %s check", name), nil
+	}
+	// This node's own addresses, from its interfaces: self_v6 below is
+	// rewritten (flushed, then filled) on every refresh, and a read in
+	// between would miss them.
+	if addrs, err := localAddrs(); err == nil {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok {
+				if ip, ok := netip.AddrFromSlice(n.IP); ok && p.Contains(ip.Unmap()) {
+					return fmt.Sprintf("the /64 holds this node's own address (%s)", ip), nil
+				}
+			}
+		}
 	}
 	plo, phi := prefixRange(p)
 	for _, set := range clientNetGuardSets {

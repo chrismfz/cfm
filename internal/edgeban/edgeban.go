@@ -110,6 +110,9 @@ func SetTrustedProxies(nets []*net.IPNet) {
 	}
 	a.merge()
 	proxies.Store(a)
+	// Nor does nft ban a proxy's whole /64 (a detector that saw the proxy's
+	// own address): firewall/client_block.go bans the address instead.
+	firewall.SetClientNetExempt("trusted_proxies", func(p netip.Prefix) bool { return proxies.Load().overlaps(p) })
 	version.Add(1)
 }
 
@@ -830,6 +833,12 @@ func BanElem(elem string, ttl *time.Duration, source string) {
 func Unban(ip string) {
 	Default().Remove(ip)
 	proxyipfilter.Forget(ip)
+	// The client's /64 too (Remove drops its /64 ban).
+	if addr := net.ParseIP(strings.TrimSpace(ip)); addr != nil {
+		if ck := clientKey(addr); ck != "" {
+			proxyipfilter.Forget(ck)
+		}
+	}
 }
 
 // IsBanned asks the Default store (false without one).
@@ -837,6 +846,14 @@ func IsBanned(ip string) (bool, time.Duration) { return Default().Banned(ip) }
 
 // List is the Default store's List (nil without one).
 func List() []Item { return Default().List() }
+
+// AddrOverlapMatcher is AddrMatcher for a network: it reports whether any
+// address of the prefix is in the elements (the TTL ban restore's test for
+// an IPv6 client /64).
+func AddrOverlapMatcher(elems []string) func(netip.Prefix) bool {
+	a := parseAllowSet(elems)
+	return a.overlaps
+}
 
 // AddrMatcher returns a matcher for nft set elements as nft lists them
 // (hosts, CIDRs, first-last ranges), the one edge ban reconcile uses for the

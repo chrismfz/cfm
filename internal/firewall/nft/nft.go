@@ -521,7 +521,7 @@ func (b *Backend) EnsureBase() (err error) {
 	// as we add/insert rules during this EnsureBase run.
 	resInput, _ := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "input")
 	inputRules := firewall.ParseChainRules(resInput.Stdout)
-	ruleInInput := inputRules.Has
+	ruleInInput := inputRules.Present
 	recordRuleInInput := inputRules.Add
 
 	// Drop the copies the old presence check piled up: it never recognised

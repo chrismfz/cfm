@@ -212,14 +212,19 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     on exec, one netlink batch on nftlib; a failed transaction keeps the old
     element, checked on earth's 4.18).
   - **Guards:** the address is banned instead when the /64 holds this node's
-    own address (`self_v6`: a provider handing one /64 to several customers'
-    VPSes), an ignored address or network (`ignore_v6`, `ignore_v6_nets`,
-    `IGNORE_IPS` / `IGNORE_NETS`), since nft accepts none of those before
+    own address (its interfaces and `self_v6`: a provider handing one /64 to
+    several customers' VPSes), an ignored address or network (`ignore_v6`,
+    `ignore_v6_nets`, `IGNORE_IPS` / `IGNORE_NETS`), or a trusted proxy's
+    range (`trusted_proxies.conf`: a detector that saw a proxy's own address
+    must not ban the proxy's /64), since nft accepts none of those before
     its drops; and when nft cannot read or write the set. Allows need no
-    guard: every allow set is accepted before any block drop.
+    guard: every allow set is accepted before any block drop. The TTL ban
+    restore at boot checks the same (`ttlban.Store.ExcludeNet`, read from
+    the files before the daemon loads them) and counts a refused /64
+    excluded. `cfm flush` empties the set like the other block sets.
   - **Edge:** the edge ban store keys it as the /64 and answers every
-    address of it, except where an allow or a trusted proxy range touches
-    any of it.
+    address of it, except where an allow, a trusted proxy range or an
+    `IGNORE_IPS` entry touches any of it.
   - **Restart, unblock:** TTL /64 bans survive a restart (`internal/ttlban`;
     a permanent one, like a detector's permanent host ban, is not
     persisted). Unblocking any address of the /64 frees the /64 (nft, the

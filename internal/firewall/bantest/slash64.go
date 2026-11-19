@@ -231,4 +231,39 @@ func RunClientSlash64Bans(t *testing.T, newBackend func() firewall.Backend) {
 	if self := idx(`ip6 saddr @self_v6 accept`); self < 0 || self > idx(`ip6 saddr @block_v6_clients drop`) {
 		t.Fatalf("the self accept must stay above the /64 drop:\n%s", listing)
 	}
+
+	// Only the plain drop missing, its est/rel twin still there: a substring
+	// presence check read it present inside the twin and never put it back.
+	chain = firewall.ParseChainRules(nft("-a", "list", "chain", "inet", "cfm", "input"))
+	nft("delete", "rule", "inet", "cfm", "input", "handle", chain.FirstHandle(`ip6 saddr @block_v6_clients drop`))
+	be = start()
+	listing = nft("list", "chain", "inet", "cfm", "input")
+	lines = lines[:0]
+	for _, l := range strings.Split(listing, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	first := -1 // the anchor's first (early) copy
+	for i, l := range lines {
+		if l == `ip6 saddr @block_v6_nets drop` {
+			first = i
+			break
+		}
+	}
+	if e := idx(`ip6 saddr @block_v6_clients drop`); e < 0 || e != first+1 {
+		t.Fatalf("the plain /64 drop is at %d, want right after %d (its est/rel twin must not hide it):\n%s", e, first, listing)
+	}
+
+	// cfm flush empties block_v6_clients (internal/cli RunFlush flushes
+	// ttlban.Sets; pinned there): the set is flushable here.
+	if _, _, err := firewall.ExtendClientBlock(be, net.ParseIP(a), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := be.FlushSet("inet", "cfm", firewall.BlockV6Clients); err != nil {
+		t.Fatalf("flush %s: %v", firewall.BlockV6Clients, err)
+	}
+	if n := elems(be, firewall.BlockV6Clients); len(n) != 0 {
+		t.Fatalf("after the flush: %v", n)
+	}
 }

@@ -120,9 +120,11 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 		// An IPv6 client's automatic ban is its /64 (firewall.ExtendClientBlock):
 		// unblocking one of its addresses frees the /64. A failure counts as
 		// the address's (the client stays blocked).
-		for _, ip := range list {
-			if _, nerr := firewall.RemoveClientNet(opts.BE, ip); nerr != nil && errs[ip.String()] == nil {
-				errs[ip.String()] = nerr
+		// One read of block_v6_clients for the batch; only the /64s it holds
+		// are deleted.
+		for ip, nerr := range firewall.RemoveClientNets(opts.BE, list) {
+			if errs[ip] == nil {
+				errs[ip] = nerr
 			}
 		}
 		// The edge's own ban goes with the nft one (no-op outside the daemon).

@@ -122,6 +122,10 @@ type Store struct {
 	sleep      func(time.Duration)
 	saveMu     sync.Mutex
 	snapMu     sync.Mutex // one Snapshot at a time, its save included
+	// ExcludeNet is Restore's exclude for an IPv6 client /64: true when any
+	// address of it must not be blocked (an allow, an ignore, IGNORE_IPS).
+	// Nil: only the network address is checked, through the exclude.
+	ExcludeNet func(netip.Prefix) bool
 }
 
 // saveMaxAge: a snapshot rewrites an unchanged file this old, so its
@@ -256,6 +260,8 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 		switch {
 		case ip == nil, left < minRemaining:
 			res.Expired++
+		case perr == nil && s.ExcludeNet != nil && s.ExcludeNet(p):
+			res.Excluded++
 		case exclude != nil && exclude(ip):
 			res.Excluded++
 		case perr == nil:
@@ -289,10 +295,25 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 	var undoNets []netip.Prefix
 	if be != nil && len(nets) > 0 {
 		sort.Slice(nets, func(i, j int) bool { return nets[i].p.Addr().Less(nets[j].p.Addr()) })
+		var guarded []string
 		for _, n := range nets {
-			if _, nerr := firewall.ExtendBlockNet(be, n.p, n.ttl); nerr != nil && err == nil {
+			_, nerr := firewall.ExtendBlockNet(be, n.p, n.ttl)
+			switch {
+			case errors.Is(nerr, firewall.ErrClientNetGuarded):
+				// It holds an address it must not drop now: excluded, as an
+				// allowed host ban is, not a failed restore.
+				res.Excluded++
+				guarded = append(guarded, n.p.String())
+			case nerr != nil && err == nil:
 				err = fmt.Errorf("ttlban: restore %s: %w", n.p, nerr)
 			}
+		}
+		if len(guarded) > 0 {
+			s.mu.Lock()
+			for _, k := range guarded {
+				delete(s.bans, k)
+			}
+			s.mu.Unlock() // saved below (Excluded > 0)
 		}
 	}
 	// An unblock that landed while the batch was writing may have removed

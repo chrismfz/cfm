@@ -290,6 +290,13 @@ origin hop brackets the address and binds `::1`.
   (skipping the bind test); at a cold start it can only be another root
   daemon, and the edge's start would then fail. Tighten by matching the
   socket inode to the edge unit's MainPID fds.
+- **ICMP flood jumps land on top of an existing chain** — [open, low].
+  Found by the /64 bans review (2026-11-19, both engines): turning ICMP
+  rate limiting on for a node whose input chain already exists inserts the
+  two `… echo-request jump flood` rules at position 0, above `iif lo` and
+  the self / allow accepts (a fresh chain gets them in order). Pre-existing;
+  list them in `firewall.BaseRuleAnchors` (after the last early drop) to
+  fix.
 - **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
   only on the fleet; the panel listeners stay IPv4.
 

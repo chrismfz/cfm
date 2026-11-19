@@ -51,6 +51,12 @@ type netRemoveBE struct {
 }
 
 func (b *netRemoveBE) WriteSetElem(string, string, *time.Duration, bool) error { return nil }
+func (b *netRemoveBE) ListSetElementsTimed(set string) ([]firewall.SetElementTimed, error) {
+	if set == firewall.BlockV6Clients {
+		return []firewall.SetElementTimed{{Elem: "2001:db8:1:2::/64", Expires: time.Hour}}, nil
+	}
+	return nil, nil
+}
 func (b *netRemoveBE) DeleteSetElem(set, cidr string) error {
 	b.nets = append(b.nets, set+" "+cidr)
 	return nil

@@ -65,6 +65,25 @@ func (f *netFake) DeleteSetElem(set, elem string) error {
 	return nil
 }
 
+// testLocalAddrs stands in for the interfaces (the real ones would make the
+// tests depend on the machine they run on).
+var testLocalAddrs []string
+
+func init() {
+	localAddrs = func() ([]net.Addr, error) {
+		var out []net.Addr
+		for _, s := range testLocalAddrs {
+			ip, n, err := net.ParseCIDR(s)
+			if err != nil {
+				return nil, err
+			}
+			n.IP = ip
+			out = append(out, n)
+		}
+		return out, nil
+	}
+}
+
 const (
 	v6a  = "2001:db8:1:2::a"
 	v6b  = "2001:db8:1:2:ffff::b"
@@ -113,14 +132,24 @@ func TestExtendClientBlockBansTheV6Slash64(t *testing.T) {
 // whole (nft accepts none of them before the drops): the address is.
 func TestExtendClientBlockGuards(t *testing.T) {
 	for name, setup := range map[string]func(*netFake){
-		"self address":   func(f *netFake) { f.set("self_v6")["2001:db8:1:2::1/128"] = 0 },
-		"ignored host":   func(f *netFake) { f.set("ignore_v6")["2001:db8:1:2::77"] = 0 },
-		"ignored net":    func(f *netFake) { f.set("ignore_v6_nets")["2001:db8:1::/48"] = 0 },
-		"IGNORE_IPS":     func(f *netFake) { SetClientNetExempt(func(p netip.Prefix) bool { return p.String() == net6 }) },
+		"self address": func(f *netFake) { f.set("self_v6")["2001:db8:1:2::1/128"] = 0 },
+		"ignored host": func(f *netFake) { f.set("ignore_v6")["2001:db8:1:2::77"] = 0 },
+		"ignored net":  func(f *netFake) { f.set("ignore_v6_nets")["2001:db8:1::/48"] = 0 },
+		"IGNORE_IPS": func(f *netFake) {
+			SetClientNetExempt("ignore", func(p netip.Prefix) bool { return p.String() == net6 })
+		},
+		"trusted proxy": func(f *netFake) {
+			SetClientNetExempt("trusted_proxies", func(p netip.Prefix) bool { return p.String() == net6 })
+		},
+		"interface addr": func(f *netFake) { testLocalAddrs = []string{"2001:db8:1:2::9/64"} },
 		"a guard unread": func(f *netFake) { f.readErr["self_v6"] = errors.New("nft busy") },
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Cleanup(func() { SetClientNetExempt(nil) })
+			t.Cleanup(func() {
+				SetClientNetExempt("ignore", nil)
+				SetClientNetExempt("trusted_proxies", nil)
+				testLocalAddrs = nil
+			})
 			f := newNetFake()
 			setup(f)
 			elem, _, err := ExtendClientBlock(f, net.ParseIP(v6a), time.Hour)
@@ -268,5 +297,56 @@ func TestChainRulesAnchorHandle(t *testing.T) {
 	}
 	if h := ParseChainRules("").AnchorHandle(`ip6 saddr @block_v6_clients drop`); h != "" {
 		t.Errorf("a new chain: %q", h)
+	}
+}
+
+// ExtendBlockNet (the TTL ban restore) reports a guarded /64 with
+// ErrClientNetGuarded, so the restore counts it excluded, not failed.
+func TestExtendBlockNetGuarded(t *testing.T) {
+	f := newNetFake()
+	f.set("ignore_v6")["2001:db8:1:2::77"] = 0
+	_, err := ExtendBlockNet(f, netip.MustParsePrefix(net6), time.Hour)
+	if !errors.Is(err, ErrClientNetGuarded) || len(f.set(BlockV6Clients)) != 0 {
+		t.Fatalf("err=%v sets=%v", err, f.sets)
+	}
+}
+
+// A mass unblock reads block_v6_clients once and deletes only the /64s it
+// holds, once each; a table from before the set frees nothing, without error.
+func TestRemoveClientNets(t *testing.T) {
+	f := newNetFake()
+	f.set(BlockV6Clients)[net6] = time.Hour
+	f.set(BlockV6Clients)["2001:db8:9:9::/64"] = time.Hour
+	ips := []net.IP{net.ParseIP(v6a), net.ParseIP(v6b), net.ParseIP("2001:db8:5:5::1"), net.ParseIP("203.0.113.9")}
+	if errs := RemoveClientNets(f, ips); len(errs) != 0 {
+		t.Fatalf("errs=%v", errs)
+	}
+	if _, ok := f.set(BlockV6Clients)[net6]; ok || len(f.set(BlockV6Clients)) != 1 {
+		t.Fatalf("after: %v (want only the unrelated /64 left)", f.sets)
+	}
+	g := newNetFake()
+	g.readErr[BlockV6Clients] = errors.New(`nft: Error: No such file or directory; set block_v6_clients`)
+	if errs := RemoveClientNets(g, ips); len(errs) != 0 {
+		t.Fatalf("missing set: errs=%v", errs)
+	}
+	h := newNetFake()
+	h.readErr[BlockV6Clients] = errors.New("nft busy")
+	if errs := RemoveClientNets(h, ips); errs[v6a] == nil || errs[v6b] == nil || errs["203.0.113.9"] != nil {
+		t.Fatalf("read error: errs=%v", errs)
+	}
+}
+
+// Present: an anchored rule counts only as itself, never inside its
+// `ct state established,related` twin.
+func TestChainRulesPresentIsExactForAnchoredRules(t *testing.T) {
+	c := ParseChainRules("chain input {\n\tct state established,related ip6 saddr @block_v6_clients drop # handle 9\n}")
+	if c.Present(`ip6 saddr @block_v6_clients drop`) {
+		t.Fatal("the plain drop read present inside its est/rel twin")
+	}
+	if !c.Present(`ct state established,related ip6 saddr @block_v6_clients drop`) {
+		t.Fatal("the est/rel drop itself is present")
+	}
+	if !c.Present(`ip6 saddr @block_v6_nets drop`) == c.Has(`ip6 saddr @block_v6_nets drop`) {
+		t.Fatal("an unanchored rule keeps Has's answer")
 	}
 }

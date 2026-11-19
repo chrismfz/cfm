@@ -2,6 +2,7 @@ package ttlban
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -152,5 +153,32 @@ func TestForgetIPv6Nets(t *testing.T) {
 	}
 	if got := readFile(t, path); len(got) != 1 {
 		t.Fatalf("file after ForgetInFile: %v", got)
+	}
+}
+
+// At restore, a /64 that now holds an address it must not drop is excluded,
+// not failed: by the caller's ExcludeNet (allows, cfm.ignore, IGNORE_IPS as
+// read at boot) or by the firewall's own guard (ErrClientNetGuarded).
+func TestRestoreExcludesGuardedIPv6Nets(t *testing.T) {
+	s, path := newStore(t)
+	writeFile(t, path, map[string]Entry{
+		"2001:db8:1:2::/64": {Expires: t0.Add(time.Hour)},
+		"2001:db8:3:4::/64": {Expires: t0.Add(time.Hour)},
+		"2001:db8:5:6::/64": {Expires: t0.Add(time.Hour)},
+	})
+	_ = s.Load()
+	s.ExcludeNet = func(p netip.Prefix) bool { return p.String() == "2001:db8:1:2::/64" }
+	firewall.SetClientNetExempt("ignore", func(p netip.Prefix) bool { return p.String() == "2001:db8:3:4::/64" })
+	t.Cleanup(func() { firewall.SetClientNetExempt("ignore", nil) })
+	be := &netsFake{nets: map[string]time.Duration{}}
+	res, err := s.Restore(be, nil)
+	if err != nil {
+		t.Fatalf("a guarded /64 must not fail the restore: %v", err)
+	}
+	if res.Excluded != 2 || len(be.nets) != 1 || be.nets["2001:db8:5:6::/64"] != time.Hour {
+		t.Fatalf("res=%+v nets=%v", res, be.nets)
+	}
+	if got := readFile(t, path); len(got) != 1 {
+		t.Fatalf("file keeps the excluded /64s: %v", got)
 	}
 }
