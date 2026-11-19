@@ -25,7 +25,9 @@
 #               would pass the test and then fail the edge's START;
 #             - the origin listens on IPv6 on both 80 and 443 (ss): an IPv6
 #               visitor's hop goes to the IPv6 address it came to;
-#             - `cfm realip` says the origin trusts the edge for the IPv6 hop
+#             - `cfm realip` (asked before the files are written; the mode in
+#               cfm.conf alone makes it require ::1) says the origin trusts
+#               the edge for the IPv6 hop
 #               too: that hop comes from ::1, and an origin trusting only
 #               127.0.0.1 would see every IPv6 visitor as ::1, i.e. as
 #               localhost (`Require local`, apps that trust localhost, one
@@ -154,11 +156,20 @@ edge_port_taken() {
     return 1
 }
 
-# realip_v6_trusted: `cfm realip` (with the IPv6 files in place, so it requires
-# ::1) says the origin trusts the edge. 0 yes, 1 no, 2 cannot tell.
+# realip_v6_trusted: `cfm realip` says the origin trusts the edge for the IPv6
+# hop too. It is asked BEFORE the files are written (so no reload can catch the
+# edge on IPv6 with an untrusting origin): EDGE_LISTEN_V6 = auto / on in
+# cfm.conf already makes it require ::1 (internal/originrealip edgeIPv6), and
+# its JSON then says "edge_ipv6":true. A verdict without that key is from a
+# cfm that does not know about the IPv6 hop: no verdict. 0 yes, 1 no, 2
+# cannot tell.
 realip_v6_trusted() {
     [ -x "$CFM_BIN" ] || return 2
     rvt_out=$("$CFM_BIN" realip --json 2>/dev/null)
+    case $rvt_out in
+        *'"edge_ipv6":true'*) ;;
+        *) return 2 ;;
+    esac
     case $rvt_out in
         *'"trusted":true'*) return 0 ;;
         *'"trusted":false'*) return 1 ;;
@@ -276,6 +287,10 @@ render_engine() {
         drop "$re_name" "$re_dir" "its live main config $re_main does not include the IPv6 listen files"
         return 0
     fi
+    if [ "$re_mode" != off ] && { [ -z "$re_bin" ] || [ ! -x "$re_bin" ]; }; then
+        drop "$re_name" "$re_dir" "no engine binary (engine not installed?)"
+        return 0
+    fi
     re_reason=$(want_v6 "$re_mode")
     re_want=$?
     if [ "$re_want" -eq 3 ] && [ "$re_action" = prestart ] &&
@@ -290,20 +305,7 @@ render_engine() {
         return 0
     fi
 
-    re_changed=0
-    for re_pair in "$V6_HTTP_FILE http_body" "$V6_HTTPS_FILE https_body"; do
-        # shellcheck disable=SC2086
-        put_file "$re_dir" $re_pair
-        case $? in
-            0) re_changed=1 ;;
-            2)
-                drop "$re_name" "$re_dir" "cannot write ${re_pair%% *} in $re_dir"
-                return 0
-                ;;
-        esac
-    done
-
-    # The ::1 trust, read with the files in place (cfm realip then requires it).
+    # The ::1 trust, asked before anything is written (see realip_v6_trusted).
     realip_v6_trusted
     case $? in
         0) ;;
@@ -319,18 +321,27 @@ render_engine() {
             if [ "$re_mode" = on ]; then
                 log "WARNING: $re_name: EDGE_LISTEN_V6 = on, but $CFM_BIN realip could not tell whether the origin trusts ::1"
             else
-                drop "$re_name" "$re_dir" "cannot tell whether the origin trusts ::1 ($CFM_BIN realip --json gave no verdict)"
+                drop "$re_name" "$re_dir" "cannot tell whether the origin trusts ::1 ($CFM_BIN realip --json gave no IPv6-aware verdict)"
                 return 0
             fi
             ;;
     esac
 
+    re_changed=0
+    for re_pair in "$V6_HTTP_FILE http_body" "$V6_HTTPS_FILE https_body"; do
+        # shellcheck disable=SC2086
+        put_file "$re_dir" $re_pair
+        case $? in
+            0) re_changed=1 ;;
+            2)
+                drop "$re_name" "$re_dir" "cannot write ${re_pair%% *} in $re_dir"
+                return 0
+                ;;
+        esac
+    done
+
     if [ "$re_changed" -eq 0 ] && [ "$re_action" != prestart ]; then
         log "$re_name: listening on IPv6 too ($re_reason); files unchanged"
-        return 0
-    fi
-    if [ -z "$re_bin" ] || [ ! -x "$re_bin" ]; then
-        drop "$re_name" "$re_dir" "no engine binary to test the config with"
         return 0
     fi
     if engine_test "$re_name" "$re_bin"; then
@@ -377,10 +388,17 @@ engines() {
         printf '%s\n' "$CFM_EDGE_ENGINES"
         return 0
     fi
+    # An engine is listed when its binary OR its conf dir exists: a removed
+    # engine's leftover files must still be cleaned up (they would keep
+    # `cfm realip` demanding ::1); with no binary they are always removed.
     e_bin=$(first_executable /usr/local/openresty/nginx/sbin/nginx /usr/bin/openresty /usr/local/openresty/bin/openresty || true)
-    [ -n "$e_bin" ] && printf 'OpenResty|%s|%s|%s\n' "$e_bin" /usr/local/openresty/nginx/conf /usr/local/openresty/nginx/conf/nginx.conf
+    if [ -n "$e_bin" ] || [ -d /usr/local/openresty/nginx/conf ]; then
+        printf 'OpenResty|%s|%s|%s\n' "$e_bin" /usr/local/openresty/nginx/conf /usr/local/openresty/nginx/conf/nginx.conf
+    fi
     e_bin=$(first_executable /usr/sbin/angie /sbin/angie || true)
-    [ -n "$e_bin" ] && printf 'Angie|%s|%s|%s\n' "$e_bin" /etc/angie /etc/angie/angie.conf
+    if [ -n "$e_bin" ] || [ -d /etc/angie ]; then
+        printf 'Angie|%s|%s|%s\n' "$e_bin" /etc/angie /etc/angie/angie.conf
+    fi
     return 0
 }
 

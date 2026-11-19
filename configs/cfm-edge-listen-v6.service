@@ -16,4 +16,7 @@ Description=CFM edge: IPv6 listen decision before the edge starts
 
 [Service]
 Type=oneshot
+# A hung ss / cfm realip / config test must not hold the edge's start for ever
+# (the edge starts anyway when this unit fails: Wants= and the "-").
+TimeoutStartSec=60
 ExecStart=-/bin/sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh prestart

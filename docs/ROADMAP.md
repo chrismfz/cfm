@@ -232,12 +232,17 @@ The edge can listen on IPv6 (`EDGE_LISTEN_V6`, default `off`;
 `docs/edge-ipv6.md`), and the origin hop brackets the address and binds
 `::1`.
 
-- **Verify on a real IPv6 node, then make `auto` the default** — [next]. No
-  dev box or CI runner has IPv6: `set_current_peer("[v6]")` on OpenResty /
-  Angie and a `::1`-bound hop to the node's own global address are unproven
-  until then, and a failed hop is a 502 the browser does not retry on IPv4.
-  Run `auto` on one IPv6 node (a `curl -6` through the edge, `cfm realip`),
-  then flip the default in the script and `configs/cfm.conf`.
+- **Verify end to end on a real IPv6 node, then make `auto` the default** —
+  [next]. The origin hop itself is verified (speedhost, 2026-11-19, a scratch
+  OpenResty 1.31.8.1 beside the live edge): the direct URL, the keepalive
+  balancer `set_current_peer("[v6]")`, the static literal line and plain
+  HTTP all reached Apache at `[v6]:443/80` from `::1` (200), and the old
+  server-level `proxy_bind 127.0.0.1` failed exactly as predicted
+  (`bind(127.0.0.1) failed (22: Invalid argument)`). Still open: Angie, and
+  the real path (an external IPv6 client → DNAT → the live edge with the
+  files rendered) on one node with `auto`; then flip the default in the
+  script and `configs/cfm.conf`. A failed hop is a 502 the browser does not
+  retry on IPv4, which is why the default waits.
 - **Per-IP counters and bans by /64** — [idea]. Every detector keys an IPv6
   client on its full address, so a client rotating inside its /64 never
   accumulates. Already true behind Cloudflare (own IPv6 address at the edge).

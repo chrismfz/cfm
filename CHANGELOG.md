@@ -45,9 +45,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **`cfm realip` requires `::1` trust when the edge listens on IPv6.** An
   IPv6 visitor's origin hop comes from `::1`; an origin trusting only
   127.0.0.1 logs `::1` for every IPv6 visitor, and the check now says so
-  (`edge_ipv6` in `--json`). `cfm realip fix` already writes both for Apache
-  and nginx; LiteSpeed needs `::1T` in its allow list by hand. Nothing
-  changes until a node listens on IPv6 (`EDGE_LISTEN_V6`, off by default).
+  (`edge_ipv6` in `--json`). The requirement starts as soon as
+  `EDGE_LISTEN_V6` is `auto` / `on`, before the edge listens, so
+  `cfm realip fix` writes the `::1` trust for Apache and nginx even where the
+  127.0.0.1 trust came from a file CFM did not write (Imunify's
+  `i360.remoteip.conf`); LiteSpeed needs `::1T` in its allow list by hand.
+  Nothing changes while `EDGE_LISTEN_V6` is `off` (the default).
 
 ### Fixed
 - **Edge: the origin hop works for an IPv6 destination.** It failed every

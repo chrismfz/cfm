@@ -980,13 +980,68 @@ func TestEdgeIPv6NginxOwnListCarriesTheV6Verdict(t *testing.T) {
 	}
 }
 
-// The ::1 reading's header is the one reported when it decides the verdict.
-func TestEdgeIPv6CarriesTheHeader(t *testing.T) {
+// EDGE_LISTEN_V6 = auto / on in cfm.conf counts as the edge listening on IPv6
+// before any listen file exists: the script asks `cfm realip` before it writes
+// them, and `cfm realip fix` must then write the ::1 trust instead of answering
+// "already trusted" on a 127.0.0.1-only origin (auto could never turn on).
+func TestEdgeIPv6IntentFromCfmConf(t *testing.T) {
 	l, r := cpanelHost(t)
 	put(t, r, "etc/apache2/conf.d/i360.remoteip.conf",
 		"<IfModule remoteip_module>\n    RemoteIPInternalProxy 127.0.0.1\n    RemoteIPHeader X-Forwarded-For\n</IfModule>\n")
+	for _, c := range []struct {
+		conf string
+		v6   bool
+	}{
+		{"", false},
+		{"EDGE_LISTEN_V6 = off\n", false},
+		{"#EDGE_LISTEN_V6 = auto\n", false},
+		{"EDGE_LISTEN_V6 = auto\n", true},
+		{"EDGE_LISTEN_V6=\"ON\" ; note\n", true},
+		{"EDGE_LISTEN_V6 = auto\nEDGE_LISTEN_V6 = off # later wins\n", false},
+		{"EDGE_LISTEN_V6 = yes\n", false},
+	} {
+		put(t, r, "etc/cfm/cfm.conf", c.conf)
+		p := l.probe("httpd")
+		if p.EdgeIPv6 != c.v6 || p.Trusted == c.v6 {
+			t.Fatalf("cfm.conf %q: %+v", c.conf, p)
+		}
+		if c.v6 {
+			if pl := l.plan(p); pl.Action != ActionWrite || !strings.Contains(pl.Content, "::1") {
+				t.Fatalf("cfm.conf %q: plan = %+v, want the ::1 trust written", c.conf, pl)
+			}
+		}
+	}
+}
+
+// Every one of the four listen files counts (both engines, both listeners).
+func TestEdgeIPv6AnyListenFile(t *testing.T) {
+	// The paths scripts/cfm-edge-listen-v6.sh writes (engines(), V6_*_FILE),
+	// spelled out: a list taken from system.edgeV6Files would follow a mistake.
+	for _, f := range []string{
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf",
+		"/usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf",
+		"/etc/angie/cfm-listen-v6-http.conf",
+		"/etc/angie/cfm-listen-v6-https.conf",
+	} {
+		l, r := cpanelHost(t)
+		put(t, r, "etc/apache2/conf.d/x.conf", "RemoteIPInternalProxy 127.0.0.1\nRemoteIPHeader X-Real-IP\n")
+		put(t, r, strings.TrimPrefix(f, "/"), "listen [::]:9043 ssl;\n")
+		if p := l.probe("httpd"); !p.EdgeIPv6 || p.Trusted {
+			t.Fatalf("%s: %+v", f, p)
+		}
+	}
+}
+
+// An origin that does not trust 127.0.0.1 either keeps the IPv4 wording: the
+// ::1 pass only runs on a trusted first pass.
+func TestEdgeIPv6UntrustedOriginKeepsTheIPv4Verdict(t *testing.T) {
+	l, r := cpanelHost(t)
 	edgeV6(t, r)
-	if p := l.probe("httpd"); p.Trusted || p.Header != "X-Forwarded-For" {
+	p := l.probe("httpd")
+	if p.Trusted || !p.EdgeIPv6 {
 		t.Fatalf("probe = %+v", p)
+	}
+	if line := StatusLine(p, true); !strings.Contains(line, "logs 127.0.0.1 for every visitor") || strings.Contains(line, "::1") {
+		t.Errorf("verdict = %q", line)
 	}
 }

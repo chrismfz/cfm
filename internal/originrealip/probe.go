@@ -107,6 +107,12 @@ type layout struct {
 	// edgeV6Files: the edge's IPv6 listen files (scripts/cfm-edge-listen-v6.sh);
 	// any of them present means the edge listens on IPv6.
 	edgeV6Files []string
+	// cfmConf: CFM's cfm.conf. EDGE_LISTEN_V6 = auto / on there means the
+	// operator wants the edge on IPv6, so the ::1 trust is required before the
+	// files exist: the script asks `cfm realip` before it writes them, and
+	// `cfm realip fix` must write the ::1 trust then, not answer "already
+	// trusted" on a 127.0.0.1-only origin and leave auto unable to turn on.
+	cfmConf string
 
 	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
 	lsMarkers, apMarkers, ngMarkers      []string // origin install markers
@@ -163,6 +169,39 @@ var system = layout{
 		"/etc/angie/cfm-listen-v6-http.conf",
 		"/etc/angie/cfm-listen-v6-https.conf",
 	},
+	cfmConf: "/etc/cfm/cfm.conf",
+}
+
+// edgeIPv6: the edge listens on IPv6 (its listen files exist), or the operator
+// asked for it (EDGE_LISTEN_V6 = auto / on in cfm.conf; read like
+// scripts/cfm-edge-listen-v6.sh: last uncommented line wins, an inline ; or #
+// comment and quotes stripped, case-insensitive).
+func (l layout) edgeIPv6() bool {
+	if l.anyExists(l.edgeV6Files) {
+		return true
+	}
+	if l.cfmConf == "" {
+		return false
+	}
+	b, err := os.ReadFile(l.fs(l.cfmConf))
+	if err != nil {
+		return false
+	}
+	mode := ""
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(k) != "EDGE_LISTEN_V6" {
+			continue
+		}
+		if i := strings.IndexAny(v, ";#"); i >= 0 {
+			v = v[:i]
+		}
+		v = strings.TrimSpace(v)
+		v = strings.Trim(v, `"'`)
+		mode = strings.ToLower(strings.TrimSpace(v))
+	}
+	return mode == "auto" || mode == "on"
 }
 
 // fs maps a logical path to where it is on disk.
@@ -223,7 +262,7 @@ func (l layout) probe(upstream string) Probe {
 	panel := l.panel()
 	p := l.probeStack(stack, panel)
 	p.Panel = panel
-	if l.loopIP == "" && l.anyExists(l.edgeV6Files) {
+	if l.loopIP == "" && l.edgeIPv6() {
 		// The edge listens on IPv6 too: an IPv6 visitor's hop comes from ::1,
 		// so the same trust has to hold for ::1. Same reading, second address;
 		// the verdict is trusted only when both are.
@@ -235,10 +274,8 @@ func (l layout) probe(upstream string) Probe {
 				p.Trusted, p.v6Only = false, true
 				p.Note = joinNote(p.Note, "the edge also listens on IPv6 and an IPv6 visitor reaches the origin from ::1, which is not trusted: "+l6.loopNote(p6.Note))
 				// The plan (fix.go) fixes what the ::1 reading found missing.
+				// (The header in effect does not depend on the address read.)
 				p.ng, p.Servers, p.UntrustedServers = p6.ng, p6.Servers, p6.UntrustedServers
-				if p6.Header != "" {
-					p.Header = p6.Header
-				}
 			}
 		}
 	}

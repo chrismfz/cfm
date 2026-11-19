@@ -30,7 +30,7 @@ decides on each host whether they exist.
 | Mode | Listens on IPv6 when |
 |---|---|
 | `off` (default) | never. The default until the IPv6 origin hop has been verified on a real IPv6 node (`docs/ROADMAP.md` §9c): if that hop failed, an IPv6 visitor would get a 502 instead of today's refused connection, and a 502 does not make a browser fall back to IPv4. |
-| `auto` | all of: the kernel has an IPv6 stack (`/proc/net/if_inet6`); nothing but the edge holds an IPv6 listener on tcp 9080 / 9043 or udp 9043 (`nginx -t` does not bind, so a taken port would pass the test and then fail the edge's start, IPv4 included); the origin listens on IPv6 on both 80 and 443 (`ss`: `[::]`, a specific IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped), because an IPv6 visitor's hop goes to the IPv6 address it came to; and `cfm realip`, asked with the files in place, says the origin trusts the edge's IPv6 hop from `::1`. |
+| `auto` | all of: the kernel has an IPv6 stack (`/proc/net/if_inet6`); nothing but the edge holds an IPv6 listener on tcp 9080 / 9043 or udp 9043 (`nginx -t` does not bind, so a taken port would pass the test and then fail the edge's start, IPv4 included); the origin listens on IPv6 on both 80 and 443 (`ss`: `[::]`, a specific IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped), because an IPv6 visitor's hop goes to the IPv6 address it came to; and `cfm realip` says the origin trusts the edge's IPv6 hop from `::1`. It is asked **before** the files are written (no reload can catch the edge on IPv6 with an untrusting origin): `EDGE_LISTEN_V6 = auto` / `on` alone makes it require `::1`, and its JSON must carry `"edge_ipv6":true` (an older `cfm` gives no verdict). |
 | `on` | the kernel and port checks only; an origin or `::1`-trust gap is logged as a warning. |
 
 In every mode the files are removed when the engine's live main config does
@@ -60,9 +60,19 @@ prints each engine's decision and whether the files are present. Removing the
   `::1` as well as 127.0.0.1**, or every IPv6 visitor reaches it as `::1`:
   localhost to `Require local`, to apps that trust localhost, and one bucket
   for every login limiter. `auto` refuses to listen without it; `cfm realip`
-  requires both once the files are present, and `cfm realip fix` writes both
+  requires both once `EDGE_LISTEN_V6` is `auto` / `on` (or the files are
+  present), and `cfm realip fix` then writes both, also on an origin whose
+  127.0.0.1 trust comes from a file CFM did not write (Imunify's
+  `i360.remoteip.conf`, a hand-written one): set the mode, run
+  `cfm realip fix`, then render
   for Apache and nginx ([origin-real-ip.md](origin-real-ip.md)); LiteSpeed
   needs `::1T` by hand.
+- The hop goes to the IPv6 address the visitor dialled, so the origin
+  answers with whatever vhost it binds there. On cPanel a vhost includes the
+  IPv6 address only when the account has IPv6 assigned (which is also when
+  its AAAA record points at the node); a site without it gets the default
+  vhost over IPv6, exactly as it did without CFM (speedhost, 2026-11-19:
+  every vhost on the IPv4 address, `defaultwebpage.cgi` over IPv6).
 - The panel ports (2083/2087/2096 …) stay IPv4 only: cpsrvd does not listen
   on IPv6 on the fleet, and opening the panel to IPv6 is a separate decision.
 - Per-IP counters and bans see each IPv6 address on its own. That was already
@@ -74,6 +84,7 @@ prints each engine's decision and whether the files are present. Removing the
 Set `EDGE_LISTEN_V6 = auto` (or `on`) in `/etc/cfm/cfm.conf`, then:
 
 ```bash
+cfm realip fix          # with EDGE_LISTEN_V6 set, it writes the ::1 trust too
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render
 systemctl reload openresty   # or angie
 ```

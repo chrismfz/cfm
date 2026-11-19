@@ -113,15 +113,18 @@ esac
 exit 0
 EOF
 # fake cfm: `realip --json` answers from $tmp/realip ("trusted", "untrusted",
-# anything else = no verdict); it records whether the IPv6 files existed when
-# it was asked (the trust must be read WITH them in place).
+# "trusted-old" = a cfm without the IPv6 pass, anything else = no verdict), in
+# the exact shape internal/originrealip runCLI prints; it records whether the
+# IPv6 files existed when it was asked (they must NOT: the trust is decided
+# before they are written, so no reload can catch an untrusting origin).
 cat >"$tmp/bin/cfm" <<EOF
 #!/bin/sh
 [ "\$1 \$2" = "realip --json" ] || exit 2
 [ -e "$conf_dir/cfm-listen-v6-http.conf" ] && echo files >> "$tmp/realip.calls" || echo nofiles >> "$tmp/realip.calls"
 case "\$(cat "$tmp/realip" 2>/dev/null)" in
-  trusted) echo '{"edge_active":true,"ok":true,"probe":{"panel":"cpanel","stack":"apache","trusted":true,"edge_ipv6":true}}' ;;
-  untrusted) echo '{"edge_active":true,"ok":false,"probe":{"panel":"cpanel","stack":"apache","trusted":false,"edge_ipv6":true}}'; exit 1 ;;
+  trusted) echo '{"edge_active":true,"ok":true,"probe":{"panel":"cpanel","stack":"apache","trusted":true,"directive":"RemoteIP{Internal,Trusted}Proxy 127.0.0.1","edge_ipv6":true}}' ;;
+  untrusted) echo '{"edge_active":true,"ok":false,"probe":{"panel":"cpanel","stack":"apache","trusted":false,"note":"x","edge_ipv6":true}}'; exit 1 ;;
+  trusted-old) echo '{"edge_active":true,"ok":true,"probe":{"panel":"cpanel","stack":"apache","trusted":true}}' ;;
   *) echo 'garbage' ;;
 esac
 EOF
@@ -177,7 +180,7 @@ printf 'EDGE_LISTEN_V6=auto\n' >"$cfm_conf"
 : >"$tmp/realip.calls"
 run render
 expect present "auto: kernel IPv6, ports free, origin on [::]:80/443, ::1 trusted -> listens"
-grep -qx files "$tmp/realip.calls" || fail "cfm realip must be asked with the IPv6 files in place: $(cat "$tmp/realip.calls")"
+[ "$(cat "$tmp/realip.calls")" = nofiles ] || fail "cfm realip must be asked BEFORE the IPv6 files are written: $(cat "$tmp/realip.calls")"
 grep -qxF "listen [::]:$http_port;" "$conf_dir/cfm-listen-v6-http.conf" || fail "http file content: $(cat "$conf_dir/cfm-listen-v6-http.conf")"
 grep -qxF "listen [::]:$https_port ssl;" "$conf_dir/cfm-listen-v6-https.conf" || fail "https file lacks the ssl listen"
 grep -qxF "listen [::]:$https_port quic reuseport;" "$conf_dir/cfm-listen-v6-https.conf" || fail "https file lacks the quic listen"
@@ -202,6 +205,15 @@ says "cfm realip fix"
 printf 'garbage' >"$tmp/realip"
 run render
 expect absent "auto: cfm realip gives no verdict -> IPv4 only"
+printf 'trusted-old' >"$tmp/realip"
+run render
+expect absent "auto: a trusted verdict without edge_ipv6 (a cfm unaware of the IPv6 hop) -> IPv4 only"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+: >"$tmp/realip.calls"
+printf 'untrusted' >"$tmp/realip"
+run render
+grep -qx files "$tmp/realip.calls" && fail "an untrusting origin must never see the IPv6 files written (reload window)"
+expect absent "untrusted: nothing was written"
 printf 'trusted' >"$tmp/realip"
 run render
 expect present "back on"
@@ -375,7 +387,13 @@ grep -qxF 'After=cfm-edge-listen-v6.service' configs/cfm-edge-listen-v6-dropin.c
 grep -q '^Requires=' configs/cfm-edge-listen-v6-dropin.conf && fail "drop-in must not Require (the edge must start if the unit fails)"
 
 # Package removal (not upgrade) removes the units, the drop-ins and the
-# generated files, so a leftover IPv6 listen never outlives its guard.
+# generated files, so a leftover IPv6 listen never outlives its guard. Only on
+# removal: on an rpm upgrade the OLD package's %postun runs after the new
+# %post, so an unconditional rm would delete what the upgrade just deployed.
+rmsect=$(awk '/^%postun$/{p=1; next} /^%(changelog|files|pre|post|preun|install|build|prep|description|check)([[:space:]]|$)/{p=0} p' packaging/rpm/SPECS/cfm.spec | awk '/^if \[ "\$1" -eq 0 \]; then$/{p=1; next} /^fi$/{p=0} p')
+printf '%s\n' "$rmsect" | grep -q 'cfm-listen-v6' || fail "cfm.spec: the cleanup is not inside %postun's 'if [ \"\$1\" -eq 0 ]; then' (removal only)"
+rmsect=$(awk '/^case "\$1" in$/{p=1} p{print} /^esac$/{p=0}' packaging/debian/DEBIAN/postrm | awk '/^    remove\|purge\)$/{p=1; next} /^        ;;$/{p=0} p')
+printf '%s\n' "$rmsect" | grep -q 'cfm-listen-v6' || fail "postrm: the cleanup is not inside the 'remove|purge)' branch (removal only)"
 for pkg in packaging/debian/DEBIAN/postrm packaging/rpm/SPECS/cfm.spec; do
   for f in /etc/systemd/system/cfm-edge-listen-v6.service \
     /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \
