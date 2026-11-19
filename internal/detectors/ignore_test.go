@@ -98,7 +98,7 @@ func TestIPIgnore_WriteLuaCache_RoundTrip(t *testing.T) {
 		}
 	}
 	// IPv6 CIDR goes to v6_ranges (network as 32 hex digits + prefix), the
-	// form cfm_selfip.lua's ipv6_to_hex32 compares against; never v4_ranges.
+	// form cfm_ipkey.lua's ipv6_to_hex32 (used by cfm_selfip.lua) compares against; never v4_ranges.
 	v4 := s[strings.Index(s, "v4_ranges"):strings.Index(s, "v6_ranges")]
 	if strings.Contains(v4, "2001") || strings.Contains(v4, "db8") {
 		t.Errorf("IPv6 CIDR leaked into v4_ranges:\n%s", s)

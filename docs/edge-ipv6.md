@@ -179,9 +179,12 @@ on its address), always the whole /64 for a ban, with no per-node switch.
 - **One key, two twins:** `internal/ipkey` (Go) and `configs/lua/cfm_ipkey.lua`
   (edge), pinned by the shared `scripts/tests/fixtures/ipkey.txt` (plus a
   Go↔Lua differential fuzz, 50k addresses, no difference). The key is the
-  prefix text (`2001:db8:1:2::/64`); a v4-mapped address is IPv4; loopback,
-  link-local (a /64 there is the whole link), zoned and unparsable addresses
-  stay as they are.
+  prefix text (`2001:db8:1:2::/64`); a v4-mapped address is IPv4. Left as
+  they are: loopback, link-local (a /64 there is the whole link), anything in
+  `::/64` (it holds `::1`, the origin hop's source), multicast,
+  `64:ff9b::/64` (it holds NAT64's `/96`, each address an IPv4 client), zoned and unparsable
+  addresses. Known limits: a Teredo client shares its server's /64; a 6to4
+  (`2002::/16`) or any /48 / /56 customer can still rotate across its /64s.
 - **Never on an allow or an exact match** (an allow widened to a /64 allows a
   whole customer prefix), nor on a clearance cookie or a log line.
 - **nft:** a masked key (`ip6 saddr and ffff:ffff:ffff:ffff::`) in a dynamic

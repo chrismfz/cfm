@@ -10,9 +10,12 @@
 --                                      Go's netip.Prefix.String() prints it)
 --   client("::ffff:1.2.3.4")         -> "1.2.3.4"  (a v4-mapped client is IPv4)
 --   client("1.2.3.4")                -> "1.2.3.4"  (IPv4: the address itself)
---   loopback (::1), link-local (fe80::/10), a zone id ("%eth0") and anything
---   unparsable come back UNCHANGED: a /64 there would be every neighbour on
---   the link, or nothing meaningful.
+--   UNCHANGED (never a /64): loopback (::1), link-local (fe80::/10: a /64
+--   there is every neighbour on the link), any address in ::/64 (that /64
+--   holds ::1, the edge's own origin hop), multicast (ff00::/8),
+--   64:ff9b::/64 (it holds NAT64's 64:ff9b::/96, each address there an IPv4
+--   client), a zone id ("%eth0")
+--   and anything unparsable.
 --
 -- Never key an ALLOW or an exact match on this (an allow widened to a /64
 -- would allow a whole customer prefix), nor a clearance cookie, nor a log
@@ -81,6 +84,7 @@ end
 
 local V4MAPPED = "00000000000000000000ffff"
 local LOOPBACK = "00000000000000000000000000000001"
+local NAT64 = "0064ff9b00000000"
 
 -- client(ip): the key described above.
 function M.client(ip)
@@ -92,7 +96,10 @@ function M.client(ip)
     return string.format("%d.%d.%d.%d", math.floor(n / 16777216), math.floor(n / 65536) % 256,
       math.floor(n / 256) % 256, n % 256)
   end
-  if h == LOOPBACK or h:match("^fe[89ab]") then return ip end
+  if h == LOOPBACK or h:match("^fe[89ab]") or h:sub(1, 16) == "0000000000000000"
+     or h:sub(1, 2) == "ff" or h:sub(1, 16) == NAT64 then
+    return ip
+  end
   -- The first four groups; the zero run that ends the /64 (at least the four
   -- zero groups of the interface id) is the longest, so RFC 5952 compresses
   -- exactly the trailing zero groups.

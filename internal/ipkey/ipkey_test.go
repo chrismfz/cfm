@@ -49,11 +49,19 @@ func TestPrefix(t *testing.T) {
 		{"::1", "::1/128", false},
 		{"fe80::1", "fe80::1/128", false},
 		{"fe80::1%eth0", "fe80::1/128", false}, // PrefixFrom drops the zone
+		{"::", "::/128", false},
+		{"::2", "::2/128", false},
+		{"::1.2.3.4", "::102:304/128", false},
+		{"ff02::1", "ff02::1/128", false},
+		{"64:ff9b::1.2.3.4", "64:ff9b::102:304/128", false},
 	} {
 		p, g := Prefix(netip.MustParseAddr(c.in))
 		if p.String() != c.want || g != c.grouped {
 			t.Errorf("Prefix(%s) = %s, %v; want %s, %v", c.in, p, g, c.want, c.grouped)
 		}
+	}
+	if p, g := Prefix(netip.Addr{}); p.IsValid() || g {
+		t.Errorf("Prefix(invalid) = %v, %v; want the zero Prefix, false", p, g)
 	}
 	// Every address of a /64 maps to the same key; the next /64 does not.
 	if Client("2001:db8:1:2::1") != Client("2001:db8:1:2:ffff:ffff:ffff:ffff") {
