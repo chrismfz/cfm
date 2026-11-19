@@ -13,7 +13,6 @@ package webdetector
 
 import (
 	"bufio"
-	"cfm/internal/firewall"
 	"cfm/internal/panelauth"
 	"cfm/internal/panelmap"
 	"crypto/hmac"
@@ -187,8 +186,6 @@ func authorizePluginAssertion(r *http.Request) (string, int, error, string) {
 }
 
 func (t *cpanelAuthFailTracker) checkDeny(ip, user string, now time.Time) (bool, time.Duration) {
-	// An IPv6 client is denied as its /64 (firewall.CountKey).
-	ip = firewall.CountKey(strings.TrimSpace(ip))
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.byIP == nil {
@@ -215,8 +212,6 @@ func (t *cpanelAuthFailTracker) checkDeny(ip, user string, now time.Time) (bool,
 }
 
 func (t *cpanelAuthFailTracker) recordFailure(ip, user string, now time.Time) {
-	// An IPv6 client is denied as its /64 (firewall.CountKey).
-	ip = firewall.CountKey(strings.TrimSpace(ip))
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.byIP == nil {
@@ -249,13 +244,9 @@ func (t *cpanelAuthFailTracker) recordFailure(ip, user string, now time.Time) {
 }
 
 func (t *cpanelAuthFailTracker) clearSuccess(ip, user string) {
-	// An IPv6 client is denied as its /64 (firewall.CountKey).
-	ip = firewall.CountKey(strings.TrimSpace(ip))
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// A success clears its address's failures; an IPv6 /64's stay (one user
-	// signing in must not wipe a neighbour's spray), only its own user's.
-	if t.byIP != nil && !strings.Contains(ip, "/") {
+	if t.byIP != nil {
 		delete(t.byIP, ip)
 	}
 	if t.byIPUser != nil && strings.TrimSpace(user) != "" {

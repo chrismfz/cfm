@@ -321,18 +321,26 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   address, which the row and the alert name (`client`, `addrs`).
   - **A ban** takes the /64 (the sink's `ExtendClientBlock`), once per
     client per emit cooldown.
-  - **A challenge** is per address at the edge, so it goes to every address
-    of the client seen in the window (its 16 busiest; `fanOutChallenge`),
-    each through the same gates as the busiest (a new matching hit, the
-    burst cooldown, the host bypass, `IGNORE_IPS` / chalExclude), only the
-    busiest notifying. A new address of the client keeps the /64's count
-    up and is challenged on the next emit.
-  - The vhost uniqIP count counts clients: one client rotating inside its
-    /64 no longer looks like a crowd that arms the vhost's automatic
-    challenge.
-  - The challenge server's page / verify limits and its 4xx abuse count,
-    and the cPanel plugin's auth-failure deny, hold the /64 (a success
-    clears its own user's failures, never the /64's).
+  - **A challenge** is per address at the edge, so it goes to the busiest
+    address and, once that alert is out, to the client's other addresses
+    seen in the window (its 16 busiest; `fanOutChallenge`, at most 64 a
+    tick in all), each through the same gates as the busiest (a new
+    matching hit, the burst cooldown, the host bypass, `IGNORE_IPS` /
+    chalExclude) and never notifying. The busiest address's exclude decides
+    for the client: an excluded one fans out nothing. A fan-out's gate is
+    its own per rule, so it never pre-empts an address's own alert for
+    another rule (`CHALLENGE_PATHS` and its v2 mark). A new address of the
+    client keeps the /64's count up and is challenged on the next emit
+    (rotating per request still outruns it until the edge's shared dicts
+    group by /64).
+  - The vhost uniqIP count counts clients (`ipkey.Client`: a count, no
+    guard): one client rotating inside its /64 no longer looks like a crowd
+    that arms the vhost's automatic challenge.
+  - The challenge server's page / verify limits (its 5 s 429 memory ban
+    included) and its 4xx abuse count hold the /64, as one IPv4 address
+    behind NAT already is.
+  - Not grouped: the cPanel plugin's auth-failure deny (the plugin calls
+    the API from loopback, so it never sees the client's address).
 - **Still per address:**
   - the kernel nft meters (`pps_v6`, `syn_v6`, `new_v6`, `icmp6`, port flood,
     connlimit `ct count`): they count packets whose source can be spoofed,

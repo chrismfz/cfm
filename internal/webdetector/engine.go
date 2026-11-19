@@ -400,6 +400,8 @@ type HotIPRow struct {
 	IP     string `json:"ip"`
 	Req    int    `json:"req"`
 	Vhosts int    `json:"vhosts"`
+	// Client: the IPv6 /64 whose addresses Req adds up (IPSignals.Client).
+	Client string `json:"client,omitempty"`
 
 	PTR     string `json:"ptr,omitempty"`
 	ASN     string `json:"asn,omitempty"`
@@ -567,6 +569,9 @@ type Engine struct {
 
 	// Challenge emit cooldown separate from blocks
 	ipLastChalEmit map[string]time.Time
+	// fanOutLeft is fanOutChallenge's budget for the running emitIPChallenges
+	// tick (maxFanOutPerTick; that tick's goroutine only).
+	fanOutLeft int
 
 	// Subnet challenge emit cooldown
 	subnetLastChalEmit map[string]time.Time
@@ -3421,6 +3426,7 @@ func (e *Engine) HotIPs(limit int) []HotIPRow {
 			IP:      s.IP,
 			Req:     s.Req,
 			Vhosts:  s.Vhosts,
+			Client:  s.Client,
 			PTR:     s.PTR,
 			ASN:     s.ASN,
 			ASNName: s.ASNName,

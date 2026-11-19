@@ -28,12 +28,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `CHALLENGE_PATHS`, the rate and ratio thresholds, malformed requests, UA
   churn). They now add up the /64's addresses (per address where a ban would
   not take the /64), named by its busiest address. A ban takes the /64 as
-  before; a challenge, which the edge applies per address, goes to every
-  address of the client seen in the window (its 16 busiest), each through
-  the usual exemptions, only one of them notifying. The vhost unique-IP count
-  counts clients, so one rotating client no longer arms a vhost's automatic
-  challenge. The challenge server's rate limits and abuse count and the
-  cPanel plugin's auth-failure deny hold the /64 too. `docs/edge-ipv6.md`
+  before; a challenge, which the edge applies per address, goes to the
+  busiest address and then to the client's other addresses seen in the
+  window (its 16 busiest, at most 64 a tick), each through the usual
+  exemptions and never notifying; an excluded busiest address challenges
+  none of them. The vhost unique-IP count counts clients, so one rotating
+  client no longer arms a vhost's automatic challenge. The challenge
+  server's rate limits and abuse count hold the /64 too. `docs/edge-ipv6.md`
   "IPv6 /64 grouping".
 - **The detectors and the admin API count an IPv6 client by its /64.** A
   client rotating its address inside the /64 any VPS or ISP line hands it got

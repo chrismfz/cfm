@@ -480,6 +480,8 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 		maxSamples = 8
 	)
 
+	e.fanOutLeft = maxFanOutPerTick // fanOutChallenge's budget for this tick
+
 	tsToTime := func(ts float64) time.Time {
 		return time.Unix(0, int64(ts*1e9))
 	}
@@ -665,7 +667,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                     Count:   0,
                     Extra:   extra,
                 }
-                e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, rule, ttl, out)
+                fanBase := clientTag(&alet, groups[ipStr])
 
                 // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
@@ -677,6 +679,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
                 alet.Samples = e.ipSamples(ipStr, 8)
                 select { case out <- alet: default: }
+                e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, rule, ttl, out)
             }
         }
     }
@@ -873,7 +876,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 Count:   c.count,
                                                 Extra:   extra,
                                         }
-                                        e.fanOutChallenge(now, a, groups[c.ip], lastCtx, "CHALLENGE_PATHS", ttl, out)
+                                        fanBase := clientTag(&a, groups[c.ip])
 
             // record to challenge API store (best-effort)
 e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Status, ttl)
@@ -891,6 +894,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                                         case out <- a:
                                         default:
                                         }
+                                        e.fanOutChallenge(now, c.ip, a.Kind, a.Count, fanBase, groups[c.ip], lastCtx, "CHALLENGE_PATHS", ttl, out)
 
                                 }
                         }
@@ -1095,7 +1099,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   a.total,
                 Extra:   extra,
             }
-            e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, rule, ttl, out)
+            fanBase := clientTag(&alet, groups[ipStr])
             e.RecordIPChallenge(ipStr, ctx.Host, rule, ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
                 if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, rule) {
@@ -1106,6 +1110,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
             alet.Samples = e.ipSamples(ipStr, maxSamples)
             select { case out <- alet: default: }
+            e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, rule, ttl, out)
         }
     }
 
@@ -1188,7 +1193,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   cnt,
                 Extra:   extra,
             }
-            e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, "CHALLENGE_MALFORMED", ttl, out)
+            fanBase := clientTag(&alet, groups[ipStr])
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_MALFORMED", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_MALFORMED") {
@@ -1199,6 +1204,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
             alet.Samples = e.ipSamples(ipStr, maxSamples)
             select { case out <- alet: default: }
+            e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, "CHALLENGE_MALFORMED", ttl, out)
         }
     }
 
@@ -1286,7 +1292,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 Count:   len(a.uniq),
                 Extra:   extra,
             }
-            e.fanOutChallenge(now, alet, groups[ipStr], lastCtx, "CHALLENGE_UNIQUA", ttl, out)
+            fanBase := clientTag(&alet, groups[ipStr])
             e.RecordIPChallenge(ipStr, ctx.Host, "CHALLENGE_UNIQUA", ctx.URI, ctx.Method, ctx.Status, ttl)
             // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
             if e.isBypassed(ipStr) || e.isExcluded(ipStr, ctx.Host, ctx.UA, "CHALLENGE_UNIQUA") {
@@ -1297,6 +1303,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
             alet.Samples = e.ipSamples(ipStr, maxSamples)
             select { case out <- alet: default: }
+            e.fanOutChallenge(now, ipStr, alet.Kind, alet.Count, fanBase, groups[ipStr], lastCtx, "CHALLENGE_UNIQUA", ttl, out)
         }
     }
 

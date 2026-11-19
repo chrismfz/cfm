@@ -1786,6 +1786,10 @@ func (s *ChallengeServer) rlLogAbuse(r *http.Request, ip string, kind int, retry
 // client should wait before retrying.
 func (s *ChallengeServer) rlAllow(ip string, kind int) (allowed bool, retry time.Duration, bannedNow bool) {
 	now := time.Now().UTC()
+	// An IPv6 client is limited as its /64 (firewall.CountKey; per address
+	// where its ban would be): rotating the address must not reset the limit.
+	// Keyed before the lock (CountKey may read the guards).
+	key := firewall.CountKey(ip)
 
 	s.rlMu.Lock()
 	defer s.rlMu.Unlock()
@@ -1807,9 +1811,6 @@ func (s *ChallengeServer) rlAllow(ip string, kind int) (allowed bool, retry time
 		s.rlLastGC = now
 	}
 
-	// An IPv6 client is limited as its /64 (firewall.CountKey; per address
-	// where its ban would be): rotating the address must not reset the limit.
-	key := firewall.CountKey(ip)
 	st := s.rlByIP[key]
 	if st == nil {
 		st = &ipRateState{winStart: now, count: 0, lastSeen: now}
