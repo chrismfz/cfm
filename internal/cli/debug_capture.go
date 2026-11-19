@@ -137,6 +137,8 @@ func filterCFMManagedWorkers(workerPIDs []int) []int {
 		".conf.cfm",                  // /etc/angie/angie.conf.cfm (install-angie.sh:691)
 		"/usr/share/cfm/",            // /usr/share/cfm/configs/openresty.conf (install-openresty.sh:464)
 		"/usr/local/openresty/nginx", // openresty prefix path (install-openresty.sh:466)
+		"/usr/sbin/cfm-edge",         // cfm-edge master: "nginx: master process /usr/sbin/cfm-edge"
+		"/etc/cfm-edge/",             // a cfm-edge started with an explicit -c
 		"/etc/cfm/",                  // any future direct -c reference
 		"/var/lib/cfm/",              // cfm-managed temp/cert/state paths
 		"/var/run/cfm/",              // bridge socket paths

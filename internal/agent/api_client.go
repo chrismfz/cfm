@@ -211,9 +211,10 @@ func (c *APIClient) ConfirmUnblock(id int, ip string, success bool, found *locat
 // present, even when the value is false/empty and clears web state).
 type HeartbeatRequest struct {
 	DNATEnabled *bool `json:"dnat_enabled,omitempty"`
-	// Edge is the active in-path edge proxy service: "openresty",
-	// "angie", or "" when neither is active. EdgeVersion is that
-	// binary's version token (e.g. "openresty/1.25.3.2"), best-effort.
+	// Edge is the active in-path edge proxy service, an edgeengine.Profiles
+	// name ("openresty", "angie", "cfm-edge"), or "" when none is active.
+	// EdgeVersion is that binary's version token (e.g. "openresty/1.25.3.2";
+	// cfm-edge reports the nginx it packages, "nginx/1.31.9"), best-effort.
 	Edge        *string `json:"edge,omitempty"`
 	EdgeVersion *string `json:"edge_version,omitempty"`
 	// Vitals is the quick-glance host metrics block (vitals.go); nil —

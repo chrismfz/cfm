@@ -30,6 +30,7 @@ func TestNativeKeepaliveTrap(t *testing.T) {
 		{"openresty", "openresty/1.27.5.1", "1.27.5", false}, // older
 		{"angie", "Angie/1.12.1", "", false},                 // Angie keeps it off
 		{"nginx", "nginx/1.31.0", "1.31.0", true},
+		{"cfm-edge", "nginx/1.31.9", "1.31.9", true}, // cfm-edge -v prints nginx's line
 	}
 	for _, c := range cases {
 		base, trap := nativeKeepaliveTrap(c.engine, c.version)

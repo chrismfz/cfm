@@ -420,8 +420,8 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	switch {
 	case engine == "":
 		findings = append(findings, sev.add("engine-version-trap", "unknown",
-			"could not detect the active edge engine/version", aEv, "check that angie/openresty is running"))
-	case (strings.EqualFold(engine, "openresty") || strings.EqualFold(engine, "nginx")) && nginxBase == "":
+			"could not detect the active edge engine/version", aEv, "check that the edge ("+edgeengine.NameList()+") is running"))
+	case (strings.EqualFold(engine, "openresty") || strings.EqualFold(engine, "cfm-edge") || strings.EqualFold(engine, "nginx")) && nginxBase == "":
 		// Engine known but version unreadable: we CANNOT rule out the
 		// nginx>=1.29.7 native-keepalive trap, so this is "unknown", never "ok"
 		// (an all-clear here would mask the exact 421 root cause).
@@ -718,7 +718,8 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 // nativeKeepaliveTrap reports the underlying nginx base version (best-effort) and
 // whether native upstream keepalive is ON by default on this engine/version.
 //   - OpenResty A.B.C.D → nginx base A.B.C; trap = base ≥ 1.29.7.
-//   - bare nginx → trap = version ≥ 1.29.7.
+//   - bare nginx, and cfm-edge (which prints nginx's own "nginx/1.31.9") →
+//     trap = version ≥ 1.29.7.
 //   - Angie → trap = false: Angie deliberately did NOT adopt nginx 1.29.7's
 //     default-on change (keepalive `Default: —`) and even rejects `keepalive 0`.
 func nativeKeepaliveTrap(engine, version string) (nginxBase string, trap bool) {

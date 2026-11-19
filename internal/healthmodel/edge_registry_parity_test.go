@@ -8,8 +8,9 @@ import (
 // These lists take their edge engines from edgeengine.Profiles; the tests pin
 // what they held as literals before (order included: the service-status
 // order is output, and the frontend candidates' order is the scoring tiebreak).
+// cfm-edge is appended after the old entries in each, so it never wins a tie.
 func TestHealthEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
-	if want := []string{"cfm.service", "nginx.service", "openresty.service", "angie.service"}; !reflect.DeepEqual(serviceStatusUnits(), want) {
+	if want := []string{"cfm.service", "nginx.service", "openresty.service", "angie.service", "cfm-edge.service"}; !reflect.DeepEqual(serviceStatusUnits(), want) {
 		t.Errorf("serviceStatusUnits() = %v, want %v", serviceStatusUnits(), want)
 	}
 	want := []frontendSignal{
@@ -30,6 +31,14 @@ func TestHealthEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 			binaryCommands:  []string{"openresty"},
 		},
 		{
+			name:            "cfm-edge",
+			serviceUnit:     "cfm-edge.service",
+			processAliases:  []string{"cfm-edge", "nginx"},
+			configHookPaths: []string{"/etc/cfm-edge/nginx.conf"},
+			binaryPaths:     []string{"/usr/sbin/cfm-edge"},
+			binaryCommands:  []string{"cfm-edge"},
+		},
+		{
 			name:            "nginx",
 			serviceUnit:     "nginx.service",
 			processAliases:  []string{"nginx"},
@@ -43,7 +52,7 @@ func TestHealthEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 	}
 	for svc, want := range map[string][]string{
 		"angie": {"angie", "nginx"}, "Angie ": {"angie", "nginx"}, "openresty": {"openresty", "nginx"},
-		"nginx": {"nginx"}, "httpd": nil,
+		"cfm-edge": {"cfm-edge", "nginx"}, "nginx": {"nginx"}, "httpd": nil,
 	} {
 		if got := frontendAliases(svc); !reflect.DeepEqual(got, want) {
 			t.Errorf("frontendAliases(%q) = %v, want %v", svc, got, want)

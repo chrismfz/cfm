@@ -290,6 +290,10 @@ func (b *NginxBridge) SetEnricher(e *enrich.Enricher) {
 // We only refresh when an entry is close to expiring.
 const refreshSkew = 30 * time.Second
 
+// nginxUploadAllowedDirs: where an upload path the edge hands over may live.
+// Decided per edge engine, never derived (CLAUDE.md §5). cfm-edge adds none:
+// it runs CFM's conf, whose client_body_temp_path is the same on every engine,
+// and the ClamAV spool is checked separately (above).
 var nginxUploadAllowedDirs = []string{
 	"/tmp",
 	"/var/tmp",

@@ -508,12 +508,13 @@ func fromOf(now float64) float64 { return now - 3600 }
 // to a semantically wrong source.
 func TestScanHost_FullLogResolverContract(t *testing.T) {
 	requireTail(t)
-	// Exact allowed set: ONLY the two full-traffic access.logs. A future edit
+	// Exact allowed set: ONLY the edges' full-traffic access.logs. A future edit
 	// adding e.g. /var/log/nginx/access.log (distro combined format) or the
 	// focused access.cfm.log must fail here.
 	want := []string{
 		"/usr/local/openresty/nginx/logs/access.log",
 		"/var/log/angie/access.log",
+		"/var/log/cfm-edge/access.log",
 	}
 	if len(fullAccessLogCandidates) != len(want) {
 		t.Fatalf("fullAccessLogCandidates = %v, want exactly %v", fullAccessLogCandidates, want)

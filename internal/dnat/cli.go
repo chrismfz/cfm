@@ -437,7 +437,7 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	edgeService := detectActivePanelListenerService()
 	edgeTarget := dnatTargetLabel(edgeService)
 	if edgeService == panelListenerServiceAmbiguous {
-		fmt.Println("WARNING: edge service is ambiguous: both Angie and OpenResty are active; exactly one should be active+enabled.")
+		fmt.Printf("WARNING: edge service is ambiguous: more than one of %s is active; exactly one should be active+enabled.\n", edgeengine.NameList())
 	}
 	if enabled {
 		s, err := backend.DNATShow(*family, *table)
@@ -567,7 +567,7 @@ func dnatTargetLabel(edgeService string) string {
 		return label
 	}
 	if edgeService == panelListenerServiceAmbiguous {
-		return label + " (ambiguous Angie/OpenResty runtime)"
+		return label + " (ambiguous edge runtime: more than one of " + edgeengine.NameList() + ")"
 	}
 	return fmt.Sprintf("%s (%s)", label, edgeService)
 }
@@ -636,7 +636,7 @@ func normalizeEdgeService(s string) string {
 func help() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  cfm dnat                  (show ON/OFF + rules + explanation)")
-	fmt.Fprintln(os.Stderr, "  cfm dnat on               (enable web DNAT: 80/443 -> openresty)")
+	fmt.Fprintln(os.Stderr, "  cfm dnat on               (enable web DNAT: 80/443 -> the edge)")
 	fmt.Fprintln(os.Stderr, "  cfm dnat off              (disable web DNAT)")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "  cfm dnat panel ...        (manage the panel DNAT chain [cPanel/DirectAdmin]; alias: `cfm dnat cpanel`; see `cfm dnat panel help`)")

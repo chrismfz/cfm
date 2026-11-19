@@ -505,7 +505,7 @@ func registerEdgeErrorTail(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "edge_error_tail",
-		Description: "Tail the edge (OpenResty/Angie) ERROR log — where the in-path Lua writes ngx.log(): the panel LOGONLY decision verdicts ('[cfm_panel_decision] logonly=would_enforce …' — what the bridge WOULD challenge/block on panel human-entry), module-load failures, and Lua runtime errors. This is the companion to edge_access_tail (which is the ACCESS ring and cannot show error-log lines). Bounded on-demand tail (last N lines, default 5000) with an optional case-insensitive grep, returning the newest matches; costs nothing until called. For a specific IP's raw requests use ip_forensics; for right-now access traffic use edge_access_tail.",
+		Description: "Tail the edge (OpenResty/Angie/cfm-edge) ERROR log — where the in-path Lua writes ngx.log(): the panel LOGONLY decision verdicts ('[cfm_panel_decision] logonly=would_enforce …' — what the bridge WOULD challenge/block on panel human-entry), module-load failures, and Lua runtime errors. This is the companion to edge_access_tail (which is the ACCESS ring and cannot show error-log lines). Bounded on-demand tail (last N lines, default 5000) with an optional case-insensitive grep, returning the newest matches; costs nothing until called. For a specific IP's raw requests use ip_forensics; for right-now access traffic use edge_access_tail.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in edgeErrorTailInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{}
 		setStr(q, "grep", in.Grep)
@@ -792,7 +792,7 @@ func registerCFMLogTail(srv *mcp.Server, d Deps) {
 }
 
 type journalInput struct {
-	Unit  string `json:"unit" jsonschema:"systemd unit to tail; MUST be allow-listed: cfm, angie, openresty, nginx, httpd, apache2, mysql, mysqld, mariadb, exim, dovecot, postfix, sshd, clamd, named"`
+	Unit  string `json:"unit" jsonschema:"systemd unit to tail; MUST be allow-listed: cfm, angie, openresty, cfm-edge, nginx, httpd, apache2, mysql, mysqld, mariadb, exim, dovecot, postfix, sshd, clamd, named"`
 	Lines int    `json:"lines,omitempty" jsonschema:"trailing journal lines (journalctl -n); default 500, max 20000"`
 	Grep  string `json:"grep,omitempty" jsonschema:"case-insensitive substring filter; omit for all"`
 	Limit int    `json:"limit,omitempty" jsonschema:"max matching lines to return; default 200, max 2000"`
@@ -802,7 +802,7 @@ func registerJournalTail(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "journal_tail",
-		Description: "Tail the systemd journal for an ALLOW-LISTED unit (cfm, angie/openresty/nginx/httpd/apache2, mysql/mysqld/mariadb, exim, dovecot, postfix, sshd, clamd, named). This is where a service's own startup/crash/restart output lives — 'did cfm/the edge/mysql restart or fail to start, and why?' — that the app-level logs don't carry. An arbitrary (non-allow-listed) unit is rejected; a non-systemd host returns result.available=false. Bounded (journalctl -n N) + optional grep.",
+		Description: "Tail the systemd journal for an ALLOW-LISTED unit (cfm, angie/openresty/cfm-edge/nginx/httpd/apache2, mysql/mysqld/mariadb, exim, dovecot, postfix, sshd, clamd, named). This is where a service's own startup/crash/restart output lives — 'did cfm/the edge/mysql restart or fail to start, and why?' — that the app-level logs don't carry. An arbitrary (non-allow-listed) unit is rejected; a non-systemd host returns result.available=false. Bounded (journalctl -n N) + optional grep.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in journalInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{}
 		setStr(q, "unit", in.Unit)

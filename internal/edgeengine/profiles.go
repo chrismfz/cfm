@@ -1,5 +1,7 @@
 package edgeengine
 
+import "strings"
+
 // Profiles: everything CFM's Go code knows about each in-path edge engine, in
 // ONE place. Before this table the same facts (unit names, binaries, conf and
 // log dirs, the legacy Lua token path, process aliases) were copied into a
@@ -16,6 +18,11 @@ package edgeengine
 //     legacy Lua token, the edge logs' equal-mtime tiebreak). It has always
 //     been OpenResty first there, and keeping it is what makes this refactor
 //     behaviour-neutral.
+//
+// cfm-edge is LAST in both orders: on every node without it the lists are the
+// old ones plus a trailing entry that matches nothing, and where it was
+// adopted, the first-readable lists hold the same content in each engine's
+// copy (one config source), and the logs are picked by mtime.
 
 // Profile is one in-path edge engine as CFM installs and manages it.
 type Profile struct {
@@ -39,7 +46,8 @@ type Profile struct {
 	// LogDir holds the edge's access/error logs.
 	LogDir string
 	// LegacyLuaDir is where CFM's Lua (and cfm_token.lua) lived before the
-	// shared /var/lib/cfm/lua; still read as a fallback.
+	// shared /var/lib/cfm/lua; still read as a fallback. Empty for an engine
+	// that never had one.
 	LegacyLuaDir string
 	// ConfigHookPaths are files whose presence says CFM is wired into this
 	// engine (health's frontend detection scores them).
@@ -83,10 +91,27 @@ var Profiles = []Profile{
 		ConfigHookPaths: []string{"/usr/local/openresty/nginx/conf/nginx-cfm.conf", "/usr/local/openresty/nginx/conf/openresty-cfm-tsv.conf", "/usr/local/openresty/nginx/conf/nginx.conf"},
 		ProcessAliases:  []string{"openresty", "nginx"},
 	},
+	{
+		// cfm-edge: CFM's own edge package (nginx.org nginx + the OpenResty Lua
+		// set, chrismfz/cfm-edge), laid out like a distro package. CFM's Lua
+		// lives in the shared /var/lib/cfm/lua from day one, so it has no
+		// legacy Lua dir. Its nginx.conf IS CFM's edge config (the install
+		// script deploys it), hence the one config hook.
+		Name:            "cfm-edge",
+		Binaries:        []string{"/usr/sbin/cfm-edge"},
+		Commands:        []string{"cfm-edge"},
+		ConfDir:         "/etc/cfm-edge",
+		PathMarker:      "/etc/cfm-edge/",
+		MainConf:        "/etc/cfm-edge/nginx.conf",
+		LogDir:          "/var/log/cfm-edge",
+		LegacyLuaDir:    "",
+		ConfigHookPaths: []string{"/etc/cfm-edge/nginx.conf"},
+		ProcessAliases:  []string{"cfm-edge", "nginx"},
+	},
 }
 
 // fileOrder is the file-precedence order (see the package comment above).
-var fileOrder = []string{"openresty", "angie"}
+var fileOrder = []string{"openresty", "angie", "cfm-edge"}
 
 // CanonicalLuaToken is the shared, current location of cfm_token.lua.
 const CanonicalLuaToken = "/var/lib/cfm/lua/cfm_token.lua"
@@ -113,6 +138,9 @@ func Lookup(name string) (Profile, bool) {
 	return Profile{}, false
 }
 
+// NameList is the engine names joined for a message ("angie/openresty/…").
+func NameList() string { return strings.Join(Names(), "/") }
+
 // IsEdge reports whether name is exactly a CFM edge engine's name.
 func IsEdge(name string) bool {
 	_, ok := Lookup(name)
@@ -135,6 +163,9 @@ func InFileOrder() []Profile {
 func LuaTokenCandidates() []string {
 	out := []string{CanonicalLuaToken}
 	for _, p := range InFileOrder() {
+		if p.LegacyLuaDir == "" {
+			continue // an engine that never had a legacy Lua dir (cfm-edge)
+		}
 		out = append(out, p.LegacyLuaDir+"/cfm_token.lua")
 	}
 	return out

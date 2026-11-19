@@ -31,6 +31,8 @@ func TestNormalizeEdgeService(t *testing.T) {
 		{input: "/usr/local/openresty/nginx/sbin/nginx", want: "openresty"},
 		{input: "angie: master process", want: "angie"},
 		{input: "nginx: worker process", want: "nginx"},
+		{input: "cfm-edge", want: "cfm-edge"}, // comm
+		{input: "nginx: master process /usr/sbin/cfm-edge", want: "cfm-edge"},
 		{input: "apache2", want: ""},
 	}
 
