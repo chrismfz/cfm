@@ -172,7 +172,8 @@ done
 # invalid port ("invalid port in upstream") — and (b) an IPv6 source address:
 # the server-level `proxy_bind 127.0.0.1` cannot be bound on an IPv6 socket
 # (bind() EINVAL). So in both confs:
-#   * no proxy_pass to a bare $server_addr / ${server_addr};
+#   * no proxy_pass to a bare $server_addr / ${server_addr} (any scheme form,
+#     e.g. $scheme://$server_addr);
 #   * the $cfm_origin_addr, $cfm_origin_bind and $cfm_pass_bind maps exist
 #     with exactly their pinned bodies;
 #   * every `proxy_pass $cfm_pass;` is followed by `proxy_bind $cfm_pass_bind;`
@@ -185,7 +186,7 @@ done
 for f in "$ORT" "$ANG"; do
   v6err=$(awk '
     function bad(m) { print FILENAME ":" NR ": " m; }
-    /^[[:space:]]*proxy_pass[[:space:]]+https?:\/\/\$\{?server_addr\}?/ { bad("proxy_pass to a bare $server_addr (use $cfm_origin_addr)") }
+    /^[[:space:]]*proxy_pass[[:space:]]+[^[:space:];]*\$\{?server_addr\}?/ { bad("proxy_pass to a bare $server_addr (use $cfm_origin_addr)") }
     /set_current_peer\(ngx\.var\.server_addr/ { bad("balancer fallback passes a bare ngx.var.server_addr") }
     /set_current_peer\(a,/ { if (prevl !~ /if a:find\(":", 1, true\) then a = "\[" \.\. a \.\. "\]" end/) bad("balancer fallback: the bracket line is not right before set_current_peer(a, ...)") }
     want != "" { if ($0 !~ want) bad("expected `" wantmsg "` right after line " NR-1); want="" }
