@@ -54,6 +54,9 @@ type BlockBatchResult struct {
 	// Never counted as Kept, which promises a ban at least as long.
 	Present int
 	Skipped int // not usable: no IP, an unspecified address, or no time left
+	// Net is the /64 an IPv6 client's ban took (ExtendBlockResult, a
+	// one-entry ban); "" when the address itself was banned.
+	Net string
 }
 
 // Add sums two results.
@@ -271,7 +274,15 @@ type BlockCreator interface {
 
 // ExtendBlockResult is ExtendBlock's batch with the read-failure fallback, for
 // a caller that tells added, extended and kept apart (the kernel autoblock).
+//
+// An IPv6 client is banned as its /64 (client_block.go): res.Net names it.
+// A /64 the set cannot take as it is falls back to the address below.
 func ExtendBlockResult(be Backend, ip net.IP, ttl time.Duration) (BlockBatchResult, error) {
+	if p, ok := ClientNet(ip); ok {
+		if res, done := extendBlockNet(be, ip, p, ttl); done {
+			return res, nil
+		}
+	}
 	res, err := be.AddBlockBatch([]BlockEntry{{IP: ip, TTL: ttl}})
 	if !errors.Is(err, ErrBlockRead) {
 		return res, err

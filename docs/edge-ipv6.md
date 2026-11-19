@@ -192,9 +192,22 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   addresses of one /64 make one element and share one limit (2026-11-19, in
   a throwaway netns on earth, 4.18, and rigel, 5.14). `block_v6_nets`
   (interval, timeout) already holds a /64 ban.
-- **Status:** the key exists; the controls move to it one area at a time
-  (bans, counters, the edge's shared dicts), then `EDGE_LISTEN_V6` defaults
-  to on (`docs/ROADMAP.md` §9c).
+- **Bans (done):** every automatic ban of an IPv6 client takes its /64
+  (`firewall.ExtendClientBlock` / `BlockClientPermanent`): the detector
+  sinks, the challenge server, the kernel flood / port-scan autoblock, the
+  admin API's login autoblock, TTL
+  and permanent. The /64 goes to `block_v6_nets`, only ever added or
+  extended (an extend deletes the shorter element and adds the longer one; a
+  failed add puts the old one back). When the set cannot take the /64 as it
+  is (a wider element ending sooner, an overlapping narrower one, a failed
+  read or write) the address is banned instead, so no ban is lost. The edge
+  ban store keys it as the /64 and answers every address of it, except where
+  an allow or a trusted proxy range touches any of it. TTL /64 bans survive a
+  restart (`internal/ttlban`), a permanent one goes to `cfm.deny`. Unblocking
+  any address of the /64 frees the /64. Manual bans stay exactly what the
+  operator typed. The alert says "Banned as: <the /64>".
+- **Still per address:** counters, rate limits and the edge's shared dicts
+  (next), then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
 
 ## Verified
 

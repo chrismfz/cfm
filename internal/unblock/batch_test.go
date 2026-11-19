@@ -293,6 +293,7 @@ func (b *feedBackend) HasElem(set, elem string) (bool, error) {
 }
 func (b *feedBackend) RemoveBlockBatch([]net.IP) error { return nil }
 func (b *feedBackend) RemoveBlock(net.IP) error        { return nil }
+func (b *feedBackend) RemoveBlockNet(string) error     { return nil }
 func (b *feedBackend) AddAllowBatch(e []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	b.batches++
 	b.allowed = append(b.allowed, e...)
@@ -338,7 +339,8 @@ func TestRemoveFromFileMany_UnreadableLineKeepsFile(t *testing.T) {
 // failingBatchBackend fails the batch remove and records the per-IP ones.
 type failingBatchBackend struct {
 	firewall.Backend
-	removed []string
+	removed    []string
+	netRemoved []string
 }
 
 func (b *failingBatchBackend) ListTableTextNoDNS(string, string) (string, error) {
@@ -349,6 +351,10 @@ func (b *failingBatchBackend) RemoveBlockBatch([]net.IP) error {
 }
 func (b *failingBatchBackend) RemoveBlock(ip net.IP) error {
 	b.removed = append(b.removed, ip.String())
+	return nil
+}
+func (b *failingBatchBackend) RemoveBlockNet(cidr string) error {
+	b.netRemoved = append(b.netRemoved, cidr)
 	return nil
 }
 
@@ -362,6 +368,10 @@ func TestDoMany_NFTBatchFailureFallsBackPerIP(t *testing.T) {
 	res := DoMany(context.Background(), ips("198.51.100.1", "2001:db8::1"), Options{BE: be})
 	if len(be.removed) != 2 {
 		t.Fatalf("per-IP removes %v, want both IPs", be.removed)
+	}
+	// The IPv6 address's client /64 (an automatic ban's) goes too.
+	if len(be.netRemoved) != 1 || be.netRemoved[0] != "2001:db8::/64" {
+		t.Fatalf("net removes %v, want the IPv6 client's /64", be.netRemoved)
 	}
 	for ip, r := range res {
 		if s := stepsOf(r, SrcNFT); len(s) != 1 || s[0].Action != ActionRemoved || !r.WasBlocked ||

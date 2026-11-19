@@ -117,6 +117,14 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 				errs[ip.String()] = opts.BE.RemoveBlock(ip)
 			}
 		}
+		// An IPv6 client's automatic ban is its /64 (firewall.ExtendClientBlock):
+		// unblocking one of its addresses frees the /64. A failure counts as
+		// the address's (the client stays blocked).
+		for _, ip := range list {
+			if _, nerr := firewall.RemoveClientNet(opts.BE, ip); nerr != nil && errs[ip.String()] == nil {
+				errs[ip.String()] = nerr
+			}
+		}
 		// The edge's own ban goes with the nft one (no-op outside the daemon).
 		// Nor may a restart bring the TTL ban back (internal/ttlban, likewise;
 		// one call, one file write), for the IPs nft really let go: a ban
@@ -128,7 +136,7 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 				forget = append(forget, ip.String())
 			}
 		}
-		ttlban.Forget(forget...)
+		ttlban.ForgetClient(forget...)
 		via := ""
 		if batchErr != nil {
 			via = "per IP, after the batch failed: " + batchErr.Error()

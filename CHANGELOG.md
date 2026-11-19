@@ -21,6 +21,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Security
+- **An automatic ban of an IPv6 client takes its whole /64.** Every
+  automatic ban (the detector sections, waf_security, the challenge server,
+  the kernel flood / port-scan autoblock, the admin API's login autoblock;
+  TTL and permanent) banned the one
+  address, so a client rotating inside the /64 any VPS or ISP line hands it
+  walked past every ban. It now goes to `block_v6_nets` as the /64, only ever
+  added or extended (never shortened); where that set cannot take it as it is
+  (a wider ban ending sooner, an overlapping one, an nft error) the address is
+  banned instead, so no ban is lost. The edge bans the /64 too for clients
+  behind Cloudflare (not where an allow or a trusted proxy range touches it),
+  a TTL /64 ban survives a reboot or `cfm reset` (`ttlbans.json`), a
+  permanent one goes to `cfm.deny`, and unblocking any of its addresses frees
+  the /64. The alert says `Banned as: <the /64>`. IPv4 and manual bans are
+  unchanged; counters and rate limits are still per address (next). Live
+  netns run on both engines; `docs/edge-ipv6.md` "IPv6 /64 grouping".
 - **IPv6 link-local clients (`fe80::/10`) are never self at the edge.**
   `cfm_selfip.lua` counted them as the node's own, so a request from one
   skipped the WAF and the challenge (cfm.lua Step 0a). Harmless while the
@@ -94,6 +109,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   whats_wrong titles it "origin does not trust the edge's loopback"), `edge_ipv6` / `edge_ipv6_listening` in `--json`.
 
 ### Fixed
+- **Removing a CIDR a set does not hold no longer fails on the exec engine.**
+  nft (1.0.4 on EL8, 1.0.9 on EL9) answers a delete from an interval set with
+  `element does not exist`, which `RemoveBlockNet` / `RemoveAllowNet` /
+  `RemoveIgnoreNet` did not take as done: `cfm unblock <cidr>` of a network
+  not banned reported an error. Found by the live netns test of the /64 bans
+  (every IPv6 unblock now removes its client's /64).
 - **Edge: the origin hop works for an IPv6 destination.** It failed every
   request with a 500, twice over. The origin URL was built as
   `https://<addr>:443`, which nginx reads as host `2001` plus an invalid port

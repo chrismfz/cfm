@@ -74,7 +74,8 @@ The history behind each rule below is in the code comments it names.
   for the web ones, which also keeps the old-port accepts until DNATOn has
   moved the redirect). A reload must not change a handle: delete-and-re-add on
   every reload dropped DNAT'd connections, and the live test pins it.
-- **TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`;
+- **TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`, and
+  `block_v6_nets` for an IPv6 client's automatic /64 ban;
   `cfm.deny` is permanent-only and must never take one). Nothing on a restart
   or upgrade may empty the `inet cfm` table (an rpm `%post` `cfm disable` once
   freed every TTL-banned attacker). For what still does (reboot, `cfm reset`,
@@ -454,7 +455,11 @@ family/rule arming table and the decision records:
   go to the edge ban store (`internal/edgeban`), answered `ip_action=block`
   for PROXIED requests only. It is NOT an nft mirror, and every nft allow set
   wins. **A new web blocker or unblock / allow path must call `edgeban.Ban` /
-  `edgeban.Unban`.** The edge checks its copy (`cfm_edgeban.lua`) at cfm.lua
+  `edgeban.Unban`.** An automatic blocker bans through
+  `firewall.ExtendClientBlock` / `BlockClientPermanent` (an IPv6 client is its
+  /64, in `block_v6_nets`) and hands the element they return to
+  `edgeban.BanElem`; an unblock also calls `firewall.RemoveClientNet` and
+  `ttlban.ForgetClient`. The edge checks its copy (`cfm_edgeban.lua`) at cfm.lua
   Step 0e, before every exemption but the static IP/CIDR bypass: **a new
   exemption step goes AFTER it**, or a banned proxied client walks through.
   `[webdetector] EDGE_BAN_MODE` = `enforce` (default) | `log`; kill switch

@@ -46,3 +46,17 @@ func TestReferenceSubjectShowsKeptBan(t *testing.T) {
 		t.Fatalf("subject = %q, %v", subj, err)
 	}
 }
+
+// An IPv6 client banned as its /64 says what was banned; an address ban says
+// nothing more.
+func TestDefaultBodyShowsTheBannedSlash64(t *testing.T) {
+	ev := Event{Kind: "WAF/SQLI", SrcIP: "2001:db8:1:2::a", TTL: time.Hour, Extra: map[string]string{"block_net": "2001:db8:1:2::/64"}}
+	body, err := render("", ev)
+	if err != nil || !strings.Contains(body, "TTL: 1h0m0s\nBanned as: 2001:db8:1:2::/64 (the client's IPv6 /64)\nCount:") {
+		t.Fatalf("body = %q, %v", body, err)
+	}
+	ev.Extra = nil
+	if body, _ = render("", ev); strings.Contains(body, "Banned as") || !strings.Contains(body, "TTL: 1h0m0s\nCount:") {
+		t.Fatalf("no /64, body = %q", body)
+	}
+}

@@ -18,6 +18,8 @@ Country: {{.Country}}
 PTR: {{.PTR}}
 Reason: {{.Reason}}
 TTL: {{.TTL}}{{with (index .Extra "block_kept")}} (a longer ban was already in place and stays){{end}}
+{{- with (index .Extra "block_net")}}
+Banned as: {{.}} (the client's IPv6 /64){{end}}
 Count: {{.Count}}
 Section: {{.Section}}
 {{- if .Samples}}

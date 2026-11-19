@@ -322,6 +322,9 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 			logging.Logf("[autoblock] %s %s -> %s ttl=%ds failed: %v", fam, logIP, set, ttl, err)
 			return err
 		}
+		if res.Net != "" { // an IPv6 client: banned as its /64
+			set = firewall.BlockV6Nets + " " + res.Net
+		}
 		b.lastAutoBlockAt[ip] = time.Now()
 		switch {
 		case res.Present > 0:
@@ -343,13 +346,15 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 		return nil
 
 	default: // "permanent"
-		if err := b.AddBlock(parsedIP, comment, nil); err != nil {
+		// An IPv6 client is banned as its /64, which cfm.deny then holds.
+		elem, err := firewall.BlockClientPermanent(b, parsedIP, comment)
+		if err != nil {
 			return err
 		}
-		logging.Logf("[autoblock] %s %s -> block_%s permanent (hits>=%d in %ds) reason=%s",
-			fam, logIP, fam, tc.Hits, tc.WindowSec, reason)
+		logging.Logf("[autoblock] %s %s -> %s permanent (hits>=%d in %ds) reason=%s",
+			fam, logIP, elem, tc.Hits, tc.WindowSec, reason)
 		b.lastAutoBlockAt[ip] = time.Now()
-		_ = b.appendToDenyFile(ip, comment)
+		_ = b.appendToDenyFile(elem, comment)
 		_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
 		b.emitAutoBlockNotify(ip, fam, "permanent", reason, 0, tc.Hits, tc.WindowSec)
 		return nil

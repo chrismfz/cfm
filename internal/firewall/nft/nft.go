@@ -868,7 +868,7 @@ func (b *Backend) removeBlockLocked(ip net.IP) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, elem)
 	out, err := b.nftOut(cmd)
-	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err, out)
 	}
 	return nil
@@ -961,7 +961,7 @@ func (b *Backend) RemoveIgnore(ip net.IP) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, ip.String())
 	out, err := b.nftOut(cmd)
-	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err, out)
 	}
 	return nil
@@ -996,7 +996,7 @@ func (b *Backend) RemoveIgnoreNet(cidr string) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
 	out, err2 := b.nftOut(cmd)
-	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err2 != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err2, out)
 	}
 	return nil
@@ -1013,10 +1013,22 @@ func (b *Backend) RemoveAllow(ip net.IP) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, elem)
 	out, err := b.nftOut(cmd)
-	if err != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err, out)
 	}
 	return nil
+}
+
+// missingElement reports nft's output for a delete of an element the set
+// does not hold, which every Remove* takes as done: "No such file or
+// directory" for a host set, "Could not delete element", and "element does
+// not exist" for an interval set (nft 1.0.4 on EL8 and 1.0.9 on EL9 alike,
+// checked 2026-11-19: before it was matched, every remove of a CIDR the set
+// did not hold failed).
+func missingElement(out string) bool {
+	return strings.Contains(out, "No such file or directory") ||
+		strings.Contains(out, "Could not delete element") ||
+		strings.Contains(out, "element does not exist")
 }
 
 // -------- manual nets (CIDR) --------
@@ -1065,7 +1077,7 @@ func (b *Backend) RemoveBlockNet(cidr string) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
 	out, err2 := b.nftOut(cmd)
-	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err2 != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err2, out)
 	}
 	return nil
@@ -1104,7 +1116,7 @@ func (b *Backend) RemoveAllowNet(cidr string) error {
 	}
 	cmd := fmt.Sprintf(`delete element %s %s %s { %s }`, family, tableName, set, canon)
 	out, err2 := b.nftOut(cmd)
-	if err2 != nil && !strings.Contains(out, "No such file or directory") && !strings.Contains(out, "Could not delete element") {
+	if err2 != nil && !missingElement(out) {
 		return fmt.Errorf("nft: %v: %s", err2, out)
 	}
 	return nil
