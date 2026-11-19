@@ -455,15 +455,22 @@ func (s *sectionSink) Publish(a core.Alert) {
 				now = time.Now()
 			}
 
+			// The challenge and its cooldown are per address (the edge
+			// challenges the address), the escalation counts the client: an
+			// IPv6 client's /64 (core.ClientKey), so a client challenged
+			// again from each new address of its /64 still escalates.
 			s.chalMu.Lock()
-			st := s.chalState[ipStr]
-
+			cur := s.chalState[ipStr]
+			cur.LastSeen = now
+			s.chalState[ipStr] = cur
+			escKey := "esc|" + core.ClientKey("|ip", ipStr)
+			st := s.chalState[escKey]
 			if !st.LastSeen.IsZero() && now.Sub(st.LastSeen) > defaultChallengeFailWindow {
 				st.Count = 0
 			}
 			st.Count++
 			st.LastSeen = now
-			s.chalState[ipStr] = st
+			s.chalState[escKey] = st
 			s.chalMu.Unlock()
 
 			out.Extra["challenge_fails"] = fmt.Sprintf("%d", st.Count)
@@ -875,7 +882,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 // alertFields are the detector Extra keys the alert log keeps for grouping
 // (vhost from host, and what a login_bruteforce row needs to be measured).
-var alertFields = []string{"host", "rule", "site", "leniency", "geo", "ipv6_ambiguous", "site_form_fails"}
+// block_net: the /64 an IPv6 client's ban took (the notification's
+// "Banned as:" line, internal/notify/templates.go).
+var alertFields = []string{"host", "rule", "site", "leniency", "geo", "ipv6_ambiguous", "site_form_fails", "block_net"}
 
 func copyAlertFields(dst, src map[string]string) {
 	for _, k := range alertFields {

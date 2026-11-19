@@ -235,12 +235,11 @@ func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 
     // 3) flush aggregated
     nowSend := time.Now()
-    for _, p := range d.pending {
+    for sk, p := range d.pending { // sk: the key bump counted on
         thr, kind, baseKey := d.thresholdAndKey(p.kindKey, p.key)
         if thr <= 0 {
             continue
         }
-        sk := p.kindKey + ":" + core.ClientKey(p.kindKey, p.key)
         n := d.counts.Count(sk, nowSend)
         if !d.gate.Allow(sk, nowSend, n, thr) {
             continue

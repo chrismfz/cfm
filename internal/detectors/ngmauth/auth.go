@@ -394,12 +394,11 @@ func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 // -------- flush --------
 
 func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
-	for _, p := range a.pending {
+	for sk, p := range a.pending { // sk: the key bump counted on
 		limit, kindStr := a.threshold(p.kindKey)
 		if limit <= 0 {
 			continue
 		}
-		sk := p.kindKey + ":" + core.ClientKey(p.kindKey, p.key)
 		n := a.counts.Count(sk, now)
 		if n < limit {
 			continue

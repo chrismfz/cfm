@@ -16,7 +16,12 @@ import (
 // tests (ssh, wafsec, apiabuse, cookiediscard) pin the behaviour; this pins
 // the shape in the detectors that share it.
 func TestDetectorWindowKeysGroupIPv6Clients(t *testing.T) {
-	raw := regexp.MustCompile(`sk :?= (?:kindKey|p\.kindKey|tag) \+ ":" \+ (?:p\.)?key\b|"ip:" \+ ip\b`)
+	// The shapes the log detectors build a window key in, spaced any way. A
+	// key built another way (fmt.Sprint, a helper) is not seen: the unit
+	// tests are the real pin, this catches the copy-paste regression.
+	raw := regexp.MustCompile(`\b(?:sk|key)\s*:?=\s*(?:kindKey|p\.kindKey|tag)\s*\+\s*":"\s*\+\s*(?:p\.)?key\b` +
+		`|\bsk\s*:?=\s*"ip:"\s*\+\s*ip\b` + // modsec (its metas stay per address)
+		`|\.(?:Add|Count|Allow)\(\s*kindKey\s*\+\s*":"\s*\+\s*key\b`)
 	var bad []string
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

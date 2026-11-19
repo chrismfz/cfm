@@ -69,6 +69,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -252,7 +253,12 @@ func (e *cdnSuspectEntry) pruneLocked(now time.Time) bool {
 // cdnSuspectClient is the client key the tracker counts: the address itself
 // for IPv4, its /64 for IPv6, where one subscriber holds the whole /64 and
 // could otherwise count as any number of "distinct" clients.
-func cdnSuspectClient(ip string) string { return ipkey.Client(ip) }
+func cdnSuspectClient(ip string) string {
+	if a, err := netip.ParseAddr(ip); err == nil {
+		ip = a.Unmap().String() // canonical: one spelling, one client
+	}
+	return ipkey.Client(ip)
+}
 
 // noteCDNCachedChallenge records one cleared bounce of ip on host that a
 // trusted proxy relayed (or an older edge conf could not say). Bounded: past

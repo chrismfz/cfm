@@ -276,12 +276,11 @@ func (l *Login) bump(now time.Time, kindKey, key, line string) {
 
 func (l *Login) flush(now time.Time, out chan<- core.Alert) {
 
-	for _, p := range l.pending {
+	for sk, p := range l.pending { // sk: the key bump counted on
 		limit, kindStr, baseKey := l.thresholdAndKey(p.kindKey, p.key)
 		if limit <= 0 {
 			continue
 		}
-		sk := p.kindKey + ":" + core.ClientKey(p.kindKey, p.key)
 		n := l.counts.Count(sk, now)
 		if n < limit { continue }
 		if !l.gate.Allow(sk, now, n, limit) { continue }

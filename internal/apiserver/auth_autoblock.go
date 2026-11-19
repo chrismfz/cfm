@@ -1,7 +1,6 @@
 package apiserver
 
 import (
-	"cfm/internal/ipkey"
 	"context"
 	"database/sql"
 	"net"
@@ -81,7 +80,7 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 			// An IPv6 client counts as its /64 (its ban takes the /64); the
 			// report and the log name this failure's address.
 			addr := ip.String()
-			key := ipkey.Client(addr)
+			key := firewall.CountKey(addr)
 			cut := ts - int64(authAutoblockWindow.Seconds())
 			series := append(failTSByIP[key], ts)
 			n := 0

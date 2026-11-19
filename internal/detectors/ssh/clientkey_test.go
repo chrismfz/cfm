@@ -1,6 +1,8 @@
 package ssh
 
 import (
+	"cfm/internal/firewall"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -32,5 +34,30 @@ func TestIPv6ClientCountsAsItsSlash64(t *testing.T) {
 	}
 	if g := got[0]; g.Extra["ip"] != "2001:db8:1:2::c" || g.Extra["client"] != "2001:db8:1:2::/64" || g.Count != 3 || len(g.Samples) != 3 {
 		t.Fatalf("alert: %+v", g)
+	}
+}
+
+// A guarded /64 counts per address: the attacker's own failures reach the
+// threshold under its own address, never a neighbour's.
+func TestGuardedSlash64CountsPerAddress(t *testing.T) {
+	firewall.SetClientNetExempt("ssh-test", func(p netip.Prefix) bool { return p.String() == "2001:db8:1:2::/64" })
+	firewall.ResetCountKeyCache()
+	t.Cleanup(func() { firewall.SetClientNetExempt("ssh-test", nil); firewall.ResetCountKeyCache() })
+	a := NewAuth(AuthConfig{Window: time.Minute, Cooldown: time.Minute, DDOSPerIP: 3})
+	a.pending = map[string]pend{}
+	now := time.Now()
+	a.bump(now, "DDOS|ip", "2001:db8:1:2::bad", "l1")
+	a.bump(now, "DDOS|ip", "2001:db8:1:2::bad", "l2")
+	a.bump(now, "DDOS|ip", "2001:db8:1:2::1", "l3")
+	a.bump(now, "DDOS|ip", "2001:db8:1:2::bad", "l4")
+	out := make(chan core.Alert, 8)
+	a.flush(now, out)
+	close(out)
+	var got []core.Alert
+	for al := range out {
+		got = append(got, al)
+	}
+	if len(got) != 1 || got[0].Extra["ip"] != "2001:db8:1:2::bad" || got[0].Count != 3 {
+		t.Fatalf("want one alert for the attacking address, got %+v", got)
 	}
 }

@@ -257,10 +257,18 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     it, or let its TTL run out.
 - **Counters (detectors, admin API: done):** a detector's sliding window,
   ladder or solve count keys an IPv6 client on its /64 (`core.ClientKey`,
-  `ipkey.Client`): the log detectors (ssh, ftp, dovecot, mysql, cPanel,
+  `firewall.CountKey`): the log detectors (ssh, ftp, dovecot, mysql, cPanel,
   Proxmox, ngm, custom, exim, postfix, ModSecurity), waf_security,
-  `cfm_endpoints`, cookie discard; the admin API's login autoblock, login
-  throttle, embed bootstrap limit and probe signals; the MCP consent limit.
+  `cfm_endpoints`, cookie discard, login_bruteforce; the admin API's login
+  autoblock, login and password-change throttle, embed bootstrap limit and
+  probe signals; the MCP consent limit.
+  - **Only where the ban would take the /64:** `firewall.CountKey` asks the
+    bans' own guards (the daemon's backend, `SetCountBackend`; cached 10 s
+    per /64). A guarded /64 (this node, its gateway, an ignored, allowed or
+    trusted proxy address, or nft cannot tell) counts per address, as its
+    ban does: counted as one client, one address's alert would spend the
+    /64's and leave the other addresses unbanned, or name an ignored
+    neighbour while the attacker went free (found by the review).
   - **Only the count:** the alert keeps a real address (the one seen last;
     `Extra["client"]` is the /64), which the sink's allow / ignore / self /
     leniency checks read and `firewall.ExtendClientBlock` widens to the /64
@@ -270,7 +278,11 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   - **Section cooldown:** stamped on what the ban took (the /64, or the
     address when a guard kept the /64), so another address of a banned /64
     is not banned again while an address banned alone does not shield its
-    neighbours.
+    neighbours. The sink's challenge cooldown stays per address (the edge
+    challenges the address); its challenge-to-ban escalation (off by
+    default) counts the client.
+  - **The notification** says "Banned as: <the /64>" (the sink passes
+    `block_net` on).
   - `TestDetectorWindowKeysGroupIPv6Clients` fails a detector window keyed
     on the raw address.
 - **Still per address:**

@@ -73,3 +73,12 @@ func TestSectionSinkCooldownCoversTheBannedSlash64(t *testing.T) {
 		t.Fatalf("two IPv4 addresses: reports=%v, want both banned", fw.reports)
 	}
 }
+
+// The /64 a ban took reaches the notification ("Banned as:").
+func TestCopyAlertFieldsCarriesBlockNet(t *testing.T) {
+	dst := map[string]string{}
+	copyAlertFields(dst, map[string]string{"block_net": "2001:db8:1:2::/64", "client": "x"})
+	if dst["block_net"] != "2001:db8:1:2::/64" {
+		t.Fatalf("block_net not copied: %v", dst)
+	}
+}

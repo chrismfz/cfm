@@ -51,7 +51,7 @@
 package loginbf
 
 import (
-	"cfm/internal/ipkey"
+	"cfm/internal/firewall"
 	"context"
 	"fmt"
 	"net/netip"
@@ -313,8 +313,9 @@ func (d *Detector) allowed(a netip.Addr) bool {
 	return false
 }
 
-// clientKey is the address, or its /64 for IPv6.
-func clientKey(ip string) string { return ipkey.Client(ip) }
+// clientKey is the address, or an IPv6 client's /64 where a ban could take
+// it (firewall.CountKey: a guarded /64 counts per address).
+func clientKey(ip string) string { return firewall.CountKey(ip) }
 
 func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	d.qmu.Lock()

@@ -1,7 +1,9 @@
 package wafsec
 
 import (
+	"cfm/internal/firewall"
 	"context"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -134,10 +136,10 @@ func TestAllowListSuppresses(t *testing.T) {
 
 func TestFamilyOf(t *testing.T) {
 	cases := map[string]string{
-		"WAF_SQLI:UNION_SELECT":     "WAF_SQLI",
-		"WAF_RCE":                   "WAF_RCE",
-		"  WAF_BACKDOOR:B64 ":       "WAF_BACKDOOR",
-		"":                          "",
+		"WAF_SQLI:UNION_SELECT": "WAF_SQLI",
+		"WAF_RCE":               "WAF_RCE",
+		"  WAF_BACKDOOR:B64 ":   "WAF_BACKDOOR",
+		"":                      "",
 	}
 	for in, want := range cases {
 		if got := familyOf(in); got != want {
@@ -324,5 +326,24 @@ func TestIPv6ClientCountsAsItsSlash64(t *testing.T) {
 	a.Enqueue(ev("2001:db8:9:9::2", "WAF_SQLI:UNION_SELECT", "301"))
 	if got := drain(t, a); len(got) != 1 {
 		t.Fatalf("another address of the allowed one's /64: %d alerts, want 1", len(got))
+	}
+}
+
+// A /64 a guard keeps from being banned as a whole (here a registered
+// check, as IGNORE_IPS or a trusted proxy range is) counts per address, as
+// its ban does: one address's alert must not spend its neighbours'.
+func TestGuardedSlash64CountsPerAddress(t *testing.T) {
+	firewall.SetClientNetExempt("wafsec-test", func(p netip.Prefix) bool { return p.String() == "2001:db8:1:2::/64" })
+	firewall.ResetCountKeyCache()
+	t.Cleanup(func() { firewall.SetClientNetExempt("wafsec-test", nil); firewall.ResetCountKeyCache() })
+	d := New(Config{Families: map[string]int{"WAF_SQLI": 1}})
+	d.Enqueue(ev("2001:db8:1:2::a", "WAF_SQLI:UNION_SELECT", "301"))
+	d.Enqueue(ev("2001:db8:1:2::b", "WAF_SQLI:UNION_SELECT", "301"))
+	got := drain(t, d)
+	if len(got) != 2 || got[0].Extra["ip"] == got[1].Extra["ip"] {
+		t.Fatalf("want one alert per address of a guarded /64, got %+v", got)
+	}
+	if _, ok := got[0].Extra["client"]; ok {
+		t.Fatalf("a guarded address tagged with a /64: %v", got[0].Extra)
 	}
 }

@@ -834,6 +834,10 @@ func runDaemon(args []string) {
 	// any L7 ban from here on) is never taken over a proxy's range
 	// (firewall/client_block.go's guard reads them).
 	loadEdgeBanTrustedProxies()
+	// The per-client counters (detectors, admin API) key an IPv6 client on
+	// its /64 only where a ban could take the /64: firewall.CountKey reads
+	// the same guards from this backend.
+	firewall.SetCountBackend(be)
 	ttlRestored := startTTLBans(be, cfgDir)
 
 	// Edge ban store (internal/edgeban): the web-related and manual bans the
