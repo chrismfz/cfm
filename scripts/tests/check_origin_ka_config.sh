@@ -167,32 +167,57 @@ for f in "$ORT" "$ANG"; do
   fi
 done
 
-# IPv6 origin hop: a literal origin proxy_pass must use $cfm_origin_addr (the
-# map that brackets an IPv6 $server_addr), never a bare $server_addr, which
-# nginx reads as host "2001" plus an invalid port ("invalid port in upstream").
-# The Lua sides (cfm.lua origin_pass_for, cfm_origin_ka.lua set_peer and the
-# balancer fallbacks) bracket in Lua; their tests are cfm_origin_ka_test.lua
-# and cfm_origin_pass_v6_test.lua.
-# grep_lines PATTERN FILE: matching line numbers, space-separated. "No match"
-# (grep exit 1) is an empty answer; a grep that cannot run (exit 2) FAILS.
-grep_lines() {
-  local out rc=0
-  out=$(grep -nE "$1" "$2") || rc=$?
-  # Runs in $( ): exit, so set -e aborts the whole check (err() would set fail in the subshell only).
-  if [ "$rc" -gt 1 ]; then echo "❌ [origin-ka-config] grep failed (exit $rc) on $2" >&2; exit 2; fi
-  printf '%s' "$out" | cut -d: -f1 | tr '\n' ' '
-}
+# IPv6 origin hop. An IPv6 $server_addr needs (a) brackets in the origin URL /
+# balancer peer — bare, nginx reads "2001:db8::1:443" as host "2001" plus an
+# invalid port ("invalid port in upstream") — and (b) an IPv6 source address:
+# the server-level `proxy_bind 127.0.0.1` cannot be bound on an IPv6 socket
+# (bind() EINVAL). So in both confs:
+#   * no proxy_pass to a bare $server_addr / ${server_addr};
+#   * the $cfm_origin_addr, $cfm_origin_bind and $cfm_pass_bind maps exist
+#     with exactly their pinned bodies;
+#   * every `proxy_pass $cfm_pass;` is followed by `proxy_bind $cfm_pass_bind;`
+#     and every $cfm_origin_addr proxy_pass by `proxy_bind $cfm_origin_bind;`;
+#   * every balancer fallback brackets its peer on the line before
+#     set_current_peer(a, …), and none passes ngx.var.server_addr directly.
+# The Lua sides are tested by cfm_origin_ka_test.lua and
+# cfm_origin_pass_v6_test.lua. These checks are awk programs (no grep exit
+# codes to get wrong); awk failing to run fails the check under set -e.
 for f in "$ORT" "$ANG"; do
-  bare=$(grep_lines '^[[:space:]]*proxy_pass[[:space:]]+https?://\$server_addr' "$f")
-  if [ -n "$bare" ]; then
-    err "$f: proxy_pass to a bare \$server_addr at line(s) [$bare] — use \$cfm_origin_addr (IPv6 needs brackets)."
+  v6err=$(awk '
+    function bad(m) { print FILENAME ":" NR ": " m; }
+    /^[[:space:]]*proxy_pass[[:space:]]+https?:\/\/\$\{?server_addr\}?/ { bad("proxy_pass to a bare $server_addr (use $cfm_origin_addr)") }
+    /set_current_peer\(ngx\.var\.server_addr/ { bad("balancer fallback passes a bare ngx.var.server_addr") }
+    /set_current_peer\(a,/ { if (prevl !~ /if a:find\(":", 1, true\) then a = "\[" \.\. a \.\. "\]" end/) bad("balancer fallback: the bracket line is not right before set_current_peer(a, ...)") }
+    want != "" { if ($0 !~ want) bad("expected `" wantmsg "` right after line " NR-1); want="" }
+    /^[[:space:]]*proxy_pass[[:space:]]+\$cfm_pass;/ { want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_pass_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_pass_bind;" }
+    /^[[:space:]]*proxy_pass[[:space:]]+https?:\/\/\$cfm_origin_addr:/ { want="^[[:space:]]*proxy_bind[[:space:]]+\\$cfm_origin_bind;[[:space:]]*$"; wantmsg="proxy_bind $cfm_origin_bind;" }
+    { prevl = $0 }
+    END { if (want != "") bad("expected `" wantmsg "` after the last line") }
+  ' "$f")
+  if [ -n "$v6err" ]; then
+    while IFS= read -r l; do err "$l"; done <<<"$v6err"
   fi
-  if ! grep -qE '^[[:space:]]*map[[:space:]]+\$server_addr[[:space:]]+\$cfm_origin_addr' "$f"; then
-    err "$f: the \$cfm_origin_addr map (IPv6 bracketing of \$server_addr) is missing."
-  fi
-  fb=$(grep_lines 'set_current_peer\(ngx\.var\.server_addr' "$f")
-  if [ -n "$fb" ]; then
-    err "$f: balancer fallback passes a bare ngx.var.server_addr at line(s) [$fb] — bracket an IPv6 address first."
+  # Pinned map bodies: the map line, then its body lines, whitespace-normalised.
+  maps=$(awk '
+    /^[[:space:]]*map[[:space:]]+(\$server_addr|"\$cfm_pass\|\$server_addr")[[:space:]]+\$cfm_(origin_addr|origin_bind|pass_bind)[[:space:]]*\{/ { inmap=1 }
+    inmap { l=$0; gsub(/[[:space:]]+/, " ", l); sub(/^ /, "", l); sub(/ $/, "", l); print l; if ($0 ~ /^[[:space:]]*\}/) inmap=0 }
+  ' "$f")
+  want_maps='map $server_addr $cfm_origin_addr {
+"~:" "[$server_addr]";
+default $server_addr;
+}
+map $server_addr $cfm_origin_bind {
+"~:" "::1";
+default 127.0.0.1;
+}
+map "$cfm_pass|$server_addr" $cfm_pass_bind {
+"~^https?://\[" "::1";
+"~^https?://cfm_origin_https?\|.*:" "::1";
+default 127.0.0.1;
+}'
+  if [ "$maps" != "$want_maps" ]; then
+    err "$f: the IPv6 origin maps (\$cfm_origin_addr / \$cfm_origin_bind / \$cfm_pass_bind) are missing or changed; got:
+$maps"
   fi
 done
 
@@ -200,4 +225,4 @@ if [ "$fail" -ne 0 ]; then
   echo "[origin-ka-config] FAILED — see errors above (invariant: 443 origin reuse blocked at every layer)." >&2
   exit 1
 fi
-echo "[origin-ka-config] OK: OpenResty origin upstreams set keepalive 0; Angie carries none; every 443 origin location disables TLS session reuse; origin hops bracket IPv6."
+echo "[origin-ka-config] OK: OpenResty origin upstreams set keepalive 0; Angie carries none; every 443 origin location disables TLS session reuse; origin hops bracket IPv6 and bind its loopback."

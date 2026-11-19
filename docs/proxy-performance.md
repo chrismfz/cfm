@@ -14,7 +14,7 @@ measure the split on any box, and which knobs shave them.
 |---|---|---|
 | Client TLS handshake | Full handshake against OpenResty/Angie on a cold connection. A shared `ssl_session_cache` (now on by default) lets *reconnecting* clients resume abbreviated handshakes. | 1 RTT + crypto |
 | Access-phase Lua (`cfm.lua`) | Clearance validation, WAF regex battery, shdict lookups. Bridge RPC + GeoIP are cached (90 s / 5 min); the former per-request `loadfile()` churn (self-ips, ignore-nets, bridge token/config, clamav config) is now cached in `cfm_filecache.lua`. | ≲ 1–2 ms warm |
-| Backend hop to Apache | `proxy_pass http(s)://$server_addr` (IPv6 bracketed: `$cfm_origin_addr` in the confs, `origin_pass_for` in cfm.lua) opens a **fresh TCP connection per request**, and on 443 pays a **full upstream TLS handshake per request**. This is usually the largest avoidable slice. | several ms on 443 |
+| Backend hop to Apache | `proxy_pass http(s)://$server_addr` (IPv6 bracketed: `$cfm_origin_addr` in the confs, `origin_pass_for` in cfm.lua; bound to `::1` instead of `127.0.0.1` via `$cfm_pass_bind` / `$cfm_origin_bind`) opens a **fresh TCP connection per request**, and on 443 pays a **full upstream TLS handshake per request**. This is usually the largest avoidable slice. | several ms on 443 |
 | Response relay | Buffered proxying, loopback. | negligible |
 
 ## Measuring the split (do this before and after tuning)

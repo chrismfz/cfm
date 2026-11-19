@@ -131,13 +131,14 @@ end
 -- ipv6_to_hex32("2001:db8::1") -> "20010db8000000000000000000000001": the full
 -- 128-bit address as 32 lowercase hex digits, in the same form Go writes the
 -- v6_ranges networks. Accepts "::" compression, an embedded IPv4 tail
--- ("::ffff:1.2.3.4") and a zone suffix ("fe80::1%eth0", dropped). Anything it
--- cannot read as exactly 8 groups returns nil, and a nil never matches a range.
+-- ("::ffff:1.2.3.4"). A zone suffix ("fe80::1%eth0") is refused like Go's
+-- net.ParseIP refuses it (link-local is the loopback/link-local rule's job).
+-- Anything it cannot read as exactly 8 groups returns nil, and a nil never
+-- matches a range.
 local function ipv6_to_hex32(ip)
   if type(ip) ~= "string" or not ip:find(":", 1, true) then return nil end
+  if ip:find("%", 1, true) then return nil end
   ip = lower(ip)
-  local pct = ip:find("%", 1, true)
-  if pct then ip = ip:sub(1, pct - 1) end
   local head4, v4 = ip:match("^(.*:)(%d+%.%d+%.%d+%.%d+)$")
   if v4 then
     local n = ipv4_to_uint32(v4)
@@ -197,7 +198,10 @@ local function is_in_ignore_nets(ip)
   local ranges6 = cache.v6_ranges
   if ranges6 and #ranges6 > 0 then
     local h = ipv6_to_hex32(ip)
-    if h then
+    -- A v4-mapped address (::ffff:a.b.c.d) is an IPv4 client to Go: its
+    -- IPNet.Contains never matches it against an IPv6 network, so neither
+    -- does the edge (a ::/0 entry must not swallow every IPv4-mapped client).
+    if h and h:sub(1, 24) ~= "00000000000000000000ffff" then
       for i = 1, #ranges6 do
         if hex32_in_prefix(h, ranges6[i][1], ranges6[i][2]) then return true end
       end

@@ -24,6 +24,7 @@ local rawByPath = {
       { "20010db8800000000000000000000000", 33 },   -- 2001:db8:8000::/33 (partial nibble)
       { "zz", 64 },                                 -- malformed: dropped
       { "2a0c0000000000000000000000000000", 129 },  -- bad prefix: dropped
+      { "00000000000000000000000000000000", 80 },   -- ::/80 covers ::ffff:0:0/96
     },
   },
 }
@@ -72,7 +73,8 @@ assert_true(H("2001:db8::1") == "20010db8000000000000000000000001", "hex32 compr
 assert_true(H("::1") == "00000000000000000000000000000001", "hex32 ::1")
 assert_true(H("::") == "00000000000000000000000000000000", "hex32 ::")
 assert_true(H("2001:DB8:0:0:0:0:0:1") == "20010db8000000000000000000000001", "hex32 full + upper")
-assert_true(H("fe80::1%eth0") == "fe800000000000000000000000000001", "hex32 zone dropped")
+assert_true(H("fe80::1%eth0") == nil, "hex32 refuses a zone id (as Go's ParseIP does)")
+assert_true(H("2001:db8::1%25eth0") == nil, "hex32 refuses an encoded zone id")
 assert_true(H("::ffff:1.2.3.4") == "00000000000000000000ffff01020304", "hex32 embedded v4")
 assert_true(H("1::") == "00010000000000000000000000000000", "hex32 trailing ::")
 for _, bad in ipairs({ "1.2.3.4", "1::2::3", "12345::1", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9",
@@ -90,7 +92,9 @@ assert_true(selfip.is_self_origin("2001:db8:8000::1"), "ignore v6 /33 low half-n
 assert_true(selfip.is_self_origin("2001:db8:ffff:ffff::1"), "ignore v6 /33 top inside")
 assert_true(not selfip.is_self_origin("2001:db8:7fff::1"), "ignore v6 /33: other half outside")
 assert_true(not selfip.is_self_origin("2a0c::1"), "malformed v6_ranges entries never match")
-assert_true(not selfip.is_self_origin("::ffff:10.0.1.1"), "v4-mapped outside every range")
+assert_true(not selfip.is_self_origin("::ffff:10.0.1.1"), "v4-mapped never matches a v6 range (::/80 here), as in Go")
+assert_true(not selfip.is_self_origin("::ffff:8.8.8.8"), "v4-mapped public never matches a v6 range")
+assert_true(selfip.is_self_origin("::abcd"), "::/80 still matches a plain v6 inside it")
 
 -- Outside every bypass source → NOT self-origin.
 assert_true(not selfip.is_self_origin("10.0.1.1"), "10.0.1.1 outside range")
