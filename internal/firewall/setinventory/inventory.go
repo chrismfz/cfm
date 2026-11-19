@@ -9,20 +9,21 @@ import (
 
 func BuildSetNames(feeds []blocklists.Feed) map[string]string {
 	setNames := map[string]string{
-		"block_v4":       "block_v4",
-		"block_v6":       "block_v6",
-		"block_v4_nets":  "block_v4_nets",
-		"block_v6_nets":  "block_v6_nets",
-		"allow_v4":       "allow_v4",
-		"allow_v6":       "allow_v6",
-		"allow_v4_nets":  "allow_v4_nets",
-		"allow_v6_nets":  "allow_v6_nets",
-		"ignore_v4":      "ignore_v4",
-		"ignore_v6":      "ignore_v6",
-		"ignore_v4_nets": "ignore_v4_nets",
-		"ignore_v6_nets": "ignore_v6_nets",
-		"allow_dyn_v4":   "allow_dyn_v4",
-		"allow_dyn_v6":   "allow_dyn_v6",
+		"block_v4":         "block_v4",
+		"block_v6":         "block_v6",
+		"block_v4_nets":    "block_v4_nets",
+		"block_v6_nets":    "block_v6_nets",
+		"block_v6_clients": "block_v6_clients",
+		"allow_v4":         "allow_v4",
+		"allow_v6":         "allow_v6",
+		"allow_v4_nets":    "allow_v4_nets",
+		"allow_v6_nets":    "allow_v6_nets",
+		"ignore_v4":        "ignore_v4",
+		"ignore_v6":        "ignore_v6",
+		"ignore_v4_nets":   "ignore_v4_nets",
+		"ignore_v6_nets":   "ignore_v6_nets",
+		"allow_dyn_v4":     "allow_dyn_v4",
+		"allow_dyn_v6":     "allow_dyn_v6",
 	}
 	for _, f := range feeds {
 		key := feedutil.SanitizeFeedName(f.Name)
@@ -52,6 +53,8 @@ func ClassifySet(name string) (action, family, scope, feed string, ok bool) {
 		return "BLOCK", "v4", "manual", "", true
 	case "block_v6", "block_v6_nets":
 		return "BLOCK", "v6", "manual", "", true
+	case "block_v6_clients": // automatic IPv6 client /64 bans
+		return "BLOCK", "v6", "auto", "", true
 	}
 
 	if strings.HasPrefix(name, "allow_ext_") || strings.HasPrefix(name, "block_ext_") {

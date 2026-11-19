@@ -257,6 +257,8 @@ func Run(args []string, backend firewall.Backend) {
 		// BLOCK v6
 		b6hTTL, b6hTot := countTTLInSet(backend, "block_v6")
 		b6nTTL, b6nTot := countTTLInSet(backend, "block_v6_nets")
+		b6cTTL, b6cTot := countTTLInSet(backend, "block_v6_clients") // automatic IPv6 client /64s
+		b6nTTL, b6nTot = b6nTTL+b6cTTL, b6nTot+b6cTot
 		// ALLOW v4
 		a4hTTL, a4hTot := countTTLInSet(backend, "allow_v4")
 		a4nTTL, a4nTot := countTTLInSet(backend, "allow_v4_nets")

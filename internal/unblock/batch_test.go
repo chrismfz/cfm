@@ -293,7 +293,6 @@ func (b *feedBackend) HasElem(set, elem string) (bool, error) {
 }
 func (b *feedBackend) RemoveBlockBatch([]net.IP) error { return nil }
 func (b *feedBackend) RemoveBlock(net.IP) error        { return nil }
-func (b *feedBackend) RemoveBlockNet(string) error     { return nil }
 func (b *feedBackend) AddAllowBatch(e []firewall.BlockEntry) (firewall.BlockBatchResult, error) {
 	b.batches++
 	b.allowed = append(b.allowed, e...)
@@ -353,8 +352,9 @@ func (b *failingBatchBackend) RemoveBlock(ip net.IP) error {
 	b.removed = append(b.removed, ip.String())
 	return nil
 }
-func (b *failingBatchBackend) RemoveBlockNet(cidr string) error {
-	b.netRemoved = append(b.netRemoved, cidr)
+func (b *failingBatchBackend) WriteSetElem(string, string, *time.Duration, bool) error { return nil }
+func (b *failingBatchBackend) DeleteSetElem(set, cidr string) error {
+	b.netRemoved = append(b.netRemoved, set+" "+cidr)
 	return nil
 }
 
@@ -370,7 +370,7 @@ func TestDoMany_NFTBatchFailureFallsBackPerIP(t *testing.T) {
 		t.Fatalf("per-IP removes %v, want both IPs", be.removed)
 	}
 	// The IPv6 address's client /64 (an automatic ban's) goes too.
-	if len(be.netRemoved) != 1 || be.netRemoved[0] != "2001:db8::/64" {
+	if len(be.netRemoved) != 1 || be.netRemoved[0] != "block_v6_clients 2001:db8::/64" {
 		t.Fatalf("net removes %v, want the IPv6 client's /64", be.netRemoved)
 	}
 	for ip, r := range res {

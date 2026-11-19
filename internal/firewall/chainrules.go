@@ -53,6 +53,49 @@ func (c *ChainRules) Has(expr string) bool {
 	return false
 }
 
+// FirstHandle is the handle of the top-most listed rule that is exactly expr
+// ("" when none, or the listing had no handles).
+func (c *ChainRules) FirstHandle(expr string) string {
+	k := ruleKey(expr)
+	for _, r := range c.rules {
+		if r.handle != "" && r.key == k {
+			return r.handle
+		}
+	}
+	return ""
+}
+
+// AnchoredRule is a base rule added after the rules it was written to follow
+// existed: on a chain that already holds Anchor, a missing Expr goes right
+// after the anchor's first copy (`add rule … position <handle>`), not where
+// an insert at position 0 or an append would put it (above the self and
+// allow accepts, or below the ports policy's accepts). On a new chain the
+// ordinary insert / append order places it.
+type AnchoredRule struct {
+	Expr, Anchor string
+}
+
+// BaseRuleAnchors are the input chain rules that came after the rest of the
+// base layer (both backends' EnsureBase): the drops of block_v6_clients, the
+// automatic IPv6 client /64 bans (client_block.go), each right after its
+// block_v6_nets twin.
+var BaseRuleAnchors = []AnchoredRule{
+	{Expr: `ip6 saddr @block_v6_clients drop`, Anchor: `ip6 saddr @block_v6_nets drop`},
+	{Expr: `ct state established,related ip6 saddr @block_v6_clients drop`, Anchor: `ct state established,related ip6 saddr @block_v6_nets drop`},
+}
+
+// AnchorHandle is the handle a missing expr must be added after on this
+// chain, or "" when expr is not anchored or its anchor is not (yet) listed.
+func (c *ChainRules) AnchorHandle(expr string) string {
+	k := ruleKey(expr)
+	for _, a := range BaseRuleAnchors {
+		if ruleKey(a.Expr) == k {
+			return c.FirstHandle(a.Anchor)
+		}
+	}
+	return ""
+}
+
 // Add records expr as present, for a rule about to be written.
 func (c *ChainRules) Add(expr string) {
 	c.rules = append(c.rules, chainRule{key: ruleKey(expr)})

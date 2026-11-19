@@ -57,7 +57,7 @@ func TestCollectFirewallStatusHealthy(t *testing.T) {
 		t.Fatalf("write detectors.conf: %v", err)
 	}
 	be := mockDiagBE{dnat: true, dnatJSON: healthyDNATJSON, sets: map[string][]string{
-		"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
+		"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {}, "block_v6_clients": {},
 		"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
 		"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
 		"allow_dyn_v4": {}, "allow_dyn_v6": {},
@@ -98,7 +98,7 @@ func TestCollectFirewallStatusOpenRestyModeOnlyDNATEdgeOK(t *testing.T) {
 		dnat:     false,
 		dnatJSON: healthyDNATJSON,
 		sets: map[string][]string{
-			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
+			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {}, "block_v6_clients": {},
 			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
 			"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
 			"allow_dyn_v4": {}, "allow_dyn_v6": {},
@@ -134,7 +134,7 @@ func TestCollectFirewallStatusBothEnabledAndHealthy(t *testing.T) {
 		dnat:     true,
 		dnatJSON: healthyDNATJSON,
 		sets: map[string][]string{
-			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
+			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {}, "block_v6_clients": {},
 			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
 			"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
 			"allow_dyn_v4": {}, "allow_dyn_v6": {},
@@ -166,7 +166,7 @@ func TestCollectFirewallStatusChallengeChecksNeverPublished(t *testing.T) {
 		dnat:     true,
 		dnatJSON: healthyDNATJSON,
 		sets: map[string][]string{
-			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {},
+			"block_v4": {}, "block_v6": {}, "block_v4_nets": {}, "block_v6_nets": {}, "block_v6_clients": {},
 			"allow_v4": {}, "allow_v6": {}, "allow_v4_nets": {}, "allow_v6_nets": {},
 			"ignore_v4": {}, "ignore_v6": {}, "ignore_v4_nets": {}, "ignore_v6_nets": {},
 			"allow_dyn_v4": {}, "allow_dyn_v6": {},

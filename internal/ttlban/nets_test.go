@@ -9,8 +9,8 @@ import (
 	"cfm/internal/firewall"
 )
 
-// netsFake adds block_v6_nets to batchFake: listed, added and removed as the
-// real sets are.
+// netsFake adds block_v6_clients to batchFake: listed, written and deleted
+// as the real set is (firewall.SetElemWriter); the guard's sets are empty.
 type netsFake struct {
 	batchFake
 	nets    map[string]time.Duration // 0 = permanent
@@ -21,7 +21,7 @@ type netsFake struct {
 
 func (f *netsFake) ListSetElementsTimed(set string) ([]firewall.SetElementTimed, error) {
 	var out []firewall.SetElementTimed
-	if set == firewall.BlockV6Nets {
+	if set == firewall.BlockV6Clients {
 		for e, d := range f.nets {
 			out = append(out, firewall.SetElementTimed{Elem: e, Expires: d})
 		}
@@ -29,36 +29,37 @@ func (f *netsFake) ListSetElementsTimed(set string) ([]firewall.SetElementTimed,
 	return out, nil
 }
 
-func (f *netsFake) AddBlockNet(cidr string, ttl *time.Duration) error {
+func (f *netsFake) WriteSetElem(set, cidr string, ttl *time.Duration, replace bool) error {
+	if set != firewall.BlockV6Clients {
+		return errFake
+	}
 	if f.addErr != nil {
 		return f.addErr
 	}
 	f.added = append(f.added, cidr)
-	if _, ok := f.nets[cidr]; !ok {
-		f.nets[cidr] = 0
-		if ttl != nil {
-			f.nets[cidr] = *ttl
-		}
+	f.nets[cidr] = 0
+	if ttl != nil {
+		f.nets[cidr] = *ttl
 	}
 	return nil
 }
 
-func (f *netsFake) RemoveBlockNet(cidr string) error {
+func (f *netsFake) DeleteSetElem(set, cidr string) error {
 	f.removed = append(f.removed, cidr)
 	delete(f.nets, cidr)
 	return nil
 }
 
-// block_v6_nets is one of the mirrored sets: an IPv6 client's /64 ban (and a
-// manual IPv6 CIDR with a TTL) survives a restart like a host ban. IPv4 nets,
-// ranges and permanent elements are not kept.
+// block_v6_clients is one of the mirrored sets: an IPv6 client's /64 ban
+// survives a restart like a host ban. IPv4 nets, ranges and permanent
+// elements are not kept.
 func TestSnapshotKeepsTimedIPv6Nets(t *testing.T) {
 	found := false
 	for _, s := range Sets {
-		found = found || s == firewall.BlockV6Nets
+		found = found || s == firewall.BlockV6Clients
 	}
 	if !found {
-		t.Fatalf("Sets = %v, want %s in it", Sets, firewall.BlockV6Nets)
+		t.Fatalf("Sets = %v, want %s in it", Sets, firewall.BlockV6Clients)
 	}
 	s, path := newStore(t)
 	if _, err := s.Restore(nil, nil); err != nil {
@@ -75,7 +76,7 @@ func TestSnapshotKeepsTimedIPv6Nets(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := readFile(t, path)
-	if len(got) != 2 || got["2001:db8:1:2::/64"].Set != firewall.BlockV6Nets || got["2001:db8:9::/48"].Set != firewall.BlockV6Nets {
+	if len(got) != 2 || got["2001:db8:1:2::/64"].Set != firewall.BlockV6Clients || got["2001:db8:9::/48"].Set != firewall.BlockV6Clients {
 		t.Fatalf("file %v", got)
 	}
 	if !got["2001:db8:1:2::/64"].Expires.Equal(t0.Add(6 * time.Hour)) {
@@ -88,8 +89,8 @@ func TestSnapshotKeepsTimedIPv6Nets(t *testing.T) {
 func TestRestoreBringsBackIPv6Nets(t *testing.T) {
 	s, path := newStore(t)
 	writeFile(t, path, map[string]Entry{
-		"2001:db8:1:2::/64": {Set: firewall.BlockV6Nets, Expires: t0.Add(90 * time.Minute)},
-		"2001:db8:5:6::/64": {Set: firewall.BlockV6Nets, Expires: t0.Add(-time.Minute)}, // expired
+		"2001:db8:1:2::/64": {Set: firewall.BlockV6Clients, Expires: t0.Add(90 * time.Minute)},
+		"2001:db8:5:6::/64": {Set: firewall.BlockV6Clients, Expires: t0.Add(-time.Minute)}, // expired
 		"192.0.2.1":         {Set: "block_v4", Expires: t0.Add(time.Hour)},
 	})
 	if err := s.Load(); err != nil || s.Len() != 3 {

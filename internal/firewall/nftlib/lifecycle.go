@@ -121,6 +121,8 @@ func (b *Backend) EnsureBase() (err error) {
 		{name: setAllowV6Net, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
 		{name: setBlockV4Net, keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
 		{name: setBlockV6Net, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
+		// The automatic IPv6 client /64 bans (firewall/client_block.go).
+		{name: firewall.BlockV6Clients, keyType: nftables.TypeIP6Addr, hasTimeout: true, interval: true},
 		{name: setIgnoreV4, keyType: nftables.TypeIPAddr, hasTimeout: true},
 		{name: setIgnoreV6, keyType: nftables.TypeIP6Addr, hasTimeout: true},
 		{name: setIgnoreV4Net, keyType: nftables.TypeIPAddr, hasTimeout: true, interval: true},
@@ -299,6 +301,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 		`ip6 saddr @block_ext_v6_nets drop`,
 		`ip saddr @block_v4_nets drop`,
 		`ip6 saddr @block_v6_nets drop`,
+		`ip6 saddr @block_v6_clients drop`,
 	}
 	if icmpEnabled {
 		early = append(early, icmpFloodJumps...)
@@ -318,6 +321,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`)
 	addRule(`ct state established,related ip saddr @block_v4_nets drop`)
 	addRule(`ct state established,related ip6 saddr @block_v6_nets drop`)
+	addRule(`ct state established,related ip6 saddr @block_v6_clients drop`)
 	addRule(`ct state established,related accept`)
 
 	// Duplicate allow/block rules appended (nft backend adds them both early and late).
@@ -428,14 +432,26 @@ func baseRulesScript(chain string, ins, adds []string) []string {
 	for _, h := range have.DuplicateHandles(append([]string{`iif "lo" accept`, `jump flood`}, icmpFloodJumps...)...) {
 		stmts = append(stmts, "delete rule inet cfm input handle "+h)
 	}
+	// A rule written after the rest (firewall.BaseRuleAnchors) goes right
+	// after its anchor on a chain that already holds it: an insert at 0
+	// would put it above the self / allow accepts, an append below the ports
+	// policy's accepts.
 	for _, e := range ins {
 		if missing(e) {
-			stmts = append(stmts, "insert rule inet cfm input position 0 "+e)
+			if h := have.AnchorHandle(e); h != "" {
+				stmts = append(stmts, "add rule inet cfm input position "+h+" "+e)
+			} else {
+				stmts = append(stmts, "insert rule inet cfm input position 0 "+e)
+			}
 		}
 	}
 	for _, e := range adds {
 		if missing(e) {
-			stmts = append(stmts, "add rule inet cfm input "+e)
+			if h := have.AnchorHandle(e); h != "" {
+				stmts = append(stmts, "add rule inet cfm input position "+h+" "+e)
+			} else {
+				stmts = append(stmts, "add rule inet cfm input "+e)
+			}
 		}
 	}
 	return stmts

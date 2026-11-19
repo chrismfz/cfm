@@ -80,19 +80,19 @@ func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 	if n := strings.Count(got, "ARGS "); n != 2 {
 		t.Fatalf("%d nft processes, want 2 (one read, one write):\n%s", n, got)
 	}
-	first := strings.Index(got, `insert rule inet cfm input position 0 ip6 saddr @block_v6_nets drop`)
+	first := strings.Index(got, `insert rule inet cfm input position 0 ip6 saddr @block_v6_clients drop`)
 	last := strings.Index(got, `insert rule inet cfm input position 0 iif "lo" accept`)
 	flood := strings.Index(got, "add rule inet cfm input jump flood")
 	if first < 0 || last < 0 || first > last || flood < last {
 		t.Errorf("want the early rules inserted bottom-up (so iif lo ends on top), then the adds, jump flood last:\n%s", got)
 	}
-	if n := strings.Count(got, "\ninsert rule") + strings.Count(got, "SCRIPT insert rule"); n != 21 {
-		t.Errorf("%d inserts, want the 21 early rules", n)
+	if n := strings.Count(got, "\ninsert rule") + strings.Count(got, "SCRIPT insert rule"); n != 22 {
+		t.Errorf("%d inserts, want the 22 early rules", n)
 	}
 	// The appended allow/block copies read as present once the early rules
 	// are queued, exactly as the per-rule version found them in the chain.
-	if n := strings.Count(got, "add rule"); n != 10 {
-		t.Errorf("%d adds, want 9 established/related rules + jump flood:\n%s", n, got)
+	if n := strings.Count(got, "add rule"); n != 11 {
+		t.Errorf("%d adds, want 10 established/related rules + jump flood:\n%s", n, got)
 	}
 
 	// Everything present: one read, no write.
@@ -130,8 +130,8 @@ func TestApplyBaseInputRules_FallsBackPerStatement(t *testing.T) {
 	log := fakeNFTChain(t, "", 1)
 	_ = (&Backend{}).applyBaseInputRules(false)
 	got := readNFTLog(t, log)
-	if n := strings.Count(got, "ARGS -f -"); n != 1+31 {
-		t.Errorf("%d nft -f runs, want the failed script + 31 single statements", n)
+	if n := strings.Count(got, "ARGS -f -"); n != 1+33 {
+		t.Errorf("%d nft -f runs, want the failed script + 33 single statements", n)
 	}
 }
 
@@ -227,5 +227,31 @@ func TestBaseRulesScript_JumpFloodAndDuplicates(t *testing.T) {
 	}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Errorf("baseRulesScript =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// On a chain from before block_v6_clients, its drops go right after their
+// block_v6_nets anchors (add … position <handle>), never at position 0 above
+// the self / allow accepts; on a new chain the ordinary order places them.
+func TestBaseRulesScriptAnchorsTheClientDrops(t *testing.T) {
+	old := "chain input {\n" +
+		"\tiif \"lo\" accept # handle 3\n" +
+		"\tip6 saddr @self_v6 accept # handle 5\n" +
+		"\tip6 saddr @block_v6_nets drop # handle 26\n" +
+		"\tct state established,related ip6 saddr @block_v6_nets drop # handle 40\n" +
+		"}"
+	got := baseRulesScript(old,
+		[]string{`iif "lo" accept`, `ip6 saddr @self_v6 accept`, `ip6 saddr @block_v6_nets drop`, `ip6 saddr @block_v6_clients drop`},
+		[]string{`ct state established,related ip6 saddr @block_v6_nets drop`, `ct state established,related ip6 saddr @block_v6_clients drop`})
+	want := []string{
+		"add rule inet cfm input position 26 ip6 saddr @block_v6_clients drop",
+		"add rule inet cfm input position 40 ct state established,related ip6 saddr @block_v6_clients drop",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("script:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	fresh := baseRulesScript("", []string{`ip6 saddr @block_v6_clients drop`}, nil)
+	if len(fresh) != 1 || fresh[0] != "insert rule inet cfm input position 0 ip6 saddr @block_v6_clients drop" {
+		t.Fatalf("a new chain: %v", fresh)
 	}
 }

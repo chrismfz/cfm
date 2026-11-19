@@ -23,6 +23,7 @@ var localSets = []struct {
 	{"allow_v4_nets", true}, {"allow_v6_nets", true},
 	{"block_v4", false}, {"block_v6", false},
 	{"block_v4_nets", false}, {"block_v6_nets", false},
+	{"block_v6_clients", false}, // automatic IPv6 client /64 bans
 }
 
 // LocalRefreshEvery is how often the local sets are re-read. A TTL ban that

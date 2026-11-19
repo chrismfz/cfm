@@ -149,14 +149,12 @@ func authAutoblockApply(be firewall.Backend, ip net.IP, mode string, ttl *time.D
 	case "dryrun":
 		return authBlockDone
 	case "ttl":
-		res, err := firewall.ExtendBlockResult(be, ip, *ttl)
+		_, kept, err := firewall.ExtendClientBlock(be, ip, *ttl)
 		switch {
 		case err != nil:
 			return authBlockFailed
-		case res.Kept > 0:
+		case kept:
 			return authBlockKept
-		case res.Added+res.Extended == 0: // not blockable (unspecified address)
-			return authBlockFailed
 		}
 		return authBlockDone
 	}

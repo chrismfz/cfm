@@ -190,22 +190,41 @@ on its address), always the whole /64 for a ban, with no per-node switch.
 - **nft:** a masked key (`ip6 saddr and ffff:ffff:ffff:ffff::`) in a dynamic
   set, a `limit` meter and a `ct count` works on the fleet's kernels: two
   addresses of one /64 make one element and share one limit (2026-11-19, in
-  a throwaway netns on earth, 4.18, and rigel, 5.14). `block_v6_nets`
-  (interval, timeout) already holds a /64 ban.
-- **Bans (done):** every automatic ban of an IPv6 client takes its /64
+  a throwaway netns on earth, 4.18, and rigel, 5.14).
+- **Bans (done):** every automatic L7 ban of an IPv6 client takes its /64
   (`firewall.ExtendClientBlock` / `BlockClientPermanent`): the detector
-  sinks, the challenge server, the kernel flood / port-scan autoblock, the
-  admin API's login autoblock, TTL
-  and permanent. The /64 goes to `block_v6_nets`, only ever added or
-  extended (an extend deletes the shorter element and adds the longer one; a
-  failed add puts the old one back). When the set cannot take the /64 as it
-  is (a wider element ending sooner, an overlapping narrower one, a failed
-  read or write) the address is banned instead, so no ban is lost. The edge
-  ban store keys it as the /64 and answers every address of it, except where
-  an allow or a trusted proxy range touches any of it. TTL /64 bans survive a
-  restart (`internal/ttlban`), a permanent one goes to `cfm.deny`. Unblocking
-  any address of the /64 frees the /64. Manual bans stay exactly what the
-  operator typed. The alert says "Banned as: <the /64>".
+  sinks, the challenge server and the admin API's login autoblock, TTL and
+  permanent. These see a real session (an HTTP request, a login). The
+  kernel flood / port-scan autoblock counts packets whose source can be
+  spoofed, so it stays per address: a /64 there would let a forged prefix
+  ban someone else's (a crawler's, the node's own). Manual bans stay exactly
+  what the operator typed.
+  - **Own set:** `block_v6_clients` (interval, timeout), with its drops
+    right after `block_v6_nets'` in both engines' EnsureBase. In
+    `block_v6_nets` an automatic /64 made the operator's own IPv6 CIDRs fail
+    (nft refuses overlapping elements: `cfm block <v6 /48>`, and a
+    `cfm.deny` /48 after a reboot). On a chain from an older version the two
+    drops are added right after their `block_v6_nets` anchors (`add rule …
+    position <handle>`, `firewall.BaseRuleAnchors`), never at the top above
+    the self / allow accepts (live test `LiveNFTClientSlash64`).
+  - **Never shortened:** only ever added or extended; an extend replaces the
+    element in one transaction (`firewall.SetElemWriter`: one `nft -f` run
+    on exec, one netlink batch on nftlib; a failed transaction keeps the old
+    element, checked on earth's 4.18).
+  - **Guards:** the address is banned instead when the /64 holds this node's
+    own address (`self_v6`: a provider handing one /64 to several customers'
+    VPSes), an ignored address or network (`ignore_v6`, `ignore_v6_nets`,
+    `IGNORE_IPS` / `IGNORE_NETS`), since nft accepts none of those before
+    its drops; and when nft cannot read or write the set. Allows need no
+    guard: every allow set is accepted before any block drop.
+  - **Edge:** the edge ban store keys it as the /64 and answers every
+    address of it, except where an allow or a trusted proxy range touches
+    any of it.
+  - **Restart, unblock:** TTL /64 bans survive a restart (`internal/ttlban`;
+    a permanent one, like a detector's permanent host ban, is not
+    persisted). Unblocking any address of the /64 frees the /64 (nft, the
+    edge, `ttlbans.json`, `cfm unblock` with the daemon down too). The alert
+    says "Banned as: <the /64>".
 - **Still per address:** counters, rate limits and the edge's shared dicts
   (next), then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
 

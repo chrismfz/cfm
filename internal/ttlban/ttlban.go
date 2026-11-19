@@ -21,11 +21,11 @@
 // what the caller says must not be blocked (an allow, cfm.ignore,
 // IGNORE_IPS).
 //
-// Host bans, and the IPv6 networks of block_v6_nets: the /64 an automatic ban
-// of an IPv6 client takes (firewall.ExtendClientBlock; docs/edge-ipv6.md),
-// and a manual `cfm block <v6 cidr> --ttl`. IPv4 TTL'd CIDRs (a manual
+// Host bans, and block_v6_clients: the /64 an automatic ban of an IPv6 client
+// takes (firewall.ExtendClientBlock; docs/edge-ipv6.md "IPv6 /64 grouping"),
+// restored through firewall.ExtendBlockNet. TTL'd CIDR blocks (a manual
 // `cfm block <cidr> --ttl`) are not persisted; cfm.deny holds the permanent
-// ones of both families.
+// ones.
 package ttlban
 
 import (
@@ -60,7 +60,7 @@ func SetPathForTest(path string) (restore func()) {
 }
 
 // Sets are the block sets the store mirrors.
-var Sets = []string{"block_v4", "block_v6", firewall.BlockV6Nets}
+var Sets = []string{"block_v4", "block_v6", firewall.BlockV6Clients}
 
 // keyOf is the store's key for a set element: an address, or an IPv6
 // network in its canonical text ("2001:db8:1:2::/64"); "" for anything
@@ -324,7 +324,7 @@ func (s *Store) Restore(be firewall.Backend, exclude func(net.IP) bool) (Restore
 		}
 	}
 	for _, p := range undoNets {
-		if rerr := be.RemoveBlockNet(p.String()); rerr != nil && err == nil {
+		if rerr := firewall.RemoveClientPrefix(be, p); rerr != nil && err == nil {
 			err = fmt.Errorf("ttlban: undo restore of unblocked %s: %w", p, rerr)
 		}
 	}
@@ -610,7 +610,7 @@ func ForgetInFile(path string, ips ...string) error {
 
 func setFor(k string) string {
 	if strings.Contains(k, "/") {
-		return firewall.BlockV6Nets
+		return firewall.BlockV6Clients
 	}
 	if ip := net.ParseIP(k); ip != nil && ip.To4() != nil {
 		return "block_v4"

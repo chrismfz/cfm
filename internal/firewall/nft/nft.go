@@ -429,6 +429,11 @@ func (b *Backend) EnsureBase() (err error) {
 	if err := b.ensureSetWithFlags(blockV6Nets, "ipv6_addr", "timeout,interval"); err != nil {
 		return err
 	}
+	// The automatic IPv6 client /64 bans (firewall/client_block.go): their
+	// own set, so they never collide with the operator's CIDRs above.
+	if err := b.ensureSetWithFlags(firewall.BlockV6Clients, "ipv6_addr", "timeout,interval"); err != nil {
+		return err
+	}
 
 	// NEW: ignore (manual) hosts + nets
 	if err := b.ensureSetWithFlags("ignore_v4", "ipv4_addr", "timeout"); err != nil {
@@ -534,11 +539,21 @@ func (b *Backend) EnsureBase() (err error) {
 		}
 	}
 
+	// A rule written after the rest (firewall.BaseRuleAnchors) goes right
+	// after its anchor on a chain that already holds it: an insert at 0
+	// would put it above the self / allow accepts, an append below the ports
+	// policy's accepts.
+	place := func(expr, otherwise string) string {
+		if h := inputRules.AnchorHandle(expr); h != "" {
+			return fmt.Sprintf(`add rule %s %s input position %s %s`, family, tableName, h, expr)
+		}
+		return otherwise
+	}
 	addRule := func(expr string) error {
 		if ruleInInput(expr) {
 			return nil
 		}
-		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input %s`, family, tableName, expr)); err != nil {
+		if err := b.nftCmd(place(expr, fmt.Sprintf(`add rule %s %s input %s`, family, tableName, expr))); err != nil {
 			return err
 		}
 		recordRuleInInput(expr)
@@ -552,7 +567,7 @@ func (b *Backend) EnsureBase() (err error) {
 		if ruleInInput(expr) {
 			return
 		}
-		if err := b.nftCmd(fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)); err == nil {
+		if err := b.nftCmd(place(expr, fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))); err == nil {
 			recordRuleInInput(expr)
 		}
 	}
@@ -587,6 +602,7 @@ func (b *Backend) EnsureBase() (err error) {
 		`ip6 saddr @block_ext_v6_nets drop`,
 		`ip saddr @block_v4_nets drop`,
 		`ip6 saddr @block_v6_nets drop`,
+		`ip6 saddr @block_v6_clients drop`,
 	}
 
 	// 5) ICMP → flood (below unconditional drops)
@@ -626,6 +642,9 @@ func (b *Backend) EnsureBase() (err error) {
 		return err
 	}
 	if err := addRule(`ct state established,related ip6 saddr @block_v6_nets drop`); err != nil {
+		return err
+	}
+	if err := addRule(`ct state established,related ip6 saddr @block_v6_clients drop`); err != nil {
 		return err
 	}
 

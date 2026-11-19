@@ -15,7 +15,6 @@ import (
 type removeOnlyBE struct{ firewall.Backend }
 
 func (removeOnlyBE) RemoveBlock(net.IP) error        { return nil }
-func (removeOnlyBE) RemoveBlockNet(string) error     { return nil }
 func (removeOnlyBE) RemoveBlockBatch([]net.IP) error { return nil }
 func (removeOnlyBE) ListTableTextNoDNS(string, string) (string, error) {
 	return "", nil
@@ -51,8 +50,9 @@ type netRemoveBE struct {
 	nets []string
 }
 
-func (b *netRemoveBE) RemoveBlockNet(cidr string) error {
-	b.nets = append(b.nets, cidr)
+func (b *netRemoveBE) WriteSetElem(string, string, *time.Duration, bool) error { return nil }
+func (b *netRemoveBE) DeleteSetElem(set, cidr string) error {
+	b.nets = append(b.nets, set+" "+cidr)
 	return nil
 }
 
@@ -81,7 +81,7 @@ func TestDoManyFreesTheIPv6ClientSlash64(t *testing.T) {
 
 	be := &netRemoveBE{}
 	DoMany(context.Background(), ips("2001:db8:1:2::abcd"), Options{BE: be})
-	if len(be.nets) != 1 || be.nets[0] != "2001:db8:1:2::/64" {
+	if len(be.nets) != 1 || be.nets[0] != "block_v6_clients 2001:db8:1:2::/64" {
 		t.Fatalf("nft net removes %v, want the /64", be.nets)
 	}
 	if ok, _ := s.Banned("2001:db8:1:2::77"); ok {

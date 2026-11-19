@@ -158,8 +158,11 @@ func makeUnblockHandler(be firewall.Backend, cfgDir string) http.HandlerFunc {
 				wb = true
 			} else if found, _ := be.HasElem("block_v6", ip.String()); found {
 				wb = true
-			} else if p, ok := firewall.ClientNet(ip); ok {
-				if found, _ := be.HasElem(firewall.BlockV6Nets, p.String()); found {
+			} else if _, ok := firewall.ClientNet(ip); ok {
+				// The address's membership in its client's /64 ban: both
+				// engines answer an address against an interval set (nftlib
+				// does not match a CIDR's text).
+				if found, _ := be.HasElem(firewall.BlockV6Clients, ip.String()); found {
 					wb = true
 				}
 			}

@@ -72,6 +72,9 @@ func classifySetName(name string) setDesc {
 	if name == "block_v6_nets" {
 		return setDesc{name: name, family: "v6", kind: "manual", action: "BLOCK"}
 	}
+	if name == "block_v6_clients" { // an automatic ban of an IPv6 client's /64
+		return setDesc{name: name, family: "v6", kind: "autoblock /64", action: "BLOCK"}
+	}
 
 	// --- dynamic hosts ---
 	if name == "allow_dyn_v4" {

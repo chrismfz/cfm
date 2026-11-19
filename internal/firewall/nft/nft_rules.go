@@ -496,9 +496,6 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 			logging.Logf("[autoblock] %s %s -> %s ttl=%ds failed: %v", fam, logIP, set, ttl, err)
 			return err
 		}
-		if res.Net != "" { // an IPv6 client: banned as its /64
-			set = firewall.BlockV6Nets + " " + res.Net
-		}
 		b.lastAutoBlockAt[ip] = time.Now()
 		switch {
 		case res.Present > 0:
@@ -541,21 +538,20 @@ func (b *Backend) autoBlockAction(ip, fam, reason string, tc cfgpkg.ThrottleConf
 			b.emitAutoBlockNotify(ip, "v4", "permanent", reason, 0, tc.Hits, tc.WindowSec)
 			return nil
 		}
-		// An IPv6 client is banned as its /64 (block_v6_nets), which
-		// cfm.deny then holds; an address ipkey does not group, or a /64 the
-		// set cannot take, as before (AddBlock holds hostBatchMu).
-		parsedIP := net.ParseIP(ip)
-		if parsedIP == nil {
-			return fmt.Errorf("autoBlockAction: invalid IP %q", ip)
-		}
-		elem, err := firewall.BlockClientPermanent(b, parsedIP, comment)
+		// hostBatchMu: see the v4 add above.
+		hostBatchMu.Lock()
+		err := b.nftExpr(fmt.Sprintf("add element inet cfm block_v6 { %s }", ip))
+		hostBatchMu.Unlock()
 		if err != nil {
+			if strings.Contains(err.Error(), "File exists") || strings.Contains(err.Error(), "already exists") {
+				return nil
+			}
 			return err
 		}
-		logging.Logf("[autoblock] v6 %s -> %s permanent (hits>=%d in %ds) reason=%s",
-			logIP, elem, tc.Hits, tc.WindowSec, reason)
+		logging.Logf("[autoblock] v6 %s -> block_v6 permanent (hits>=%d in %ds) reason=%s",
+			logIP, tc.Hits, tc.WindowSec, reason)
 		b.lastAutoBlockAt[ip] = time.Now()
-		_ = b.appendToDenyFile(elem, comment)
+		_ = b.appendToDenyFile(ip, comment)
 		_ = b.ReportBlock(ip, comment, "autoblock", "permanent", 0)
 		b.emitAutoBlockNotify(ip, "v6", "permanent", reason, 0, tc.Hits, tc.WindowSec)
 		return nil

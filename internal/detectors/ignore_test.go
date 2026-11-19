@@ -3,6 +3,7 @@ package detectors
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,4 +255,29 @@ func stripGenerated(s string) string {
 		return s
 	}
 	return s[:start] + s[start+end:]
+}
+
+// OverlapsPrefix (firewall.SetClientNetExempt): any IGNORE_IPS address or
+// IGNORE_NETS network touching the /64, even in part, keeps it from being
+// banned as a whole.
+func TestIPIgnoreOverlapsPrefix(t *testing.T) {
+	ig := newIPIgnoreFromGlobal(KV{
+		"IGNORE_IPS":  "203.0.113.9, 2001:db8:1:2::77",
+		"IGNORE_NETS": "2001:db8:9::/48, 198.51.100.0/24, 2001:db8:5:6:8000::/65",
+	})
+	for p, want := range map[string]bool{
+		"2001:db8:1:2::/64": true,  // an ignored address inside
+		"2001:db8:1:3::/64": false, // next door
+		"2001:db8:9:4::/64": true,  // inside an ignored /48
+		"2001:db8:5:6::/64": true,  // holds an ignored /65
+		"2001:db8:7::/64":   false,
+	} {
+		if got := ig.OverlapsPrefix(netip.MustParsePrefix(p)); got != want {
+			t.Errorf("OverlapsPrefix(%s) = %v, want %v", p, got, want)
+		}
+	}
+	var nilIG *IPIgnore
+	if nilIG.OverlapsPrefix(netip.MustParsePrefix("2001:db8:1:2::/64")) {
+		t.Error("a nil ignore list overlaps nothing")
+	}
 }

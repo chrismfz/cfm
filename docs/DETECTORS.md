@@ -207,7 +207,7 @@ BLOCK_COOLDOWN = 20m
 #### TTL bans across a restart, an upgrade or a reboot
 
 A TTL block lives only as a timed element of `inet cfm block_v4` /
-`block_v6`, or of `block_v6_nets` for the /64 an automatic ban of an IPv6
+`block_v6`, or of `block_v6_clients` for the /64 an automatic ban of an IPv6
 client takes. `cfm.deny` holds only permanent bans (it has no expiry, so a TTL
 ban there would become permanent). A restart's `EnsureBase` keeps the table,
 its sets and their elements on both engines (`LiveNFTTTLBansSurviveRestart`).
@@ -215,8 +215,8 @@ Nothing on an upgrade may empty the table: the rpm `%post` once ran `cfm
 disable` on every upgrade and freed every TTL-banned attacker.
 
 For what still empties it (a reboot, `cfm reset`, `cfm disable`) the daemon
-persists TTL host bans, and the IPv6 networks of `block_v6_nets` (an IPv6
-client's /64, a manual IPv6 CIDR with a TTL), in `/var/lib/cfm/ttlbans.json`
+persists TTL host bans, and the IPv6 client /64s of `block_v6_clients`, in
+`/var/lib/cfm/ttlbans.json`
 (`internal/ttlban`):
 
 - **Saved** from nft every ~2 minutes (the edge ban reconcile's read of the
@@ -226,7 +226,7 @@ client's /64, a manual IPv6 CIDR with a TTL), in `/var/lib/cfm/ttlbans.json`
   table recreated empty under the daemon (`cfm disable` then any CLI command
   that runs EnsureBase; a `flush ruleset`): those bans stay in the file and
   the log says to restart the daemon to re-apply them. Permanent elements are
-  not saved (cfm.deny re-applies them), nor are TTL'd IPv4 CIDR blocks.
+  not saved (cfm.deny re-applies them), nor are TTL'd CIDR blocks.
   Two elements with one key keep the longer ban.
 - **Restored** after `EnsureBase`, in the background (the first edge ban
   reconcile waits up to 30 seconds for it, and nothing is saved before it

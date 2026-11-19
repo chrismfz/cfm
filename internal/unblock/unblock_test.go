@@ -41,10 +41,6 @@ func (c *ensureCounter) RemoveBlock(ip net.IP) error {
 	c.removed = append(c.removed, ip.String())
 	return nil
 }
-func (c *ensureCounter) RemoveBlockNet(cidr string) error {
-	c.removed = append(c.removed, cidr)
-	return nil
-}
 func (c *ensureCounter) ListTableTextNoDNS(string, string) (string, error) {
 	return "", errors.New("no feed sets in this test")
 }

@@ -75,7 +75,7 @@ The history behind each rule below is in the code comments it names.
   moved the redirect). A reload must not change a handle: delete-and-re-add on
   every reload dropped DNAT'd connections, and the live test pins it.
 - **TTL bans live only in nft** (timed elements of `block_v4`/`block_v6`, and
-  `block_v6_nets` for an IPv6 client's automatic /64 ban;
+  `block_v6_clients` for an IPv6 client's automatic /64 ban;
   `cfm.deny` is permanent-only and must never take one). Nothing on a restart
   or upgrade may empty the `inet cfm` table (an rpm `%post` `cfm disable` once
   freed every TTL-banned attacker). For what still does (reboot, `cfm reset`,
@@ -98,6 +98,13 @@ The history behind each rule below is in the code comments it names.
   behind the daemon's back; the same probe answers IP lookups
   (`setprobe.Lookup`, via `ipquery.FindMany`), and an interval-boundary answer
   the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
+- **A base input rule added after the rest needs an anchor.** Both engines'
+  EnsureBase insert a missing early rule at position 0 and append a missing
+  late one: on a node's existing chain a new drop would land above the self /
+  allow accepts (or below the ports policy's accepts). List it in
+  `firewall.BaseRuleAnchors` (rule + the rule it follows): a missing one is
+  then added right after its anchor (`add rule … position <handle>`), and the
+  live `LiveNFTClientSlash64` test pins the upgrade case.
 - **A change here gets a live run in an isolated netns** (the fleet's kernels,
   4.18 and 5.14, are older than a dev box's):
   `unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run 'LiveNFT|ApplyPortsPolicyIsAtomic'`;
@@ -457,7 +464,8 @@ family/rule arming table and the decision records:
   wins. **A new web blocker or unblock / allow path must call `edgeban.Ban` /
   `edgeban.Unban`.** An automatic blocker bans through
   `firewall.ExtendClientBlock` / `BlockClientPermanent` (an IPv6 client is its
-  /64, in `block_v6_nets`) and hands the element they return to
+  /64, in its own set `block_v6_clients`; the kernel L3/L4 autoblock stays per
+  address, its source can be spoofed) and hands the element they return to
   `edgeban.BanElem`; an unblock also calls `firewall.RemoveClientNet` and
   `ttlban.ForgetClient`. The edge checks its copy (`cfm_edgeban.lua`) at cfm.lua
   Step 0e, before every exemption but the static IP/CIDR bypass: **a new

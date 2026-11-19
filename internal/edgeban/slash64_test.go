@@ -121,3 +121,21 @@ func TestSlash64RemoveAndPersistence(t *testing.T) {
 		t.Fatalf("after the unblocks: Len = %d, want 0", s.Len())
 	}
 }
+
+// A /64 banned AFTER the reconcile that saw an allow inside it is not answered
+// either (answers checks the allow sets on every lookup, not only Reconcile).
+func TestSlash64AddedBetweenReconcilesRespectsAllows(t *testing.T) {
+	s, now := newTestStore(t)
+	s.Reconcile(snap(now.Add(time.Second), []string{"2001:db8:1:2::77"}))
+	s.AddElem("2001:db8:1:2::/64", dur(time.Hour), "waf_security", false)
+	if ok, _ := s.Banned("2001:db8:1:2::5"); ok {
+		t.Fatal("a /64 an allow touches must not be answered, reconcile or not")
+	}
+	if len(s.List()) != 0 {
+		t.Fatalf("List = %v, want empty", s.List())
+	}
+	s.AddElem("2001:db8:3:4::/64", dur(time.Hour), "waf_security", false)
+	if ok, _ := s.Banned("2001:db8:3:4::5"); !ok {
+		t.Fatal("a /64 no allow touches must be answered")
+	}
+}
