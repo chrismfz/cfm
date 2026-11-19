@@ -82,13 +82,15 @@ func TestProfilesAreComplete(t *testing.T) {
 	}
 }
 
-func TestLookup(t *testing.T) {
-	for _, in := range []string{"angie", "Angie", " openresty ", "openresty.service", "ANGIE.service"} {
+// Exact, like the equality checks it replaced: a caller uses the string as
+// given afterwards (unit names, reload commands).
+func TestLookupIsExact(t *testing.T) {
+	for _, in := range []string{"angie", "openresty"} {
 		if !IsEdge(in) {
 			t.Errorf("IsEdge(%q) = false", in)
 		}
 	}
-	for _, in := range []string{"", "nginx", "httpd", "angie2", "open"} {
+	for _, in := range []string{"", "nginx", "httpd", "angie2", "open", "Angie", " openresty ", "openresty.service"} {
 		if IsEdge(in) {
 			t.Errorf("IsEdge(%q) = true", in)
 		}

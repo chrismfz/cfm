@@ -17,8 +17,6 @@ package edgeengine
 //     been OpenResty first there, and keeping it is what makes this refactor
 //     behaviour-neutral.
 
-import "strings"
-
 // Profile is one in-path edge engine as CFM installs and manages it.
 type Profile struct {
 	// Name is the engine's name and its systemd unit's base name.
@@ -95,19 +93,20 @@ func Names() []string {
 	return out
 }
 
-// Lookup returns the profile of the named engine (case-insensitive; a
-// trailing ".service" is accepted).
+// Lookup returns the profile of the engine named EXACTLY name (the canonical,
+// lowercase engine name, e.g. "angie"). Exact on purpose: the checks it
+// replaced were exact, and callers go on to use the string as given (unit
+// names, reload commands); a caller that wants leniency normalises first.
 func Lookup(name string) (Profile, bool) {
-	n := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".service")
 	for _, p := range Profiles {
-		if p.Name == n {
+		if p.Name == name {
 			return p, true
 		}
 	}
 	return Profile{}, false
 }
 
-// IsEdge reports whether name is a CFM edge engine (see Lookup).
+// IsEdge reports whether name is exactly a CFM edge engine's name.
 func IsEdge(name string) bool {
 	_, ok := Lookup(name)
 	return ok

@@ -411,10 +411,9 @@ type frontendSignal struct {
 	score           int
 }
 
-func detectDNATFrontend(dnatState string) (string, string, string) {
-	dnatOn := strings.EqualFold(strings.TrimSpace(dnatState), "on")
-	// The CFM edge engines (edgeengine.Profiles, detection order), then plain
-	// nginx, which is a frontend but not a CFM edge.
+// dnatFrontendCandidates: the CFM edge engines (edgeengine.Profiles, detection
+// order), then plain nginx, which is a frontend but not a CFM edge.
+func dnatFrontendCandidates() []frontendSignal {
 	var candidates []frontendSignal
 	for _, p := range edgeengine.Profiles {
 		candidates = append(candidates, frontendSignal{
@@ -436,6 +435,12 @@ func detectDNATFrontend(dnatState string) (string, string, string) {
 			binaryCommands:  []string{"nginx"},
 		},
 	}...)
+	return candidates
+}
+
+func detectDNATFrontend(dnatState string) (string, string, string) {
+	dnatOn := strings.EqualFold(strings.TrimSpace(dnatState), "on")
+	candidates := dnatFrontendCandidates()
 
 	dnatListeners := probeFrontendListeners()
 	dnatHTTP, dnatHTTPS := dnat.EffectiveTargetPorts()
@@ -1115,7 +1120,7 @@ func edgeOrNginx(service string) bool {
 }
 
 func frontendAliases(service string) []string {
-	if p, ok := edgeengine.Lookup(service); ok {
+	if p, ok := edgeengine.Lookup(strings.ToLower(strings.TrimSpace(service))); ok {
 		return append([]string(nil), p.ProcessAliases...) // a copy: never hand out the registry's slice
 	}
 	switch strings.ToLower(strings.TrimSpace(service)) {
@@ -1250,11 +1255,18 @@ func enrichHostMemoryAndLoad(host *HostSystem) {
 	}
 }
 
-func collectServiceStatuses() []ServiceStatus {
+// serviceStatusUnits: CFM, plain nginx, then the edge engines in
+// file-precedence order (OpenResty, then Angie: the order this list always had).
+func serviceStatusUnits() []string {
 	units := []string{"cfm.service", "nginx.service"}
-	for _, p := range edgeengine.InFileOrder() { // OpenResty, then Angie: the order this list always had
+	for _, p := range edgeengine.InFileOrder() {
 		units = append(units, p.Unit())
 	}
+	return units
+}
+
+func collectServiceStatuses() []ServiceStatus {
+	units := serviceStatusUnits()
 	out := make([]ServiceStatus, 0, len(units))
 	for _, unit := range units {
 		st, ok := systemdunit.Probe(unit)

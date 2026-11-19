@@ -81,11 +81,7 @@ func detectWorkerUser() string {
 			return v
 		}
 	}
-	confs := []string{"/etc/nginx/nginx.conf"}
-	for _, ep := range edgeengine.InFileOrder() {
-		confs = append(confs, ep.MainConf)
-	}
-	for _, p := range confs {
+	for _, p := range workerUserConfs() {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -574,6 +570,16 @@ func dnatTargetLabel(edgeService string) string {
 		return label + " (ambiguous Angie/OpenResty runtime)"
 	}
 	return fmt.Sprintf("%s (%s)", label, edgeService)
+}
+
+// workerUserConfs: where the edge worker `user` line is looked for, first
+// readable wins: plain nginx, then the edge engines in file-precedence order.
+func workerUserConfs() []string {
+	confs := []string{"/etc/nginx/nginx.conf"}
+	for _, ep := range edgeengine.InFileOrder() {
+		confs = append(confs, ep.MainConf)
+	}
+	return confs
 }
 
 func detectEdgeService() string {

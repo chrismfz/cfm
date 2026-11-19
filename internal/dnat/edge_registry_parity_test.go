@@ -30,3 +30,10 @@ func TestDNATEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkerUserConfsUnchangedByTheEdgeRegistry(t *testing.T) {
+	want := []string{"/etc/nginx/nginx.conf", "/usr/local/openresty/nginx/conf/nginx.conf", "/etc/angie/angie.conf"}
+	if !reflect.DeepEqual(workerUserConfs(), want) {
+		t.Fatalf("workerUserConfs() = %v, want %v", workerUserConfs(), want)
+	}
+}

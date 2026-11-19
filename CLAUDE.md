@@ -217,10 +217,20 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   detection order (Angie first); `fileOrder` is the precedence of
   first-readable-file lists (OpenResty first). Both orders are pinned, by
   `profiles_test.go` and by a parity test next to each converted caller.
-  Still engine-specific on purpose: the process-title parsing in
-  `healthmodel`, the `debug_capture` master heuristics, Angie's
-  native-keepalive exception in `edge_health`, and `status`'s per-engine
-  output fields.
+  `Lookup`/`IsEdge` are exact on the canonical name, like the checks they
+  replaced, so a caller that needs leniency normalises first. Still
+  engine-specific on purpose:
+  - the process-title parsing in `healthmodel`;
+  - the `debug_capture` master heuristics;
+  - Angie's native-keepalive exception in `edge_health`;
+  - `status`'s per-engine output fields.
+
+  Two security allowlists are OpenResty-only today and are decided per
+  engine, never derived:
+  - agent file sync's `syncAllowedPrefixes`;
+  - the bridge's `nginxUploadAllowedDirs`.
+
+  A new engine must decide each of them explicitly.
 - **A new log file needs a rotation entry in the same change.**
   `check_logrotate_coverage.sh` fails CI if a path CFM writes (edge
   `access_log`/`error_log`, a `*_LOG_FILE` key in `cfm.conf`, a

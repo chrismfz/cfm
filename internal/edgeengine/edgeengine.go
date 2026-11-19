@@ -16,12 +16,13 @@ import (
 )
 
 // ServiceCandidates are the systemd units probed in order; the first active one
-// wins (both active at once is a rare manual-switchover state). Derived from
-// Profiles (profiles.go), never edited by hand.
+// wins (both active at once is a rare manual-switchover state). An init-time
+// snapshot of Profiles (profiles.go), kept as a var for its existing users:
+// never edit it by hand, and a test that changes Profiles must reset it too.
 var ServiceCandidates = Names()
 
 // BinaryPaths lists where each edge's binary lives so its version can be read
-// via `-v`. Derived from Profiles.
+// via `-v`. Same init-time snapshot of Profiles as ServiceCandidates.
 var BinaryPaths = binaryPaths()
 
 func binaryPaths() map[string][]string {
