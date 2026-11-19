@@ -23,6 +23,7 @@ log path CFM configures is covered by something.
 | `/var/log/cfm/` | `/etc/logrotate.d/logrotate-cfm` (CFM) |
 | `/usr/local/openresty/nginx/logs/` | `/etc/logrotate.d/logrotate-cfm` (CFM) |
 | `/var/log/angie/` | vendor `/etc/logrotate.d/angie` |
+| `/var/log/cfm-edge/` | the cfm-edge package's `/etc/logrotate.d/cfm-edge`, run hourly too by CFM's `/etc/cron.hourly/cfm-logrotate` |
 | `/var/log/nginx/` | distro `/etc/logrotate.d/nginx` |
 | `/var/log/apache2/`, `/var/log/httpd/` | distro `/etc/logrotate.d/{apache2,httpd}`; on cPanel, cpanellogd (see below) |
 | `/usr/local/apache/logs/` | cPanel EA4 |
@@ -31,6 +32,14 @@ CFM owns exactly the two directories nobody else does. The OpenResty
 tarball/package ships no logrotate config at all, which is why an OpenResty
 edge is the one that grows a 200 GB `access.log`; Angie and the distro nginx
 packages ship their own, and CFM must stay out of their way.
+
+cfm-edge (CFM's own edge package, `chrismfz/cfm-edge`) also rotates its own
+directory, so `logrotate-cfm` must not list it either. A busy edge writes tens
+of GB a day, though, and a `maxsize` only fires when logrotate runs: CFM's
+hourly pass (`configs/cfm-logrotate.cron`) therefore hands logrotate
+`/etc/logrotate.d/cfm-edge` as well whenever the package is installed, as it
+does `logrotate-cfm` for the OpenResty logs. The package's file carries the
+size cap.
 
 **Do not add a vendor-rotated path to `configs/logrotate-cfm`.** logrotate
 refuses a path declared by two configs:

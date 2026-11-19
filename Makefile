@@ -65,7 +65,7 @@ CGO_ENABLED ?= 0
 # -------------------------------
 # Phony targets
 # -------------------------------
-.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua test-js waf-corpus verify-bpf-bindings
+.PHONY: help setup update build run clean git clean-deb clean-rpm distclean check-cli-transport lua test-lua test-js waf-corpus verify-bpf-bindings cfm-edge-conf
 
 # -------------------------------
 # Help
@@ -504,10 +504,18 @@ trusted-proxies: ## Refresh trusted_proxies.conf from Cloudflare's published ran
 	rm -f configs/.trusted_proxies.*.tmp; rm -rf scripts/__pycache__ scripts/tests/__pycache__; \
 	vout="$$(BYPASS_PYTHON="$$PY" ./scripts/tests/check_bypass_list.sh 2>&1)" || { printf '%s\n' "$$vout"; echo "❌ trusted_proxies.conf / bypass list failed validation — not packaging them"; exit 1; }
 
+# configs/cfm-edge.conf is derived from configs/openresty.conf (paths only,
+# scripts/render-cfm-edge-conf.sh); `make release` re-renders and commits it,
+# and CI (check_cfm_edge_conf.sh) fails a PR whose copy is stale. Offline.
+cfm-edge-conf: ## Re-render configs/cfm-edge.conf from configs/openresty.conf
+	@./scripts/render-cfm-edge-conf.sh
+	@echo "✅ configs/cfm-edge.conf rendered from configs/openresty.conf."
+
 # release flow: (0) `bypass-list` and `trusted-proxies` refresh
-# configs/challenge_waf_bypass.conf and configs/trusted_proxies.conf before
+# configs/challenge_waf_bypass.conf and configs/trusted_proxies.conf, and
+# `cfm-edge-conf` re-renders configs/cfm-edge.conf from openresty.conf, before
 # deb/rpm package them; (1) stamp CHANGELOG for today's UTC date; (2)
-# commit & push ONLY CHANGELOG.md + those two lists — never the whole tree,
+# commit & push ONLY CHANGELOG.md + those three files — never the whole tree,
 # since a release host usually has built binaries / compiled BPF objects sitting
 # in the working dir that must not be committed; (3) create + publish a tag-only GitHub release (title +
 # CHANGELOG notes, NO .deb/.rpm assets; packages ship via `make sync`). Steps 2 and 3
@@ -515,16 +523,17 @@ trusted-proxies: ## Refresh trusted_proxies.conf from Cloudflare's published ran
 # inside them: a comment without a trailing backslash ends the segment, so the
 # shell vars (DEB_FILE/RPM_FILE/REPO/NOTES_FILE) set above it silently vanish and the rest
 # runs without `set -e`. (That exact trap masked a broken gh-release publish.)
-release: bypass-list trusted-proxies bpf deb rpm
+release: bypass-list trusted-proxies cfm-edge-conf bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
 	@set -uo pipefail; \
-	REL_FILES="CHANGELOG.md"; \
+	REL_FILES="CHANGELOG.md configs/cfm-edge.conf"; \
 	if [ "$(BYPASS_REFRESH)" != "0" ]; then REL_FILES="$$REL_FILES configs/challenge_waf_bypass.conf configs/trusted_proxies.conf"; fi; \
 	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- $$REL_FILES)" ]; then \
 	  echo "📝 Committing $$REL_FILES (only) for $(REL_DATE)..."; \
 	  MSG="changelog: stamp $(REL_DATE) release"; \
 	  if [ -n "$$(git status --porcelain -- configs/challenge_waf_bypass.conf)" ] && [ "$(BYPASS_REFRESH)" != "0" ]; then MSG="$$MSG + refresh bypass list"; fi; \
 	  if [ -n "$$(git status --porcelain -- configs/trusted_proxies.conf)" ] && [ "$(BYPASS_REFRESH)" != "0" ]; then MSG="$$MSG + refresh Cloudflare trusted_proxies"; fi; \
+	  if [ -n "$$(git status --porcelain -- configs/cfm-edge.conf)" ]; then MSG="$$MSG + re-render cfm-edge.conf"; fi; \
 	  if git commit -q -m "$$MSG" -- $$REL_FILES; then \
 	    branch="$$(git rev-parse --abbrev-ref HEAD)"; \
 	    if [ "$$branch" = "HEAD" ]; then \

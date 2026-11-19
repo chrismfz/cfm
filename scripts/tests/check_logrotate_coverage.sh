@@ -29,6 +29,7 @@ OURS="$CONFIGS/logrotate-cfm"
 # configs/logrotate-cfm.
 VENDOR_DIRS=(
     /var/log/angie
+    /var/log/cfm-edge
     /var/log/nginx
     /var/log/apache2
     /var/log/httpd
@@ -162,6 +163,31 @@ cron_tsv_selftest() {
 }
 
 # ---------------------------------------------------------------------------
+# configs/cfm-logrotate.cron hourly pass: it hands logrotate the cfm-edge
+# package's own config too (its `maxsize` needs the hourly pass, and the
+# package rotates /var/log/cfm-edge itself, so logrotate-cfm must not), but
+# only when that file exists. A fake logrotate on PATH records its arguments.
+# ---------------------------------------------------------------------------
+cron_edge_conf_selftest() {
+    local cron="$REPO_ROOT/configs/cfm-logrotate.cron" d rc=0
+    d=$(mktemp -d)
+    mkdir -p "$d/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/args"\n' "$d" > "$d/bin/logrotate"
+    chmod +x "$d/bin/logrotate"
+    : > "$d/logrotate-cfm"
+    PATH="$d/bin:$PATH" CFM_TSV_LOGS="$d/none.log" CFM_LOGROTATE_CONF="$d/logrotate-cfm" \
+        CFM_EDGE_LOGROTATE_CONF="$d/cfm-edge" sh "$cron" || rc=1
+    [ "$(cat "$d/args" 2>/dev/null)" = "$d/logrotate-cfm" ] || { red "FAIL: without /etc/logrotate.d/cfm-edge the hourly pass must run logrotate-cfm alone"; rc=1; }
+    : > "$d/cfm-edge"
+    PATH="$d/bin:$PATH" CFM_TSV_LOGS="$d/none.log" CFM_LOGROTATE_CONF="$d/logrotate-cfm" \
+        CFM_EDGE_LOGROTATE_CONF="$d/cfm-edge" sh "$cron" || rc=1
+    [ "$(cat "$d/args" 2>/dev/null)" = "$(printf '%s\n%s' "$d/logrotate-cfm" "$d/cfm-edge")" ] || { red "FAIL: with cfm-edge installed the hourly pass must also run its logrotate config"; rc=1; }
+    rm -rf "$d"
+    [ "$rc" -eq 0 ] && grn "OK: cfm-logrotate.cron runs cfm-edge's own config hourly when present."
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # Repo / CI mode
 # ---------------------------------------------------------------------------
 repo_mode() {
@@ -218,6 +244,7 @@ repo_mode() {
 
     grn "OK: every configured CFM log path is rotated."
     cron_tsv_selftest || return 1
+    cron_edge_conf_selftest || return 1
     return 0
 }
 

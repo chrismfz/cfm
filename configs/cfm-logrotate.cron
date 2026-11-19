@@ -48,6 +48,15 @@ done
 [ -r "$CONF" ] || exit 0
 command -v logrotate >/dev/null 2>&1 || exit 0
 
+# cfm-edge's logs (/var/log/cfm-edge/) are rotated by the cfm-edge package's
+# own /etc/logrotate.d/cfm-edge, never by logrotate-cfm (two entries for one
+# path is a "duplicate log entry" error that aborts the run). Its `maxsize`
+# needs the same hourly pass as the OpenResty logs, so this run reads that
+# file too, when the package is installed.
+set -- "$CONF"
+EDGE_CONF=${CFM_EDGE_LOGROTATE_CONF:-/etc/logrotate.d/cfm-edge}
+[ -r "$EDGE_CONF" ] && set -- "$@" "$EDGE_CONF"
+
 # A concurrent daily run holds the state-file lock, and a previous hourly pass
 # may still be copying a multi-GB access log; skipping this hour is harmless,
 # the next hour picks it up. Never exit non-zero for a skipped or failed run —
@@ -56,9 +65,9 @@ LOCK=/var/lock/cfm-logrotate.lock
 [ -d /var/lock ] || LOCK=/tmp/cfm-logrotate.lock
 
 if command -v flock >/dev/null 2>&1; then
-    flock -n "$LOCK" logrotate "$CONF" || exit 0
+    flock -n "$LOCK" logrotate "$@" || exit 0
 else
-    logrotate "$CONF" || exit 0
+    logrotate "$@" || exit 0
 fi
 
 exit 0
