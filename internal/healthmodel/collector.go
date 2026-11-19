@@ -4,6 +4,7 @@ import (
 	"cfm/internal/conntrack"
 	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
+	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"cfm/internal/mailq"
 	"cfm/internal/systemdunit"
@@ -344,7 +345,7 @@ func humanUnixTime(ts int64) string {
 }
 
 func probeSSLCollectorStatus() string {
-	cfmToken := edgediag.ResolveLuaToken([]string{"/var/lib/cfm/lua/cfm_token.lua", "/usr/local/openresty/nginx/lua/cfm_token.lua", "/etc/angie/lua/cfm_token.lua"})
+	cfmToken := edgediag.ResolveLuaToken(edgeengine.LuaTokenCandidates())
 	sock := edgediag.ProbeSSLCollector("/var/run/sslcollector.sock", cfmToken)
 	category := strings.ToUpper(strings.TrimSpace(sock.Category))
 	switch category {
@@ -412,23 +413,20 @@ type frontendSignal struct {
 
 func detectDNATFrontend(dnatState string) (string, string, string) {
 	dnatOn := strings.EqualFold(strings.TrimSpace(dnatState), "on")
-	candidates := []frontendSignal{
-		{
-			name:            "angie",
-			serviceUnit:     "angie.service",
-			processAliases:  []string{"angie", "nginx"},
-			configHookPaths: []string{"/etc/angie/conf.d/cfm.conf", "/etc/angie/conf.d/nginx-cfm.conf", "/etc/angie/angie.conf"},
-			binaryPaths:     []string{"/usr/sbin/angie", "/usr/bin/angie"},
-			binaryCommands:  []string{"angie"},
-		},
-		{
-			name:            "openresty",
-			serviceUnit:     "openresty.service",
-			processAliases:  []string{"openresty", "nginx"},
-			configHookPaths: []string{"/usr/local/openresty/nginx/conf/nginx-cfm.conf", "/usr/local/openresty/nginx/conf/openresty-cfm-tsv.conf", "/usr/local/openresty/nginx/conf/nginx.conf"},
-			binaryPaths:     []string{"/usr/local/openresty/nginx/sbin/nginx", "/opt/openresty/nginx/sbin/nginx"},
-			binaryCommands:  []string{"openresty"},
-		},
+	// The CFM edge engines (edgeengine.Profiles, detection order), then plain
+	// nginx, which is a frontend but not a CFM edge.
+	var candidates []frontendSignal
+	for _, p := range edgeengine.Profiles {
+		candidates = append(candidates, frontendSignal{
+			name:            p.Name,
+			serviceUnit:     p.Unit(),
+			processAliases:  p.ProcessAliases,
+			configHookPaths: p.ConfigHookPaths,
+			binaryPaths:     p.Binaries,
+			binaryCommands:  p.Commands,
+		})
+	}
+	candidates = append(candidates, []frontendSignal{
 		{
 			name:            "nginx",
 			serviceUnit:     "nginx.service",
@@ -437,7 +435,7 @@ func detectDNATFrontend(dnatState string) (string, string, string) {
 			binaryPaths:     []string{"/usr/sbin/nginx", "/usr/bin/nginx"},
 			binaryCommands:  []string{"nginx"},
 		},
-	}
+	}...)
 
 	dnatListeners := probeFrontendListeners()
 	dnatHTTP, dnatHTTPS := dnat.EffectiveTargetPorts()
@@ -815,21 +813,14 @@ func deriveFrontendWorking(frontend, dnatState string) (string, string, Frontend
 	}
 
 	candidates := map[string]frontendSignal{
-		"angie": {
-			name:           "angie",
-			serviceUnit:    "angie.service",
-			processAliases: []string{"angie", "nginx"},
-		},
-		"openresty": {
-			name:           "openresty",
-			serviceUnit:    "openresty.service",
-			processAliases: []string{"openresty", "nginx"},
-		},
 		"nginx": {
 			name:           "nginx",
 			serviceUnit:    "nginx.service",
 			processAliases: []string{"nginx"},
 		},
+	}
+	for _, p := range edgeengine.Profiles {
+		candidates[p.Name] = frontendSignal{name: p.Name, serviceUnit: p.Unit(), processAliases: p.ProcessAliases}
 	}
 	sig, ok := candidates[frontend]
 	if !ok {
@@ -888,8 +879,8 @@ func detectEdgeRuntime(frontend, dnatState string) runtimeRoleSignal {
 		expectedHTTP, expectedHTTPS = dnat.EffectiveTargetPorts()
 	}
 	out.listeningPort = detectedPortsForService(listeners, out.service, expectedHTTP, expectedHTTPS)
-	switch out.service {
-	case "angie", "openresty", "nginx":
+	switch {
+	case edgeOrNginx(out.service):
 		active, _, ok := probeSystemdUnit(out.service + ".service")
 		if !ok {
 			out.status = "unknown"
@@ -954,7 +945,7 @@ func detectUpstreamRuntime(edgeService string) runtimeRoleSignal {
 				score++
 			}
 		}
-		if c.name == "nginx" && (edgeService == "angie" || edgeService == "openresty") {
+		if c.name == "nginx" && edgeengine.IsEdge(edgeService) {
 			score++
 		}
 		if score > bestScore {
@@ -1118,12 +1109,16 @@ func (s frontendListenerSnapshot) ownersForPort(entries []listenerEntry, owners 
 	return out
 }
 
+// edgeOrNginx: a CFM edge engine (edgeengine.Profiles) or plain nginx.
+func edgeOrNginx(service string) bool {
+	return service == "nginx" || edgeengine.IsEdge(service)
+}
+
 func frontendAliases(service string) []string {
+	if p, ok := edgeengine.Lookup(service); ok {
+		return append([]string(nil), p.ProcessAliases...) // a copy: never hand out the registry's slice
+	}
 	switch strings.ToLower(strings.TrimSpace(service)) {
-	case "angie":
-		return []string{"angie", "nginx"}
-	case "openresty":
-		return []string{"openresty", "nginx"}
 	case "nginx":
 		return []string{"nginx"}
 	default:
@@ -1256,7 +1251,10 @@ func enrichHostMemoryAndLoad(host *HostSystem) {
 }
 
 func collectServiceStatuses() []ServiceStatus {
-	units := []string{"cfm.service", "nginx.service", "openresty.service", "angie.service"}
+	units := []string{"cfm.service", "nginx.service"}
+	for _, p := range edgeengine.InFileOrder() { // OpenResty, then Angie: the order this list always had
+		units = append(units, p.Unit())
+	}
 	out := make([]ServiceStatus, 0, len(units))
 	for _, unit := range units {
 		st, ok := systemdunit.Probe(unit)

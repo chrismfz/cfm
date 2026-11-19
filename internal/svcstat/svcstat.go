@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/edgeengine"
 )
 
 // Service is one systemd unit's status.
@@ -58,16 +60,15 @@ var showProps = []string{
 // FTP, panel and platform units. Units that aren't installed (LoadState
 // not-found) are dropped from the default view; an explicit query keeps them so
 // the operator sees "you asked about X — it isn't here".
-var DefaultUnits = []string{
-	"cfm",
-	"angie", "openresty", "nginx", "httpd", "apache2", "lsws", "lshttpd",
+var DefaultUnits = append(append([]string{"cfm"}, edgeengine.Names()...),
+	"nginx", "httpd", "apache2", "lsws", "lshttpd",
 	"mariadb", "mysql", "mysqld", "postgresql",
 	"exim", "dovecot", "postfix",
 	"named", "bind9", "pdns", "redis", "memcached",
 	"pure-ftpd", "proftpd", "vsftpd",
 	"sshd", "ssh", "crond", "cron", "fail2ban",
 	"cpanel", "cpsrvd", "imunify360",
-}
+)
 
 // Status returns systemd status for the given units. When units is empty the
 // curated DefaultUnits set is used and not-installed units are elided; when the

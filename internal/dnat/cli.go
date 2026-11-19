@@ -1,6 +1,7 @@
 package dnat
 
 import (
+	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"context"
 	"flag"
@@ -80,7 +81,11 @@ func detectWorkerUser() string {
 			return v
 		}
 	}
-	for _, p := range []string{"/etc/nginx/nginx.conf", "/usr/local/openresty/nginx/conf/nginx.conf", "/etc/angie/angie.conf"} {
+	confs := []string{"/etc/nginx/nginx.conf"}
+	for _, ep := range edgeengine.InFileOrder() {
+		confs = append(confs, ep.MainConf)
+	}
+	for _, p := range confs {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -609,11 +614,12 @@ func normalizeEdgeService(s string) string {
 	if s == "" {
 		return ""
 	}
-	if strings.Contains(s, "openresty") || strings.Contains(s, "/openresty/") {
-		return "openresty"
-	}
-	if strings.Contains(s, "angie") {
-		return "angie"
+	// File-precedence order: OpenResty first, because an OpenResty process
+	// line also contains "nginx".
+	for _, ep := range edgeengine.InFileOrder() {
+		if strings.Contains(s, ep.Name) {
+			return ep.Name
+		}
 	}
 	if strings.Contains(s, "nginx") {
 		return "nginx"

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"cfm/internal/systemdunit"
 )
@@ -350,15 +351,15 @@ func panelListenerConfigPathsForService(service string, paths []string) []string
 	return servicePaths
 }
 
+// panelListenerConfigPathService names the edge engine whose config dir holds
+// path (Contains, not HasPrefix: tests root the same layout under a temp dir).
 func panelListenerConfigPathService(path string) string {
-	switch {
-	case strings.Contains(path, "/etc/angie/"):
-		return "angie"
-	case strings.Contains(path, "/openresty/"):
-		return "openresty"
-	default:
-		return ""
+	for _, p := range edgeengine.Profiles {
+		if strings.Contains(path, p.ConfDir+"/") {
+			return p.Name
+		}
 	}
+	return ""
 }
 
 // detectActiveEdgeService uses the same active/enabled systemd model surfaced
@@ -368,7 +369,7 @@ func panelListenerConfigPathService(path string) string {
 // we fall back to the running-process detector; stale config files are never used
 // to decide which engine is live. Both web DNAT and panel DNAT consume this resolver.
 func detectActiveEdgeService() string {
-	services := []string{"angie", "openresty"}
+	services := edgeengine.Names()
 	states := make(map[string]systemdunit.Status, len(services))
 	systemdAvailable := false
 	for _, service := range services {
@@ -405,10 +406,20 @@ func detectActiveEdgeService() string {
 		return ""
 	}
 
-	if service := panelListenerProcessDetector(); service == "angie" || service == "openresty" {
+	if service := panelListenerProcessDetector(); edgeengine.IsEdge(service) {
 		return service
 	}
 	return ""
+}
+
+// edgeCommands are every edge engine's command names (`<cmd> -t`), in
+// detection order.
+func edgeCommands() []string {
+	var out []string
+	for _, p := range edgeengine.Profiles {
+		out = append(out, p.Commands...)
+	}
+	return out
 }
 
 // Kept as a compatibility/test seam for the existing panel-specific callers.
@@ -426,11 +437,8 @@ func panelListenerServiceCandidates(active string) [][]string {
 			{"service", service, "restart"},
 		}
 	}
-	if active == "angie" {
-		return serviceCommands("angie")
-	}
-	if active == "openresty" {
-		return serviceCommands("openresty")
+	if edgeengine.IsEdge(active) {
+		return serviceCommands(active)
 	}
 	return nil
 }
@@ -457,7 +465,7 @@ func cmdExists(name string) bool {
 // an ambiguous dual-active state yields no authoritative config at all.
 func orderedPanelListenerConfigPaths() []string {
 	active := panelListenerServiceDetector()
-	if active == "angie" || active == "openresty" {
+	if edgeengine.IsEdge(active) {
 		return panelListenerConfigPathsForService(active, panelListenerChallengeConfigPaths)
 	}
 	if active == panelListenerServiceAmbiguous {
@@ -593,7 +601,7 @@ func runPanelLuaGuardProbe(st panelLuaGuardStatus, cmdPath string) panelLuaGuard
 		st.LoadError = probe.Name + " failed: " + msg
 		return st
 	}
-	for _, probe := range []string{"angie", "openresty"} {
+	for _, probe := range edgeCommands() {
 		if !cmdExists(probe) {
 			continue
 		}

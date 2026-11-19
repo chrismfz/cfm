@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"cfm/internal/edgeengine"
 	"cfm/internal/logging"
 )
 
@@ -63,7 +64,7 @@ var nudgeOnce sync.Once
 var (
 	nudgePollInterval = 500 * time.Millisecond
 	nudgeTotalBudget  = 60 * time.Second
-	edgeServiceNames  = []string{"angie", "openresty"}
+	edgeServiceNames  = edgeengine.Names()
 )
 
 // systemctlRunner is replaced in tests; defaults to exec.CommandContext.

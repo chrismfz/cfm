@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/edgeengine"
 	"cfm/internal/logscan"
 )
 
@@ -35,13 +36,11 @@ import (
 // default is the most-recently-modified of those that exist (see availableFrom
 // — it tracks the ACTIVE edge, not this list order); this static order is only
 // the tiebreak when mtimes are equal. A caller may name any one from this set.
-var accessLogCandidates = []string{
-	"/usr/local/openresty/nginx/logs/access.log",
-	"/var/log/angie/access.log",
-	"/usr/local/openresty/nginx/logs/access.cfm.log",
-	"/var/log/angie/access.cfm.log",
+var accessLogCandidates = append(append(
+	edgeengine.LogFileCandidates("access.log"),
+	edgeengine.LogFileCandidates("access.cfm.log")...),
 	"/var/log/nginx/access.log",
-}
+)
 
 // errorLogCandidates are the known CFM edge ERROR logs. Same most-recently-
 // modified default-selection + allow-list discipline as the access candidates
@@ -49,11 +48,10 @@ var accessLogCandidates = []string{
 // Lua writes ngx.log(): panel
 // decision logonly verdicts ([cfm_panel_decision] logonly=would_enforce …),
 // module-load failures, and Lua runtime errors.
-var errorLogCandidates = []string{
-	"/usr/local/openresty/nginx/logs/error.log",
-	"/var/log/angie/error.log",
+var errorLogCandidates = append(
+	edgeengine.LogFileCandidates("error.log"),
 	"/var/log/nginx/error.log",
-}
+)
 
 const (
 	DefaultTailLines = 300_000

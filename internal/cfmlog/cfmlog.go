@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/edgeengine"
 	"cfm/internal/logscan"
 )
 
@@ -89,22 +90,28 @@ func FileSources() []string { return sortedKeys(fileCandidates) }
 // keyed by the normalized unit name (lowercased, `.service` stripped). Bounds an
 // admin read tool to the CFM + hosting-stack units rather than any unit on the
 // box, matching how service_status curates its default set.
-var journalUnits = map[string]bool{
-	"cfm":       true,
-	"angie":     true,
-	"openresty": true,
-	"nginx":     true,
-	"httpd":     true,
-	"apache2":   true,
-	"mysql":     true,
-	"mysqld":    true,
-	"mariadb":   true,
-	"exim":      true,
-	"dovecot":   true,
-	"postfix":   true,
-	"sshd":      true,
-	"clamd":     true,
-	"named":     true,
+var journalUnits = withEdgeUnits(map[string]bool{
+	"cfm":     true,
+	"nginx":   true,
+	"httpd":   true,
+	"apache2": true,
+	"mysql":   true,
+	"mysqld":  true,
+	"mariadb": true,
+	"exim":    true,
+	"dovecot": true,
+	"postfix": true,
+	"sshd":    true,
+	"clamd":   true,
+	"named":   true,
+})
+
+// withEdgeUnits adds every CFM edge engine (edgeengine.Profiles) to m.
+func withEdgeUnits(m map[string]bool) map[string]bool {
+	for _, n := range edgeengine.Names() {
+		m[n] = true
+	}
+	return m
 }
 
 // JournalUnits returns the sorted allow-listed unit names (for docs/validation).

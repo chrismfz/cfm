@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"cfm/internal/edgeengine"
 )
 
 // Severity levels, ranked most-severe first.
@@ -579,7 +581,13 @@ func eccDimmSuffix(dimm string) string {
 // traffic with exactly one of these, so the others are installed-but-disabled
 // alternates whose failed/inactive state is not a fault. (httpd/apache2 are the
 // ORIGIN, not an edge alternate, so they are deliberately absent here.)
-var edgeEngineUnits = map[string]bool{"angie": true, "openresty": true, "nginx": true}
+var edgeEngineUnits = func() map[string]bool {
+	m := map[string]bool{"nginx": true}
+	for _, n := range edgeengine.Names() {
+		m[n] = true
+	}
+	return m
+}()
 
 // evalServices flags failed/inactive/flapping units. edgeService is the resolved
 // active edge engine (from the health snapshot, lowercased, no ".service"); when

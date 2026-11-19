@@ -46,6 +46,7 @@ import (
 	"strings"
 	"time"
 
+	"cfm/internal/edgeengine"
 	"cfm/internal/logscan"
 )
 
@@ -94,10 +95,7 @@ const (
 // requires the key=value `host=` field, so a semantically wrong source must
 // never be selected just because its mtime is newest (unlike GrepIP, where any
 // raw-line source is fair game).
-var fullAccessLogCandidates = []string{
-	"/usr/local/openresty/nginx/logs/access.log",
-	"/var/log/angie/access.log",
-}
+var fullAccessLogCandidates = edgeengine.LogFileCandidates("access.log")
 
 // AvailableFullLogs returns the FULL access-log candidates that currently
 // exist, so callers can surface what was considered.

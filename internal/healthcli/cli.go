@@ -2,6 +2,7 @@ package healthcli
 
 import (
 	"cfm/internal/clihttp"
+	"cfm/internal/edgeengine"
 	"cfm/internal/healthmodel"
 	"cfm/internal/originrealip"
 	"encoding/json"
@@ -568,7 +569,7 @@ func challengeFlowReadiness(state, code, reason string) (healthLabelRank, string
 }
 
 func printEdgeInterceptorDiagnostics(s parsedSnapshot, opts cliOptions) {
-	sslToken := edgediag.ResolveLuaToken([]string{"/var/lib/cfm/lua/cfm_token.lua", "/usr/local/openresty/nginx/lua/cfm_token.lua", "/etc/angie/lua/cfm_token.lua"})
+	sslToken := edgediag.ResolveLuaToken(edgeengine.LuaTokenCandidates())
 	challengeToken := edgediag.ReadChallengeTokenProbe("/etc/cfm/detectors.conf")
 	bridgeToken := edgediag.ReadBridgeTokenProbe(edgediag.CanonicalBridgeTokenPath)
 	sock := edgediag.ProbeSSLCollector("/var/run/sslcollector.sock", sslToken)
@@ -756,7 +757,7 @@ func mapEdgeStatus(v string) string {
 	}
 }
 func collectWebStackRows(s parsedSnapshot) []serviceStatus {
-	targets := []string{"angie", "openresty"}
+	targets := edgeengine.Names()
 	byName := make(map[string]serviceStatus, len(s.Modern.Services))
 	for _, svc := range s.Modern.Services {
 		name := strings.ToLower(strings.TrimSpace(svc.Name))

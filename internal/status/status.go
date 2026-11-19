@@ -7,6 +7,7 @@ import (
 	"cfm/internal/detectors"
 	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
+	"cfm/internal/edgeengine"
 	"cfm/internal/enrich"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/setinventory"
@@ -402,11 +403,7 @@ func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 
 	sockProbe := probeSSLCollector("/var/run/sslcollector.sock")
 
-	cfmToken := resolveLuaToken([]string{
-		"/var/lib/cfm/lua/cfm_token.lua",
-		"/usr/local/openresty/nginx/lua/cfm_token.lua",
-		"/etc/angie/lua/cfm_token.lua",
-	})
+	cfmToken := resolveLuaToken(edgeengine.LuaTokenCandidates())
 	bridgeToken := readBridgeTokenProbe()
 	bridgeRuntime := probeBridgeRuntime(bridgeCfg, bridgeToken)
 
@@ -500,11 +497,7 @@ func probeSSLCollector(path string) sslCollectorProbe {
 		return out
 	}
 
-	tok := resolveLuaToken([]string{
-		"/var/lib/cfm/lua/cfm_token.lua",
-		"/usr/local/openresty/nginx/lua/cfm_token.lua",
-		"/etc/angie/lua/cfm_token.lua",
-	})
+	tok := resolveLuaToken(edgeengine.LuaTokenCandidates())
 	if !tok.Valid {
 		out.Category = "AUTH_FAIL"
 		out.ErrorText = ": token missing/invalid"

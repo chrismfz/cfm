@@ -1,9 +1,10 @@
-// Package edgeengine is the single source of truth for detecting which in-path
-// edge proxy (OpenResty or Angie) is active on this host and reading its
-// version. Both the heartbeat agent (internal/agent) and the edge_health MCP
-// endpoint (internal/apiserver) need it; keeping ONE copy avoids the drift
-// CLAUDE.md §5 warns about (a new binary path added in one place but not the
-// other would silently mis-detect the engine). Leaf package: no CFM deps.
+// Package edgeengine is the single source of truth for the in-path edge
+// engines (OpenResty, Angie): their facts (Profiles, profiles.go), detecting
+// which one is active on this host, and reading its version. The heartbeat
+// agent, edge_health, health, status, dnat, edgelog, sslcollector and the rest
+// read the engines from here; keeping ONE copy avoids the drift CLAUDE.md §5
+// warns about (a new binary path added in one place but not the other would
+// silently mis-detect the engine). Leaf package: no CFM deps.
 package edgeengine
 
 import (
@@ -15,14 +16,20 @@ import (
 )
 
 // ServiceCandidates are the systemd units probed in order; the first active one
-// wins (both active at once is a rare manual-switchover state).
-var ServiceCandidates = []string{"angie", "openresty"}
+// wins (both active at once is a rare manual-switchover state). Derived from
+// Profiles (profiles.go), never edited by hand.
+var ServiceCandidates = Names()
 
 // BinaryPaths lists where each edge's binary lives so its version can be read
-// via `-v`.
-var BinaryPaths = map[string][]string{
-	"angie":     {"/usr/sbin/angie", "/usr/bin/angie"},
-	"openresty": {"/usr/local/openresty/nginx/sbin/nginx", "/opt/openresty/nginx/sbin/nginx"},
+// via `-v`. Derived from Profiles.
+var BinaryPaths = binaryPaths()
+
+func binaryPaths() map[string][]string {
+	m := make(map[string][]string, len(Profiles))
+	for _, p := range Profiles {
+		m[p.Name] = p.Binaries
+	}
+	return m
 }
 
 // Stub seams (overridden in tests).
