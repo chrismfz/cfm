@@ -81,7 +81,7 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 			// An IPv6 client counts as its /64 (its ban takes the /64); the
 			// ban, the report and the log name its busiest address.
 			key := firewall.CountKey(ip.String())
-			addr := core.TopAddr("auth_autoblock", key, ip.String(), time.Unix(ts, 0))
+			addr := core.TopAddr("auth_autoblock", key, ip.String(), time.Unix(ts, 0), authAutoblockWindow)
 			ip = net.ParseIP(addr)
 			cut := ts - int64(authAutoblockWindow.Seconds())
 			series := append(failTSByIP[key], ts)

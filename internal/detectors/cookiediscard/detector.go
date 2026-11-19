@@ -362,7 +362,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			st = &ipState{}
 			d.ips[client] = st
 		}
-		st.addr = core.TopAddr("cookiediscard", client, ip, ev.When)
+		st.addr = core.TopAddr("cookiediscard", client, ip, ev.When, d.cfg.Window)
 		if len(st.recs) >= d.cfg.MaxTrackedPerIP {
 			st.truncated++
 			continue

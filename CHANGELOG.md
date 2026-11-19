@@ -34,12 +34,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   that holds this node, its gateway, an ignored, allowed or trusted proxy
   address (whose ban takes the address alone) still counts per address, so
   one address's alert never uses up its neighbours' or names an ignored one.
-  The alert names the /64's busiest address (plus `client=<the /64>`), never
-  a neighbour whose one hit came last: that address is what the fleet report
-  and the leniency checks get. The ban takes the /64 as before, allow lists
-  stay exact, and a detector's own allows (waf_security, cfm_endpoints,
-  cookie discard, login_bruteforce) keep their /64 counted and banned per
-  address. The section cooldown
+  The alert names the /64's busiest address inside the window (plus
+  `client=<the /64>`), never a neighbour whose one hit came last: that
+  address is what the fleet report and the leniency checks get. The ban takes
+  the /64 as before, allow lists stay exact, and an allowed address (narrower
+  than a /64) in waf_security, cfm_endpoints, cookie discard or
+  login_bruteforce keeps its /64 counted and banned per address by every
+  section. The section cooldown
   follows what the ban took. The detectors' other /64 helpers (the login
   ledger, the CDN-cache finding, mail abuse) now use the shared key, which
   leaves Teredo and NAT64 per address. The kernel nft meters (flood, SYN,

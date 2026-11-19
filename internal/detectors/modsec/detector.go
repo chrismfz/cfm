@@ -340,7 +340,7 @@ func (d *Detector) bump(now time.Time, ip, sample string) {
 	sk := "ip:" + client
 	d.samples.Add(sk, sample)
 	_ = d.counts.Add(sk, now)
-	d.pending[client] = pend{key: core.TopAddr("modsec", client, ip, now)}
+	d.pending[client] = pend{key: core.TopAddr("modsec", client, ip, now, d.cfg.Window)}
 
 
 }

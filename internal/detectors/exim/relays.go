@@ -347,7 +347,7 @@ func (d *Relays) bump(now time.Time, kindKey, key, line string, _ chan<- core.Al
 	if d.pending == nil {
 		d.pending = make(map[string]pend)
 	}
-	d.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("exim_relays", sk, key, now)}
+	d.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("exim_relays", sk, key, now, d.cfg.Window)}
 }
 
 //fun bump end

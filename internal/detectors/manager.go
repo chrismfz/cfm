@@ -532,6 +532,11 @@ func (m *manager) maybeReload(parent context.Context) {
 	// factories, so the two never disagree between reloads.
 	syncPendingGovernor(secs.ByName, readErr, firstLoad)
 
+	// The detectors' own allow guards (core.GuardAllows) are this sweep's:
+	// a section disabled, removed or failing its build drops its own.
+	core.BeginGuardSweep()
+	defer core.EndGuardSweep()
+
 	// instantiate + run all enabled sections
 	for secName, kv := range secs.ByName {
 		if secName == "global" {

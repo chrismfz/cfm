@@ -388,7 +388,7 @@ func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	a.samples.Add(sk, line)
 	_ = a.counts.Add(sk, now)
-	a.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("ngmauth", sk, key, now)}
+	a.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("ngmauth", sk, key, now, a.cfg.Window)}
 }
 
 // -------- flush --------

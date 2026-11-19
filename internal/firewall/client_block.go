@@ -564,6 +564,8 @@ var (
 		sets int   // the number of sets it read (the fleet allows or not)
 
 		refreshing bool // a background refresh (staleGuardView) is running
+		gen        int  // bumped by every write and reset: a refresh started
+		// before one must not overwrite it
 	}
 )
 
@@ -588,6 +590,7 @@ func cachedGuardView(be Backend) (*guardView, error) {
 	}
 	v, err := newGuardView(be)
 	c.be, c.at, c.view, c.err, c.sets = be, time.Now(), v, err, sets
+	c.gen++
 	if err != nil {
 		return nil, err
 	}
@@ -606,15 +609,17 @@ func staleGuardView(be Backend) (*guardView, error) {
 		v := c.view
 		if time.Since(c.at) >= guardCacheTTL && !c.refreshing {
 			c.refreshing = true
+			gen := c.gen
 			go func() {
 				nv, err := newGuardView(be)
 				guardCacheMu.Lock()
 				defer guardCacheMu.Unlock()
 				c.refreshing = false
-				if c.be != be || c.sets != sets {
-					return // replaced meanwhile
+				if c.gen != gen || c.be != be || c.sets != sets {
+					return // replaced or reset meanwhile
 				}
 				c.at, c.view, c.err = time.Now(), nv, err
+				c.gen++
 			}()
 		}
 		guardCacheMu.Unlock()
@@ -629,6 +634,7 @@ func staleGuardView(be Backend) (*guardView, error) {
 func ResetGuardCache() {
 	guardCacheMu.Lock()
 	guardCache.view, guardCache.err = nil, nil
+	guardCache.gen++
 	guardCacheMu.Unlock()
 }
 

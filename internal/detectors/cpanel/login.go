@@ -269,7 +269,7 @@ func (l *Login) bump(now time.Time, kindKey, key, line string) {
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	l.samples.Add(sk, line)
 	_ = l.counts.Add(sk, now)
-	l.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("cpanel", sk, key, now)}
+	l.pending[sk] = pend{kindKey: kindKey, key: core.TopAddr("cpanel", sk, key, now, l.cfg.Window)}
 }
 
 // -------- flush --------

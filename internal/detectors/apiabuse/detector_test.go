@@ -225,7 +225,7 @@ func TestDetectorBoundsAndQuotesEvidenceSamples(t *testing.T) {
 }
 
 // An IPv6 client climbs one ladder for its /64; each alert names its
-// busiest address (a tie: the lowest).
+// busiest address (a tie: the address hitting now).
 func TestDetectorIPv6ClientStagesAsItsSlash64(t *testing.T) {
 	d := New(Config{Every: time.Second, Window: time.Minute, Stage1Threshold: 2, Stage2Threshold: 3, Stage3Threshold: 4})
 	out := make(chan core.Alert, 8)
@@ -244,7 +244,7 @@ func TestDetectorIPv6ClientStagesAsItsSlash64(t *testing.T) {
 		}
 		got = append(got, a.Extra["stage"]+"@"+a.Extra["ip"])
 	}
-	if strings.Join(got, ",") != "1@2001:db8:1:2::1,2@2001:db8:1:2::1,3@2001:db8:1:2::1" {
+	if strings.Join(got, ",") != "1@2001:db8:1:2::2,2@2001:db8:1:2::3,3@2001:db8:1:2::4" {
 		t.Fatalf("stages: %v", got)
 	}
 }

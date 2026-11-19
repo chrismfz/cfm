@@ -209,7 +209,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		key := core.ClientKey("|ip", srcIP)
 		attributed := net.ParseIP(srcIP) != nil
 		if attributed {
-			srcIP = core.TopAddr("apiabuse", key, srcIP, ev.When) // the /64's busiest address
+			srcIP = core.TopAddr("apiabuse", key, srcIP, ev.When, d.cfg.Window) // the /64's busiest address
 		}
 		if !attributed {
 			key = unattributedSourceKey

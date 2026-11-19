@@ -184,3 +184,41 @@ func TestCountKeyFollowsANewCheckAtOnce(t *testing.T) {
 		t.Fatalf("after the check: %q", got)
 	}
 }
+
+// A background refresh that started before a reset does not write its view
+// back over it.
+func TestStaleGuardRefreshLosesToAReset(t *testing.T) {
+	oldG := guardCacheTTL
+	guardCacheTTL = 20 * time.Millisecond
+	t.Cleanup(func() { guardCacheTTL = oldG; ResetGuardCache() })
+	ResetGuardCache()
+	f := &lockedNetFake{netFake: newNetFake()}
+	if _, err := staleGuardView(f); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	f.mu.Lock()
+	f.block = make(chan struct{})
+	f.mu.Unlock()
+	if _, err := staleGuardView(f); err != nil { // starts the refresh, held
+		t.Fatal(err)
+	}
+	ResetGuardCache()
+	close(f.block)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		guardCacheMu.Lock()
+		done, view := !guardCache.refreshing, guardCache.view
+		guardCacheMu.Unlock()
+		if done {
+			if view != nil {
+				t.Fatal("the refresh wrote its view over the reset")
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("refresh never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}

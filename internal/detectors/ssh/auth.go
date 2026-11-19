@@ -300,7 +300,7 @@ func (a *Auth) bump(now time.Time, kindKey, key, line string) {
 
     // mark as touched this tick (no per-tick increment anymore)
     p := a.pending[sk]
-    p.kindKey, p.key = kindKey, core.TopAddr("ssh", sk, key, now)
+    p.kindKey, p.key = kindKey, core.TopAddr("ssh", sk, key, now, a.cfg.Window)
     a.pending[sk] = p
 
     // real counting happens in the sliding window

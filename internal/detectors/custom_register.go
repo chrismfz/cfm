@@ -484,7 +484,7 @@ func (d *customDetector) bump(now time.Time, kindKey, key, sample string, out ch
 	// An IPv6 client counts as its /64; the alert keeps this address.
 	sk := kindKey + ":" + core.ClientKey(kindKey, key)
 	count := d.counts.Add(sk, now)
-	addr := core.TopAddr("custom", sk, key, now) // the /64's busiest address
+	addr := core.TopAddr("custom:"+d.name, sk, key, now, d.cfg.Window) // the /64's busiest address
 	d.samples.Add(sk, sample)
 
 	threshold := 0

@@ -469,7 +469,7 @@ func (d *PostfixSecurity) bump(now time.Time, tag, key, line string) {
     if d.pending == nil {
         d.pending = make(map[string]secPend)
     }
-    d.pending[sk] = secPend{kindKey: tag, key: core.TopAddr("postfix", sk, key, now)}
+    d.pending[sk] = secPend{kindKey: tag, key: core.TopAddr("postfix", sk, key, now, d.cfg.Window)}
 }
 
 func (d *PostfixSecurity) flush(now time.Time, out chan<- core.Alert) {

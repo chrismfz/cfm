@@ -680,7 +680,7 @@ func (d *EximSecurity) bump(now time.Time, tag, key, line string) {
 	if d.pending == nil {
 		d.pending = make(map[string]pend)
 	}
-	d.pending[sk] = pend{kindKey: tag, key: core.TopAddr("exim", sk, key, now)} // no per-tick n here
+	d.pending[sk] = pend{kindKey: tag, key: core.TopAddr("exim", sk, key, now, d.cfg.Window)} // no per-tick n here
 }
 
 func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {

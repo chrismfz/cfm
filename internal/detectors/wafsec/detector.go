@@ -256,7 +256,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		famKey := client + "|" + family
 		key := counterKey(client, family, ev.Signal, limit, ruleScoped)
 		// The alert names the /64's busiest address (core.TopAddr).
-		addr := core.TopAddr("wafsec", famKey, ev.SrcIP, ev.When)
+		addr := core.TopAddr("wafsec|"+family, client, ev.SrcIP, ev.When, d.cfg.Window)
 		count := d.counts.Add(key, ev.When)
 		if ev.When.After(d.famSeen[famKey]) {
 			d.famSeen[famKey] = ev.When
