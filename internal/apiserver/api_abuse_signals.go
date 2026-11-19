@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"cfm/internal/ipkey"
 	"math"
 	"net/http"
 	"strings"
@@ -37,7 +38,9 @@ func (c *apiAbuseSignalClassifier) Evaluate(r *http.Request, status int, reason 
 	if r == nil {
 		return nil
 	}
-	ip := realIPFromRequest(r)
+	// An IPv6 client counts as its /64 (ipkey); the events carry no address
+	// of their own (the security log line names the request's).
+	ip := ipkey.Client(realIPFromRequest(r))
 	ua := strings.TrimSpace(r.UserAgent())
 	ipUA := ip + "|" + ua
 	path := strings.ToLower(r.URL.Path)

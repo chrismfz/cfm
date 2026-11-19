@@ -141,6 +141,9 @@ type solveRec struct {
 }
 
 type ipState struct {
+	// addr is the address seen last: the state is an IPv6 client's /64
+	// (core.ClientKey), the alert names a real address.
+	addr string
 	recs []solveRec
 	// truncated counts records the evidence cap dropped SINCE THE LAST
 	// EVALUATION, and is added back into the solve total so the cap cannot hide
@@ -339,7 +342,8 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		if net.ParseIP(ip) == nil {
 			continue
 		}
-		st := d.ips[ip]
+		client := core.ClientKey("|ip", ip) // an IPv6 client solves as its /64
+		st := d.ips[client]
 		if st == nil {
 			// Admit new addresses only while there is room. Existing entries keep
 			// counting either way, so a flood of one-shot solvers can delay a new
@@ -349,8 +353,9 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 				continue
 			}
 			st = &ipState{}
-			d.ips[ip] = st
+			d.ips[client] = st
 		}
+		st.addr = ip
 		if len(st.recs) >= d.cfg.MaxTrackedPerIP {
 			st.truncated++
 			continue
@@ -369,12 +374,13 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 	}
 	d.ipsCapped = capped
 
-	for ip, st := range d.ips {
+	for client, st := range d.ips {
+		ip := st.addr
 		// Drop addresses that have gone quiet so state does not grow without
 		// bound. Guarded by the cooldown so state is never reclaimed while it
 		// still suppresses a repeat alert.
 		if len(st.recs) == 0 && now.Sub(st.lastAlert) > d.cfg.Cooldown {
-			delete(d.ips, ip)
+			delete(d.ips, client)
 			continue
 		}
 
@@ -528,7 +534,7 @@ func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, raw
 			truncated, d.cfg.MaxTrackedPerIP, sampled, solves))
 	}
 
-	return core.Alert{
+	alert := core.Alert{
 		When:    now,
 		Kind:    core.AlertKind("Challenge/CookieDiscard"),
 		Key:     ip,
@@ -553,6 +559,8 @@ func (d *Detector) buildAlert(now time.Time, ip string, st *ipState, solves, raw
 			"impossible_ua": fmt.Sprint(impossibleUA),
 		},
 	}
+	core.TagClient(alert.Extra, ip) // the solves are its /64's
+	return alert
 }
 
 func topOf(m map[string]int) (string, int) {

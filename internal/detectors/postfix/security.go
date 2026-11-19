@@ -1,6 +1,7 @@
 package postfix
 
 import (
+	"cfm/internal/ipkey"
     "context"
     "io"
     "regexp"
@@ -456,7 +457,10 @@ func (d *PostfixSecurity) addUserIP(user, ip string) {
 // ---- bump & flush (like EximSecurity) -------------------------------------
 
 func (d *PostfixSecurity) bump(now time.Time, tag, key, line string) {
-    sk := tag + ":" + key
+    // An IPv6 client counts as its /64 (the per-IP tags, rules and RBL hits
+    // alike; a user or user@ip key is no address and stays as it is);
+    // pending keeps the address seen last.
+    sk := tag + ":" + ipkey.Client(key)
     d.samples.Add(sk, line)
     _ = d.counts.Add(sk, now)
     if d.pending == nil {
@@ -498,6 +502,7 @@ func (d *PostfixSecurity) flush(now time.Time, out chan<- core.Alert) {
         }
         if isIP {
             extra["ip"] = base
+            core.TagClient(extra, base)
         } else if rp := d.userIPs[base]; rp != nil {
             csv, cnt := rp.CSV()
             if cnt > 0 {

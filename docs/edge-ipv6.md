@@ -255,8 +255,32 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     `cfm flush` do not touch the set: free a /64 there with
     `nft delete element inet cfm block_v6_clients '{ <the /64> }'`, or flush
     it, or let its TTL run out.
-- **Still per address:** counters, rate limits and the edge's shared dicts
-  (next), then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
+- **Counters (detectors, admin API: done):** a detector's sliding window,
+  ladder or solve count keys an IPv6 client on its /64 (`core.ClientKey`,
+  `ipkey.Client`): the log detectors (ssh, ftp, dovecot, mysql, cPanel,
+  Proxmox, ngm, custom, exim, postfix, ModSecurity), waf_security,
+  `cfm_endpoints`, cookie discard; the admin API's login autoblock, login
+  throttle, embed bootstrap limit and probe signals; the MCP consent limit.
+  - **Only the count:** the alert keeps a real address (the one seen last;
+    `Extra["client"]` is the /64), which the sink's allow / ignore / self /
+    leniency checks read and `firewall.ExtendClientBlock` widens to the /64
+    itself. Allow lists (`ALLOW_IPS`, …) stay exact matches.
+  - **Like IPv4 behind NAT:** every device of a home or office /64 adds to
+    one count, as every device behind one IPv4 address already does.
+  - **Section cooldown:** stamped on what the ban took (the /64, or the
+    address when a guard kept the /64), so another address of a banned /64
+    is not banned again while an address banned alone does not shield its
+    neighbours.
+  - `TestDetectorWindowKeysGroupIPv6Clients` fails a detector window keyed
+    on the raw address.
+- **Still per address:**
+  - the kernel nft meters (`pps_v6`, `syn_v6`, `new_v6`, `icmp6`, port flood,
+    connlimit `ct count`): they count packets whose source can be spoofed,
+    and a /64 meter would let a forged prefix throttle someone else's whole
+    /64 (decided 2026-11-19; revisit only if the burn-in shows rotation
+    there);
+  - webdetector scoring and the challenge server (next), the edge's shared
+    dicts, then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
 
 ## Verified
 

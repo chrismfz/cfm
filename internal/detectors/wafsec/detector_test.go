@@ -294,3 +294,35 @@ func TestRuleScopedHitsKeepFamilyBanAlive(t *testing.T) {
 		t.Fatalf("state not pruned after a quiet Window: fired=%v famSeen=%v", d.fired, d.famSeen)
 	}
 }
+
+// An IPv6 client rotating inside its /64 fills one count and fires once
+// (its ban takes the /64); the alert names the address of the tripping hit.
+func TestIPv6ClientCountsAsItsSlash64(t *testing.T) {
+	d := New(Config{Families: map[string]int{"WAF_WEBSHELL": 3}})
+	d.Enqueue(ev("2001:db8:1:2::a", "WAF_WEBSHELL:PROBE", "410"))
+	d.Enqueue(ev("2001:db8:1:2::b", "WAF_WEBSHELL:PROBE", "410"))
+	d.Enqueue(ev("2001:db8:1:3::c", "WAF_WEBSHELL:PROBE", "410")) // another /64
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("fired before the /64's third hit: %d", len(got))
+	}
+	d.Enqueue(ev("2001:db8:1:2::c", "WAF_WEBSHELL:PROBE", "410"))
+	got := drain(t, d)
+	if len(got) != 1 || got[0].Extra["ip"] != "2001:db8:1:2::c" || got[0].Key != "2001:db8:1:2::c" || got[0].Extra["client"] != "2001:db8:1:2::/64" {
+		t.Fatalf("want one alert for 2001:db8:1:2::c (client /64), got %+v", got)
+	}
+	d.Enqueue(ev("2001:db8:1:2::d", "WAF_WEBSHELL:PROBE", "410"))
+	if got := drain(t, d); len(got) != 0 {
+		t.Fatalf("a new address of the fired /64 re-emitted: %d", len(got))
+	}
+	// The allow list stays per address: an allowed address of the /64 is
+	// never counted, the others are.
+	a := New(Config{Families: map[string]int{"WAF_SQLI": 1}, AllowIPs: []string{"2001:db8:9:9::1"}})
+	a.Enqueue(ev("2001:db8:9:9::1", "WAF_SQLI:UNION_SELECT", "301"))
+	if got := drain(t, a); len(got) != 0 {
+		t.Fatalf("allowed address fired: %d", len(got))
+	}
+	a.Enqueue(ev("2001:db8:9:9::2", "WAF_SQLI:UNION_SELECT", "301"))
+	if got := drain(t, a); len(got) != 1 {
+		t.Fatalf("another address of the allowed one's /64: %d alerts, want 1", len(got))
+	}
+}

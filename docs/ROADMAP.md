@@ -250,17 +250,21 @@ origin hop brackets the address and binds `::1`.
   operator node that reported the bug (AAAA records to the server). Check
   that the site (not the default vhost) answers over `curl -6`.
 - **Per-IP counters and bans by /64, then IPv6 on by default** — [next].
-  Every per-IP control keys on the full IPv6 address: nft `connlimit` /
-  `pps_v6` / `syn_v6` / `new_v6` meters and `block_v6` bans, waf_security
-  autoblock, webdetector scoring, login_bruteforce, 403_flood, challenge rate
-  counters. A direct IPv6 client with a /64 (any VPS) gets a new identity per
-  request. Behind Cloudflare that did not matter (nft never sees the client,
-  Cloudflare absorbs the volume), but with the edge listening on IPv6 direct
-  clients reach the nft per-IP layer. Group IPv6 by /64 there (and in the
-  edge ban store), then flip `V6_DEFAULT` (scripts/cfm-edge-listen-v6.sh)
-  and `edgeIPv6Default` (internal/originrealip) together to auto/true, and
-  swap the reference cfm.conf's commented `# EDGE_LISTEN_V6 = on` for
-  `# EDGE_LISTEN_V6 = off` (check_edge_listen_v6.sh checks all three).
+  A direct IPv6 client with a /64 (any VPS) got a new identity per request
+  wherever a control keyed on the full address. Done: the automatic L7 bans
+  (`block_v6_clients`) and the detectors' and admin API's counters
+  (`docs/edge-ipv6.md` "IPv6 /64 grouping"). Left: webdetector scoring
+  (403_flood, 404_flood, the challenge thresholds, uniqIP) and the challenge
+  server's limits, then the edge's shared dicts; then flip `V6_DEFAULT`
+  (scripts/cfm-edge-listen-v6.sh) and `edgeIPv6Default`
+  (internal/originrealip) together to auto/true, and swap the reference
+  cfm.conf's commented `# EDGE_LISTEN_V6 = on` for `# EDGE_LISTEN_V6 = off`
+  (check_edge_listen_v6.sh checks all three).
+- **nft per-IP meters stay per address for IPv6** — [decided]. `pps_v6`,
+  `syn_v6`, `new_v6`, `icmp6`, port flood and connlimit count packets whose
+  source can be spoofed; a /64 meter would let a forged prefix throttle
+  someone else's whole /64 (as the kernel autoblock stays per address).
+  Revisit only if the burn-in shows a client rotating its /64 there.
 
 - **The RFC1918 peer bypass at cfm.lua Step 0a** — [open]. Found while
   closing the `fe80::` self bypass (2026-11-19): a direct (non-Cloudflare)

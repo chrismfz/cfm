@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"bytes"
+	"cfm/internal/ipkey"
 	"context"
 	"crypto/hkdf"
 	"crypto/hmac"
@@ -282,7 +283,8 @@ func sanitizeExpectedParentOrigin(raw string) string {
 }
 
 func allowEmbedRate(action, srcIP, tokenID string, now time.Time, window time.Duration, burst int) bool {
-	ipKey := fmt.Sprintf("%s:ip:%s", action, strings.TrimSpace(srcIP))
+	// An IPv6 client is limited as its /64 (ipkey).
+	ipKey := fmt.Sprintf("%s:ip:%s", action, ipkey.Client(strings.TrimSpace(srcIP)))
 	tokenKey := fmt.Sprintf("%s:token:%s", action, strings.TrimSpace(tokenID))
 	return embedBootstrapRateLimiter.allow(ipKey, now, window, burst) &&
 		embedBootstrapRateLimiter.allow(tokenKey, now, window, burst)

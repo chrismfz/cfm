@@ -321,6 +321,7 @@ func (m *MySQL) flush(now time.Time, out chan<- core.Alert) {
 		// help autoblock sink: tag what to block / who
 		if strings.HasSuffix(p.kindKey, "|ip") {
 			extra["ip"] = p.key
+			core.TagClient(extra, p.key)
 		}
 		if strings.HasSuffix(p.kindKey, "|user") {
 			extra["user"] = p.key
@@ -340,10 +341,9 @@ func (m *MySQL) flush(now time.Time, out chan<- core.Alert) {
 
 // bump aggregates into window primitives and tracks the key for this tick
 func (m *MySQL) bump(now time.Time, kindKey, key, line string) {
-	sk := kindKey + ":" + key
-	if _, ok := m.pending[sk]; !ok {
-		m.pending[sk] = pend{kindKey: kindKey, key: key}
-	}
+	// An IPv6 client counts as its /64; pending keeps the address seen last.
+	sk := kindKey + ":" + core.ClientKey(kindKey, key)
+	m.pending[sk] = pend{kindKey: kindKey, key: key}
 	_ = m.counts.Add(sk, now)
 	m.samples.Add(sk, line)
 }

@@ -198,10 +198,9 @@ func normalizeIP(raw string) string {
 }
 
 func (a *Auth) bump(now time.Time, kindKey, key, line string) {
-	sk := kindKey + ":" + key
-	if _, ok := a.pending[sk]; !ok {
-		a.pending[sk] = pend{kindKey: kindKey, key: key}
-	}
+	// An IPv6 client counts as its /64; pending keeps the address seen last.
+	sk := kindKey + ":" + core.ClientKey(kindKey, key)
+	a.pending[sk] = pend{kindKey: kindKey, key: key}
 	_ = a.counts.Add(sk, now)
 	a.samples.Add(sk, line)
 }
@@ -227,6 +226,7 @@ func (a *Auth) flush(now time.Time, out chan<- core.Alert) {
 		}
 		if isIP {
 			extra["ip"] = p.key
+			core.TagClient(extra, p.key)
 		}
 
 		out <- core.Alert{

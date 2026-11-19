@@ -1,6 +1,7 @@
 package exim
 
 import (
+	"cfm/internal/ipkey"
 	//	"bufio"
 	"context"
 	"fmt"
@@ -666,7 +667,10 @@ func (d *EximSecurity) addUserIP(user, ip string) {
 }
 
 func (d *EximSecurity) bump(now time.Time, tag, key, line string) {
-	sk := tag + ":" + key
+	// An IPv6 client counts as its /64 (the per-IP tags, rules and RBL hits
+	// alike; a user or user@ip key is no address and stays as it is);
+	// pending keeps the address seen last.
+	sk := tag + ":" + ipkey.Client(key)
 	d.samples.Add(sk, line)
 	_ = d.counts.Add(sk, now) // real counting in sliding window
 
@@ -736,6 +740,7 @@ func (d *EximSecurity) flush(now time.Time, out chan<- core.Alert) {
 		}
 		if isIP {
 			extra["ip"] = base
+			core.TagClient(extra, base)
 		} else if rp := d.userIPs[base]; rp != nil {
 			csv, n := rp.CSV()
 			if n > 0 {

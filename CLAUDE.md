@@ -327,7 +327,10 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   IPv6 client is its /64 (`docs/edge-ipv6.md` "IPv6 /64 grouping"). Never key
   an allow, an exact match, a clearance cookie or a log line on it, and never
   add another private "IPv4 or /64" helper: both twins run
-  `scripts/tests/fixtures/ipkey.txt`.
+  `scripts/tests/fixtures/ipkey.txt`. A detector counts on it
+  (`core.ClientKey`) but its alert carries a real address (`Extra["ip"]`),
+  which the sink's checks read and `firewall.ExtendClientBlock` widens itself;
+  the kernel nft meters stay per address (spoofable sources).
 - **`detectors.conf` readers tolerate an inline `;`/`#` comment — don't
   regress it.** `kvInt`/`kvBool`/`kvDur` (`internal/detectors/registry.go`)
   strip it via `cleanScalar`; before that, `KEY = 5 ; note` failed to parse and

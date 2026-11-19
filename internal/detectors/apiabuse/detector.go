@@ -201,7 +201,10 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		default:
 		}
 		srcIP := strings.TrimSpace(ev.SrcIP)
-		key := srcIP
+		// An IPv6 client counts and stages as its /64 (a rotating client
+		// climbs one ladder, whose ban takes the /64); the alert carries this
+		// event's address.
+		key := core.ClientKey("|ip", srcIP)
 		attributed := net.ParseIP(srcIP) != nil
 		if !attributed {
 			key = unattributedSourceKey
@@ -219,10 +222,14 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 		d.stage[key] = next
 
+		alertKey := key
+		if attributed {
+			alertKey = srcIP
+		}
 		alert := core.Alert{
 			When:    now,
 			Kind:    core.AlertKind("CFM/ENDPOINTS"),
-			Key:     key,
+			Key:     alertKey,
 			Count:   count,
 			Samples: d.samples.GetAndClear(key),
 			Extra: map[string]string{
@@ -234,6 +241,7 @@ func (d *Detector) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 		}
 		if attributed {
 			alert.Extra["ip"] = srcIP
+			core.TagClient(alert.Extra, srcIP)
 		} else {
 			alert.Extra["identity"] = "unattributed"
 			alert.Extra[core.ExtraIPScope] = core.IPScopeHost

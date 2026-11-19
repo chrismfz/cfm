@@ -21,6 +21,24 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Security
+- **The detectors and the admin API count an IPv6 client by its /64.** A
+  client rotating its address inside the /64 any VPS or ISP line hands it got
+  a fresh count per address, so it never reached a threshold. The login and
+  service detectors (ssh, ftp, dovecot, mysql, cPanel, Proxmox, ngm, custom),
+  the mail ones (exim, postfix: auth failures, rules, RBL hits, relays),
+  ModSecurity, waf_security, the API-probe ladder (`cfm_endpoints`), the
+  challenge cookie-discard detector, the admin API's login autoblock, login
+  throttle, embed bootstrap limit and probe signals, and the MCP consent limit
+  now count the /64, as an IPv4 address behind NAT already is; the alert still
+  names a real address (the one seen last, plus `client=<the /64>`), the
+  ban takes the /64 as before, and allow lists stay exact. The section
+  cooldown follows what the ban took, so another address of a banned /64 is
+  not banned again. The detectors' own /64 helpers (login_bruteforce, the
+  login ledger, the CDN-cache finding, mail abuse) now use the one shared key,
+  which leaves Teredo and NAT64 per address. The kernel nft meters (flood,
+  SYN, new-connection, ICMP, port flood, connlimit) stay per address: their
+  packets' source can be spoofed. Webdetector scoring and the challenge
+  server follow; `docs/edge-ipv6.md` "IPv6 /64 grouping".
 - **An automatic L7 ban of an IPv6 client takes its whole /64** (not a
   loopback, link-local, NAT64 or Teredo address: a /64 there is shared by
   unrelated clients, so those stay per address). The

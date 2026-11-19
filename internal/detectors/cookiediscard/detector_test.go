@@ -305,3 +305,21 @@ func hasSample(a core.Alert, substr string) bool {
 	}
 	return false
 }
+
+// An IPv6 client re-solving from a new address of its /64 each time is one
+// client (as an IPv4 address behind NAT is): the solves add up, and the
+// alert names the address seen last and its /64.
+func TestIPv6ClientSolvesAsItsSlash64(t *testing.T) {
+	h := newHarness(t, Config{})
+	for i := 0; i < 30; i++ {
+		h.solve(fmt.Sprintf("2001:db8:1:2::%x", i+1), "forum.example.com", "/forum/ucp.php?mode=register", chromeUA)
+		h.clock = h.clock.Add(4 * time.Second)
+	}
+	alerts := h.run(t)
+	if len(alerts) != 1 {
+		t.Fatalf("got %d alerts, want 1", len(alerts))
+	}
+	if a := alerts[0]; a.Count != 30 || a.Extra["ip"] != "2001:db8:1:2::1e" || a.Key != "2001:db8:1:2::1e" || a.Extra["client"] != "2001:db8:1:2::/64" {
+		t.Fatalf("alert: count=%d key=%q extra=%v", a.Count, a.Key, a.Extra)
+	}
+}

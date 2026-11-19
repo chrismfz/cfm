@@ -25,6 +25,7 @@ package mcpserver
 //     it); neither MCP_TOKEN nor the admin token is handed to the OAuth client.
 
 import (
+	"cfm/internal/ipkey"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -342,7 +343,8 @@ func (s *oauthServer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	// against brute-forcing it through the form and against mcp_oauth_consent_*
 	// log spam. A legitimate operator submits once, well under the burst.
 	ip := s.clientIP(r)
-	if !s.consentRL.allow(ip, time.Now(), consentRLWindow, consentRLBurst) {
+	// An IPv6 client is throttled as its /64 (ipkey); the log keeps ip.
+	if !s.consentRL.allow(ipkey.Client(ip), time.Now(), consentRLWindow, consentRLBurst) {
 		if s.auditAuth != nil {
 			s.auditAuth(r, AuthAuditEvent{Kind: "mcp_consent", Result: "rate_limited", AuthMech: "unknown", Status: http.StatusTooManyRequests})
 		}

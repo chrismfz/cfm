@@ -205,7 +205,7 @@ func (d *Relays) RunOnce(ctx context.Context, out chan<- core.Alert) error {
 			continue
 		}
 
-		sk := p.kindKey + ":" + p.key
+		sk := p.kindKey + ":" + core.ClientKey(p.kindKey, p.key)
 		n := d.counts.Count(sk, nowSend)
 		if !d.gate.Allow(sk, nowSend, n, thr) {
 			continue
@@ -342,7 +342,7 @@ func (d *Relays) processLine(now time.Time, line string, out chan<- core.Alert) 
 //func bump
 
 func (d *Relays) bump(now time.Time, kindKey, key, line string, _ chan<- core.Alert) {
-	sk := kindKey + ":" + key
+	sk := kindKey + ":" + core.ClientKey(kindKey, key) // an IPv6 client: its /64
 	d.samples.Add(sk, line)
 	_ = d.counts.Add(sk, now)
 	if d.pending == nil {

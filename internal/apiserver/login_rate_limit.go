@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"cfm/internal/ipkey"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -109,7 +110,9 @@ func (b *tokenBucket) allow(now time.Time) bool {
 func (l *loginRateLimiter) Evaluate(ip, account string) loginRateLimitDecision {
 	now := l.now().UTC()
 	account = normalizeLoginUsername(account)
-	ip = normalizeChallengeIP(ip)
+	// An IPv6 client is throttled as its /64 (ipkey): rotating the address
+	// inside it must not refill the buckets.
+	ip = ipkey.Client(normalizeChallengeIP(ip))
 	tuple := loginIPAccountTuple(ip, account)
 
 	l.mu.Lock()

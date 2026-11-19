@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"cfm/internal/ipkey"
 	"context"
 	"database/sql"
 	"net"
@@ -77,7 +78,10 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 			if ip == nil || strings.EqualFold(event, "RATELIMIT") {
 				continue
 			}
-			key := ip.String()
+			// An IPv6 client counts as its /64 (its ban takes the /64); the
+			// report and the log name this failure's address.
+			addr := ip.String()
+			key := ipkey.Client(addr)
 			cut := ts - int64(authAutoblockWindow.Seconds())
 			series := append(failTSByIP[key], ts)
 			n := 0
@@ -122,11 +126,11 @@ func runAuthAutoblock(ctx context.Context, cfg *cfgpkg.Config, be firewall.Backe
 				lastBlock[key] = time.Now()
 			}
 			if outcome == authBlockKept {
-				logging.LogfAPI("[apiserver][auth-autoblock] ip=%s already blocked for at least %s; kept (%s)", key, *ttlPtr, authAutoblockReason)
+				logging.LogfAPI("[apiserver][auth-autoblock] ip=%s already blocked for at least %s; kept (%s)", addr, *ttlPtr, authAutoblockReason)
 				continue
 			}
-			_ = be.ReportBlock(key, authAutoblockReason, "detector", mode, ttlSec)
-			logging.LogfAPI("[apiserver][auth-autoblock] ip=%s fails=%d/%dm -> %s (%s)", key, len(series), int(authAutoblockWindow.Minutes()), mode, authAutoblockReason)
+			_ = be.ReportBlock(addr, authAutoblockReason, "detector", mode, ttlSec)
+			logging.LogfAPI("[apiserver][auth-autoblock] ip=%s fails=%d/%dm -> %s (%s)", addr, len(series), int(authAutoblockWindow.Minutes()), mode, authAutoblockReason)
 		}
 		_ = rows.Close()
 	}

@@ -34,6 +34,7 @@ package mailtraffic
 
 import (
 	"bufio"
+	"cfm/internal/ipkey"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -242,7 +243,7 @@ func authSource(ip string) (src, country string) {
 	if v4 := pip.To4(); v4 != nil {
 		return v4.String(), cc // ::ffff:1.2.3.4 is 1.2.3.4
 	}
-	return pip.Mask(net.CIDRMask(64, 128)).String() + "/64", cc
+	return ipkey.Client(pip.String()), cc // an IPv6 client is its /64
 }
 
 // ---- per-line context (what the counters don't keep) ----
