@@ -33,6 +33,11 @@ func TestNormalizeEdgeService(t *testing.T) {
 		{input: "nginx: worker process", want: "nginx"},
 		{input: "cfm-edge", want: "cfm-edge"}, // comm
 		{input: "nginx: master process /usr/sbin/cfm-edge", want: "cfm-edge"},
+		// Processes that only mention cfm-edge are not the edge: CFM's own
+		// pre-start script runs on every OpenResty / Angie node.
+		{input: "/bin/sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh prestart", want: ""},
+		{input: "tail -f /var/log/cfm-edge/error.log", want: ""},
+		{input: "less /etc/cfm-edge/trusted_proxies.conf", want: ""},
 		{input: "apache2", want: ""},
 	}
 

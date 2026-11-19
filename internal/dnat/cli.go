@@ -623,6 +623,12 @@ func normalizeEdgeService(s string) string {
 	// File-precedence order: OpenResty first, because an OpenResty process
 	// line also contains "nginx".
 	for _, ep := range edgeengine.InFileOrder() {
+		if ep.Name == "cfm-edge" {
+			if isCfmEdgeProcess(s, ep) {
+				return ep.Name
+			}
+			continue
+		}
 		if strings.Contains(s, ep.Name) {
 			return ep.Name
 		}
@@ -631,6 +637,26 @@ func normalizeEdgeService(s string) string {
 		return "nginx"
 	}
 	return ""
+}
+
+// isCfmEdgeProcess: the cfm-edge processes themselves, never a process that
+// merely mentions the name. A substring match (the rule the older engines keep)
+// would also take CFM's own cfm-edge-listen-v6.sh, which runs before every
+// OpenResty / Angie start, or a `tail -f /var/log/cfm-edge/...`. comm is
+// exactly "cfm-edge"; the master's retitled cmdline ends in the binary
+// ("nginx: master process /usr/sbin/cfm-edge").
+func isCfmEdgeProcess(s string, ep edgeengine.Profile) bool {
+	if s == ep.Name {
+		return true
+	}
+	for _, f := range strings.Fields(s) {
+		for _, b := range ep.Binaries {
+			if f == b {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func help() {

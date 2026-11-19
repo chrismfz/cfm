@@ -34,7 +34,7 @@ func TestHealthEdgeListsUnchangedByTheEdgeRegistry(t *testing.T) {
 			name:            "cfm-edge",
 			serviceUnit:     "cfm-edge.service",
 			processAliases:  []string{"cfm-edge", "nginx"},
-			configHookPaths: []string{"/etc/cfm-edge/nginx.conf"},
+			configHookPaths: []string{"/etc/cfm-edge/trusted_proxies.conf"},
 			binaryPaths:     []string{"/usr/sbin/cfm-edge"},
 			binaryCommands:  []string{"cfm-edge"},
 		},

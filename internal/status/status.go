@@ -401,7 +401,6 @@ func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 
 	openrestySvc := getUnitServiceInfo("openresty.service")
 	angieSvc := getUnitServiceInfo("angie.service")
-	cfmEdgeSvc := getUnitServiceInfo("cfm-edge.service")
 	bridgeCfg := resolveBridgeRuntimeConfig()
 
 	sockProbe := probeSSLCollector("/var/run/sslcollector.sock")
@@ -413,7 +412,6 @@ func printBridgeInterceptorStatus_unused(backend firewall.Backend) {
 	fmt.Printf("  %-24s %s\n", "DNAT:", dnatState)
 	fmt.Printf("  %-24s %s\n", "OpenResty:", serviceTriple(openrestySvc))
 	fmt.Printf("  %-24s %s\n", "Angie:", serviceTriple(angieSvc))
-	fmt.Printf("  %-24s %s\n", "cfm-edge:", serviceTriple(cfmEdgeSvc))
 	fmt.Printf("  %-24s %s\n", "sslcollector.sock:", sockProbe.Category)
 	fmt.Printf("  %-24s path=%s uid=%s gid=%s mode=%s probe=%s%s\n",
 		"",

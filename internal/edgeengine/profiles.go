@@ -20,9 +20,12 @@ import "strings"
 //     behaviour-neutral.
 //
 // cfm-edge is LAST in both orders: on every node without it the lists are the
-// old ones plus a trailing entry that matches nothing, and where it was
-// adopted, the first-readable lists hold the same content in each engine's
-// copy (one config source), and the logs are picked by mtime.
+// old ones plus a trailing entry that matches nothing. On a node switched to
+// cfm-edge with the old engine still installed, a first-readable list takes
+// the old engine's copy: that is right only while CFM's sidecar deploy
+// refreshes every installed engine's copy, cfm-edge's included (the
+// packaging change that adopts cfm-edge must do it). The logs are picked by
+// mtime.
 
 // Profile is one in-path edge engine as CFM installs and manages it.
 type Profile struct {
@@ -95,8 +98,9 @@ var Profiles = []Profile{
 		// cfm-edge: CFM's own edge package (nginx.org nginx + the OpenResty Lua
 		// set, chrismfz/cfm-edge), laid out like a distro package. CFM's Lua
 		// lives in the shared /var/lib/cfm/lua from day one, so it has no
-		// legacy Lua dir. Its nginx.conf IS CFM's edge config (the install
-		// script deploys it), hence the one config hook.
+		// legacy Lua dir. Its config hook is a CFM sidecar, not nginx.conf:
+		// the package ships a placeholder nginx.conf, so that file says
+		// nothing about CFM being wired in.
 		Name:            "cfm-edge",
 		Binaries:        []string{"/usr/sbin/cfm-edge"},
 		Commands:        []string{"cfm-edge"},
@@ -105,7 +109,7 @@ var Profiles = []Profile{
 		MainConf:        "/etc/cfm-edge/nginx.conf",
 		LogDir:          "/var/log/cfm-edge",
 		LegacyLuaDir:    "",
-		ConfigHookPaths: []string{"/etc/cfm-edge/nginx.conf"},
+		ConfigHookPaths: []string{"/etc/cfm-edge/trusted_proxies.conf"},
 		ProcessAliases:  []string{"cfm-edge", "nginx"},
 	},
 }

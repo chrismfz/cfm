@@ -66,7 +66,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the OpenResty Lua set, `chrismfz/cfm-edge`), as a third engine next to
   OpenResty and Angie: unit `cfm-edge.service`, `/usr/sbin/cfm-edge`, config
   and sidecars in `/etc/cfm-edge/`, logs in `/var/log/cfm-edge/`, Lua from
-  the shared `/var/lib/cfm/lua/`. `cfm status`, `cfm health`, `cfm dnat`,
+  the shared `/var/lib/cfm/lua/`. `cfm health` (a cfm-edge row next to
+  OpenResty and Angie, `inactive` where it is not installed), `cfm dnat`,
   edge_health, the heartbeat (`edge = "cfm-edge"`), the edge log tools and
   `journal_tail` recognise it. Nothing changes on a node without it: every
   edge list keeps its order and only gains a trailing entry. No node runs
