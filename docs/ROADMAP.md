@@ -241,6 +241,13 @@ origin hop brackets the address and binds `::1`.
   rendered. A failed hop would be a 502 the browser does not retry on IPv4:
   check `edge_error_tail` for `bind(` / `set_current_peer` on the first nodes
   that turn IPv6 on.
+- **A site with a dedicated IPv6 address through the edge** — [track]. The
+  hop goes to the IPv6 address the visitor dialled (`[$server_addr]`, the
+  DNAT keeps the destination), so a cPanel account with its own IPv6 (its
+  vhost bound to that address) should reach its own vhost, as dedicated IPv4
+  does today; no fleet site has one, so it is unproven. First real case: the
+  operator node that reported the bug (AAAA records to the server). Check
+  that the site (not the default vhost) answers over `curl -6`.
 - **Per-IP counters and bans by /64** — [idea]. Every detector keys an IPv6
   client on its full address, so a client rotating inside its /64 never
   accumulates. Already true behind Cloudflare (own IPv6 address at the edge).
