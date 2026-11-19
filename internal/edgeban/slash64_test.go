@@ -1,7 +1,9 @@
 package edgeban
 
 import (
+	"cfm/internal/firewall"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -137,5 +139,35 @@ func TestSlash64AddedBetweenReconcilesRespectsAllows(t *testing.T) {
 	s.AddElem("2001:db8:3:4::/64", dur(time.Hour), "waf_security", false)
 	if ok, _ := s.Banned("2001:db8:3:4::5"); !ok {
 		t.Fatal("a /64 no allow touches must be answered")
+	}
+}
+
+// The edge ban store tells the firewall which /64s it must never ban as a
+// whole: a trusted proxy's range (SetTrustedProxies) and any the allow sets
+// touch (the last reconcile's read, the fleet whitelist included).
+func TestSlash64ExemptsRegisteredWithTheFirewall(t *testing.T) {
+	p := netip.MustParsePrefix("2001:db8:1:2::/64")
+	if got := firewall.ClientNetExempted(p); got != "" {
+		t.Fatalf("nothing registered yet refuses it: %q", got)
+	}
+	_, cf, _ := net.ParseCIDR("2001:db8::/32")
+	SetTrustedProxies([]*net.IPNet{cf})
+	if got := firewall.ClientNetExempted(p); got != "trusted_proxies" {
+		t.Fatalf("a /64 inside a trusted proxy range: %q", got)
+	}
+	SetTrustedProxies(nil)
+	if got := firewall.ClientNetExempted(p); got != "" {
+		t.Fatalf("after clearing the proxies: %q", got)
+	}
+
+	s, now := newTestStore(t)
+	SetDefault(s)
+	t.Cleanup(func() { SetDefault(nil) })
+	s.Reconcile(snap(now.Add(time.Second), []string{"2001:db8:1:2::77"}))
+	if got := firewall.ClientNetExempted(p); got != "allow_sets" {
+		t.Fatalf("a /64 an allow touches: %q", got)
+	}
+	if got := firewall.ClientNetExempted(netip.MustParsePrefix("2001:db8:1:3::/64")); got != "" {
+		t.Fatalf("the next /64: %q", got)
 	}
 }

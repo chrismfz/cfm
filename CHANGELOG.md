@@ -33,8 +33,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   one transaction, and the address is banned instead (no ban is lost) when
   the /64 holds this node's own address (a provider sharing one /64 between
   customers' VPSes), an ignored address or network (`cfm.ignore`,
-  `IGNORE_IPS` / `IGNORE_NETS`), a trusted proxy's range (Cloudflare's), or
-  nft cannot write it. `cfm flush` empties `block_v6_clients` too. The edge bans the
+  `IGNORE_IPS` / `IGNORE_NETS`), an allowed one, a trusted proxy's range
+  (Cloudflare's), or nft cannot write it. `cfm flush` empties
+  `block_v6_clients` too. The edge bans the
   /64 too for clients behind Cloudflare (not where an allow or a trusted
   proxy range touches it), a TTL /64 ban survives a reboot or `cfm reset`
   (`ttlbans.json`; a permanent one, like a detector's permanent host ban, is

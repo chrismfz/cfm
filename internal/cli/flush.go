@@ -25,7 +25,7 @@ func RunFlush(args []string, be firewall.Backend, tableExists func() bool) int {
 	// IPv6 client /64s) included.
 	for _, setName := range ttlban.Sets {
 		if err := be.FlushSet("inet", "cfm", setName); err != nil {
-			if setName == firewall.BlockV6Clients {
+			if setName == firewall.BlockV6Clients && firewall.IsMissingSet(err) {
 				// A table an older daemon built has no such set: nothing to flush.
 				fmt.Fprintf(os.Stderr, "warning: flush %s: %v\n", setName, err)
 				continue

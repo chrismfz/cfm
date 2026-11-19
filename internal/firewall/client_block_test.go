@@ -4,6 +4,8 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -13,10 +15,12 @@ import (
 // through SetElemWriter as both backends implement it.
 type netFake struct {
 	extendFake
-	sets     map[string]map[string]time.Duration // set -> elem -> left (0 = permanent)
-	readErr  map[string]error
-	writeErr error
-	writes   []string // "set elem replace"
+	sets      map[string]map[string]time.Duration // set -> elem -> left (0 = permanent)
+	readErr   map[string]error
+	writeErr  error
+	deleteErr error
+	writes    []string // "set elem"
+	deletes   []string // "set elem"
 }
 
 func newNetFake() *netFake {
@@ -61,6 +65,10 @@ func (f *netFake) WriteSetElem(set, elem string, ttl *time.Duration, replace boo
 }
 
 func (f *netFake) DeleteSetElem(set, elem string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	f.deletes = append(f.deletes, set+" "+elem)
 	delete(f.set(set), elem)
 	return nil
 }
@@ -142,12 +150,19 @@ func TestExtendClientBlockGuards(t *testing.T) {
 			SetClientNetExempt("trusted_proxies", func(p netip.Prefix) bool { return p.String() == net6 })
 		},
 		"interface addr": func(f *netFake) { testLocalAddrs = []string{"2001:db8:1:2::9/64"} },
+		"allowed host":   func(f *netFake) { f.set("allow_v6")["2001:db8:1:2::55"] = 0 },
+		"allowed dyn":    func(f *netFake) { f.set("allow_dyn_v6")["2001:db8:1:2::56"] = 0 },
+		"allowed net":    func(f *netFake) { f.set("allow_v6_nets")["2001:db8:1:2:8000::/65"] = 0 },
+		"fleet allow": func(f *netFake) {
+			SetClientNetExempt("allow_sets", func(p netip.Prefix) bool { return p.String() == net6 })
+		},
 		"a guard unread": func(f *netFake) { f.readErr["self_v6"] = errors.New("nft busy") },
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Cleanup(func() {
 				SetClientNetExempt("ignore", nil)
 				SetClientNetExempt("trusted_proxies", nil)
+				SetClientNetExempt("allow_sets", nil)
 				testLocalAddrs = nil
 			})
 			f := newNetFake()
@@ -324,6 +339,10 @@ func TestRemoveClientNets(t *testing.T) {
 	if _, ok := f.set(BlockV6Clients)[net6]; ok || len(f.set(BlockV6Clients)) != 1 {
 		t.Fatalf("after: %v (want only the unrelated /64 left)", f.sets)
 	}
+	// One delete, for the /64 the set held; none for the one it did not.
+	if len(f.deletes) != 1 || f.deletes[0] != BlockV6Clients+" "+net6 {
+		t.Fatalf("deletes %v, want the held /64 once", f.deletes)
+	}
 	g := newNetFake()
 	g.readErr[BlockV6Clients] = errors.New(`nft: Error: No such file or directory; set block_v6_clients`)
 	if errs := RemoveClientNets(g, ips); len(errs) != 0 {
@@ -348,5 +367,34 @@ func TestChainRulesPresentIsExactForAnchoredRules(t *testing.T) {
 	}
 	if !c.Present(`ip6 saddr @block_v6_nets drop`) == c.Has(`ip6 saddr @block_v6_nets drop`) {
 		t.Fatal("an unanchored rule keeps Has's answer")
+	}
+}
+
+// RemoveClientNet: a table from before block_v6_clients (no such set) frees
+// nothing, without error; any other failure is reported.
+func TestRemoveClientNetMissingSet(t *testing.T) {
+	f := newNetFake()
+	f.deleteErr = errors.New(`nft: Error: No such file or directory; did you mean set 'block_v6_nets'?`)
+	if _, err := RemoveClientNet(f, net.ParseIP(v6a)); err != nil {
+		t.Fatalf("missing set: %v", err)
+	}
+	f.deleteErr = errors.New("nft: exec: \"nft\": executable file not found in $PATH")
+	if _, err := RemoveClientNet(f, net.ParseIP(v6a)); err == nil {
+		t.Fatal("a missing nft binary must be an error, not a missing set")
+	}
+}
+
+func TestIsMissingSet(t *testing.T) {
+	for err, want := range map[error]bool{
+		nil:            false,
+		syscall.ENOENT: true,
+		errors.New("Error: No such file or directory"):   true,
+		errors.New("executable file not found in $PATH"): false,
+		exec.ErrNotFound:        false,
+		errors.New("not found"): false,
+	} {
+		if got := IsMissingSet(err); got != want {
+			t.Errorf("IsMissingSet(%v) = %v, want %v", err, got, want)
+		}
 	}
 }

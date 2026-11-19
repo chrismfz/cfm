@@ -155,7 +155,21 @@ func ParseTrustedProxies(text string) []*net.IPNet {
 	return out
 }
 
-func init() { enabled.Store(true) }
+func init() {
+	enabled.Store(true)
+	// A /64 the allow sets touch (the fleet whitelist included, from the last
+	// reconcile's read) is never banned as a whole: the edge would never
+	// answer it (answers) and the TTL restore drops it, so nft bans the
+	// address instead (firewall/client_block.go).
+	firewall.SetClientNetExempt("allow_sets", func(p netip.Prefix) bool {
+		s := Default()
+		if s == nil {
+			return false
+		}
+		a := s.allow.Load()
+		return a != nil && a.overlaps(p)
+	})
+}
 
 // SetEnabled is the [webdetector] EDGE_BAN kill switch: off, Banned answers
 // false for every address (the store keeps its entries).
@@ -832,13 +846,11 @@ func BanElem(elem string, ttl *time.Duration, source string) {
 // dropping it.
 func Unban(ip string) {
 	Default().Remove(ip)
+	// The address only: forgetting its whole /64 there would lift every
+	// source (the fleet blacklist, other addresses' own bans) for the /64.
+	// Other addresses of an unblocked /64 ban stay filtered until the
+	// filter's next read of the sets (proxyipfilter.LocalRefreshEvery).
 	proxyipfilter.Forget(ip)
-	// The client's /64 too (Remove drops its /64 ban).
-	if addr := net.ParseIP(strings.TrimSpace(ip)); addr != nil {
-		if ck := clientKey(addr); ck != "" {
-			proxyipfilter.Forget(ck)
-		}
-	}
 }
 
 // IsBanned asks the Default store (false without one).

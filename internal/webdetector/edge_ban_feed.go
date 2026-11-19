@@ -1,7 +1,6 @@
 package webdetector
 
 import (
-	"cfm/internal/firewall"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +13,7 @@ import (
 	"time"
 
 	"cfm/internal/edgeban"
+	"cfm/internal/firewall"
 	"cfm/internal/logging"
 	"cfm/internal/proxyipfilter"
 )

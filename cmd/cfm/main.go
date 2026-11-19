@@ -830,6 +830,10 @@ func runDaemon(args []string) {
 	// the background; the edge ban store's first reconcile waits for it, or
 	// it would drop the edge's copy of every ban nft does not hold yet. The
 	// store is refreshed from that reconcile's read and once more on SIGTERM.
+	// The trusted proxies first: an IPv6 client /64 ban (the restore's, and
+	// any L7 ban from here on) is never taken over a proxy's range
+	// (firewall/client_block.go's guard reads them).
+	loadEdgeBanTrustedProxies()
 	ttlRestored := startTTLBans(be, cfgDir)
 
 	// Edge ban store (internal/edgeban): the web-related and manual bans the

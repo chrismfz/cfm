@@ -215,13 +215,17 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     own address (its interfaces and `self_v6`: a provider handing one /64 to
     several customers' VPSes), an ignored address or network (`ignore_v6`,
     `ignore_v6_nets`, `IGNORE_IPS` / `IGNORE_NETS`), or a trusted proxy's
-    range (`trusted_proxies.conf`: a detector that saw a proxy's own address
-    must not ban the proxy's /64), since nft accepts none of those before
-    its drops; and when nft cannot read or write the set. Allows need no
-    guard: every allow set is accepted before any block drop. The TTL ban
-    restore at boot checks the same (`ttlban.Store.ExcludeNet`, read from
-    the files before the daemon loads them) and counts a refused /64
-    excluded. `cfm flush` empties the set like the other block sets.
+    range (`trusted_proxies.conf`, loaded before the TTL restore: a
+    detector that saw a proxy's own address must not ban the proxy's /64),
+    since nft accepts none of those before its drops; an allowed address or
+    network (the manual allow sets, read per ban, and the fleet whitelist
+    from the edge ban store's last read): nft would still accept it, but the
+    edge never answers a /64 an allow touches and the restore drops one, so
+    the address is banned for all three alike; and when nft cannot read or
+    write the set. The TTL ban restore at boot checks the same sources
+    (`ttlban.Store.ExcludeNet`, read from the files before the daemon loads
+    them) and counts a refused /64 excluded. `cfm flush` empties the set
+    like the other block sets.
   - **Edge:** the edge ban store keys it as the /64 and answers every
     address of it, except where an allow, a trusted proxy range or an
     `IGNORE_IPS` entry touches any of it.

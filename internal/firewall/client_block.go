@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"cfm/internal/ipkey"
@@ -40,8 +42,13 @@ import (
 //     before its drops;
 //   - the backend cannot write the set (no SetElemWriter, a read or write
 //     error).
-// Allowed addresses need no such care: every allow set is accepted before
-// any block drop.
+//   - the /64 holds an allowed address or network: nft would still accept
+//     it (every allow set comes before the drops), but the edge ban store
+//     never answers a /64 an allow touches and the TTL restore drops one, so
+//     a /64 ban there would hold only for direct clients and not survive a
+//     restart. The small manual allow sets are read here; the fleet's
+//     (allow_ext_*) come from the edge ban store's snapshot, registered as
+//     "allow_sets".
 
 // BlockV6Clients is the set of automatic IPv6 client /64 bans.
 const BlockV6Clients = "block_v6_clients"
@@ -147,7 +154,7 @@ func ExtendClientBlock(be Backend, ip net.IP, ttl time.Duration) (elem string, k
 // detector, it is not written to cfm.deny.
 func BlockClientPermanent(be Backend, ip net.IP, comment string) (elem string, err error) {
 	if p, ok := ClientNet(ip); ok {
-		if _, done := writeClientNet(be, ip, p, nil); done {
+		if _, done, _ := writeClientNet(be, ip, p, nil); done {
 			return p.String(), nil
 		}
 	}
@@ -165,11 +172,14 @@ func ExtendBlockNet(be Backend, p netip.Prefix, ttl time.Duration) (BlockBatchRe
 	if !p.IsValid() || !p.Addr().Is6() || p.Addr().Is4In6() || p != p.Masked() {
 		return BlockBatchResult{}, fmt.Errorf("not an IPv6 network: %v", p)
 	}
-	if why, err := clientNetGuard(be, p); err == nil && why != "" {
-		return BlockBatchResult{}, fmt.Errorf("%s: %s: %w", p, why, ErrClientNetGuarded)
+	if ttl < time.Second {
+		ttl = time.Second
 	}
-	res, done := extendClientNet(be, nil, p, ttl)
-	if !done {
+	res, done, guarded := writeClientNet(be, nil, p, &ttl)
+	switch {
+	case guarded != "":
+		return BlockBatchResult{}, fmt.Errorf("%s: %s: %w", p, guarded, ErrClientNetGuarded)
+	case !done:
 		return res, fmt.Errorf("%s: not written to %s (see the log)", p, BlockV6Clients)
 	}
 	return res, nil
@@ -211,15 +221,19 @@ func RemoveClientNets(be Backend, ips []net.IP) map[string]error {
 		for p := range byNet {
 			all = append(all, p)
 		}
-		if isMissingSet(err) {
+		if IsMissingSet(err) {
 			return nil // a table from before the set: nothing to free
 		}
 		return fail(all, fmt.Errorf("read %s: %w", BlockV6Clients, err))
 	}
 	held := map[netip.Prefix]bool{}
-	for _, e := range elems {
-		if p, err := netip.ParsePrefix(strings.TrimSpace(e.Elem)); err == nil {
-			held[p.Masked()] = true
+	for p := range byNet {
+		plo, phi := prefixRange(p)
+		for _, e := range elems {
+			if lo, hi, ok := ElemRange(e.Elem); ok && lo == plo && hi == phi {
+				held[p] = true
+				break
+			}
 		}
 	}
 	var out map[string]error
@@ -239,10 +253,18 @@ func RemoveClientNets(be Backend, ips []net.IP) map[string]error {
 	return out
 }
 
-// isMissingSet: nft's (or nftlib's) error for a set that does not exist.
-func isMissingSet(err error) bool {
-	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "no such file") || strings.Contains(s, "does not exist") || strings.Contains(s, "not found")
+// IsMissingSet reports nft's (or nftlib's) error for a set or table that does
+// not exist (a table an older daemon built): ENOENT, "No such file or
+// directory". Not any "not found": a missing nft binary ("executable file
+// not found") is a failure.
+func IsMissingSet(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOENT) && !errors.Is(err, exec.ErrNotFound) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "no such file or directory")
 }
 
 // RemoveClientNet is the unblock side: it removes the /64 an automatic ban
@@ -260,7 +282,7 @@ func RemoveClientNet(be Backend, ip net.IP) (net string, err error) {
 	}
 	netBlockMu.Lock()
 	defer netBlockMu.Unlock()
-	if err := w.DeleteSetElem(BlockV6Clients, p.String()); err != nil && !isMissingSet(err) {
+	if err := w.DeleteSetElem(BlockV6Clients, p.String()); err != nil && !IsMissingSet(err) {
 		return p.String(), err
 	}
 	return p.String(), nil // removed, not held, or a table from before the set
@@ -284,23 +306,25 @@ func extendClientNet(be Backend, ip net.IP, p netip.Prefix, ttl time.Duration) (
 	if ttl < time.Second {
 		ttl = time.Second // as SplitBlockEntries: "0s" would read as permanent
 	}
-	return writeClientNet(be, ip, p, &ttl)
+	res, done, _ := writeClientNet(be, ip, p, &ttl)
+	return res, done
 }
 
 // writeClientNet writes p to block_v6_clients for ttl (nil: permanent),
-// never shortening what is there.
-func writeClientNet(be Backend, ip net.IP, p netip.Prefix, ttl *time.Duration) (BlockBatchResult, bool) {
+// never shortening what is there. guarded names why a guard refused p ("" when
+// none did).
+func writeClientNet(be Backend, ip net.IP, p netip.Prefix, ttl *time.Duration) (res BlockBatchResult, done bool, guarded string) {
 	what := p.String()
 	if ip != nil {
 		what = fmt.Sprintf("%s as %s", ip, p)
 	}
-	fallback := func(why string) (BlockBatchResult, bool) {
+	fallback := func(why string) (BlockBatchResult, bool, string) {
 		if ip == nil {
 			logging.Logf("[firewall] ban of %s: %s", what, why)
 		} else {
 			logging.Logf("[firewall] ban of %s: %s; banning the address instead", what, why)
 		}
-		return BlockBatchResult{}, false
+		return BlockBatchResult{}, false, ""
 	}
 	w, ok := be.(SetElemWriter)
 	if !ok {
@@ -309,7 +333,8 @@ func writeClientNet(be Backend, ip net.IP, p netip.Prefix, ttl *time.Duration) (
 	if why, err := clientNetGuard(be, p); err != nil {
 		return fallback(fmt.Sprintf("cannot check what the /64 holds: %v", err))
 	} else if why != "" {
-		return fallback(why)
+		r, d, _ := fallback(why)
+		return r, d, why
 	}
 	netBlockMu.Lock()
 	defer netBlockMu.Unlock()
@@ -330,22 +355,23 @@ func writeClientNet(be Backend, ip net.IP, p netip.Prefix, ttl *time.Duration) (
 	}
 	switch {
 	case exists && permanent:
-		return BlockBatchResult{Kept: 1, Net: p.String()}, true
+		return BlockBatchResult{Kept: 1, Net: p.String()}, true, ""
 	case exists && ttl != nil && left >= *ttl:
-		return BlockBatchResult{Kept: 1, Net: p.String()}, true
+		return BlockBatchResult{Kept: 1, Net: p.String()}, true, ""
 	}
 	if err := w.WriteSetElem(BlockV6Clients, p.String(), ttl, exists); err != nil {
 		return fallback(fmt.Sprintf("cannot write %s: %v", BlockV6Clients, err))
 	}
 	if exists {
-		return BlockBatchResult{Extended: 1, Net: p.String()}, true
+		return BlockBatchResult{Extended: 1, Net: p.String()}, true, ""
 	}
-	return BlockBatchResult{Added: 1, Net: p.String()}, true
+	return BlockBatchResult{Added: 1, Net: p.String()}, true, ""
 }
 
-// clientNetGuardSets are the sets whose addresses a /64 ban must not drop:
-// nft accepts none of them before the block drops.
-var clientNetGuardSets = []string{"self_v6", "ignore_v6", "ignore_v6_nets"}
+// clientNetGuardSets are the sets whose addresses a /64 ban must not cover:
+// this node's, the ignored (nft accepts neither before its drops), and the
+// small manual allow sets (the rest of the allows: "allow_sets").
+var clientNetGuardSets = []string{"self_v6", "ignore_v6", "ignore_v6_nets", "allow_v6", "allow_dyn_v6", "allow_v6_nets"}
 
 // clientNetGuard says why p must not be banned as a whole ("" when it may).
 func clientNetGuard(be Backend, p netip.Prefix) (string, error) {
