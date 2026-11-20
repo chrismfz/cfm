@@ -59,7 +59,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   TTL. The burst-shield recipe is 5 s. An edge conf from before this
   release keeps working with the new Lua: a 300 s TTL runs as 120 s there
   until the conf is updated. The retired `cfm_micro_1s` / `cfm_micro_2s`
-  cache dirs are left in place, unused.
+  cache dirs are left in place, unused. `cfm webtop site-cache help` and
+  the MCP `site_cache_status` description list the new buckets.
 - **`cfm edge` names the IPv6 next step.** When the host can do IPv6 but
   the running edge listens on IPv4 only, the summary's "needs a look" says
   what to run: `cfm edge ipv6 on`, or `cfm edge realip fix` first when the
