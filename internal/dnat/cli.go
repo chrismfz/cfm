@@ -769,11 +769,15 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	})
 	// An unknown --mode was accepted and ran the whole pipeline at -101 (a
 	// typo such as `fallbak` silently lost the -99): refuse it up front.
-	if modeSet && !panelModes[*mode] {
+	if modeSet && !panelModes[*mode] && (sub == "on" || sub == "status") {
 		fmt.Fprintf(os.Stderr, "dnat cpanel: unknown --mode %q (auto, chain-imunify, direct-cpsrvd, fallback); nothing changed\n", *mode)
 		return 2
 	}
 	pc := resolvePanelChoice(sub, *mode, *priority, modeSet, prioSet)
+	if pc.err != nil {
+		fmt.Fprintf(os.Stderr, "dnat cpanel %s: %v; nothing changed\n", sub, pc.err)
+		return 1
+	}
 	*mode, *priority = pc.mode, pc.priority
 	modeFromSaved, prioFromSaved := pc.modeFromSaved, pc.prioFromSaved
 	selected := *mode
@@ -842,7 +846,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on: warning: persist mode:", err)
 		}
 		if modeFromSaved || prioFromSaved {
-			fmt.Printf("Re-used the saved mode/priority (pass --mode / --priority to change them)\n")
+			fmt.Printf("Re-used the saved %s (pass --mode / --priority to change)\n", pc.reused())
 		}
 		LogTransition(ScopeCPanel, "ON", "manual", fmt.Sprintf("mode=%s priority=%d", selected, *priority))
 		fmt.Printf("DNAT cpanel: ON (mode=%s priority=%d)\n", selected, *priority)
@@ -1026,6 +1030,18 @@ type panelChoice struct {
 	mode                         string
 	priority                     int
 	modeFromSaved, prioFromSaved bool
+	err                          error
+}
+
+func (pc panelChoice) reused() string {
+	switch {
+	case pc.modeFromSaved && pc.prioFromSaved:
+		return fmt.Sprintf("mode %s and priority %d", pc.mode, pc.priority)
+	case pc.modeFromSaved:
+		return "mode " + pc.mode
+	default:
+		return fmt.Sprintf("priority %d", pc.priority)
+	}
 }
 
 // resolvePanelChoice is the mode and priority `panel on` / `status` use. A
@@ -1046,8 +1062,28 @@ func resolvePanelChoice(sub, mode string, priority int, modeSet, prioSet bool) p
 		}
 	}
 	if !modeSet && !prioSet && sub == "on" {
+		// A saved file that is there but does not parse is an unknown: a
+		// bare `on` must not quietly fall back to the defaults and overwrite
+		// it.
+		for path, ok := range map[string]bool{panelDNATPriorityPath: savedPriorityOK(), panelDNATModePath: savedModeOK()} {
+			if !ok {
+				pc.err = fmt.Errorf("%s is unreadable or holds no valid value: pass --mode / --priority (or remove it)", path)
+				return pc
+			}
+		}
 		if p, ok := LoadPanelPriority(); ok {
 			pc.priority, pc.prioFromSaved = p, true
+			// Saved by a cfm that did not save the mode: -99 is what
+			// fallback installs, so label it so (the status warning and
+			// the summary read the label).
+			if !pc.modeFromSaved && p == -99 {
+				pc.mode, pc.modeFromSaved = "fallback", true
+			}
+		} else if !pc.modeFromSaved || pc.mode != "fallback" {
+			// Nothing saved: the daemon's own default (NFT_PANEL_DNAT_PRIORITY
+			// when set, else -101), not just the flag default, or `on` would
+			// save -101 over the env override the daemon restores with.
+			pc.priority = PanelStartupPriority()
 		}
 	}
 	if pc.mode == "fallback" && !prioSet && !pc.prioFromSaved {
@@ -1125,6 +1161,7 @@ func panelOnHelp() {
 	fmt.Fprintln(os.Stdout, "Usage: cfm dnat cpanel on [--mode auto|chain-imunify|direct-cpsrvd|fallback] [--priority -101|-99]")
 	fmt.Fprintln(os.Stdout, "Modes: auto, chain-imunify, direct-cpsrvd, fallback")
 	fmt.Fprintln(os.Stdout, "Priority guidance: -101 (CFM-first), -99 (Imunify-first)")
+	fmt.Fprintln(os.Stdout, "With neither flag, `on` re-uses the mode and priority it was last turned on with.")
 	fmt.Fprintln(os.Stdout, "Challenge behavior: ON always applies forced challenge mode.")
 	fmt.Fprintln(os.Stdout, "Examples: --mode direct-cpsrvd, mode=direct-cpsrvd, --priority -101, priority=-101")
 }

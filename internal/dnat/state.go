@@ -163,6 +163,24 @@ func LoadPanelMode() (string, bool) {
 	return m, true
 }
 
+// savedPriorityOK / savedModeOK: the file is absent, or present with a value
+// LoadPanelPriority / LoadPanelMode accept (false = present but unusable).
+func savedPriorityOK() bool {
+	if _, err := os.Stat(panelDNATPriorityPath); os.IsNotExist(err) {
+		return true
+	}
+	_, ok := LoadPanelPriority()
+	return ok
+}
+
+func savedModeOK() bool {
+	if _, err := os.Stat(panelDNATModePath); os.IsNotExist(err) {
+		return true
+	}
+	_, ok := LoadPanelMode()
+	return ok
+}
+
 // LoadIntent returns the persisted intent for the given scope. `present`
 // is false when the file does not exist; callers should treat that as
 // "no intent recorded yet" and default to OFF.

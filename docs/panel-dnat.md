@@ -28,7 +28,8 @@ on|off` are deprecated: accepted with a warning, ignored.
 
 **Modes**
 
-The mode sets the default priority and the label `on` and `status` print;
+The mode sets the default priority and the label `on`, `status` and
+`cfm edge` print;
 nothing else reads it (the listeners and the upstream are the same in every
 mode):
 
@@ -53,7 +54,11 @@ priority it applied (`/var/lib/cfm/dnat_panel_mode`,
 them again, so `off` then `on` keeps a fallback / -99 setup (before, it went
 back to auto / -101 and overwrote the saved priority). An explicit `--mode`
 takes its own default priority again (`fallback` -99, else -101), and
-`--priority` always wins (alone, it records the mode as `auto`). `status`
+`--priority` always wins (alone, it records the mode as `auto`). With nothing
+saved, a bare `on` takes the daemon's default (`NFT_PANEL_DNAT_PRIORITY` when
+set, else -101); a saved -99 without a saved mode (an older cfm) is labelled
+`fallback`; a saved file that does not parse makes a bare `on` refuse,
+nothing changed. `status`
 prints the saved mode as `Enabled with mode:` (the mode is not visible in the
 installed chain).
 

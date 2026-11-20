@@ -50,7 +50,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `--mode` takes its own default priority, `--priority` always wins.
   `cfm dnat cpanel status` and `cfm edge` show the mode it was turned on with.
   An unknown `--mode` (a typo such as `fallbak`, which went on at -101) is
-  refused with nothing changed.
+  refused with nothing changed. With nothing saved, a bare `on` takes the
+  daemon's default (`NFT_PANEL_DNAT_PRIORITY` when set) instead of saving
+  -101 over it; a saved file that does not parse makes it refuse.
 
 ## 2026.11.20
 

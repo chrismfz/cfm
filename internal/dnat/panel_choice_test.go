@@ -1,6 +1,7 @@
 package dnat
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,8 @@ func isolatePanelChoice(t *testing.T, savedMode, savedPrio string) {
 	}
 }
 
+var errWant = errors.New("an error")
+
 // A bare `on` re-uses what panel DNAT was last turned on with; an explicit
 // --mode takes its own default priority; --priority always wins.
 func TestResolvePanelChoice(t *testing.T) {
@@ -45,8 +48,10 @@ func TestResolvePanelChoice(t *testing.T) {
 			panelChoice{mode: "direct-cpsrvd", priority: -120, modeFromSaved: true, prioFromSaved: true}},
 		{"bare on keeps a saved priority under a saved fallback", "fallback", "-120", "on", "auto", -101, false, false,
 			panelChoice{mode: "fallback", priority: -120, modeFromSaved: true, prioFromSaved: true}},
-		{"saved priority without a saved mode (older cfm)", "", "-99", "on", "auto", -101, false, false,
-			panelChoice{mode: "auto", priority: -99, prioFromSaved: true}},
+		{"saved -99 without a saved mode (older cfm) is fallback", "", "-99", "on", "auto", -101, false, false,
+			panelChoice{mode: "fallback", priority: -99, modeFromSaved: true, prioFromSaved: true}},
+		{"saved priority without a saved mode (older cfm)", "", "-110", "on", "auto", -101, false, false,
+			panelChoice{mode: "auto", priority: -110, prioFromSaved: true}},
 		{"explicit mode takes its own default", "fallback", "-99", "on", "direct-cpsrvd", -101, true, false,
 			panelChoice{mode: "direct-cpsrvd", priority: -101}},
 		{"explicit fallback without saved state", "", "", "on", "fallback", -101, true, false,
@@ -61,13 +66,22 @@ func TestResolvePanelChoice(t *testing.T) {
 			panelChoice{mode: "fallback", priority: -110, modeFromSaved: true}},
 		{"status --mode shows the flag's mode", "fallback", "-99", "status", "direct-cpsrvd", -101, true, false,
 			panelChoice{mode: "direct-cpsrvd", priority: -101}},
-		{"an unknown saved mode is ignored", "bogus", "", "on", "auto", -101, false, false,
-			panelChoice{mode: "auto", priority: -101}},
+		{"an unknown saved mode refuses a bare on", "bogus", "", "on", "auto", -101, false, false,
+			panelChoice{mode: "auto", priority: -101, err: errWant}},
+		{"an unparsable saved priority refuses a bare on", "", "garbage", "on", "auto", -101, false, false,
+			panelChoice{mode: "auto", priority: -101, err: errWant}},
+		{"a broken saved file does not block explicit flags", "", "garbage", "on", "fallback", -101, true, false,
+			panelChoice{mode: "fallback", priority: -99}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			isolatePanelChoice(t, c.savedMode, c.savedPrio)
-			if got := resolvePanelChoice(c.sub, c.mode, c.prio, c.modeSet, c.prioSet); got != c.want {
+			got := resolvePanelChoice(c.sub, c.mode, c.prio, c.modeSet, c.prioSet)
+			if (got.err != nil) != (c.want.err != nil) {
+				t.Fatalf("err=%v want an error: %v", got.err, c.want.err != nil)
+			}
+			got.err, c.want.err = nil, nil
+			if got != c.want {
 				t.Fatalf("got %+v want %+v", got, c.want)
 			}
 		})
@@ -103,5 +117,31 @@ func TestPanelOnRefusesAnUnknownMode(t *testing.T) {
 	}
 	if p, _ := LoadPanelPriority(); p != -99 {
 		t.Fatalf("the saved priority changed: %d", p)
+	}
+}
+
+// With nothing saved, a bare `on` takes the daemon's default: the
+// NFT_PANEL_DNAT_PRIORITY override when set (it used to save -101 over it).
+func TestResolvePanelChoiceNothingSavedUsesTheDaemonDefault(t *testing.T) {
+	isolatePanelChoice(t, "", "")
+	t.Setenv("NFT_PANEL_DNAT_PRIORITY", "-105")
+	if got := resolvePanelChoice("on", "auto", -101, false, false); got.priority != -105 || got.err != nil {
+		t.Fatalf("got %+v", got)
+	}
+	// An explicit mode keeps its own default.
+	if got := resolvePanelChoice("on", "direct-cpsrvd", -101, true, false); got.priority != -101 {
+		t.Fatalf("explicit mode: got %+v", got)
+	}
+}
+
+func TestPanelChoiceReusedText(t *testing.T) {
+	for pc, want := range map[panelChoice]string{
+		{mode: "fallback", priority: -99, modeFromSaved: true, prioFromSaved: true}: "mode fallback and priority -99",
+		{mode: "auto", priority: -110, prioFromSaved: true}:                         "priority -110",
+		{mode: "fallback", priority: -99, modeFromSaved: true}:                      "mode fallback",
+	} {
+		if got := pc.reused(); got != want {
+			t.Errorf("%+v: %q want %q", pc, got, want)
+		}
 	}
 }
