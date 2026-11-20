@@ -106,10 +106,12 @@ it has IPv6 files, and `nginx -t` creates every log its config names. The
 script removes the **empty** files that test created in `/var/log/cfm-edge`
 again (never a file that was there before or has content, and nothing while
 cfm-edge may run: a unit not `inactive` / `failed` / `unknown`, or a
-`cfm-edge` process), the rule the package deploy and `install-edge.sh` apply
-to their own tests; otherwise the daemon's log tools (`edge_error_tail`,
-`ip_forensics`, whats_wrong: the newest log wins) would read cfm-edge's empty
-logs instead of the live edge's.
+`cfm-edge` process), the rule `install-edge.sh` applies to its own tests;
+otherwise the daemon's log tools (`edge_error_tail`, `ip_forensics`,
+whats_wrong: the newest log wins) would read cfm-edge's empty logs instead of
+the live edge's. The test runs with `-e /dev/null` where the binary offers it,
+so a build whose startup error log is `/var/log/cfm-edge/error.log` does not
+write the test's warnings into it (a file with content is never removed).
 
 ```bash
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status

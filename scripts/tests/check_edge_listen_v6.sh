@@ -635,12 +635,26 @@ grep -qF "'cfm-edge|%s|%s|%s\\n' \"\$e_bin\" /etc/cfm-edge /etc/cfm-edge/nginx.c
 # content, and everything while cfm-edge may run (a unit not
 # inactive/failed/unknown, or a cfm-edge process).
 cel="$tmp/cfmedge-logs"
+# fake cfm-edge: offers -e in its -h only with $tmp/cfmedge.has_e; with
+# $tmp/cfmedge.warn and no -e, the test's [warn] lands in error.log (a build
+# whose startup error log is that file, as nginx.org's --error-log-path).
 cat >"$tmp/bin/cfm-edge" <<EOF_CFMEDGE
 #!/bin/sh
-[ "\$1" = "-t" ] || exit 2
+if [ "\$1" = "-h" ]; then
+  echo 'Usage: cfm-edge [-?hvVtTq] [-s signal] [-p prefix]'
+  [ -e "$tmp/cfmedge.has_e" ] && echo '  -e filename   : set error log file (default: /var/log/cfm-edge/error.log)'
+  exit 0
+fi
 echo "\$*" >> "$tmp/cfmedge.calls"
+noe=1
+if [ "\$1" = "-e" ]; then
+  [ -e "$tmp/cfmedge.has_e" ] || exit 2
+  noe=0; shift 2
+fi
+[ "\$1" = "-t" ] || exit 2
 [ -d "\${CFM_CFMEDGE_LOG_DIR:-/nonexistent}" ] || exit 0
 : >>"\$CFM_CFMEDGE_LOG_DIR/error.log"
+[ "\$noe" = 1 ] && [ -e "$tmp/cfmedge.warn" ] && echo '[warn] conflicting server name' >>"\$CFM_CFMEDGE_LOG_DIR/error.log"
 : >>"\$CFM_CFMEDGE_LOG_DIR/access.log"
 printf 'x\n' >>"\$CFM_CFMEDGE_LOG_DIR/written.log"
 case "\$(cat "$tmp/engine.fail" 2>/dev/null)" in
@@ -724,6 +738,23 @@ cel_reset
 cel_run deploy
 expect present "deploy, cfm-edge: kept"
 [ ! -e "$cel/error.log" ] && ok "deploy, cfm-edge inactive: the test-created empty logs are removed" || fail "deploy: left $(cel_list)"
+# A build that offers -e: the test runs with -e /dev/null, so its warnings
+# never fill error.log (a non-empty file would be kept, and read as the
+# newest edge log). One that does not: plain -t (an unknown -e would fail
+# every test and remove the IPv6 files).
+cel_reset; : >"$tmp/cfmedge.has_e"; : >"$tmp/cfmedge.warn"; : >"$tmp/cfmedge.calls"
+cel_run prestart
+expect present "prestart, cfm-edge offering -e: config test passed"
+grep -qx -- '-e /dev/null -t -q' "$tmp/cfmedge.calls" || fail "cfm-edge offering -e was not tested with -e /dev/null: $(cat "$tmp/cfmedge.calls")"
+[ ! -e "$cel/error.log" ] && ok "a warning of cfm-edge's test (-e /dev/null) leaves no error.log behind" \
+  || fail "with -e: error.log left ($(wc -c <"$cel/error.log") bytes)"
+rm -f "$tmp/cfmedge.has_e"; cel_reset; : >"$tmp/cfmedge.calls"
+cel_run prestart
+expect present "prestart, cfm-edge without -e: config test passed"
+grep -q -- '-e' "$tmp/cfmedge.calls" && fail "a cfm-edge without -e was passed -e: $(cat "$tmp/cfmedge.calls")"
+[ -s "$cel/error.log" ] && ok "without -e, a warning fills error.log and it is kept (content is never removed)" \
+  || fail "without -e: a non-empty error.log was removed"
+rm -f "$tmp/cfmedge.warn"
 rm -rf "$cel"
 cel_run prestart
 [ ! -e "$cel" ] && ok "a missing cfm-edge log dir: no error, nothing created" || fail "a missing cfm-edge log dir was created"

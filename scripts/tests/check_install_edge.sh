@@ -201,10 +201,14 @@ el_run "$mk" >/dev/null
 [ ! -e "$el.real/error.log" ] && [ -f "$el.real/old-empty.log" ] \
   || fail "a symlinked cfm-edge log dir: left $(ls -A "$el.real" | tr '\n' ' ')"
 rm -f "$el"; rm -rf "$el.real"
-# A symlink created in the dir is not a log the test created.
+# A symlink created in the dir is not a log the test created (find -type f
+# never lists one; the [ ! -L ] in the drop is the second fence).
 el_reset; ln -s "$el/old-full.log" "$el/link.log"
 el_run ': >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
 [ -L "$el/link.log" ] && [ ! -e "$el/error.log" ] || fail "a symlink in the log dir was removed (or the new log kept)"
+# The EXIT trap drops too (a run interrupted during a test).
+awk '/^cleanup\(\) *\{/,/^}/' "$SCRIPT" | grep -qE '^ +drop_test_created_logs$' \
+  || fail "$SCRIPT: cleanup (the EXIT trap) must call drop_test_created_logs"
 # Without a snapshot (a run that never tested), and a second drop: no-ops.
 el_reset; : >"$el/error.log"
 env PATH="$tmp/bin:$PATH" CFM_CFMEDGE_LOG_DIR="$el" bash -c 'set -euo pipefail; . "$1"; drop_test_created_logs' sh "$fns" >/dev/null 2>&1 \
@@ -224,8 +228,9 @@ for fn in adopt_cfm_edge ensure_edge_listen_v6 print_next_steps; do
   body="$(awk -v fn="$fn" '$0 ~ "^"fn"\\(\\) *\\{" {p=1} p {print} p && /^}/ {exit}' "$SCRIPT")"
   sn="$(grep -n 'snapshot_edge_logs' <<<"$body" | head -1 | cut -d: -f1 || true)"
   ts="$(grep -nE '"\$EDGE_BIN" -t|"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1 || true)"
+  tl="$(grep -nE '"\$EDGE_BIN" -t|"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | tail -1 | cut -d: -f1 || true)"
   dr="$(grep -n 'drop_test_created_logs' <<<"$body" | tail -1 | cut -d: -f1 || true)"
-  [ -n "$sn" ] && [ -n "$ts" ] && [ -n "$dr" ] && [ "$sn" -lt "$ts" ] && [ "$ts" -lt "$dr" ] \
+  [ -n "$sn" ] && [ -n "$ts" ] && [ -n "$dr" ] && [ "$sn" -lt "$ts" ] && [ "$tl" -lt "$dr" ] \
     || fail "$SCRIPT $fn: the cfm-edge config test must sit between snapshot_edge_logs and drop_test_created_logs"
 done
 

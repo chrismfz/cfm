@@ -54,8 +54,8 @@ readonly CFM_LUA_MANIFEST=(
 
 readonly EDGE_BIN="/usr/sbin/cfm-edge"
 readonly EDGE_CONF_DIR="/etc/cfm-edge"
-# Its log dir (CFM_CFMEDGE_LOG_DIR, the package deploy's name, is the test
-# seam of scripts/tests/check_install_edge.sh).
+# Its log dir (CFM_CFMEDGE_LOG_DIR, which cfm-edge-listen-v6.sh reads too, is
+# the test seam of scripts/tests/check_install_edge.sh).
 readonly EDGE_LOG_DIR="${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}"
 readonly EDGE_MAIN_CONF="$EDGE_CONF_DIR/nginx.conf"
 readonly CFM_CONFIGS="/usr/share/cfm/configs"
@@ -214,6 +214,9 @@ cleanup() {
     if [ -n "$STAGE" ] && [ -d "$STAGE" ]; then
         rm -rf -- "$STAGE"
     fi
+    # A run interrupted during a config test (a no-op otherwise: each
+    # snapshot is used once).
+    drop_test_created_logs
     return 0
 }
 trap cleanup EXIT
@@ -243,9 +246,7 @@ release_deploy_lock() {
 # newest edge logs the daemon's log tools read (internal/edgelog: the newest
 # mtime wins). Remember what was there, and remove only the EMPTY regular
 # files the tests created, never while cfm-edge may run (cfm_edge_may_run).
-# The same rule as the package deploy (package-proxy-config-deploy.sh
-# snapshot_cfmedge_logs / cfm_edge_may_run / drop_test_created_cfmedge_logs)
-# and cfm-edge-listen-v6.sh's engine_test.
+# The same rule as cfm-edge-listen-v6.sh's engine_test.
 snapshot_edge_logs() {
     # The trailing / makes find list a symlinked log dir's files (without it
     # find lists the symlink alone, and -type f nothing).

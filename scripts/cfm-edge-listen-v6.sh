@@ -392,7 +392,17 @@ engine_test() {
         return
     fi
     cfmedge_test_logs_snapshot
-    "$2" -t -q >/dev/null 2>&1
+    # -e /dev/null: a build whose startup error log is a FILE (nginx.org's
+    # --error-log-path) appends every [warn] / [emerg] of the test to it,
+    # and a non-empty file is never removed: that log would then be the
+    # newest edge error log all the same. Only where the binary offers -e
+    # (nginx >= 1.19.5; `-h` lists it): an unknown option would fail every
+    # test, i.e. remove the IPv6 files for good.
+    if "$2" -h 2>&1 | grep -q '^[[:space:]]*-e filename'; then
+        "$2" -e /dev/null -t -q >/dev/null 2>&1
+    else
+        "$2" -t -q >/dev/null 2>&1
+    fi
     et_rc=$?
     cfmedge_test_logs_drop
     return $et_rc
@@ -405,13 +415,12 @@ engine_test() {
 # this, each openresty/angie start left fresh EMPTY files in /var/log/cfm-edge,
 # and internal/edgelog (the newest mtime wins) then read cfm-edge's empty logs
 # instead of the live edge's (edge_error_tail, ip_forensics, whats_wrong).
-# The rule is the package deploy's (package-proxy-config-deploy.sh
-# snapshot_cfmedge_logs / cfm_edge_may_run / drop_test_created_cfmedge_logs)
-# and install-edge.sh's: remember what was there before the test, then remove
+# The rule is install-edge.sh's (snapshot_edge_logs / cfm_edge_may_run /
+# drop_test_created_logs): remember what was there before the test, then remove
 # only the EMPTY regular files that were not, and nothing while cfm-edge may
 # be running (its own new empty log is then the live one). A file that was
 # already there, or one with content, is never touched. Test seam:
-# CFM_CFMEDGE_LOG_DIR (the deploy's name).
+# CFM_CFMEDGE_LOG_DIR (install-edge.sh reads the same one).
 CFM_CFMEDGE_LOG_DIR=${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}
 ctl_taken=0
 cfmedge_test_logs_snapshot() {
@@ -437,7 +446,9 @@ cfm_edge_may_run() {
     for cmr_f in "$CFM_PROC_ROOT"/[0-9]*/comm; do
         [ -r "$cmr_f" ] || continue
         cmr_comm=""
-        read -r cmr_comm <"$cmr_f" 2>/dev/null || true
+        # 2>/dev/null first: dash applies redirections in order, and a
+        # process that exits after the -r test would print "cannot open".
+        read -r cmr_comm 2>/dev/null <"$cmr_f" || true
         [ "$cmr_comm" = cfm-edge ] && return 0
     done
     return 1
