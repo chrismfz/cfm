@@ -70,6 +70,52 @@ there (or ship a host-specific drop-in), don't duplicate the entry.
   is bigger than the free space `copytruncate` + `compress` can no longer
   complete — so it never rotates again and the disk fills. Caps are 200M for
   `/var/log/cfm/`, 2G for the edge.
+- **`dateext` + `dateformat -%Y%m%d-%H%M%S` in every block.** The distro's
+  daily run reads `/etc/logrotate.conf` first; EL's sets a global `dateext`
+  (`access.log-YYYYMMDD`), Debian's does not. The hourly pass runs
+  `logrotate-cfm` without `logrotate.conf`, so before this it numbered
+  generations (`access.log.1`, `.2`, …) on the same files. `rotate N` counts
+  per naming scheme, so an EL node kept up to 2N generations, and a second
+  dated rotation on one day failed with `error: destination … already exists,
+  skipping rotation` (logrotate exit 1). Naming them in the block, to the
+  second, gives both runs one scheme on every distro and two rotations never
+  share a name (logrotate 3.14, EL8's, accepts `%H%M%S`). It must stay
+  per-block, never global: the hourly pass hands logrotate `logrotate-cfm` and
+  `/etc/logrotate.d/cfm-edge` in ONE invocation, and a global carries across
+  files in one invocation (the cfm-edge package sets the same two lines in its
+  own block). `check_logrotate_coverage.sh` asserts both lines in every block
+  and, where logrotate is installed, runs two forced rotations a second apart
+  on a temp tree. The dated names never match `*.log`, and CFM's
+  rotated-log readers (`logscan.RotatedSiblings`) take `<name>-…` siblings by
+  mtime.
+
+  logrotate only ever expires generations whose name matches the CURRENT
+  `dateformat`, so what a node had before the change is never deleted: the
+  hourly pass's numbered ones (`access.log.1` … `.7.gz`, `cfm.log.1` …
+  `.14.gz`; on Debian both runs made these) and, on EL, the distro run's
+  date-only ones (`access.log-YYYYMMDD.gz`). Remove both by hand once they
+  are older than the block's old retention (`rotate 7` / `rotate 14` days),
+  so nothing the old config would still have kept, and the rotated-log tools
+  (`include_rotated`, `rotated=N`) still reach, is lost. Run this a day after
+  the upgrade, or again later; it only takes files past that age:
+
+  ```bash
+  find /usr/local/openresty/nginx/logs -maxdepth 1 -type f -regextype posix-extended -regex '.*\.log(\.[0-9]+|-[0-9]{8})(\.gz)?' -mtime +7 -print -delete
+  ```
+
+  ```bash
+  find /var/log/cfm -maxdepth 1 -type f -regextype posix-extended -regex '.*\.log(\.[0-9]+|-[0-9]{8})(\.gz)?' -mtime +14 -print -delete
+  ```
+
+  Files younger than that stay until the next run of the command; a
+  maxsize-heavy edge rotating several times a day can hold more than seven
+  of them for a while.
+
+  (and, on a host that still writes the legacy flat paths, the same
+  `/var/log/cfm*.log.N` / `-YYYYMMDD` files under `/var/log` itself, by
+  name: that directory is the distro's). The `%H%M%S` dateformat needs a
+  logrotate whose `dateformat` knows `%H`/`%M`/`%S` (EL8's 3.14 does).
+
 - **No `delaycompress` on the edge block.** An uncompressed `.1` of a 2 GB
   access log costs as much disk as the live file.
 - **`/etc/cron.hourly/cfm-logrotate`** (`configs/cfm-logrotate.cron`).

@@ -188,6 +188,116 @@ cron_edge_conf_selftest() {
 }
 
 # ---------------------------------------------------------------------------
+# Every block in configs/logrotate-cfm names its generations by date, down to
+# the second, in the block itself. EL's /etc/logrotate.conf sets a global
+# `dateext`, which the distro's daily run applies and the hourly pass (this
+# file alone, no logrotate.conf) did not: two name schemes, `rotate N` counted
+# per scheme (2N generations kept), and a second dated rotation on one day
+# failed with "destination ... already exists" (exit 1). Never as a global:
+# the hourly pass reads this file and /etc/logrotate.d/cfm-edge in one
+# invocation, and globals carry across files.
+# ---------------------------------------------------------------------------
+LR_DATEFORMAT='-%Y%m%d-%H%M%S'
+
+dateext_static_check() {
+    local rc=0 out
+    # One line per block: "<line of {> <has dateext> <has dateformat>", plus
+    # "GLOBAL <line>" for a dateext/dateformat outside any block.
+    out=$(awk -v fmt="$LR_DATEFORMAT" '
+        { sub(/#.*/, "") }
+        /\{/ { inblock = 1; start = NR; de = 0; df = 0 }
+        {
+            n = split($0, t, /[[:space:]]+/)
+            for (i = 1; i <= n; i++) {
+                if (t[i] == "") continue
+                if (t[i] == "dateext" || t[i] == "dateformat" || t[i] == "nodateext") {
+                    if (!inblock) { print "GLOBAL " NR; continue }
+                    if (t[i] == "dateext") de = 1
+                    if (t[i] == "nodateext") de = 0
+                    if (t[i] == "dateformat") df = (t[i + 1] == fmt)
+                }
+            }
+        }
+        /\}/ { if (inblock) print start, de, df; inblock = 0 }
+    ' "$OURS")
+    if [ -z "$out" ]; then
+        red "FAIL: no logrotate blocks parsed out of $OURS"
+        return 1
+    fi
+    local a b c
+    while read -r a b c; do
+        if [ "$a" = GLOBAL ]; then
+            red "FAIL: $OURS:$b sets dateext/dateformat outside a block (a global leaks into /etc/logrotate.d/cfm-edge in the hourly pass)"
+            rc=1
+        elif [ "$b" != 1 ] || [ "$c" != 1 ]; then
+            red "FAIL: the block at $OURS:$a lacks 'dateext' + 'dateformat $LR_DATEFORMAT'"
+            rc=1
+        fi
+    done <<< "$out"
+    [ "$rc" -eq 0 ] && grn "OK: every logrotate-cfm block carries dateext + dateformat $LR_DATEFORMAT."
+    return "$rc"
+}
+
+# With logrotate installed: two forced rotations a second apart, logrotate-cfm
+# alone (as the hourly pass runs it), on a temp tree. Both must succeed (no
+# "destination already exists") and leave date-named generations, no `.1`.
+# The block patterns are rewritten to the temp tree; everything else is the
+# shipped config.
+dateext_live_check() {
+    if ! command -v logrotate >/dev/null 2>&1; then
+        # CI installs it (security.yml): there a missing logrotate means the
+        # check would pass without running, so it fails (CLAUDE.md §5).
+        if [ "${CI:-}" = true ]; then
+            red "FAIL: logrotate not installed under CI; the dated-rotation run cannot be exercised."
+            return 1
+        fi
+        ylw "SKIP: logrotate not installed; dated-rotation run not exercised."
+        return 0
+    fi
+    local d rc=0 i f conf
+    d=$(mktemp -d)
+    mkdir -p "$d/cfm" "$d/edge" "$d/legacy"
+    conf="$d/logrotate-cfm"
+    sed -e "s#/var/log/cfm/\*\.log#$d/cfm/*.log#" \
+        -e "s#/usr/local/openresty/nginx/logs/\*\.log#$d/edge/*.log#" \
+        -e "s#^/var/log/#$d/legacy/#" "$OURS" > "$conf"
+    # logrotate ignores a group/world-writable config (and still exits 0) and
+    # refuses a group-writable log dir: under umask 002 nothing would rotate.
+    chmod 0644 "$conf"
+    chmod 0755 "$d" "$d/cfm" "$d/edge" "$d/legacy"
+    if grep -qE '^[^#]*(/var/log|/usr/local)' "$conf"; then
+        red "FAIL: dated-rotation test could not redirect every block of $OURS to a temp tree"
+        rm -rf "$d"; return 1
+    fi
+    for i in 1 2; do
+        for f in "$d/cfm/cfm.log" "$d/edge/access.log" "$d/legacy/cfm.log"; do
+            echo "line $i" >> "$f"
+        done
+        if ! logrotate -f -s "$d/state" "$conf" > "$d/out.$i" 2>&1; then
+            red "FAIL: forced rotation $i of logrotate-cfm failed:"
+            sed 's/^/      /' "$d/out.$i"
+            rc=1
+        fi
+        [ "$i" = 1 ] && sleep 1.1
+    done
+    local re='-[0-9]{8}-[0-9]{6}(\.gz)?$' n
+    for f in "$d/cfm/cfm.log" "$d/edge/access.log" "$d/legacy/cfm.log"; do
+        n=$(find "$(dirname "$f")" -maxdepth 1 -name "$(basename "$f")-*" | grep -cE -- "$re")
+        if [ "$n" -ne 2 ]; then
+            red "FAIL: $(basename "$(dirname "$f")")/$(basename "$f"): expected 2 date-named generations, found $n"
+            rc=1
+        fi
+        if compgen -G "$f.[0-9]*" > /dev/null; then
+            red "FAIL: $(basename "$(dirname "$f")")/$(basename "$f"): numbered generation (.1) created"
+            rc=1
+        fi
+    done
+    rm -rf "$d"
+    [ "$rc" -eq 0 ] && grn "OK: two forced rotations a second apart: both succeed, date-named, no .1 (logrotate $(logrotate --version 2>&1 | head -1 | awk '{print $2}'))."
+    return "$rc"
+}
+
+# ---------------------------------------------------------------------------
 # Repo / CI mode
 # ---------------------------------------------------------------------------
 repo_mode() {
@@ -245,6 +355,8 @@ repo_mode() {
     grn "OK: every configured CFM log path is rotated."
     cron_tsv_selftest || return 1
     cron_edge_conf_selftest || return 1
+    dateext_static_check || return 1
+    dateext_live_check || return 1
     return 0
 }
 

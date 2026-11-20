@@ -47,8 +47,10 @@ jobs:
       # nginx: check_package_proxy_config_deploy.sh runs the package-upgrade
       # helper's staged `-T` test against a REAL nginx (unprivileged, scratch
       # prefix; the service is never used).
-      - name: Install luajit + ripgrep + nginx (CI check dependencies)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit ripgrep nginx
+      # logrotate: check_logrotate_coverage.sh runs logrotate-cfm for real (two
+      # forced rotations on a temp tree) and, under CI, fails without it.
+      - name: Install luajit + ripgrep + nginx + logrotate (CI check dependencies)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends luajit ripgrep nginx logrotate
       - name: Enforce CLI transport guardrail
         run: ./scripts/tests/check_cli_transport.sh
       - name: Enforce Lua clearance module load check

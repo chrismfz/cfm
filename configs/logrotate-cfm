@@ -40,6 +40,19 @@
 # It does copy the whole file, which is exactly why the maxsize caps below
 # matter.
 #
+# dateext + `dateformat -%Y%m%d-%H%M%S` in EVERY block, never as a global
+# directive. The distro's daily run reads /etc/logrotate.conf first, and EL's
+# sets a global `dateext` (generations access.log-YYYYMMDD); the hourly pass
+# (cfm-logrotate.cron) runs this file alone and got none of it (access.log.1,
+# .2, ...). `rotate N` counts per naming scheme, so a node kept up to 2N
+# generations, and a second dated rotation the same day failed with
+# "destination ... already exists, skipping rotation" (logrotate exit 1).
+# Setting both in the block gives the two runs one name scheme on every
+# distro, and the time down to the second never collides. A global here would
+# leak: the hourly pass hands logrotate this file AND /etc/logrotate.d/cfm-edge
+# in one invocation, and globals carry across files in one invocation. The
+# rotated names (access.log-20261120-130000.gz) never match `*.log`.
+#
 # WHY maxsize. A busy edge writes tens of GB/day. With `daily` alone,
 # access.log grows unbounded until the nightly run — and once it is larger
 # than the free space, copytruncate + compress cannot complete, so the file
@@ -63,6 +76,8 @@
     missingok
     notifempty
     copytruncate
+    dateext
+    dateformat -%Y%m%d-%H%M%S
 }
 
 # --- OpenResty edge logs -----------------------------------------------------
@@ -83,6 +98,8 @@
     missingok
     notifempty
     copytruncate
+    dateext
+    dateformat -%Y%m%d-%H%M%S
 }
 
 # --- Legacy top-level paths --------------------------------------------------
@@ -109,4 +126,6 @@
     missingok
     notifempty
     copytruncate
+    dateext
+    dateformat -%Y%m%d-%H%M%S
 }
