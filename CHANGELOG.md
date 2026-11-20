@@ -108,12 +108,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ### Changed
 - **The operator hints name `cfm edge realip` and `cfm edge ipv6`.** The
-  messages, installers, usage texts, `cfm.conf` and the docs say
+  messages, usage texts, `cfm.conf` and the docs say
   `cfm edge realip fix` / `cfm edge ipv6 on|off` (the runbook in
   docs/edge-ipv6.md is those two commands). After `EDGE_LISTEN_V6 = off` the
   listen script now says to remove that line (or `cfm edge ipv6 on`) instead
   of writing `= on`, which would let every edge start turn IPv6 on
-  unconfirmed. `cfm realip` stays (scripts and installers call it).
+  unconfirmed. `cfm realip` stays (scripts and installers call it; the
+  installers' hints keep it, since they can run against an older cfm
+  without `cfm edge`).
 - **The hints say `cfm edge`.** The edge health checks (`cfm edge check`, the
   MCP `edge_health`, `whats_wrong`), `cfm realip` and `cfm health` now name
   `cfm edge realip fix`, `cfm edge on --priority …` and `cfm edge ipv6 on`

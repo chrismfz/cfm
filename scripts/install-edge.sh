@@ -385,16 +385,16 @@ adopt_cfm_edge() {
 # fix` makes the origin trust it (docs/origin-real-ip.md). Never fatal.
 ensure_origin_realip() {
     if [ "${CFM_SKIP_REALIP:-0}" = "1" ]; then
-        log "Origin real-IP: skipped (CFM_SKIP_REALIP=1); run 'cfm edge realip fix' later"
+        log "Origin real-IP: skipped (CFM_SKIP_REALIP=1); run 'cfm realip fix' later"
         return 0
     fi
     if ! command_exists cfm; then
-        warn "Origin real-IP: cfm is not on PATH; run 'cfm edge realip fix' later"
+        warn "Origin real-IP: cfm is not on PATH; run 'cfm realip fix' later"
         return 0
     fi
     local rc=0
     cfm realip fix || rc=$?
-    [ "$rc" -eq 0 ] || warn "Origin real-IP: not set automatically (see above); check with 'cfm edge realip'"
+    [ "$rc" -eq 0 ] || warn "Origin real-IP: not set automatically (see above); check with 'cfm realip'"
     return 0
 }
 
