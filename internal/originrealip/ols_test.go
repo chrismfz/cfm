@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -372,10 +373,12 @@ func TestOLSAddTrustAndSetMode(t *testing.T) {
 	}
 }
 
-func olsCtlStub(t *testing.T, statusAfter string) *[]string {
+// olsCtlStub fakes lswsctrl. after: what status says once restarted: "new"
+// (a new master), "same" (the old master still runs), "down" (not running).
+func olsCtlStub(t *testing.T, after string) *[]string {
 	t.Helper()
 	var calls []string
-	restarted := false
+	restarts := 0
 	oldRun := runCmd
 	runCmd = func(_ time.Duration, name string, args ...string) (string, error) {
 		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
@@ -384,13 +387,16 @@ func olsCtlStub(t *testing.T, statusAfter string) *[]string {
 		}
 		switch args[0] {
 		case "restart":
-			restarted = true
+			restarts++
 			return "[OK] Send SIGUSR1", nil
 		case "status":
-			if restarted && statusAfter != "" {
-				return statusAfter, errors.New("exit status 1")
+			switch {
+			case restarts == 0 || after == "same":
+				return "litespeed is running with PID 42.", nil
+			case after == "down":
+				return "[ERROR] litespeed is not running.", errors.New("exit status 1")
 			}
-			return "litespeed is running with PID 42.", nil
+			return "litespeed is running with PID " + strconv.Itoa(42+restarts) + ".", nil
 		}
 		return "", nil
 	}
@@ -400,7 +406,7 @@ func olsCtlStub(t *testing.T, statusAfter string) *[]string {
 
 func TestApplyOLSWritesAndRestarts(t *testing.T) {
 	l, r := olsDAHost(t)
-	calls := olsCtlStub(t, "")
+	calls := olsCtlStub(t, "new")
 	pl := l.plan(l.probe(""))
 	var out strings.Builder
 	if err := Apply(pl, &out); err != nil {
@@ -426,7 +432,7 @@ func TestApplyOLSWritesAndRestarts(t *testing.T) {
 
 func TestApplyOLSRollsBackWhenItDoesNotComeBack(t *testing.T) {
 	l, r := olsDAHost(t)
-	calls := olsCtlStub(t, "[ERROR] litespeed is not running.")
+	calls := olsCtlStub(t, "down")
 	pl := l.plan(l.probe(""))
 	var out strings.Builder
 	if err := Apply(pl, &out); err == nil || !strings.Contains(err.Error(), "restored") {
@@ -440,5 +446,75 @@ func TestApplyOLSRollsBackWhenItDoesNotComeBack(t *testing.T) {
 	}
 	if n := strings.Count(strings.Join(*calls, "|"), olsCtl+" restart"); n != 2 {
 		t.Fatalf("want a restart and a restart back, got %v", *calls)
+	}
+}
+
+// Review: the old master still running after the graceful restart is the new
+// config NOT taken: restored, not reported as done.
+func TestApplyOLSOldMasterStillRunsIsAFailure(t *testing.T) {
+	l, r := olsDAHost(t)
+	olsCtlStub(t, "same")
+	var out strings.Builder
+	err := Apply(l.plan(l.probe("")), &out)
+	if err == nil || !strings.Contains(err.Error(), "still runs as pid 42") {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := read(t, filepath.Join(r, "etc/openlitespeed/httpd-accesscontrol.conf")); got != server3OLSACL {
+		t.Fatalf("live file not restored: %q", got)
+	}
+}
+
+// Review: a file changed between the plan and the write is not overwritten.
+func TestApplyOLSRefusesAFileChangedSincePlan(t *testing.T) {
+	l, r := olsDAHost(t)
+	olsCtlStub(t, "new")
+	pl := l.plan(l.probe(""))
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", "accessControl{\n  allow ALL, 10.0.0.1T\n}\n")
+	if err := Apply(pl, &strings.Builder{}); err == nil || !strings.Contains(err.Error(), "changed since the plan") {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := read(t, filepath.Join(r, "etc/openlitespeed/httpd-accesscontrol.conf")); !strings.Contains(got, "10.0.0.1T") {
+		t.Fatalf("the newer file was overwritten: %q", got)
+	}
+}
+
+// Review: a custom copy of ANOTHER file the trust needs, set otherwise: the
+// fix would not survive rewrite_confs, so it is the operator's call.
+func TestOLSFixRefusesWhatARebuildUndoes(t *testing.T) {
+	l, r := olsDAHost(t)
+	put(t, r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-defaults.conf", strings.Replace(server3OLSDefaults, "\t\t 2", " 0", 1))
+	pl := l.plan(l.probe(""))
+	if pl.Action != ActionManual || !strings.Contains(pl.Reason, "would not survive `da build rewrite_confs`") {
+		t.Fatalf("plan = %+v", pl)
+	}
+}
+
+// Review: trusted only until the next rewrite_confs: fix keeps it by writing
+// the custom copy of the culprit file, live content, with no restart.
+func TestOLSFixKeepsALiveOnlyTrust(t *testing.T) {
+	l, r := olsDAHost(t)
+	tmpl := "usr/local/directadmin/custombuild/configure/openlitespeed/conf/"
+	put(t, r, tmpl+"httpd-accesscontrol.conf", server3OLSACL)
+	put(t, r, tmpl+"httpd-defaults.conf", server3OLSDefaults)
+	acl := strings.Replace(server3OLSACL, "ALL,", "ALL, 127.0.0.1T, ::1T,", 1)
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", acl)
+	p := l.probe("")
+	if !p.Trusted || p.Warning == "" {
+		t.Fatalf("setup: %+v", p)
+	}
+	pl := l.plan(p)
+	custom := filepath.Join(r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf")
+	if pl.Action != ActionWrite || len(pl.Writes) != 1 || pl.Writes[0].Path != custom || pl.Writes[0].Content != acl || pl.Writes[0].Live {
+		t.Fatalf("keep plan = %+v", pl)
+	}
+	calls := olsCtlStub(t, "new")
+	if err := Apply(pl, &strings.Builder{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(*calls, "|"), "restart") {
+		t.Fatalf("a custom copy alone must not restart OpenLiteSpeed: %v", *calls)
+	}
+	if p := l.probe(""); !p.Trusted || p.Warning != "" {
+		t.Fatalf("after keep: %+v", p)
 	}
 }

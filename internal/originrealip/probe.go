@@ -130,9 +130,10 @@ type layout struct {
 
 	apacheMains []apacheMain // the first that exists is the server's main config
 	nginxMain   string
-	nginxPrefix string // what relative nginx includes resolve against
-	lsConfig    string // LiteSpeed Enterprise
-	olsConfig   string // OpenLiteSpeed (ols.go)
+	nginxPrefix string    // what relative nginx includes resolve against
+	lsConfig    string    // LiteSpeed Enterprise
+	culpritsOut *[]string // olsRewriteCulprits: where olsRewriteWarning reports them
+	olsConfig   string    // OpenLiteSpeed (ols.go)
 
 	// activeStack names the origin family that is serving, or "", and whether
 	// that came from the :80 listener (decisive) or only from systemd unit

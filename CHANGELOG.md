@@ -27,7 +27,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   live and as its copy in `custombuild/custom/openlitespeed/conf/`, so
   `da build rewrite_confs` keeps it (the DirectAdmin way; no rebuild is run),
   and restarts OpenLiteSpeed gracefully. OpenLiteSpeed has no config test:
-  if it does not come back, the files are restored and it is restarted again.
+  unless a new master comes up (the old one still running means the config
+  was not taken), the files are restored and it is restarted again. A trust
+  only in a live file (the rewrite_confs warning) is kept by writing its
+  custom copy, with no restart; a fix a rebuild would undo, or a file changed
+  since the plan, is refused.
   Several lists or values, or a custom copy that differs from the live file,
   stay a manual step. LiteSpeed Enterprise and a plain OpenLiteSpeed are
   unchanged (manual).

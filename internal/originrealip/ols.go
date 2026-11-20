@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -299,6 +300,15 @@ func (l layout) probeOLS() Probe {
 	return p
 }
 
+// olsRewriteCulprits: the live files whose rewrite alone breaks the trust
+// (olsRewriteWarning's reading), for the fix to keep.
+func (l layout) olsRewriteCulprits() []string {
+	var out []string
+	l.culpritsOut = &out
+	l.olsRewriteWarning()
+	return out
+}
+
 // olsRewriteWarning: on DirectAdmin, whether the trust survives `da build
 // rewrite_confs`. The config is read again with each DirectAdmin-managed file
 // replaced by what CustomBuild would install (its custom copy, else its
@@ -340,7 +350,7 @@ func (l layout) olsRewriteWarning() string {
 	}
 	// Name the files whose rewrite alone breaks the trust; a file that only
 	// differs from its template (a tuned httpd-tuning.conf) is not one.
-	var changed, culprits []string
+	var changed, culprits, culpritFiles []string
 	for _, f := range live.files {
 		b, ok := installed(f)
 		if !ok {
@@ -359,10 +369,14 @@ func (l layout) olsRewriteWarning() string {
 		}
 		if !survives(l.readOLSWith(only)) {
 			culprits = append(culprits, entry)
+			culpritFiles = append(culpritFiles, f)
 		}
 	}
 	if len(culprits) > 0 {
 		changed = culprits
+	}
+	if l.culpritsOut != nil {
+		*l.culpritsOut = culpritFiles
 	}
 	w := "trusted now, but not after `da build rewrite_confs`, which rewrites the files under " + olsDALiveDir + " from CustomBuild's templates"
 	if len(changed) > 0 {
@@ -544,12 +558,52 @@ func (l layout) planOLS(pl *Plan) {
 		} else if isFile(l.fs(custom)) || isDir(l.fs(custom)) {
 			return
 		}
+		base := readConfFile(l.fs(src))
 		writes = append(writes,
-			FileWrite{Path: l.fs(src), Content: string(edits[src])},
-			FileWrite{Path: l.fs(custom), Content: string(edits[src])})
+			FileWrite{Path: l.fs(src), Content: string(edits[src]), Live: true, base: string(base.b), baseExists: base.ok, checkBase: true},
+			FileWrite{Path: l.fs(custom), Content: string(edits[src]), checkBase: true})
+	}
+	// And after the next rewrite_confs: the edited files are what it installs
+	// (their custom copies), every other file what CustomBuild has for it.
+	rewritten := func(logical string) ([]byte, bool) {
+		if b, ok := edits[logical]; ok {
+			return b, true
+		}
+		if inst, ok := l.olsDAInstalled(logical); ok {
+			cf := readConfFile(l.fs(inst))
+			return cf.b, cf.ok
+		}
+		return nil, false
+	}
+	if ar := l.readOLSWith(rewritten); !ar.trusted(l4) || !ar.trusted(l6) {
+		pl.Reason = "the trust would not survive `da build rewrite_confs`: a custom copy or template under " +
+			olsDACustomDir + " / " + olsDATemplateDir + " sets it otherwise; reconcile them by hand, then: " + pl.Reason
+		return
 	}
 	pl.Action, pl.Reason, pl.Writes = ActionWrite, "", writes
 	pl.Path = writes[0].Path
+}
+
+// planOLSKeep: trusted now, but not after `da build rewrite_confs` (the
+// warning): write the custom copies of the files whose rewrite breaks the
+// trust, with their live content, so a rebuild installs what runs. Nothing
+// live changes, so nothing restarts.
+func (l layout) planOLSKeep(pl *Plan) {
+	culprits := l.olsRewriteCulprits()
+	if len(culprits) == 0 {
+		return
+	}
+	var writes []FileWrite
+	for _, f := range culprits {
+		live := readConfFile(l.fs(f))
+		if !live.ok {
+			return
+		}
+		custom := filepath.Join(olsDACustomDir, filepath.Base(f))
+		prev := readConfFile(l.fs(custom))
+		writes = append(writes, FileWrite{Path: l.fs(custom), Content: string(live.b), base: string(prev.b), baseExists: prev.ok, checkBase: true})
+	}
+	pl.Action, pl.Reason, pl.Writes, pl.Path = ActionWrite, "", writes, writes[0].Path
 }
 
 // olsAddTrust appends the missing olsFixTokens to the last allow line of the
@@ -686,11 +740,21 @@ func applyOLS(pl Plan, w io.Writer) error {
 			restore(done[i].path, done[i].prev, done[i].existed)
 		}
 	}
-	running := func() bool {
+	// The master's PID, "" when it does not run: a graceful restart (SIGUSR1)
+	// that took the new config starts a new master; the old one still
+	// running is the config NOT taken (review).
+	pid := func() string {
 		out, err := runCmd(fixTimeout, olsCtl, "status")
-		return err == nil && strings.Contains(out, "is running")
+		if err != nil || !strings.Contains(out, "is running") {
+			return ""
+		}
+		if m := olsPIDRe.FindStringSubmatch(out); m != nil {
+			return m[1]
+		}
+		return "?"
 	}
-	wasRunning := running()
+	before := pid()
+	live := false
 	for _, fw := range pl.Writes {
 		path := fw.Path
 		if real, err := filepath.EvalSymlinks(path); err == nil {
@@ -704,6 +768,12 @@ func applyOLS(pl Plan, w io.Writer) error {
 		if existed && string(prev) == fw.Content {
 			continue
 		}
+		// Planned from the file as it was: one changed since (a rebuild, a
+		// hand edit) is not overwritten (review).
+		if fw.checkBase && (existed != fw.baseExists || (existed && string(prev) != fw.base)) {
+			rollback()
+			return fmt.Errorf("%s changed since the plan; nothing written, run the fix again", path)
+		}
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			rollback()
 			return err
@@ -713,22 +783,37 @@ func applyOLS(pl Plan, w io.Writer) error {
 			return err
 		}
 		done = append(done, saved{path, prev, existed})
+		live = live || fw.Live
 		fmt.Fprintf(w, "  wrote %s\n", path)
 	}
-	if len(done) == 0 {
+	switch {
+	case len(done) == 0:
 		fmt.Fprintln(w, "  the files already hold the trust; nothing changed")
 		return nil
-	}
-	if !wasRunning {
+	case !live:
+		fmt.Fprintln(w, "  only CustomBuild's custom copies changed: OpenLiteSpeed is not restarted (rewrite_confs installs them as they are)")
+		return nil
+	case before == "":
 		fmt.Fprintln(w, "  OpenLiteSpeed is not running: the change applies when it starts")
 		return nil
 	}
 	out, err := runCmd(fixTimeout, olsCtl, "restart")
-	if err == nil && running() {
-		fmt.Fprintln(w, "  OpenLiteSpeed restarted gracefully")
+	after := pid()
+	if err == nil && after != "" && (after != before || before == "?") {
+		fmt.Fprintln(w, "  OpenLiteSpeed restarted gracefully (pid "+before+" -> "+after+")")
 		return nil
 	}
+	why := "it is not running"
+	if after != "" {
+		why = "its master still runs as pid " + after + ", so the new config was not taken"
+	}
 	rollback()
-	_, _ = runCmd(fixTimeout, olsCtl, "restart")
-	return fmt.Errorf("OpenLiteSpeed did not come back after the restart (%v); the files were restored and it was restarted again\n%s", err, strings.TrimSpace(out))
+	_, rerr := runCmd(fixTimeout, olsCtl, "restart")
+	state := "it was restarted on the restored files and runs"
+	if rerr != nil || pid() == "" {
+		state = "and it is NOT running now: start it with " + olsCtl + " start"
+	}
+	return fmt.Errorf("OpenLiteSpeed did not take the new config (%s; restart: %v); the files were restored, %s\n%s", why, err, state, strings.TrimSpace(out))
 }
+
+var olsPIDRe = regexp.MustCompile(`with PID (\d+)`)

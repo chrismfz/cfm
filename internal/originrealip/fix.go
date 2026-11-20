@@ -34,6 +34,12 @@ type Plan struct {
 type FileWrite struct {
 	Path    string
 	Content string
+	Live    bool // a file the server reads now (a write of it needs a restart)
+
+	// The content the plan was made from: Apply refuses a file changed since.
+	base       string
+	baseExists bool
+	checkBase  bool
 }
 
 const (
@@ -91,6 +97,13 @@ func (l layout) plan(p Probe) Plan {
 	pl := Plan{Probe: p}
 	if p.Trusted {
 		pl.Action, pl.Reason = ActionNone, "already trusted via "+p.Directive+" ("+p.Source+")"
+		if p.ols != nil && p.Warning != "" && p.Panel == PanelDirectAdmin {
+			// Trusted only until the next rewrite_confs: keep it (planOLSKeep).
+			l.planOLSKeep(&pl)
+			if pl.Action == ActionNone {
+				pl.Reason += "; WARNING: " + p.Warning
+			}
+		}
 		return pl
 	}
 	pl.Action = ActionManual
