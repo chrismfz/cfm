@@ -59,6 +59,17 @@ What counts, per stack:
 - **LiteSpeed:** `useIpInProxyHeader` 1 in `httpd_config.xml`, or 2 ("Trusted
   IP Only") with `127.0.0.1T` in the Access Control allow list (mars). The
   Apache RemoteIP trust it loads (`loadApacheConf`) also counts.
+- **OpenLiteSpeed:** no `httpd_config.xml`, a plain-text
+  `/usr/local/lsws/conf/httpd_config.conf` and the files it `include`s (on
+  DirectAdmin a symlink to `/etc/openlitespeed/httpd_config.conf`, with
+  `useIpInProxyHeader` in `httpd-defaults.conf` and the allow list in
+  `httpd-accesscontrol.conf`, which CustomBuild writes with Cloudflare's
+  ranges: server3, 2026-11-20). The same rule, at server level: every
+  `useIpInProxyHeader` 1, or 1 / 2 with `127.0.0.1T` (and `::1T` for an IPv6
+  edge) in every `accessControl` allow list (which one OpenLiteSpeed keeps
+  when a setting appears twice is not measured, so all of them must agree). A
+  `virtualhost{}` block's own settings do not count, and it loads no Apache
+  config.
 - **nginx:** per `server{}` block, the way nginx resolves it. A block with its
   own `set_real_ip_from` list uses only that list, and the http-level list only
   when it has none; its own `real_ip_header` likewise beats the http-level one
@@ -108,6 +119,7 @@ has a deadline.
 | nginx | `/etc/nginx/conf.d/cfm-realip.conf` (when `nginx.conf` includes `conf.d/*.conf`) |
 | nginx, every untrusted block with its own list | nothing: an http-level trust would not reach them; the blocks are named, add `set_real_ip_from 127.0.0.1;` to their lists |
 | LiteSpeed | nothing: WebAdmin → Server → General → *Use Client IP in Header* = "Trusted IP Only", add `127.0.0.1T` (and `::1T` when the edge listens on IPv6) to Security → Access Control → Allowed List, restart |
+| OpenLiteSpeed | nothing: set the server-level `useIpInProxyHeader 2` and add `127.0.0.1T` (and `::1T`) to the server-level `accessControl` allow list, in the files the probe names (DirectAdmin: `/etc/openlitespeed/httpd-defaults.conf`, `/etc/openlitespeed/httpd-accesscontrol.conf`), then `/usr/local/lsws/bin/lswsctrl restart`. CustomBuild can rewrite them on a rebuild: run `cfm realip` again after one |
 | NGM | nothing: NGM renders nginx itself, and a hand-written file is overwritten on apply. The trust has to come from NGM's templates (NGM `docs/cfm-integration-map.md`, "real_ip gap") |
 
 The Apache file is
