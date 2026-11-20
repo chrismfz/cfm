@@ -49,6 +49,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   mode next to the priority and a bare `on` re-uses both; an explicit
   `--mode` takes its own default priority, `--priority` always wins.
   `cfm dnat cpanel status` and `cfm edge` show the mode it was turned on with.
+  An unknown `--mode` (a typo such as `fallbak`, which went on at -101) is
+  refused with nothing changed.
 
 ## 2026.11.20
 

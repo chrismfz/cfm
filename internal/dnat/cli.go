@@ -767,6 +767,12 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 			prioSet = true
 		}
 	})
+	// An unknown --mode was accepted and ran the whole pipeline at -101 (a
+	// typo such as `fallbak` silently lost the -99): refuse it up front.
+	if modeSet && !panelModes[*mode] {
+		fmt.Fprintf(os.Stderr, "dnat cpanel: unknown --mode %q (auto, chain-imunify, direct-cpsrvd, fallback); nothing changed\n", *mode)
+		return 2
+	}
 	pc := resolvePanelChoice(sub, *mode, *priority, modeSet, prioSet)
 	*mode, *priority = pc.mode, pc.priority
 	modeFromSaved, prioFromSaved := pc.modeFromSaved, pc.prioFromSaved
@@ -832,9 +838,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		}
 		// The requested mode ("auto" stays auto: it is resolved again on the
 		// next `on`), so a bare `on` re-uses it.
-		if !panelModes[*mode] {
-			// An unknown --mode is not saved: a bare `on` would re-use it.
-		} else if err := PersistPanelMode(*mode); err != nil {
+		if err := PersistPanelMode(*mode); err != nil {
 			fmt.Fprintln(os.Stderr, "dnat cpanel on: warning: persist mode:", err)
 		}
 		if modeFromSaved || prioFromSaved {
@@ -981,7 +985,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		for _, tp := range panelTargetPorts {
 			fmt.Printf("Port %d listener=%s firewall=%s\n", tp, panelListenerState(tp), fw[tp])
 		}
-		if selected == "fallback" && len(detectedImunifyMappings()) > 0 {
+		if on && selected == "fallback" && len(detectedImunifyMappings()) > 0 {
 			fmt.Println("WARNING: fallback mode is not a complete panel exploit guard when Imunify already redirects panel ports.")
 		}
 		bridgeSock := probeUnixSocket("/var/run/cfm/cfm_nginx.sock")
@@ -1029,14 +1033,20 @@ type panelChoice struct {
 // turned on with: before, `off` then `on` silently went back to auto / -101,
 // whatever the operator had chosen. An explicit --mode picks its own default
 // priority again (fallback -99, else the flag default); --priority always
-// wins. `status` re-uses only the mode (it reports the installed priority).
+// wins, and alone it records the mode as auto (the mode is only a label and
+// the fallback -99 default: nothing else reads it). `status` re-uses only the
+// mode (it reports the installed priority).
 func resolvePanelChoice(sub, mode string, priority int, modeSet, prioSet bool) panelChoice {
 	pc := panelChoice{mode: mode, priority: priority}
-	if !modeSet && !prioSet {
+	// `status` ignores --priority (it reports the installed one), so only
+	// --mode keeps it from showing the saved mode.
+	if !modeSet && (!prioSet || sub == "status") {
 		if m, ok := LoadPanelMode(); ok {
 			pc.mode, pc.modeFromSaved = m, true
 		}
-		if p, ok := LoadPanelPriority(); ok && sub == "on" {
+	}
+	if !modeSet && !prioSet && sub == "on" {
+		if p, ok := LoadPanelPriority(); ok {
 			pc.priority, pc.prioFromSaved = p, true
 		}
 	}

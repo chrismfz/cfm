@@ -3,6 +3,7 @@ package dnat
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -56,6 +57,10 @@ func TestResolvePanelChoice(t *testing.T) {
 			panelChoice{mode: "fallback", priority: -101}},
 		{"status re-uses the mode only", "fallback", "-99", "status", "auto", -101, false, false,
 			panelChoice{mode: "fallback", priority: -99, modeFromSaved: true}},
+		{"status --priority still shows the saved mode", "fallback", "-99", "status", "auto", -110, false, true,
+			panelChoice{mode: "fallback", priority: -110, modeFromSaved: true}},
+		{"status --mode shows the flag's mode", "fallback", "-99", "status", "direct-cpsrvd", -101, true, false,
+			panelChoice{mode: "direct-cpsrvd", priority: -101}},
 		{"an unknown saved mode is ignored", "bogus", "", "on", "auto", -101, false, false,
 			panelChoice{mode: "auto", priority: -101}},
 	}
@@ -79,5 +84,24 @@ func TestPersistPanelModeRoundTrip(t *testing.T) {
 	}
 	if m, ok := LoadPanelMode(); !ok || m != "chain-imunify" {
 		t.Fatalf("got %q %v", m, ok)
+	}
+}
+
+// A typo'd --mode is refused before anything runs; it used to go on at -101.
+func TestPanelOnRefusesAnUnknownMode(t *testing.T) {
+	stubNoEdgeDetected(t)
+	stubNoExternalTools(t)
+	isolatePanelChoice(t, "fallback", "-99")
+	b := &redirectBackend{}
+	var rc int
+	_, errOut := captureStreams(t, func() { rc = RunCLI([]string{"cpanel", "on", "--mode", "fallbak"}, b) })
+	if rc != 2 || !strings.Contains(errOut, `unknown --mode "fallbak"`) || !strings.Contains(errOut, "nothing changed") {
+		t.Fatalf("rc=%d stderr=%q", rc, errOut)
+	}
+	if m, _ := LoadPanelMode(); m != "fallback" {
+		t.Fatalf("the saved mode changed: %q", m)
+	}
+	if p, _ := LoadPanelPriority(); p != -99 {
+		t.Fatalf("the saved priority changed: %d", p)
 	}
 }

@@ -28,13 +28,17 @@ on|off` are deprecated: accepted with a warning, ignored.
 
 **Modes**
 
-- `auto`: `chain-imunify` when Imunify360 / WebShield mappings are found,
-  else `direct-cpsrvd`.
-- `chain-imunify`: CFM takes the panel ports first and proxies to Imunify's
-  WebShield `522xx` targets.
-- `direct-cpsrvd`: CFM takes them first and proxies to local `cpsrvd` `208x`.
-- `fallback`: Imunify first (priority -99). Not a complete panel mitigation
-  when Imunify already redirects the ports.
+The mode sets the default priority and the label `on` and `status` print;
+nothing else reads it (the listeners and the upstream are the same in every
+mode):
+
+- `auto`: labelled `chain-imunify` when Imunify360 / WebShield mappings are
+  found, else `direct-cpsrvd`; priority -101.
+- `chain-imunify` / `direct-cpsrvd`: priority -101 (CFM first).
+- `fallback`: priority -99 (Imunify first). Not a complete panel mitigation
+  when Imunify already redirects the ports (`status` warns while it is on).
+
+An unknown `--mode` is refused, nothing changed.
 
 **Priority:** `-101` = CFM first (the default), `-99` = Imunify first.
 `cfm dnat cpanel on --priority …` persists the choice, and the daemon reuses
@@ -49,8 +53,9 @@ priority it applied (`/var/lib/cfm/dnat_panel_mode`,
 them again, so `off` then `on` keeps a fallback / -99 setup (before, it went
 back to auto / -101 and overwrote the saved priority). An explicit `--mode`
 takes its own default priority again (`fallback` -99, else -101), and
-`--priority` always wins. `status` prints the saved mode as `Enabled with
-mode:` (the mode is not visible in the installed chain).
+`--priority` always wins (alone, it records the mode as `auto`). `status`
+prints the saved mode as `Enabled with mode:` (the mode is not visible in the
+installed chain).
 
 ## DirectAdmin
 
