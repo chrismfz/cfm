@@ -326,6 +326,7 @@ func main() {
 		dnat.SetAPIBase(apiBaseURL())
 		clihttp.SetToken(apiAuthToken())
 		dnat.SetConfigDir(cfgDir())
+		edgecli.SetAPIBase(apiBaseURL())
 		os.Exit(edgecli.Run(os.Args[2:], func() firewall.Backend {
 			// Not mustBackend: the summary prints UNKNOWN DNAT and the rest of
 			// the picture without one; the dnat routes refuse a nil backend.
