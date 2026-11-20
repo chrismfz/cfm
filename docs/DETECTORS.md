@@ -916,8 +916,9 @@ cfm webtop challenge exclude remove /images/.tmb/ --type path --scope example.gr
   `/`, `/*`, `/*.php`, `/[!/]*` are refused (that is a host exclude).
 - `--scope` names the site exactly and also covers its `www.` alias
   (`--scope example.gr` covers `www.example.gr`, not `shop.example.gr`). An
-  admin may scope to `*.example.gr` (the subdomains); `*`, `*.*`, `*.gr` and
-  other globs are refused.
+  admin may scope to `*.example.gr` (the subdomains; a tenant does not see
+  such an entry); `*`, `*.*`, `*.gr`, `*.com.gr` and other globs are refused,
+  and so is a value glob that does not compile.
 - `--scope` is required (repeat it for several sites): a path exclude without
   it would exempt the path everywhere, so it is refused, and one an older
   version stored stays inert (`list` and cfm-admin show it as such; remove it

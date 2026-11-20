@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,6 +151,9 @@ func TestChallengePathExcludeAPIScope(t *testing.T) {
 		"type=path&value=/.tmb/&scope_hosts=*-*",
 		"type=path&value=/.tmb/&scope_hosts=*a*",
 		"type=path&value=/.tmb/&scope_hosts=*.gr",
+		"type=path&value=/.tmb/&scope_hosts=*.com.gr",
+		"type=path&value=/.tmb/&scope_hosts=*.co.uk",
+		"type=path&value=/a/[x&scope_hosts=a.gr",
 	} {
 		if rr := call(add, adminReq("POST", "/api/v1/challenge/exclude/add?"+q)); rr.Code != http.StatusBadRequest {
 			t.Fatalf("admin %s: %d %s", q, rr.Code, rr.Body.String())
@@ -247,6 +251,11 @@ func TestChallengePathExcludeAPIScope(t *testing.T) {
 	}
 	if _, ok := e.challengeExcludes.MatchChallengePath("t2.gr", "/two/x"); !ok {
 		t.Fatal("narrowed remove dropped the other host")
+	}
+	// An admin glob scope is not listed to a tenant holding the same string.
+	rr = call(e.handleChallengeExcludeList, scopedReq("GET", "/api/v1/challenge/exclude/list", "*.t9.gr"))
+	if strings.Contains(rr.Body.String(), "/w/") {
+		t.Fatalf("glob-scoped admin entry listed to a tenant: %s", rr.Body.String())
 	}
 	// A tenant holding a wildcard vhost never gets it as a scope.
 	if rr := call(add, scopedReq("POST", "/api/v1/challenge/exclude/add?type=path&value=/x/", "*.t5.gr")); rr.Code != http.StatusForbidden {

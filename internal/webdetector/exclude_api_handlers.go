@@ -22,6 +22,8 @@ package webdetector
 
 import (
 	"net/http"
+
+	"golang.org/x/net/publicsuffix"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -200,14 +202,24 @@ func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Reque
 // scoped caller may see: those with at least one scope host the caller holds
 // literally, with scope_hosts cut to those hosts (the writer's other domains
 // are not the caller's to see). A path entry without scope_hosts is inert
-// (MatchChallengePath) and hidden.
+// (MatchChallengePath) and hidden; so is a glob scope host, which only an admin
+// can write: an admin `*.example.gr` entry covering a tenant's
+// shop.example.gr is managed by the admin, not listed to the tenant.
 func filterChallengePathExcludesForScope(entries []excludeEntry, scope map[string]struct{}) []excludeEntry {
 	var out []excludeEntry
 	for _, entry := range entries {
 		if !strings.EqualFold(strings.TrimSpace(entry.Type), "path") || len(entry.ScopeHosts) == 0 {
 			continue
 		}
-		seen := scopeHostsSeenBy(entry.ScopeHosts, scope)
+		// Literal hosts only, like the writes: a glob scope host (an admin's
+		// `*.example.gr`) is never the tenant's to see or remove, even when
+		// the tenant's token holds the same glob string.
+		var seen []string
+		for _, h := range scopeHostsSeenBy(entry.ScopeHosts, scope) {
+			if !strings.ContainsAny(h, "*?[]") {
+				seen = append(seen, h)
+			}
+		}
 		if len(seen) == 0 {
 			continue
 		}
@@ -263,8 +275,9 @@ func challengePathExcludeScope(r *http.Request, add bool) (map[string]struct{}, 
 }
 
 // wideScopeHost reports a glob scope host other than `*.<domain>` where
-// <domain> is literal and has a dot: anything else (`*`, `*.*`, `*-*`, `*a*`,
-// `*.gr`, a character class) matches far more hosts than one site's.
+// <domain> is literal, has a dot and is not a public suffix: anything else
+// (`*`, `*.*`, `*-*`, `*a*`, `*.gr`, `*.com.gr`, a character class) matches far
+// more hosts than one site's.
 func wideScopeHost(hosts map[string]struct{}) (string, bool) {
 	for h := range hosts {
 		if !strings.ContainsAny(h, "*?[]") {
@@ -272,6 +285,10 @@ func wideScopeHost(hosts map[string]struct{}) (string, bool) {
 		}
 		rest, ok := strings.CutPrefix(h, "*.")
 		if !ok || rest == "" || strings.ContainsAny(rest, "*?[]") || !strings.Contains(rest, ".") {
+			return h, true
+		}
+		// `*.com.gr` / `*.co.uk` reach every tenant under a public suffix.
+		if ps, _ := publicsuffix.PublicSuffix(rest); ps == rest {
 			return h, true
 		}
 	}
@@ -310,6 +327,17 @@ func (e *Engine) challengePathExcludeWrite(w http.ResponseWriter, r *http.Reques
 	if add && !validChallengePathExcludeValue(value) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a path exclude must name a path below the site root (use a host exclude for the whole site)"})
 		return
+	}
+	if add && strings.ContainsAny(value, "*?[]") {
+		// A glob that does not compile would be stored and match nothing.
+		norm := strings.ToLower(strings.TrimSpace(value))
+		if !strings.HasPrefix(norm, "/") {
+			norm = "/" + norm
+		}
+		if compileGlob(norm) == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid glob in path exclude value"})
+			return
+		}
 	}
 	scope, code, msg := challengePathExcludeScope(r, add)
 	if code != 0 {

@@ -71,6 +71,10 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			scope := "*"
 			if len(r.ScopeHosts) > 0 {
 				scope = strings.Join(r.ScopeHosts, ",")
+			} else if prefix == "challenge" && r.Type == "path" {
+				// An unscoped challenge path entry (an older version) matches
+				// nothing: never print it as "every site".
+				scope = "none(inert)"
 			}
 			fmt.Printf("%-8s %-40s %-16s %-24s %s\n", r.Type, r.Value, rules, scope, r.CreatedAt)
 		}
