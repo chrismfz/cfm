@@ -33,7 +33,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the edge's own package upgrade) and a cfm package upgrade never turn it on
   by themselves: they keep what a render approved. `install-edge.sh` now runs
   the new `prepare cfm-edge` (render's decision for cfm-edge alone, never a
-  reload), so a freshly prepared cfm-edge starts with IPv6 where the host is
+  reload, and no new files while cfm-edge runs: that is `render cfm-edge`'s
+  job), so a freshly prepared cfm-edge starts with IPv6 where the host is
   ready; the script also takes an engine name after the action. `cfm realip` (and its
   whats_wrong / edge_health finding) now asks for the `::1` trust on every
   IPv6-capable host, and exits 1 until it is there: run `cfm realip fix`

@@ -83,7 +83,8 @@ otherwise (the script logs which one failed):
 6. the engine's config test passes with them.
 
 `render` (by hand, the installers) makes the full decision; `prepare <engine>`
-makes the same one without ever reloading (an engine's own installer).
+makes the same one without ever reloading, and writes no new files for a
+running edge (`install-edge.sh` runs `prepare cfm-edge`).
 `prestart` (before every edge start) makes it too, except that under the
 default (no or an empty `EDGE_LISTEN_V6`; an explicit `on` / `auto` lets it
 write) it never writes files that are not there, and that files a `render` already approved
@@ -113,8 +114,8 @@ ready (run `cfm realip fix` first, so the origin trusts `::1`);
 `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` turns it off. After a change,
 run the script with `render`. An engine name after the action
 (`render cfm-edge`, `render OpenResty`, `render Angie`) acts on that engine
-alone: an engine's own installer renders its edge (reloading it only if it
-runs) without reloading the others. An older script ignores the name and
+alone, never the others (`install-edge.sh` runs `prepare cfm-edge`; the
+OpenResty and Angie installers render every engine found). An older script ignores the name and
 renders every engine, so an installer that may meet one checks for the
 argument first (`grep -q '\[engine\]' <script>`). When it writes the files it reloads a running edge and
 checks (`/proc/net/tcp6`) that it listens on IPv6, else removes them and

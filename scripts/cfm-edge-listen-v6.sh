@@ -55,8 +55,9 @@
 #
 # Usage: cfm-edge-listen-v6.sh [render|prepare|prestart|deploy|status] [engine]
 #   engine    (optional: OpenResty, Angie or cfm-edge, case-insensitive) act on
-#             that engine alone: an engine's own installer renders (and
-#             reloads, if running) only its edge, never the others
+#             that engine alone, never the others (install-edge.sh runs
+#             `prepare cfm-edge`; the OpenResty / Angie installers render
+#             every engine found)
 #   render    (default; by hand, the installers) decide and write/remove the
 #             files for every engine found; the ONLY action that turns IPv6 on
 #             for a running edge (it reloads it and confirms the listen)
@@ -85,8 +86,9 @@
 #   prepare   (an engine's own installer, scoped: `prepare cfm-edge`) render's
 #             decision and writes, the default included (it is an explicit
 #             step like render), but it NEVER reloads: the files apply at the
-#             edge's next start or reload, which the installer leaves to the
-#             operator (a render reloads and confirms at once)
+#             edge's next start, which the installer leaves to the operator.
+#             On a RUNNING edge it writes no new files (they would go live at
+#             some unrelated reload, unconfirmed): that is render's job
 #   status    print the decision per engine, change nothing
 #
 # Test seams (scripts/tests/check_edge_listen_v6.sh): CFM_CONF,
@@ -576,6 +578,19 @@ render_engine() {
         return 0
     fi
 
+    if [ "$re_action" = prepare ] && { [ ! -f "$re_dir/$V6_HTTP_FILE" ] || [ ! -f "$re_dir/$V6_HTTPS_FILE" ]; } &&
+        "$CFM_SYSTEMCTL" is-active --quiet "$(unit_of "$re_name")" 2>/dev/null; then
+        # A running edge: files written without a reload would go live at
+        # the next unrelated reload (the sslcollector nudge, an operator's),
+        # unconfirmed. Only a render turns IPv6 on for a running edge.
+        if [ -f "$re_dir/$V6_HTTP_FILE" ] || [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
+            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: sh $0 render $re_name"
+            return 0
+        fi
+        log "$re_name: IPv4 only for now: it is running, and prepare never reloads; turn IPv6 on with: sh $0 render $re_name (it reloads the edge and confirms the listen)"
+        return 0
+    fi
+
     re_changed=0
     for re_pair in "$V6_HTTP_FILE http_body" "$V6_HTTPS_FILE https_body"; do
         # shellcheck disable=SC2086
@@ -619,7 +634,9 @@ status_engine() {
     fi
     se_reason=$(want_v6 "$5")
     se_want=$?
-    if [ "$se_want" -eq 0 ]; then
+    if [ "$se_want" -eq 0 ] && [ "$se_live" = no ] && [ -z "$(mode_raw)" ]; then
+        log "$1: IPv6 allowed by default and the host is ready ($se_reason), but an edge start never turns it on: run: sh $0 render $1 (the ::1 trust and the config test are checked then); files present: $se_live"
+    elif [ "$se_want" -eq 0 ]; then
         log "$1: wants IPv6 ($se_reason; the ::1 trust and the config test are checked when it renders); files present: $se_live"
     else
         log "$1: IPv4 only ($se_reason); files present: $se_live"
@@ -663,8 +680,8 @@ engines() {
 main() {
     action=${1:-render}
     # An optional engine name (OpenResty | Angie | cfm-edge, case-insensitive):
-    # act on that engine alone, so an engine's own installer renders it without
-    # reloading the others.
+    # act on that engine alone, never the others (install-edge.sh's
+    # `prepare cfm-edge`).
     only=$(printf '%s' "${2:-}" | tr 'A-Z' 'a-z')
     case $action in
         render | prepare | prestart | deploy | status) ;;

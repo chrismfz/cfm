@@ -581,21 +581,33 @@ run render nginx
 says 'no edge engine named "nginx"'
 
 # prepare: render's decision and writes, the default included, but never a
-# reload, even of a running edge (an engine's own installer, prepare-only).
+# reload (an engine's own installer, prepare-only). On a running edge it
+# writes no new files: they would go live at some unrelated reload,
+# unconfirmed; only render turns IPv6 on for a running edge.
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
-touch "$tmp/edge.active"
+rm -f "$tmp/edge.active"
 : >"$tmp/edgectl.calls"
 run prepare Test
-expect_default "prepare <engine> under the default writes the files"
-grep -q '^reload' "$tmp/edgectl.calls" && fail "prepare reloaded the edge: $(cat "$tmp/edgectl.calls")"
+expect_default "prepare <engine> on a stopped edge under the default writes the files"
 [ "$sdef" != auto ] || says "applies at the next start or reload"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+touch "$tmp/edge.active"
+run prepare Test
+expect absent "prepare on a RUNNING edge writes no new files"
+[ "$sdef" != auto ] || says "prepare never reloads; turn IPv6 on with"
+grep -q '^reload' "$tmp/edgectl.calls" && fail "prepare reloaded the edge: $(cat "$tmp/edgectl.calls")"
+rm -f "$tmp/edge.active"
+run prepare Test
+touch "$tmp/edge.active"
 printf 'untrusted' >"$tmp/realip"
 run prepare Test
-expect absent "prepare: the origin does not trust ::1 -> removed"
-says "reload it to apply"
+expect absent "prepare: the origin does not trust ::1 -> removed, running edge or not"
 grep -q '^reload' "$tmp/edgectl.calls" && fail "prepare reloaded the edge after a removal: $(cat "$tmp/edgectl.calls")"
 printf 'trusted' >"$tmp/realip"
 rm -f "$tmp/edge.active"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run status
+[ "$sdef" != auto ] || says "an edge start never turns it on: run: sh"
 
 # prestart under the default with files a render approved: the trust and the
 # config test still apply; a half pair never starts.
