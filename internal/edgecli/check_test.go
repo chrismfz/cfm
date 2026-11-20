@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"cfm/internal/clihttp"
 	"cfm/internal/dnat"
@@ -155,10 +156,9 @@ func TestFetchEdgeHealth(t *testing.T) {
 		t.Fatalf("limit: err=%v", err)
 	}
 	// Nothing listening: the daemon is down.
-	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	deadURL := dead.URL
-	dead.Close()
-	base = deadURL
+	// Port 1 on loopback: nothing listens there (a closed httptest port
+	// could be taken by another process before the dial).
+	base = "http://127.0.0.1:1"
 	if _, err := fetchEdgeHealth(0); err == nil || !strings.Contains(err.Error(), "is cfm running") {
 		t.Fatalf("down: err=%v", err)
 	}
@@ -175,5 +175,22 @@ func TestFetchEdgeHealth(t *testing.T) {
 	t.Cleanup(func() { checkTimeout = oldTimeout })
 	if _, err := fetchEdgeHealth(0); err == nil || !strings.Contains(err.Error(), "did not answer within") || strings.Contains(err.Error(), "is cfm running") {
 		t.Fatalf("a timeout must not read as the daemon down: err=%v", err)
+	}
+}
+
+// overall "ok" with a non-ok finding is a report that disagrees with itself:
+// not trusted, exit 1.
+func TestCheckOverallOKButAFindingIsNot(t *testing.T) {
+	d, _, _ := checkDeps(`{"ok":true,"overall":"ok","findings":[{"check":"x","severity":"warn","summary":"s"}]}`, nil, nil)
+	if rc := run([]string{"check"}, d); rc != 1 {
+		t.Fatalf("rc=%d", rc)
+	}
+}
+
+func TestClipKeepsRunes(t *testing.T) {
+	s := strings.Repeat("a", 511) + "αβγ"
+	got := clip(s, 512)
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, "…") || len(got) > 512+len("…") {
+		t.Fatalf("got %q", got)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cfm/internal/clihttp"
 	"cfm/internal/dnat"
@@ -76,7 +77,7 @@ func fetchEdgeHealth(window int) ([]byte, error) {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("the daemon did not finish the report within %s (try a smaller --window)", checkTimeout)
 		}
-		return nil, fmt.Errorf("read the edge-health report: %w", err)
+		return nil, fmt.Errorf("read the edge-health report (%s): %w", resp.Status, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("the daemon answered %s: %s", resp.Status, clip(strings.TrimSpace(string(body)), 512))
@@ -101,6 +102,10 @@ Exit status: 0 all ok; 1 a warn / unknown / critical finding, or no report
 func clip(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	// Back off to a rune boundary: never split a multi-byte character.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }
@@ -152,9 +157,16 @@ func runCheck(args []string, d deps) int {
 	} else {
 		printCheck(d, rep)
 	}
-	// An unknown must never read as OK: only an explicit "ok" exits 0.
+	// An unknown must never read as OK: only an explicit "ok" exits 0, and
+	// every finding must agree (the daemon derives overall from them; a
+	// report where they disagree is not trusted).
 	if !rep.OK || rep.Overall != "ok" {
 		return 1
+	}
+	for _, f := range rep.Findings {
+		if f.Severity != "ok" {
+			return 1
+		}
 	}
 	return 0
 }

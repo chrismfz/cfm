@@ -38,7 +38,7 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   origin real IP, web DNAT order): every check with its severity and, for a
   non-ok one, the next step. `--json` prints the daemon's report as it came,
   `--window N` sets the access lines to scan. It exits 0 only when the overall
-  verdict is ok; a daemon that does not answer, a report it cannot read or an
+  verdict and every check are ok; a daemon that does not answer, a report it cannot read or an
   unknown verdict exit 1. Docs: `docs/edge-health.md`, `docs/cli.md`.
 
 ### Fixed

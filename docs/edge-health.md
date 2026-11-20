@@ -7,10 +7,11 @@ in one call: **is the in-path edge → origin hop correct right now, on this
 engine, with this config?** It reads the edge logs, the published bridge
 config, the engine version, the origin's configuration and the nft ruleset
 together, and correlates them. On the node, `cfm edge check` prints the same
-report (every check with its severity, the next step for a non-ok one;
-`--json` the report as it came, `--window N` the access lines to scan; exit 0
-only when overall is ok, so a warn exits 1: a resolved 421 storm still in the
-log tail stays warn until it scrolls out, which a cron alert should allow for). `whats_wrong` surfaces its findings (below).
+report: every check with its severity, and the next step for a non-ok one.
+`--json` prints the report as it came, `--window N` sets the access lines to
+scan. It exits 0 only when the overall verdict and every finding are ok, so a
+warn exits 1: a resolved 421 storm still in the log tail stays warn until it
+scrolls out, which a cron alert should allow for. `whats_wrong` surfaces its findings (below).
 
 It exists because of the 2026-08 `421 Misdirected Request` incident
 (`docs/proxy-performance.md`): the symptom sat in the edge access log for a
