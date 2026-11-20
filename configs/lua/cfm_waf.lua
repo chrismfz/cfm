@@ -1904,7 +1904,8 @@ local function check_impl(ctx, st)
 
   -- ── 25) WP-specific auth checks ──────────────────────────────────────────
   -- The three burst detectors below take a host for their counter key and
-  -- are passed nil, so they count per IP ACROSS vhosts (key host "-"). That
+  -- are passed nil, so they count per client ACROSS vhosts (key host "-";
+  -- a client is its address, an IPv6 one its /64: cfm_selfip.count_key). That
   -- is how the fleet's thresholds were tuned: these calls used to read an
   -- undeclared global `host`, always nil, and a per-vhost key would let a
   -- spray split across a server's vhosts stay under every threshold.

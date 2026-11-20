@@ -16,6 +16,8 @@ _G.ngx = {
   ERR           = 0, WARN = 1, INFO = 2,
 }
 package.path = "configs/lua/?.lua;" .. package.path
+-- No self / IGNORE files: the host's /var/lib/cfm/lua must not steer the test.
+package.loaded["cfm_filecache"] = { get = function() return nil end }
 local waf = require("cfm_waf")
 
 local fails = 0
@@ -206,6 +208,40 @@ do
     for _, h in ipairs(hits or {}) do if h.waf_rule_id == 501 then act = h.action end end
   end
   check(act == nil, "a panel login (body_unread) is not counted (got " .. tostring(act) .. ")")
+end
+
+-- ── An IPv6 client counts as its /64 (cfm_selfip.count_key) ─────────────────
+-- 501, the wp-login HEAD probe and the XML-RPC burst: addresses rotating
+-- inside one /64 fill one window; another /64 counts on its own.
+do
+  local det = require("cfm_waf_detectors")
+  local dict = new_dict()
+  local body = "log=admin&pwd=guess&wp-submit=Log+In"
+  local hdr = { ["content-type"] = FORM, ["user-agent"] = CHROME }
+  local tag
+  for i = 1, 8 do
+    tag = det.detect_auth_burst(string.format("2001:db8:1:2::%x", i), "example.com", "/wp-login.php", "POST", dict, "", body, hdr)
+  end
+  check(tag ~= nil, "8 credential POSTs from 8 addresses of one /64 trip 501 (got nil)")
+  check(det.detect_auth_burst("2001:db8:1:3::1", "example.com", "/wp-login.php", "POST", dict, "", body, hdr) == nil,
+    "another /64's first credential POST does not trip 501")
+  local x
+  for i = 1, 6 do
+    x = det.detect_xmlrpc_post_burst(string.format("2001:db8:5:6::%x", i), "example.com", "/xmlrpc.php", "POST", dict, "", {}, "<methodCall/>")
+  end
+  check(x == "AUTH_WP_XMLRPC_POST_BURST", "6 XML-RPC POSTs from one /64 trip the burst (got " .. tostring(x) .. ")")
+  local hk = 0
+  for k in pairs(dict.v) do
+    if k:find("^authwph|w|") then hk = hk + 1 end
+  end
+  for i = 1, 3 do
+    det.detect_wp_login_probe("/wp-login.php", "HEAD", {}, string.format("2001:db8:9:9::%x", i), "example.com", dict)
+  end
+  local n = 0
+  for k, v in pairs(dict.v) do
+    if k == "authwph|w|2001:db8:9:9::/64|-|AUTH_WP_LOGIN_HEAD" then n = v end
+  end
+  check(hk == 0 and n == 3, "the wp-login HEAD probe counts the /64 (got " .. tostring(n) .. ")")
 end
 
 if fails > 0 then

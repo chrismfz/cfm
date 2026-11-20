@@ -253,8 +253,8 @@ origin hop brackets the address and binds `::1`.
   A direct IPv6 client with a /64 (any VPS) got a new identity per request
   wherever a control keyed on the full address. Done: the automatic L7 bans
   (`block_v6_clients`) and the detectors' and admin API's counters
-  (`docs/edge-ipv6.md` "IPv6 /64 grouping"), webdetector scoring and the
-  challenge server. Left: the edge's shared dicts; then flip `V6_DEFAULT`
+  (`docs/edge-ipv6.md` "IPv6 /64 grouping"), webdetector scoring, the
+  challenge server and the edge's counters. Left: flip `V6_DEFAULT`
   (scripts/cfm-edge-listen-v6.sh) and `edgeIPv6Default`
   (internal/originrealip) together to auto/true, and swap the reference
   cfm.conf's commented `# EDGE_LISTEN_V6 = on` for `# EDGE_LISTEN_V6 = off`

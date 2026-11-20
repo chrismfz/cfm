@@ -11,6 +11,8 @@
 --   * check_loopback() trusts the real peer ($realip_remote_addr), not the
 --     real_ip-rewritten $remote_addr that a CF-fronted request can forge.
 
+package.path = "configs/lua/?.lua;" .. package.path -- cfm_purge reads cfm_ipkey
+
 local failures = 0
 local function check(cond, msg)
   if not cond then
@@ -100,6 +102,20 @@ local r6 = purge.purge_ip("2a02:587:dc1f::1")
 check(r6.deleted.geo == 1,      "v6 geo should be 1 (deleted from cfm_geocache)")
 check(geostore["geo|2a02:587:dc1f::1"] == nil, "v6 geo key must be deleted from cfm_geocache")
 check(r6.deleted.throttle == 2, "v6 throttle should be 2 (incl :lock), got " .. tostring(r6.deleted.throttle))
+
+-- ── IPv6 client: the throttle counts its /64 (cfm_rules) ─────────────────────
+-- An unblock of any address of it, or of its network address (the daemon's
+-- /64 unblock), frees the /64's throttle; another /64's stays.
+for _, target in ipairs({ "2001:db8:1:2::77", "2001:db8:1:2::" }) do
+  store = {
+    ["tr|soft_bot|h|7|2001:db8:1:2::/64"] = "x",
+    ["tr|soft_bot|h|7|2001:db8:1:3::/64"] = "x",
+  }
+  geostore = {}
+  local rc = purge.purge_ip(target)
+  check(rc.deleted.throttle == 1, "unblock of " .. target .. ": the /64's throttle, got " .. tostring(rc.deleted.throttle))
+  check(store["tr|soft_bot|h|7|2001:db8:1:3::/64"] ~= nil, "another /64's throttle must survive")
+end
 
 -- ── geocache dict absent (conf not yet reloaded): geo delete is a no-op ───────
 _G.ngx.shared.cfm_geocache = nil

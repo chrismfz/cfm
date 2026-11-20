@@ -343,8 +343,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   an allow, an exact match, a clearance cookie or a log line on it, and never
   add another private "IPv4 or /64" helper: both twins run
   `scripts/tests/fixtures/ipkey.txt`. A counter or rate limit keys on
-  `firewall.CountKey` (`core.ClientKey` in a detector): the /64 only where a
-  ban could take it (a guarded /64 counts per address, as its ban does). Its
+  `firewall.CountKey` (`core.ClientKey` in a detector, `cfm_selfip.count_key`
+  at the edge, which knows only the self and IGNORE guards): the /64 only
+  where a ban could take it (a guarded /64 counts per address, as its ban does). Its
   alert carries a real address (`Extra["ip"]`), which the sink's checks read
   and `firewall.ExtendClientBlock` widens itself; the kernel nft meters stay
   per address (spoofable sources).

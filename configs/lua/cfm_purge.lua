@@ -161,6 +161,11 @@ function _M.purge_ip(ip)
   -- dicts. Revisit F57 once they land.
   local keys = sh:get_keys(0)
   local scanned = #keys
+  local client = ip
+  do
+    local ok, ik = pcall(require, "cfm_ipkey")
+    if ok and type(ik) == "table" and ik.client then client = ik.client(ip) end
+  end
 
   for _, k in ipairs(keys) do
     local parts = split_pipe(k)
@@ -184,7 +189,11 @@ function _M.purge_ip(ip)
       -- is the LAST field, not field 2.
       if parts[#parts] == ip then plane = "wafpush" end
     elseif prefix == "tr" then
-      if strip_tr_suffix(parts[#parts]) == ip then plane = "throttle" end
+      -- The throttle counts a client: an IPv6 client's /64 (cfm_rules
+      -- client_key), so an unblock of any address of it (or of the /64's
+      -- network address, the daemon's /64 unblock) frees it too.
+      local t = strip_tr_suffix(parts[#parts])
+      if t == ip or (client ~= ip and t == client) then plane = "throttle" end
     end
 
     if plane then

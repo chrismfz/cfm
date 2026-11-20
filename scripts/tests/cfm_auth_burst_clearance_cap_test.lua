@@ -79,6 +79,20 @@ do
     "a resumed login on a second site in the window is refused (" .. desc(r) .. ")")
 end
 
+-- The cap and the resume pass count an IPv6 client as its /64 (count_key):
+-- rotating the address inside it neither resets 501 nor mints a second pass.
+do
+  local SH, r
+  for i = 1, 8 do r = login(SH, true, string.format("2001:db8:1:2::%x", i)); SH = r.SH end
+  check(r.ok and r.exited == 403 and r.action == "login_capped_pc",
+    "the /64's 8th login from its 8th address is refused (" .. desc(r) .. ")")
+  r = login(SH, true, "2001:db8:1:2::a1", nil, true)
+  check(r.ok and r.exited ~= 403, "the /64's first resumed login passes (" .. desc(r) .. ")")
+  r = login(r.SH, true, "2001:db8:1:2::a2", nil, true)
+  check(r.ok and r.exited == 403 and r.action == "login_capped_pc",
+    "a resumed login from another address of the /64 is refused (" .. desc(r) .. ")")
+end
+
 -- An operator stepping 501 back to logonly turns the cap off too, even when
 -- another rule's challenge is converted on the same request.
 do

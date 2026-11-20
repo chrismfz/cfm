@@ -15,7 +15,7 @@ local rawByPath = {
     ips = { ["1.2.3.4"] = true, ["2001:DB8::1"] = true, ["fe80::abcd"] = true },
   },
   ["/var/lib/cfm/lua/cfm_ignore_nets.lua"] = {
-    ips = { ["9.9.9.9"] = true },
+    ips = { ["9.9.9.9"] = true, ["2a06:1:2:3::9"] = true },
     v4_ranges = { { RANGE_LO, RANGE_HI } },
     -- what Go writes (IPIgnore.WriteLuaCache): network as 32 hex digits + prefix.
     v6_ranges = {
@@ -26,6 +26,7 @@ local rawByPath = {
       { "2a0c0000000000000000000000000000", 129 },  -- bad prefix: dropped
       { "00000000000000000000000000000000", 80 },   -- ::/80 covers ::ffff:0:0/96
       { "fe800000000000000000000000000000", 10 },   -- IGNORE_NETS fe80::/10: ignored by design
+      { "2a050000000000000000000000010000", 112 },  -- 2a05::1:0/112: inside one /64
     },
   },
 }
@@ -132,5 +133,54 @@ assert_true(selfip.is_self_origin("::abcd"), "::/80 still matches a plain v6 ins
 assert_true(not selfip.is_self_origin("10.0.1.1"), "10.0.1.1 outside range")
 assert_true(not selfip.is_self_origin("8.8.8.8"), "8.8.8.8 public")
 assert_true(not selfip.is_self_origin(""), "empty is not self-origin")
+
+-- count_key: an IPv6 client's /64, but the address where the /64 holds this
+-- node's own address or an IGNORE entry (as the daemon's firewall.CountKey).
+for ip, want in pairs({
+  ["2001:db9:1:2::5"]  = "2001:db9:1:2::/64", -- an unguarded /64
+  ["2001:db8::99"]     = "2001:db8::99",      -- holds the node's 2001:db8::1
+  ["2a01:45f8:1:2::5"] = "2a01:45f8:1:2::5",  -- inside an ignored /32
+  ["2a14:4280:1:1::9"] = "2a14:4280:1:1::9",  -- an ignored /64 itself
+  ["2a05::2:9"]        = "2a05::2:9",         -- holds an ignored /112
+  ["2a14:4280:1:2::9"] = "2a14:4280:1:2::/64", -- the ignored /64's neighbour
+  ["203.0.113.7"]      = "203.0.113.7",
+  ["fe80::1"]          = "fe80::1",           -- ungrouped (cfm_ipkey)
+  ["-"]                = "-",
+}) do
+  local got = selfip.count_key(ip)
+  assert_true(got == want, "count_key(" .. ip .. ") = " .. tostring(got) .. ", want " .. want)
+end
+assert_true(selfip.is_self_origin("2a05::1:5"), "ignore v6 /112 inside")
+
+assert_true(selfip.count_key("2a06:1:2:3::77") == "2a06:1:2:3::77", "a /64 holding an IGNORE_IPS IPv6 address counts per address")
+assert_true(selfip.count_key("2a06:1:2:4::77") == "2a06:1:2:4::/64", "its neighbour /64 is grouped")
+
+-- The guarded /64s are worked out once per cfm_filecache table and follow a
+-- reload: a filecache that hands back the same table until the file changes.
+do
+  local tables = {}
+  local self_ips = { ips = { ["2001:db8:aa::1"] = true } }
+  local ignore = { ips = { ["2001:db8:bb::1"] = true }, v6_ranges = {} }
+  package.loaded["cfm_filecache"] = {
+    get = function(path, opts)
+      if not tables[path] then
+        local raw = path:find("self_ips", 1, true) and self_ips or ignore
+        tables[path] = opts.transform(raw)
+      end
+      return tables[path]
+    end,
+  }
+  package.loaded["cfm_selfip"] = nil
+  local s2 = require("cfm_selfip")
+  assert_true(s2.count_key("2001:db8:aa::9") == "2001:db8:aa::9", "cached: the self /64 counts per address")
+  assert_true(s2.count_key("2001:db8:bb::9") == "2001:db8:bb::9", "cached: the ignore /64 counts per address (not the self set again)")
+  assert_true(s2.count_key("2001:db8:aa::9") == "2001:db8:aa::9", "cached, second call")
+  assert_true(s2.count_key("2001:db8:cc::9") == "2001:db8:cc::/64", "cached: an unguarded /64")
+  -- A reload (a new table): the old self /64 is free, the new one guarded.
+  self_ips = { ips = { ["2001:db8:cc::1"] = true } }
+  tables["/var/lib/cfm/lua/cfm_self_ips.lua"] = nil
+  assert_true(s2.count_key("2001:db8:aa::9") == "2001:db8:aa::/64", "after a reload the old self /64 is grouped")
+  assert_true(s2.count_key("2001:db8:cc::9") == "2001:db8:cc::9", "after a reload the new self /64 counts per address")
+end
 
 print("ok: cfm_selfip self-origin / IGNORE_NETS bypass (loopback + self-IP + ignore ips + v4/v6 ranges)")

@@ -38,11 +38,24 @@ local function profile_for(name)
   return PROFILES[k] or PROFILES.soft_bot
 end
 
+-- client_key: the per-client counter key for ip (cfm_selfip.count_key: an
+-- IPv6 client's /64, docs/edge-ipv6.md "IPv6 /64 grouping"); the address
+-- itself when cfm_selfip cannot load (the client key then, cfm_ipkey).
+local function client_key(ip)
+  local ok, sip = pcall(require, "cfm_selfip")
+  if ok and type(sip) == "table" and sip.count_key then return sip.count_key(ip) end
+  local ok2, ik = pcall(require, "cfm_ipkey")
+  if ok2 and type(ik) == "table" and ik.client then return ik.client(ip) end
+  return ip
+end
+
+
 -- throttle_hit returns (hit, retry_after). hit==true means reject (429).
 --
 -- Lock-free fixed-window counter (audit F21): ONE atomic SH:incr per request
 -- (a window's first hit also an add, via cfm_shdict),
--- keyed on (profile, host, ip, window). The previous implementation took a
+-- keyed on (profile, host, window, client: an IPv6 client's /64). The
+-- previous implementation took a
 -- per-(profile,host,ip) spin-lock (SH:add + up to 10x ngx.sleep(1ms)) around a
 -- read-modify-write token bucket, and on lock-acquisition TIMEOUT returned a 429
 -- regardless of token availability. Under carrier-grade NAT / a shared proxy,
@@ -56,8 +69,9 @@ end
 -- WINDOW = burst/rate, LIMIT = burst (soft_bot 20/10s = 2/s burst 20; medium
 -- 10/10s; hard 5/10s). A fixed window can admit up to ~2x LIMIT across a window
 -- boundary — acceptable for a coarse bot throttle. (Deliberately NOT changed:
--- keying purely on IP still shares one budget across a NAT/proxy's users; that
--- is a deeper design question the finding raises separately.)
+-- keying on the client, an address or an IPv6 /64, still shares one budget
+-- across a NAT/proxy's or a /64's users; that is a deeper design question the
+-- finding raises separately.)
 local function throttle_hit(profileName, host, ip)
   if not SH then
     -- Intentional degraded mode: fail open and allow requests when cfm_decisions SHM is unavailable.
@@ -74,11 +88,13 @@ local function throttle_hit(profileName, host, ip)
   local limit  = p.burst
   local now = ngx.now()
   local win = math.floor(now / window)
-  -- IP is the LAST field on purpose: cfm_purge.purge_ip finds throttle keys by
-  -- matching the trailing IP on a force-unblock, so the window index goes BEFORE
-  -- it. (Format: tr|<profile>|<host>|<window>|<ip>.)
+  -- The client is the LAST field on purpose: cfm_purge.purge_ip finds throttle
+  -- keys by matching the trailing client on a force-unblock, so the window index
+  -- goes BEFORE it. (Format: tr|<profile>|<host>|<window>|<client>; the client
+  -- is an IPv6 client's /64, client_key, so rotating the address inside it
+  -- does not refill the budget.)
   local key = "tr|" .. tostring(profileName or "soft_bot") .. "|" ..
-              tostring(host or "-") .. "|" .. win .. "|" .. tostring(ip or "-")
+              tostring(host or "-") .. "|" .. win .. "|" .. client_key(tostring(ip or "-"))
 
   -- A fresh window key starts at 1; its TTL (2x the window) is applied on
   -- CREATE only, so the key ages out on its own after the window.

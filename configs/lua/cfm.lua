@@ -458,6 +458,9 @@ end
 local selfip = require("cfm_selfip")
 local normalize_ip = selfip.normalize_ip
 local is_self_origin = selfip.is_self_origin
+-- count_key: a per-client counter's key (an IPv6 client's /64; cfm_selfip),
+-- the client key alone when an older cfm_selfip lacks it.
+local count_key = selfip.count_key or require("cfm_ipkey").client
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- WAF BODY INSPECTION
@@ -2006,13 +2009,14 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
       -- arg) takes the headline, and keying on the headline let a cleared
       -- client switch the cap off with one junk arg; the refusal is reported
       -- as 501's. A resumed POST is the login the client was challenged for
-      -- and has just solved: one per IP per window is let through (501
-      -- counts per IP across vhosts), since a client can mint resume tokens
-      -- by posting without its cookie.
+      -- and has just solved: one per client per window is let through (501
+      -- counts per client across vhosts: an IPv6 client is its /64,
+      -- count_key), since a client can mint resume tokens by posting without
+      -- its cookie.
       local abh = waf_action == "logonly" and converted_from_challenge
         and waf.hits_auth_burst and waf.hits_auth_burst(waf_hits)
       if abh and not (ngx.ctx.cfm_resumed_post and SH
-                      and SH:add("abrs|" .. ip, 1, waf.auth_window_sec and waf.auth_window_sec() or 20)) then
+                      and SH:add("abrs|" .. count_key(ip), 1, waf.auth_window_sec and waf.auth_window_sec() or 20)) then
         reason, ttl, waf_rule_id = abh.reason, abh.ttl or ttl, abh.waf_rule_id
         push_and_log_waf_hit()
         -- The push and its waf_logonly line say logonly (no ban); this line

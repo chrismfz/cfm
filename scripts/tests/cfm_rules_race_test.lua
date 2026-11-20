@@ -46,6 +46,8 @@ _G.ngx = {
 }
 
 package.path = "configs/lua/?.lua;" .. package.path -- cfm_rules requires cfm_shdict
+-- No self / IGNORE files: the host's /var/lib/cfm/lua must not steer the test.
+package.loaded["cfm_filecache"] = { get = function() return nil end }
 local rules = dofile("configs/lua/cfm_rules.lua")
 rules.init({})
 
@@ -159,6 +161,23 @@ do
   assert_eq(throttle("2.2.2.2").action, "allow", "missing cfm_decisions dict → throttle fails open")
   _G.ngx.shared.cfm_decisions = dict
   rules.init({})
+end
+
+-- ── an IPv6 client is throttled as its /64 ───────────────────────────────────
+-- Rotating the address inside the /64 does not refill the budget
+-- (cfm_selfip.count_key); another /64 has its own.
+do
+  now = 5000
+  for i = 1, LIMIT do
+    assert_eq(throttle(string.format("2001:db8:1:2::%x", i)).action, "allow", "v6 request " .. i .. " within the /64's budget")
+  end
+  assert_eq(throttle("2001:db8:1:2::ffff").action, "throttle", "a fresh address of the same /64 must be throttled")
+  assert_eq(throttle("2001:db8:1:3::1").action, "allow", "another /64 has its own budget")
+  local keyed = false
+  for k in pairs(dict:_dump()) do
+    if k:find("|2001:db8:1:2::/64$") then keyed = true end
+  end
+  assert(keyed, "the throttle key must end in the client's /64 (cfm_purge matches it)")
 end
 
 print("ok: cfm_rules lock-free fixed-window throttle — " .. LIMIT .. "/" .. WINDOW .. "s, fails open, ip-last key (F21)")
