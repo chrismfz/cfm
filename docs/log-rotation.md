@@ -93,12 +93,23 @@ there (or ship a host-specific drop-in), don't duplicate the entry.
   `dateformat`, so what a node had before the change is never deleted: the
   hourly pass's numbered ones (`access.log.1` … `.7.gz`, `cfm.log.1` …
   `.14.gz`; on Debian both runs made these) and, on EL, the distro run's
-  date-only ones (`access.log-YYYYMMDD.gz`). Remove both once, after the
-  upgrade:
+  date-only ones (`access.log-YYYYMMDD.gz`). Remove both by hand once they
+  are older than the block's old retention (`rotate 7` / `rotate 14` days),
+  so nothing the old config would still have kept, and the rotated-log tools
+  (`include_rotated`, `rotated=N`) still reach, is lost. Run this a day after
+  the upgrade, or again later; it only takes files past that age:
 
   ```bash
-  find /usr/local/openresty/nginx/logs /var/log/cfm -maxdepth 1 -type f -regextype posix-extended -regex '.*\.log(\.[0-9]+|-[0-9]{8})(\.gz)?' -print -delete
+  find /usr/local/openresty/nginx/logs -maxdepth 1 -type f -regextype posix-extended -regex '.*\.log(\.[0-9]+|-[0-9]{8})(\.gz)?' -mtime +7 -print -delete
   ```
+
+  ```bash
+  find /var/log/cfm -maxdepth 1 -type f -regextype posix-extended -regex '.*\.log(\.[0-9]+|-[0-9]{8})(\.gz)?' -mtime +14 -print -delete
+  ```
+
+  Files younger than that stay until the next run of the command; a
+  maxsize-heavy edge rotating several times a day can hold more than seven
+  of them for a while.
 
   (and, on a host that still writes the legacy flat paths, the same
   `/var/log/cfm*.log.N` / `-YYYYMMDD` files under `/var/log` itself, by
