@@ -485,10 +485,14 @@ check(cache.micro_gate() == nil, "enforce: http scheme → nil (no @cfm_micro lo
 check(ngx.var.cfm_cache_skip == "1", "scheme-gated miss leaves the bypass gate closed")
 
 -- request-side rails still apply under enforce
-reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_cookie = "PHPSESSID=x"
+reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_cookie = "PHPSESSID=x"; ngx.var.cfm_micro_why = "-"
 check(cache.micro_gate() == nil, "enforce: an app-session cookie → nil (bypass, never cached)")
-reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.request_method = "POST"
+check(ngx.var.cfm_micro_why == "auth:PHPSESSID", "the bypass reason reaches the log variable: " .. tostring(ngx.var.cfm_micro_why))
+reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.request_method = "POST"; ngx.var.cfm_micro_why = "-"
 check(cache.micro_gate() == nil, "enforce: POST → nil (GET/HEAD only)")
+check(ngx.var.cfm_micro_why == "method", "POST is logged as method: " .. tostring(ngx.var.cfm_micro_why))
+reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.cfm_micro_why = "-"
+check(cache.micro_gate() == "@cfm_micro_1s" and ngx.var.cfm_micro_why == "-", "a micro-cached request leaves mwhy at -")
 reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_authorization = "Basic dXNlcjpwYXNz"
 check(cache.micro_gate() == nil, "enforce: Authorization header → nil (credentialed, never micro-cached)")
 check(ngx.var.cfm_cache_skip == "1", "credentialed miss leaves the bypass gate closed")
@@ -1064,6 +1068,50 @@ do
   check(note("PHPSESSID=x") == 1, "old conf, a Set-Cookie: marked, as nginx refused to store it")
   ngx.var.upstream_http_set_cookie = nil
   _micro_enforce = false
+end
+
+-- ── mwhy: the micro-bypass reason for the access log ─────────────────────────
+-- nginx raises on a write to a variable the conf never declared: a strict var
+-- table stands in, so an older conf (no $cfm_micro_why) must see no write.
+do
+  local saved = ngx.var
+  local strict = setmetatable({}, { __newindex = function(_, k) error("variable \"" .. k .. "\" not found for writing") end })
+  ngx.var = strict
+  local ok, err = pcall(cache._note_micro_why, "auth:wordpress_logged_in_abc")
+  check(ok, "an old conf without $cfm_micro_why must not raise: " .. tostring(err))
+  -- a new conf declares it ("-"): the reason lands, sanitized and capped
+  ngx.var = { cfm_micro_why = "-" }
+  cache._note_micro_why("auth:wordpress_logged_in_0123abcd")
+  check(ngx.var.cfm_micro_why == "auth:wordpress_logged_in_0123abcd", "reason written: " .. tostring(ngx.var.cfm_micro_why))
+  cache._note_micro_why('auth:x" y=1\nz')
+  check(ngx.var.cfm_micro_why == "auth:x__y_1_z", "quotes, spaces, = and newlines become _: " .. tostring(ngx.var.cfm_micro_why))
+  cache._note_micro_why(string.rep("a", 200))
+  check(#ngx.var.cfm_micro_why == 80, "capped at 80")
+  cache._note_micro_why(nil)
+  check(ngx.var.cfm_micro_why == "unknown", "nil reads as unknown")
+  ngx.var = saved
+end
+-- note_skip: an allow before Step 4 (clearance fast-path, WAF logonly,
+-- self-IP) records its reason, on a micro-armed vhost only.
+do
+  local saved = ngx.var
+  _site_cache_on = true
+  cache._rebuild_cache({
+    { host = "myip.gr", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "1s" } },
+    { host = "assets.cdn.example.com", gen = 1, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  })
+  ngx.var = { host = "myip.gr", cfm_micro_why = "-" }
+  cache.note_skip("clearance")
+  check(ngx.var.cfm_micro_why == "clearance", "note_skip on a micro-armed vhost: " .. tostring(ngx.var.cfm_micro_why))
+  ngx.var = { host = "assets.cdn.example.com", cfm_micro_why = "-" }
+  cache.note_skip("clearance")
+  check(ngx.var.cfm_micro_why == "-", "note_skip on a vhost without micro leaves -")
+  ngx.var = { host = "nope.example", cfm_micro_why = "-" }
+  cache.note_skip("clearance")
+  check(ngx.var.cfm_micro_why == "-", "note_skip on a vhost with no policy leaves -")
+  ngx.var = setmetatable({ host = "myip.gr" }, { __newindex = function(_, k) error("no " .. k) end })
+  check(pcall(cache.note_skip, "clearance"), "note_skip with an old conf does not raise")
+  ngx.var = saved
 end
 
 if fails > 0 then

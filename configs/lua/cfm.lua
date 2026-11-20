@@ -295,8 +295,16 @@ local cache_ok, cfm_cache = pcall(require, "cfm_cache")
 -- raised) is never micro-cached (ngx.ctx.cfm_no_micro, set at Step 2): both
 -- went to the origin uncached before they went on to Step 4, and the cache
 -- must not keep a response to a payload the WAF flagged or never saw.
+-- micro_skip: record why a micro-armed request will not be micro-cached when
+-- it is allowed before Step 4, the only micro entry (mwhy= in the access log;
+-- cfm_cache.note_skip writes only on a micro-armed vhost and a conf that
+-- declares the variable). Under a pcall: logging never breaks an allow path.
+local function micro_skip(why)
+  if cache_ok and cfm_cache and cfm_cache.note_skip then pcall(cfm_cache.note_skip, why) end
+end
+
 local function micro_cache_target()
-  if ngx.ctx.cfm_no_micro then return nil end
+  if ngx.ctx.cfm_no_micro then micro_skip("waf"); return nil end
   if not cache_ok or not cfm_cache or not cfm_cache.micro_gate then return nil end
   local ok, target = pcall(cfm_cache.micro_gate)
   if ok and type(target) == "string" then return target end
@@ -1462,6 +1470,7 @@ do
     ngx.header["X-CFM-Bypass"] = "self_ip"
     log_route(ngx.INFO, "bypass=self_ip ip=" .. tostring(ip) .. " peer=" .. tostring(peer_ip) .. " host=" .. host)
     ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+    micro_skip("self-ip")
     return
   end
   if not has_cf and p ~= "" then
@@ -2132,6 +2141,7 @@ if clearance_allow then
   end
   ngx.header["X-CFM-Action"] = waf_allow_action or "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+  micro_skip("clearance")
   -- Site Cache Tier B: micro-cache is deliberately NOT wired on this
   -- clearance fast-path yet. `refresh_clearance_cookie` above sets the sliding
   -- cfm_clearance Set-Cookie via ngx.header in THIS access phase; whether that

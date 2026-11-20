@@ -29,6 +29,27 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   becomes `/worksec.php`, which keeps the one campaign it caught
   (`/.tmb/worksec.php`, ~110 a day over the fleet) in any folder.
 
+### Changed
+- **`cfm edge` names the IPv6 next step.** When the host can do IPv6 but
+  the running edge listens on IPv4 only, the summary's "needs a look" says
+  what to run: `cfm edge ipv6 on`, or `cfm edge realip fix` first when the
+  origin does not trust the edge (`127.0.0.1` and `::1`). The listen script's own hints
+  (status, prestart, deploy, prepare) say `cfm edge ipv6 on [engine]`
+  instead of `sh …/cfm-edge-listen-v6.sh render`, and the origin real-IP OK
+  line no longer ends in an empty "header " on OpenLiteSpeed / LiteSpeed.
+
+### Added
+- **The edge's access log says why a request was not micro-cached.** A new
+  last field, `mwhy="…"`, carries Site Cache Tier B's request-side reason
+  for a micro-armed vhost (`auth:<cookie name>` for a session cookie,
+  `method`, `path`, `uncacheable`, …; a cookie's name, never its value;
+  `clearance` for a visitor whose challenge-clearance cookie takes the fast
+  path, which never micro-caches; `waf`, `self-ip`), and
+  `-` for everything else. Before, "why was my page not cached?" needed the
+  trusted-source debug header, which cannot see a visitor's own cookies.
+  An old conf with the new Lua simply has no field (no error); the panel
+  listeners log `-` without warnings.
+
 ## 2026.11.20
 
 _Nothing yet._

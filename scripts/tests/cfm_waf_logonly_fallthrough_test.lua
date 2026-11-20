@@ -136,7 +136,7 @@ end
 do
   local f = assert(io.open("configs/lua/cfm.lua", "r"))
   local src = f:read("*a"); f:close()
-  check(src:find("local function micro_cache_target()\n  if ngx.ctx.cfm_no_micro then return nil end", 1, true) ~= nil,
+  check(src:find('local function micro_cache_target()\n  if ngx.ctx.cfm_no_micro then micro_skip("waf"); return nil end', 1, true) ~= nil,
         "micro_cache_target refuses a flagged request")
 end
 
