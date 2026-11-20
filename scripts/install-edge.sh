@@ -12,8 +12,8 @@
 # restart / enable / disable, no `cfm dnat` / `cfm edge` switch, and the IPv6 listen script only
 # as a cfm-edge-scoped `prepare`, which never reloads
 # (scripts/tests/check_install_edge.sh pins it). The switch and the way back are printed at the end, for the engine
-# that runs now: `cfm edge off` first (`cfm dnat off` on an older cfm; the
-# origin serves directly), then the
+# that runs now: `cfm edge off` first (the origin serves directly; `cfm dnat
+# off` on an older cfm), then the
 # systemctl swap at leisure (both edges bind :9080 / :9043 and the panel
 # listener ports, so only one runs at a time), then `cfm edge on`.
 #
@@ -479,7 +479,7 @@ cfm-edge is already the live edge; reload it to apply the new config (and
 any IPv6 listen change), then check the IPv6 listen decision:
 
     systemctl reload cfm-edge
-    sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status    # or: cfm edge ipv6
+    sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
 EOF
         return 0
     fi

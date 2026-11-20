@@ -66,7 +66,9 @@ ex="$(executed "$SCRIPT")"
 [ -n "$ex" ] || fail "no executed lines found in $SCRIPT (matcher broken?)"
 grep -q 'print_next_steps' <<<"$ex" || fail "matcher lost the executed body of $SCRIPT"
 grep -q 'is already the live edge' <<<"$ex" && fail "matcher kept a quoted heredoc body (the printed steps)"
-grep -q 'cfm edge off' <<<"$ex" && fail "matcher kept an unquoted heredoc body line without a command substitution (the printed steps)"
+# 'cfm edge off' sits in steps_edge's UNQUOTED rollback heredoc (it carries
+# ${old}): keep a line of it unquoted, or this sentinel proves nothing.
+grep -q 'cfm edge off' <<<"$ex" && fail "matcher kept a heredoc body line without a command substitution (the printed steps)"
 
 if bad="$(grep -E 'systemctl[[:space:]]+(-[^[:space:]]+[[:space:]]+)*(start|stop|restart|try-restart|reload|reload-or-restart|try-reload-or-restart|enable|disable|reenable|mask|unmask|kill|isolate)\b' <<<"$ex")"; then
   fail "$SCRIPT runs a unit-changing systemctl (it must only print the switch):
@@ -80,7 +82,9 @@ fi
 # too, strictly (web / panel / bypass / ipv6 on|off, even their read-only
 # forms such as `panel status`, are not the installer's to run). `cfm edge
 # help`, a bare `cfm edge`, `check` and `ipv6 [status]` pass; so does
-# `realip`, which the installer runs on purpose (`cfm realip fix`).
+# `realip`, which the installer runs on purpose (`cfm realip fix`). Like the
+# `cfm dnat` check it reads the literal command: an indirect call
+# (C=cfm; $C edge on) is not seen, so keep the installer's calls literal.
 Q='["'"'"']?'
 if bad="$(grep -E "(^|[^A-Za-z_-])cfm${Q}[[:space:]]+${Q}edge${Q}[[:space:]]+${Q}(on|off|panel|cpanel|bypass|web|ipv6${Q}[[:space:]]+${Q}(on|off))\\b" <<<"$ex")"; then
   fail "$SCRIPT runs a \`cfm edge\` switch (the switch is the operator's call):
