@@ -21,13 +21,11 @@
 #
 # Whether a node may listen on IPv6 at all is EDGE_LISTEN_V6 in cfm.conf: on
 # (yes / true / 1 / auto) or off (no / false / 0 / disabled); absent, it is
-# V6_DEFAULT below. V6_DEFAULT is off until per-IP defences group IPv6 by /64
-# (docs/ROADMAP.md §9c): today bans, rate limits and scoring key on the full
-# address, so a direct IPv6 client rotating inside its /64 evades them, while
-# an edge without IPv6 refuses it and the browser falls back to IPv4, where
-# they hold. Then V6_DEFAULT becomes auto and no node needs the key. Where it
-# is allowed, the edge listens on IPv6 by itself where ALL of these hold, and
-# stays on IPv4 otherwise:
+# V6_DEFAULT below: auto, since the per-IP defences group an IPv6 client by
+# its /64 (bans, counters, rate limits, scoring and the edge's counters;
+# docs/edge-ipv6.md "IPv6 /64 grouping"), so a direct IPv6 client rotating
+# inside its /64 no longer evades them. Where it is allowed, the edge listens
+# on IPv6 by itself where ALL of these hold, and stays on IPv4 otherwise:
 #   - the host has a global IPv6 address (/proc/net/if_inet6, scope 00);
 #   - nothing but the edge holds [::]:9080 / [::]:9043 (tcp) or [::]:9043
 #     (udp) — `nginx -t` ignores a port in use (EADDRINUSE), so a taken port would pass the test
@@ -42,7 +40,7 @@
 #     for all of them). `cfm realip fix` writes it (Apache / nginx).
 #
 # The reference cfm.conf carries the key commented out (`# EDGE_LISTEN_V6 =
-# on`, the opt-in while V6_DEFAULT is off).
+# off`, the kill switch).
 #
 # After a change it runs the engine's own config test and, if that fails with
 # the IPv6 files in place, removes them again. Files are removed too when the
@@ -102,10 +100,10 @@ CFM_V6_CONFIRM_TRIES=${CFM_V6_CONFIRM_TRIES:-10}
 V6_HTTP_PORT=9080
 V6_HTTPS_PORT=9043
 
-# The decision with no EDGE_LISTEN_V6 in cfm.conf: off until IPv6 /64
-# grouping lands (see the header), then auto. internal/originrealip
-# edgeIPv6Default is the same switch; check_edge_listen_v6.sh pins them equal.
-V6_DEFAULT=off
+# The decision with no EDGE_LISTEN_V6 in cfm.conf: auto since IPv6 /64
+# grouping (see the header). internal/originrealip edgeIPv6Default is the
+# same switch; check_edge_listen_v6.sh pins them equal.
+V6_DEFAULT=auto
 
 V6_HTTP_FILE=cfm-listen-v6-http.conf
 V6_HTTPS_FILE=cfm-listen-v6-https.conf

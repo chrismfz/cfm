@@ -13,19 +13,15 @@ without an IPv6 stack (`ipv6.disable=1`) it fails the config test and the edge
 does not start. So the IPv6 listens live in two generated files, and a script
 decides on each host whether they exist.
 
-**Off by default for now.** Per-IP defences (nft bans and rate / connection
-limits, waf_security autoblock, webdetector scoring, login bruteforce) key on
-the full IPv6 address, so a direct IPv6 client rotating inside its /64 (any
-VPS has one) evades them, while an edge without IPv6 refuses it and the
-browser falls back to IPv4, where they hold. Behind Cloudflare that never
-mattered (Cloudflare absorbs the volume and nft never sees the client).
-Until they group IPv6 by /64 (`docs/ROADMAP.md` §9c), a node listens on IPv6
-only when `EDGE_LISTEN_V6 = on` in `/etc/cfm/cfm.conf` allows it; then the
-default becomes automatic (`V6_DEFAULT` in the script and `edgeIPv6Default`
+**On by default** (`V6_DEFAULT=auto` in the script, `edgeIPv6Default = true`
 in `internal/originrealip`, one switch each, pinned equal by
-`check_edge_listen_v6.sh`) and the key is no longer needed. Where it is
-allowed, the edge listens on IPv6 by itself wherever the host can and the
-origin is ready for it.
+`check_edge_listen_v6.sh`). It was off until the per-IP defences grouped an
+IPv6 client by its /64 ("IPv6 /64 grouping" below: the automatic bans, the
+detectors', the admin API's, the web detector's and the edge's counters):
+keyed on the full address, a direct IPv6 client rotating inside its /64 (any
+VPS has one) evaded them. The edge listens on IPv6 by itself wherever the
+host can and the origin is ready for it (trusting `::1`: `cfm realip fix`);
+`EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` keeps a node on IPv4.
 
 ## How it works
 
@@ -104,9 +100,10 @@ prints each engine's decision and why, and whether the files are present.
 Removing the `cfm` package (not upgrading it) removes the unit, the drop-ins
 and the files.
 
-**Turning it on and off on a node:** uncomment `EDGE_LISTEN_V6 = on` in
-`/etc/cfm/cfm.conf` (run `cfm realip fix` first), or set `off`; then run the
-script with `render`. When it writes the files it reloads a running edge and
+**Turning it on and off on a node:** it is on by default where the host is
+ready (run `cfm realip fix` first, so the origin trusts `::1`);
+`EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` turns it off. After a change,
+run the script with `render`. When it writes the files it reloads a running edge and
 checks (`/proc/net/tcp6`) that it listens on IPv6, else removes them and
 reloads back: a failed reload leaves nginx on its old config, never down.
 When it removes files a running edge listens with, it reloads it too. A

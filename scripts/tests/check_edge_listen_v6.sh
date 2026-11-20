@@ -262,6 +262,11 @@ expect() { # expect present|absent DESC
   if "$1"; then ok "$2"; else fail "$2 (files $( (present && echo present) || (absent && echo absent) || echo partial)); output: $(cat "$tmp/out")"; fi
 }
 says() { grep -q -- "$1" "$tmp/out" || fail "expected '$1' in: $(cat "$tmp/out")"; }
+# expect_default DESC: what no EDGE_LISTEN_V6 gives on a ready host
+# (V6_DEFAULT: auto listens, off does not).
+expect_default() {
+  if [ "$sdef" = auto ]; then expect present "$1 (default auto)"; else expect absent "$1 (default off)"; fi
+}
 
 v6_global
 ss_v6
@@ -271,9 +276,10 @@ run render
 expect absent "EDGE_LISTEN_V6=off with a CRLF line ending (no spaces) -> IPv4 only"
 cp configs/cfm.conf "$cfm_conf"
 run render
-expect absent "the reference cfm.conf (nothing set): V6_DEFAULT=off until /64 grouping -> IPv4 only"
-says "EDGE_LISTEN_V6 is off"
+expect_default "the reference cfm.conf (nothing set) -> V6_DEFAULT"
+[ "$sdef" = auto ] || says "EDGE_LISTEN_V6 is off"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
 : >"$tmp/realip.calls"
 run render
 expect present "EDGE_LISTEN_V6 = on: kernel IPv6, ports free, origin on [::]:80/443, ::1 trusted -> listens"
@@ -522,7 +528,7 @@ expect absent "an unknown value reads as off"
 says 'not on/off'
 printf '# EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 run render
-expect absent "a commented key leaves the default (off)"
+expect_default "a commented key leaves the default"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 
 rm -f "$proc"
@@ -548,7 +554,7 @@ v6_global
 rm -f "$cfm_conf"
 ss_v6
 run render
-expect absent "no cfm.conf at all -> the default (off)"
+expect_default "no cfm.conf at all -> the default"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 printf 'with-v6' >"$tmp/engine.fail"

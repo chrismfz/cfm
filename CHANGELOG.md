@@ -20,6 +20,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Changed
+- **The edge listens on IPv6 by default.** It stayed IPv4-only unless
+  `EDGE_LISTEN_V6 = on` until the per-IP defences grouped an IPv6 client by
+  its /64 (now done: bans, the detectors', admin API's, web detector's and
+  edge's counters). With no `EDGE_LISTEN_V6` in `cfm.conf`, a node now listens
+  on `[::]:9080` / `[::]:9043` at its next edge start (or
+  `cfm-edge-listen-v6.sh render`) wherever the host can (a global IPv6
+  address, free ports, the origin on IPv6) and the origin trusts the edge's
+  IPv6 hop from `::1`; otherwise it stays on IPv4 as before. A package
+  upgrade never turns it on by itself. `cfm realip` (and its whats_wrong
+  finding) asks for the `::1` trust on every IPv6-capable host now: run
+  `cfm realip fix` (Apache / nginx; LiteSpeed needs `::1T` by hand) where it
+  says so. `EDGE_LISTEN_V6 = off` keeps a node on IPv4. `docs/edge-ipv6.md`.
+
 ### Security
 - **The edge counts an IPv6 client by its /64.** The traffic-rule throttle
   (429), the login burst (rule 501, and its one resumed login a window), the
