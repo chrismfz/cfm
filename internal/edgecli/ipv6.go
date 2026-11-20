@@ -131,7 +131,9 @@ const ipv6Usage = `Usage: cfm edge ipv6 [status]
   on        remove an EDGE_LISTEN_V6 = off from cfm.conf (IPv6 is on by
             default), then render: the edge listens on IPv6 where the host,
             the ports and the origin's ::1 trust allow it (run cfm edge
-            realip fix first)
+            realip fix first). An EDGE_LISTEN_V6 = on / auto you wrote stays,
+            and it also lets every edge start turn IPv6 on
+            (docs/edge-ipv6.md "The decision")
   off       EDGE_LISTEN_V6 = off in cfm.conf (the kill switch), then render:
             back to IPv4
   engine    OpenResty, Angie or cfm-edge: render only that one
