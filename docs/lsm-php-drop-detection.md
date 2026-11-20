@@ -647,7 +647,7 @@ check in `imunify360-agent config show`, not facts asserted by this doc.
   means no file and no event. Complementary.
 * **What Imunify does not do** is attribute a file to the **edge** request and
   client IP. Behind CFM's edge, Apache sees `127.0.0.1` unless
-  `cfm realip` is set up (`docs/origin-real-ip.md`). Nor does it feed CFM's
+  `cfm edge realip` is set up (`docs/origin-real-ip.md`). Nor does it feed CFM's
   nft/edgeban bans or the dropper-chain tell. That is this design's unique
   part.
 

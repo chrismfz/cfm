@@ -499,8 +499,8 @@ Usage:
   cfm health json                 -- machine-readable local snapshot
   cfm health watch --interval=2s  -- periodic one-line local snapshot output
   cfm health live                 -- TTY dashboard; non-TTY auto-falls back to watch
-  cfm realip [status] [--json]    -- does the origin (Apache/LiteSpeed/nginx) see visitors' real IPs behind the edge, or 127.0.0.1?
-  cfm realip fix [--dry-run]      -- add the origin's trust of the edge's 127.0.0.1 where missing (config test + graceful reload)
+  cfm edge realip [status] [--json] -- (also: cfm realip) does the origin (Apache/LiteSpeed/nginx) see visitors' real IPs behind the edge, or 127.0.0.1?
+  cfm edge realip fix [--dry-run]   -- add the origin's trust of the edge's 127.0.0.1 where missing (config test + graceful reload)
 
   cfm lve                         -- CloudLinux per-tenant CPU ranking (hottest first); non-CloudLinux hosts show nothing
   cfm lve top <N>                 -- top N tenants by CPU

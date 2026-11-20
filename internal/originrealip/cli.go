@@ -10,11 +10,11 @@ import (
 	"cfm/internal/edgeengine"
 )
 
-const usage = `cfm realip — does the origin web server see visitors' real IPs behind the CFM edge?
+const usage = `cfm edge realip (also: cfm realip) — does the origin web server see visitors' real IPs behind the CFM edge?
 
-  cfm realip [status] [--json]   show the origin's real-IP trust (read-only)
-  cfm realip fix [--dry-run]     add the trust where it is missing, then config-test
-                                 and gracefully reload the origin (rolled back on failure)
+  cfm edge realip [status] [--json]   show the origin's real-IP trust (read-only)
+  cfm edge realip fix [--dry-run]     add the trust where it is missing, then config-test
+                                      and gracefully reload the origin (rolled back on failure)
 
 The edge proxies to the origin from 127.0.0.1. Without the origin trusting the
 loopback, its access logs and PHP's REMOTE_ADDR read 127.0.0.1. fix writes:

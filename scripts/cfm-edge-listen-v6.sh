@@ -37,7 +37,8 @@
 #     IPv6 hop too: that hop comes from ::1, and an origin trusting only
 #     127.0.0.1 would see every IPv6 visitor as ::1, i.e. as localhost
 #     (`Require local`, apps that trust localhost, one login-limiter bucket
-#     for all of them). `cfm realip fix` writes it (Apache / nginx).
+#     for all of them). `cfm edge realip fix` writes it (Apache / nginx /
+#     OpenLiteSpeed on DirectAdmin).
 #
 # The reference cfm.conf carries the key commented out (`# EDGE_LISTEN_V6 =
 # off`, the kill switch).
@@ -324,7 +325,7 @@ realip_v6_trusted() {
 want_v6() {
     case $1 in
         off)
-            echo "EDGE_LISTEN_V6 is off (set EDGE_LISTEN_V6 = on in $CFM_CONF to allow IPv6; docs/edge-ipv6.md)"
+            echo "EDGE_LISTEN_V6 is off (remove the EDGE_LISTEN_V6 line that turns it off from $CFM_CONF, or: cfm edge ipv6 on; docs/edge-ipv6.md)"
             return 1
             ;;
     esac
@@ -649,7 +650,7 @@ render_engine() {
     case $re_trust in
         0) ;;
         1)
-            drop "$re_name" "$re_dir" "the origin does not trust the edge's IPv6 hop from ::1 (cfm realip); run: cfm realip fix"
+            drop "$re_name" "$re_dir" "the origin does not trust the edge's IPv6 hop from ::1 (cfm realip); run: cfm edge realip fix"
             return 0
             ;;
         *)
