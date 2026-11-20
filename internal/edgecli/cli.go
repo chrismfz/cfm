@@ -44,6 +44,7 @@ type deps struct {
 	verdict func(edgeInFront bool) (ok bool, text string)
 	ipv6    func() ([]string, error)
 	check   func(window int) ([]byte, error)
+	setIPv6 func(value string, renderArgs []string) int
 }
 
 // Run is `cfm edge`. The firewall backend is built only for the routes that
@@ -51,7 +52,7 @@ type deps struct {
 // (no nft binary), as `cfm realip` does. A nil backend gives the summary
 // UNKNOWN DNAT lines and the rest of the picture.
 func Run(args []string, backend func() firewall.Backend) int {
-	return run(args, deps{
+	d := deps{
 		out:     os.Stdout,
 		errOut:  os.Stderr,
 		summary: func() dnat.Summary { return dnat.CollectSummary(backend()) },
@@ -62,7 +63,9 @@ func Run(args []string, backend func() firewall.Backend) int {
 		},
 		ipv6:  ipv6Status,
 		check: fetchEdgeHealth,
-	})
+	}
+	d.setIPv6 = func(value string, renderArgs []string) int { return setIPv6(d, value, renderArgs) }
+	return run(args, d)
 }
 
 func run(args []string, d deps) int {
@@ -91,19 +94,7 @@ func run(args []string, d deps) int {
 	case "realip":
 		return d.realip(rest)
 	case "ipv6":
-		if len(rest) > 1 || (len(rest) == 1 && rest[0] != "status") {
-			fmt.Fprintln(d.errOut, "edge: ipv6 supports only `status` so far (turning it on/off: EDGE_LISTEN_V6 in cfm.conf, then sh "+ListenV6Script+" render; docs/edge-ipv6.md)")
-			return 2
-		}
-		lines, err := d.ipv6()
-		for _, l := range lines {
-			fmt.Fprintln(d.out, l)
-		}
-		if err != nil {
-			fmt.Fprintln(d.errOut, "edge: ipv6 status:", err)
-			return 1
-		}
-		return 0
+		return runIPv6(rest, d)
 	case "check":
 		return runCheck(rest, d)
 	case "help", "-h", "--help":
@@ -125,6 +116,7 @@ const usage = `Usage:
                                    the panel ports through the edge (= cfm dnat cpanel …; alias: cfm edge cpanel)
   cfm edge realip [status|fix]     does the origin log the visitor, not 127.0.0.1 (= cfm realip …)
   cfm edge ipv6 [status]           the IPv6 listen decision of every installed engine (docs/edge-ipv6.md)
+  cfm edge ipv6 on|off [engine]    lift / set the EDGE_LISTEN_V6 kill switch, then render (RELOADS a running edge)
   cfm edge check [--json] [--window N]
                                    the edge's health checks, as the MCP edge_health tool (docs/edge-health.md)
 

@@ -38,6 +38,11 @@ cfm realip fix
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render
 ```
 
+`cfm edge ipv6 on` does the second step too. It removes an
+`EDGE_LISTEN_V6 = off` from `/etc/cfm/cfm.conf` if there is one, then runs
+`render`. It never writes `EDGE_LISTEN_V6 = on`, which would let every edge
+start turn IPv6 on unconfirmed. `cfm edge ipv6` prints the `status` below.
+
 Then check the result:
 
 ```bash
@@ -110,7 +115,8 @@ the same reason when it leaves a node on IPv4.
 8. **Panel ports stay IPv4.** 2083/2087/2096 and the rest: cpsrvd does not
    listen on IPv6 on the fleet.
 9. **Turning it off.** Set `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf`, then
-   run `render`. It removes the files and reloads the edge. Do the same
+   run `render` (`cfm edge ipv6 off` does both). It removes the files and
+   reloads the edge. Do the same
    before downgrading to a cfm without this script.
 
 ## How it works
