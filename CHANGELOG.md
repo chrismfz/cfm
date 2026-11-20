@@ -118,9 +118,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   cfm-edge package; CFM's hourly logrotate pass now runs that package's
   config too, so its size cap fires hourly as the OpenResty logs' does. The
   deploy summary now names every active edge and calls more than one
-  ambiguous (it knew exactly two). Note: on a host where the cfm-edge rpm is
-  merely installed, the next CFM upgrade replaces its placeholder
-  `nginx.conf` with CFM's (the unit stays disabled and stopped).
+  ambiguous (it knew exactly two). Only an ADOPTED cfm-edge is touched (its
+  `nginx.conf` is already CFM's, which `install-edge.sh` will put there): a
+  host that merely has the cfm-edge rpm keeps the package's placeholder, so
+  its config test never creates `/var/log/cfm-edge/*.log` files that the edge
+  log tools would then prefer over the live edge's.
 - **The edge can listen on IPv6 (`EDGE_LISTEN_V6 = on`; off by default until
   IPv6 /64 grouping).** The web DNAT
   redirect has always caught IPv6 (`table inet`), but the edge listened on
