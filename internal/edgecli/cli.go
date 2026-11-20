@@ -227,6 +227,22 @@ func printSummary(d deps) int {
 			notes = append(notes, "panel DNAT is OFF but its saved intent is ON: the daemon's failsafe puts it back (cfm edge panel off clears the intent)")
 		}
 	}
+	// IPv6 the host can do but the running edge does not listen on: the next
+	// step, in order (server3, 2026-11-20). The Origin line already warns
+	// when the ::1 trust is missing; this names what to run.
+	if s.EdgeRunning && err == nil {
+		for _, l := range lines {
+			if !ipv6Available(l) {
+				continue
+			}
+			step := "cfm edge ipv6 on (it reloads the edge and confirms the listen)"
+			if !ok {
+				step = "cfm edge realip fix first (the origin must trust the edge's 127.0.0.1 and ::1), then cfm edge ipv6 on"
+			}
+			notes = append(notes, "the host can do IPv6 but the edge listens on IPv4 only: "+step)
+			break
+		}
+	}
 	if s.WebBypass < 0 || s.PanelBypass < 0 {
 		rc = 1
 	}
@@ -239,6 +255,17 @@ func printSummary(d deps) int {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "More: cfm edge check | cfm edge web | cfm edge panel | cfm edge ipv6 | cfm edge realip | cfm edge help")
 	return rc
+}
+
+// ipv6Available: an engine's status line (cfm-edge-listen-v6.sh status) says
+// the host can do IPv6 and nothing forbids it, yet its listen files are not
+// there. The script's wording is the contract; TestIPv6AvailablePhrases pins
+// it to the script.
+func ipv6Available(line string) bool {
+	if !strings.HasSuffix(strings.TrimSpace(line), "files present: no") {
+		return false
+	}
+	return strings.Contains(line, "an edge start never turns it on") || strings.Contains(line, ": wants IPv6 (")
 }
 
 // activeEngineLines keeps the IPv6 line of the engine that runs (the script

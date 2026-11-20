@@ -22,6 +22,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 _Nothing yet._
 
+### Changed
+- **`cfm edge` names the IPv6 next step.** When the host can do IPv6 but
+  the running edge listens on IPv4 only, the summary's "needs a look" says
+  what to run: `cfm edge ipv6 on`, or `cfm edge realip fix` first when the
+  origin does not trust the edge (`127.0.0.1` and `::1`). The listen script's own hints
+  (status, prestart, deploy, prepare) say `cfm edge ipv6 on [engine]`
+  instead of `sh …/cfm-edge-listen-v6.sh render`, and the origin real-IP OK
+  line no longer ends in an empty "header " on OpenLiteSpeed / LiteSpeed.
+
 ## 2026.11.20
 
 ### Added

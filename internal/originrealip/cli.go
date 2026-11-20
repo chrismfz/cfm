@@ -136,9 +136,9 @@ func StatusLine(p Probe, edgeActive bool) string {
 func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 	switch {
 	case p.Trusted && p.Warning != "":
-		return true, fmt.Sprintf("Origin real-IP: %s/%s trusts the edge via %s (%s), header %s; WARNING: %s", p.Panel, p.Stack, p.Directive, p.Source, p.Header, p.Warning)
+		return true, fmt.Sprintf("Origin real-IP: %s/%s trusts the edge via %s (%s)%s; WARNING: %s", p.Panel, p.Stack, p.Directive, p.Source, headerNote(p.Header), p.Warning)
 	case p.Trusted:
-		return true, fmt.Sprintf("Origin real-IP: %s/%s trusts the edge via %s (%s), header %s", p.Panel, p.Stack, p.Directive, p.Source, p.Header)
+		return true, fmt.Sprintf("Origin real-IP: %s/%s trusts the edge via %s (%s)%s", p.Panel, p.Stack, p.Directive, p.Source, headerNote(p.Header))
 	case !edgeActive:
 		return true, fmt.Sprintf("Origin real-IP: n/a, no CFM edge in front of the %s/%s origin", p.Panel, p.Stack)
 	case p.Stack == StackUnknown:
@@ -154,6 +154,16 @@ func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 	default:
 		return false, fmt.Sprintf("Origin real-IP: %s/%s %s, so it logs 127.0.0.1 for every visitor (run: cfm edge realip fix)", p.Panel, p.Stack, p.Note)
 	}
+}
+
+// headerNote names the header the origin reads the client from, when the
+// probe knows it (LiteSpeed's useIpInProxyHeader reads X-Forwarded-For itself
+// and names none): no dangling "header " (server3, 2026-11-20).
+func headerNote(h string) string {
+	if h == "" {
+		return ""
+	}
+	return ", header " + h
 }
 
 func indent(s string) string {

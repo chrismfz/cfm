@@ -629,10 +629,10 @@ render_engine() {
         if [ -f "$re_dir/$V6_HTTP_FILE" ] || [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
             # One of the pair (a crash between the writes, a hand delete):
             # never start with an unconfirmed half.
-            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: sh $0 render"
+            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: cfm edge ipv6 on $re_name"
             return 0
         fi
-        log "$re_name: IPv4 only for now: IPv6 is allowed by default; turn it on with: sh $0 render (it reloads the edge and confirms the listen)"
+        log "$re_name: IPv4 only for now: IPv6 is allowed by default; turn it on with: cfm edge ipv6 on $re_name (it reloads the edge and confirms the listen)"
         return 0
     fi
 
@@ -664,10 +664,10 @@ render_engine() {
         # and files written without a reload leave a window for another
         # process to take the port (render reloads and confirms at once).
         if [ -f "$re_dir/$V6_HTTP_FILE" ] || [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
-            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: sh $0 render"
+            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: cfm edge ipv6 on $re_name"
             return 0
         fi
-        log "$re_name: IPv4 only for now: IPv6 is allowed and the host is ready; turn it on with: sh $0 render (it reloads the edge)"
+        log "$re_name: IPv4 only for now: IPv6 is allowed and the host is ready; turn it on with: cfm edge ipv6 on $re_name (it reloads the edge and confirms the listen)"
         return 0
     fi
 
@@ -676,7 +676,7 @@ render_engine() {
         # some later reload, the window render's reload-and-confirm closes.
         for re_pair in "$V6_HTTP_FILE http_body" "$V6_HTTPS_FILE https_body"; do
             if [ "$(cat "$re_dir/${re_pair%% *}" 2>/dev/null)" != "$(${re_pair#* })" ]; then
-                log "$re_name: the IPv6 listen files differ from this version's; kept as they are: apply with: sh $0 render (it reloads the edge)"
+                log "$re_name: the IPv6 listen files differ from this version's; kept as they are: apply with: cfm edge ipv6 on $re_name (it reloads the edge)"
                 break
             fi
         done
@@ -695,10 +695,10 @@ render_engine() {
         # the next unrelated reload (the sslcollector nudge, an operator's),
         # unconfirmed. Only a render turns IPv6 on for a running edge.
         if [ -f "$re_dir/$V6_HTTP_FILE" ] || [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
-            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: sh $0 render $re_name"
+            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: cfm edge ipv6 on $re_name"
             return 0
         fi
-        log "$re_name: IPv4 only for now: it is running, and prepare never reloads; turn IPv6 on with: sh $0 render $re_name (it reloads the edge and confirms the listen)"
+        log "$re_name: IPv4 only for now: it is running, and prepare never reloads; turn IPv6 on with: cfm edge ipv6 on $re_name (it reloads the edge and confirms the listen)"
         return 0
     fi
 
@@ -746,7 +746,7 @@ status_engine() {
     se_reason=$(want_v6 "$5")
     se_want=$?
     if [ "$se_want" -eq 0 ] && [ "$se_live" = no ] && [ -z "$(mode_raw)" ]; then
-        log "$1: IPv6 allowed by default and the host is ready ($se_reason), but an edge start never turns it on: run: sh $0 render $1 (the ::1 trust and the config test are checked then); files present: $se_live"
+        log "$1: IPv6 allowed by default and the host is ready ($se_reason), but an edge start never turns it on: run: cfm edge ipv6 on $1 (the ::1 trust and the config test are checked then); files present: $se_live"
     elif [ "$se_want" -eq 0 ]; then
         log "$1: wants IPv6 ($se_reason; the ::1 trust and the config test are checked when it renders); files present: $se_live"
     else

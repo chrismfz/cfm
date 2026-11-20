@@ -3,6 +3,7 @@ package edgecli
 import (
 	"bytes"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -233,5 +234,61 @@ func TestSummaryMarksConfiguredValues(t *testing.T) {
 	run(nil, d)
 	if !strings.Contains(out.String(), "configured values: the live chain could not be read") {
 		t.Fatalf("configured values printed as live:\n%s", out.String())
+	}
+}
+
+// server3, 2026-11-20: the host could do IPv6, the edge listened on IPv4 only.
+// The summary names the next step: realip fix first when the origin does not
+// trust ::1, else cfm edge ipv6 on. A node already on IPv6, or one where IPv6
+// is off or impossible, gets no such line.
+func TestSummaryNamesTheIPv6NextStep(t *testing.T) {
+	s := dnat.Summary{ActiveEdge: "cfm-edge", EdgeRunning: true}
+	avail := "cfm-edge: IPv6 allowed by default and the host is ready (the kernel has IPv6), but an edge start never turns it on: run: cfm edge ipv6 on cfm-edge (the ::1 trust and the config test are checked then); files present: no"
+	for _, c := range []struct {
+		name    string
+		v6      string
+		trusted bool
+		want    string
+	}{
+		{"available, origin trusts ::1", avail, true, "listens on IPv4 only: cfm edge ipv6 on"},
+		{"available, no ::1 trust", avail, false, "cfm edge realip fix first"},
+		{"explicit on, files gone", "cfm-edge: wants IPv6 (the kernel has IPv6; the ::1 trust and the config test are checked when it renders); files present: no", true, "cfm edge ipv6 on"},
+		{"already on IPv6", "cfm-edge: wants IPv6 (the kernel has IPv6); files present: yes", true, ""},
+		{"kill switch", "cfm-edge: IPv4 only (EDGE_LISTEN_V6 is off (remove the EDGE_LISTEN_V6 line that turns it off …)); files present: no", true, ""},
+		{"no IPv6 on the host", "cfm-edge: IPv4 only (no global IPv6 address on this host); files present: no", true, ""},
+	} {
+		d, out, _ := testDeps(&recorder{}, s, []string{c.v6}, nil)
+		trusted := c.trusted
+		d.verdict = func(bool) (bool, string) { return trusted, "Origin real-IP: x" }
+		run(nil, d)
+		got := out.String()
+		if c.want == "" {
+			if strings.Contains(got, "listens on IPv4 only") {
+				t.Errorf("%s: unexpected IPv6 hint:\n%s", c.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, "! the host can do IPv6 but the edge listens on IPv4 only: ") || !strings.Contains(got, c.want) {
+			t.Errorf("%s: want %q in:\n%s", c.name, c.want, got)
+		}
+	}
+	// Not running: nothing to turn on yet.
+	d, out, _ := testDeps(&recorder{}, dnat.Summary{ActiveEdge: "cfm-edge"}, []string{avail}, nil)
+	run(nil, d)
+	if strings.Contains(out.String(), "listens on IPv4 only") {
+		t.Errorf("a stopped edge got the IPv6 hint:\n%s", out.String())
+	}
+}
+
+// The phrases ipv6Available keys on are the listen script's own wording.
+func TestIPv6AvailablePhrases(t *testing.T) {
+	b, err := os.ReadFile("../../scripts/cfm-edge-listen-v6.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"but an edge start never turns it on", ": wants IPv6 (", "files present: $se_live"} {
+		if !strings.Contains(string(b), p) {
+			t.Errorf("cfm-edge-listen-v6.sh no longer prints %q: ipv6Available (internal/edgecli) reads it", p)
+		}
 	}
 }
