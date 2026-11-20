@@ -524,7 +524,7 @@ func probeSSLCollectorHTTP(path, token string) (category, statsSummary, errText 
 		DisableKeepAlives: true,
 	}
 	defer tr.CloseIdleConnections()
-	client := &http.Client{
+	client := &http.Client{ // clihttp-exception: the sslcollector unix socket, with its own token
 		Timeout:   3 * time.Second,
 		Transport: tr,
 	}
@@ -922,7 +922,7 @@ func probeNginxBridgeSocket(sockPath, token string) (int, string, error) {
 	}
 	defer tr.CloseIdleConnections()
 
-	client := &http.Client{
+	client := &http.Client{ // clihttp-exception: the nginx bridge unix socket, with its own token
 		Transport: tr,
 		Timeout:   2 * time.Second,
 	}
