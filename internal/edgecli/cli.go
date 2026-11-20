@@ -172,7 +172,11 @@ func printSummary(d deps) int {
 		if s.PanelFromSaved {
 			saved = " (saved value: the live chain could not be parsed)"
 		}
-		fmt.Fprintf(w, "  Panel DNAT:  ON   priority %d%s%s\n", s.PanelPriority, saved, bypassNote(s.PanelBypass))
+		mode := ""
+		if s.PanelMode != "" {
+			mode = ", mode " + s.PanelMode
+		}
+		fmt.Fprintf(w, "  Panel DNAT:  ON   priority %d%s%s%s\n", s.PanelPriority, saved, mode, bypassNote(s.PanelBypass))
 	default:
 		fmt.Fprintf(w, "  Panel DNAT:  OFF%s\n", bypassNote(s.PanelBypass))
 	}
