@@ -19,18 +19,18 @@ command -v rg >/dev/null 2>&1 || {
 }
 
 # The direct net/http client uses: the package-level helpers, the default
-# client and transport, a client of one's own (a literal, new(), a var of the
-# value type), a RoundTrip by hand, and net/http imported under another name
-# (which every pattern here would miss). `*http.Client {` is a return type, not
-# a client: the [^*] excludes it.
+# client and transport, a client of one's own (any http.Client value: a
+# literal, a var, a struct field; new()), a RoundTrip by hand, and net/http
+# imported under another name or dot-imported (which every pattern here would
+# miss). A pointer `*http.Client` holds a client made elsewhere, so the [^*]
+# excludes it (a return type, a parameter).
 patterns=(
   '\bhttp\.(Get|Head|Post|PostForm)\('
   '\bhttp\.Default(Client|Transport)\b'
-  '(^|[^*.\w])http\.Client\s*\{'
+  '(^|[^*.\w])http\.Client\b'
   '\bnew\(http\.Client\)'
-  '\bvar\s+\w+\s+http\.Client\b'
   '\.RoundTrip\('
-  '^\s*(import\s+)?\w+\s+"net/http"'
+  '^\s*(import\s+)?[\w.]+\s+"net/http"'
 )
 
 # The CLI runtime code: the packages that serve a `cfm <command>` and call the
@@ -49,7 +49,7 @@ paths=(
   internal/srcreportcli
   internal/status
   internal/sslcollector/cli.go
-  internal/unblock/waf.go
+  internal/unblock
 )
 # webdetector and mysql mix the daemon with their CLI: only the CLI files.
 # Each glob must match a file (a renamed target must not drop out silently).
@@ -66,7 +66,8 @@ for p in "${paths[@]}" "${globbed_dirs[@]}"; do
   [[ -e "$p" ]] || { echo "FAIL: $(basename "$0"): $p does not exist (renamed? update the list)" >&2; exit 1; }
 done
 for g in "${globs[@]}"; do
-  compgen -G "$g" >/dev/null || { echo "FAIL: $(basename "$0"): no file matches $g (renamed? update the list)" >&2; exit 1; }
+  # A non-test file: the scan skips tests, so a test alone covers nothing.
+  compgen -G "$g" | grep -qv '_test\.go$' || { echo "FAIL: $(basename "$0"): no file matches $g (renamed? update the list)" >&2; exit 1; }
 done
 
 # rg: 0 = matches, 1 = none, anything else = it could not search (a fail).
@@ -94,8 +95,8 @@ for pat in "${patterns[@]}"; do
   b="$(search "${glob_args[@]}" -e "$pat" "${globbed_dirs[@]}")" || exit 1
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    # The marker counts only with a reason after it.
-    [[ "$line" =~ clihttp-exception:[[:space:]]*[^[:space:]] ]] && continue
+    # The marker counts only in a // comment, with a reason after it.
+    [[ "$line" =~ //[[:space:]]*clihttp-exception:[[:space:]]*[[:alnum:]] ]] && continue
     # A Go comment line (file:line:  // ...) mentions, it does not call.
     code="${line#*:*:}"
     [[ "${code#"${code%%[![:space:]]*}"}" == //* ]] && continue
