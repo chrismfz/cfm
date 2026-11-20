@@ -196,6 +196,11 @@ type pathMatchOnce struct {
 	lowered bool
 	m       *pathMatcher
 	ridx    int
+	// The challenge store's path-exclude answer for this request, asked at
+	// most once and only once a malpath rule matched (malpathExcluded).
+	exclChecked bool
+	excluded    bool
+	exclValue   string
 }
 
 func (o *pathMatchOnce) first(m *pathMatcher) int {

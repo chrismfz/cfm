@@ -886,6 +886,56 @@ Raise thresholds or widen `WINDOW`; use `BLOCK = dryrun` or a short TTL while
 tuning; use the section's allow keys, `[global] IGNORE_IPS` / `IGNORE_NETS`
 and leniency companions. For web traffic, review path / UA lists.
 
+#### One site's tool trips the malpath list: a host-scoped path exclude
+
+The webdetector's two malpath checks read `/etc/cfm/webdetector_malpaths.txt`
+(substring, case-insensitive, query cut): `CHALLENGE_PATHS` challenges an IP
+on its first hit (v2 tier, and it revokes the clearance cookie), and `MALPATH`
+bans an IP after `20` hits in `WINDOW`. When a legitimate tool on ONE site
+hits a listed name (elFinder thumbnails, Duplicator's `dup-installer/`
+during a migration), carve that path out on that site instead of editing the
+list for every site:
+
+```
+cfm webtop challenge exclude add /images/.tmb/ --type path --scope example.gr
+cfm webtop challenge exclude list
+cfm webtop challenge exclude remove /images/.tmb/ --type path --scope example.gr
+```
+
+- A request on a scope host under the path is not counted by either check
+  (decided when the line is counted; the per-IP counters span hosts). The
+  same path on another site, and every other path on this one, still count.
+- Only a plain path is carved out: a request path with a `.`/`..` segment,
+  `//`, a backslash or a percent-encoded dot, slash or backslash still counts
+  (`/images/.tmb/../../.env` sits under the prefix, but the origin serves
+  `/.env`).
+- Matching is a path-segment prefix (`/images/.tmb/` covers everything under
+  it; `/admin` covers `/admin` and `/admin/x`, not `/administrator`), or a
+  glob anchored at both ends (`/images/*/.tmb/*`; `*` stays within one
+  segment), case-insensitive. The first segment must be a literal name:
+  `/`, `/*`, `/*.php`, `/[!/]*` are refused (that is a host exclude).
+- `--scope` names the site exactly and also covers its `www.` alias
+  (`--scope example.gr` covers `www.example.gr`, not `shop.example.gr`). An
+  admin may scope to `*.example.gr` (the subdomains; a tenant does not see
+  such an entry); `*`, `*.*`, `*.gr`, `*.com.gr` and other globs are refused,
+  and so is a value glob that does not compile.
+- `--scope` is required (repeat it for several sites): a path exclude without
+  it would exempt the path everywhere, so it is refused, and one an older
+  version stored stays inert (`list` and cfm-admin show it as such; remove it
+  without `--scope`).
+- A cPanel tenant's scoped token may add, list and remove these on its own
+  vhosts: an add is pinned to its vhosts (or the subset it names), and a
+  remove takes its own hosts out of every entry on that path, so an entry
+  shared with another site keeps covering that site.
+  `docs/endpoint_scope_inventory.md` has the rules. In cfm-admin the excludes
+  card offers it to admins (scope field); the tenant view still hides
+  `type=path`.
+- Each skipped hit is logged to the challenges log at most once a minute per
+  (check, exclude): `[challenge][malpath] action=path_exclude_skip`.
+- This is only the malpath checks. The WAF has its own path + rule excludes
+  (`cfm webtop waf exclude add … --type path --rule <id> --scope <host>`), and
+  a host exclude (`challenge exclude add <host>`) keeps its meaning.
+
 ### Outbound alerts need DNS corroboration
 
 When the outbound sentinel warns on per-uid destination churn or burst rates,

@@ -19,6 +19,9 @@ export const excludesMixin = {
       // are always pinned to their own vhost set), so the input is hidden for
       // scoped users.
       wafExcludeScope: "",
+      // Comma-separated vhost(s) a challenge PATH exclude applies to (admin;
+      // required by the server). A scoped token is pinned to its own vhosts.
+      challengeExcludeScope: "",
     };
   },
 
@@ -42,6 +45,13 @@ export const excludesMixin = {
     formatExcludeScope(hosts) {
       const a = Array.isArray(hosts) ? hosts : [];
       return a.length ? a.join(", ") : "*";
+    },
+    // A challenge path exclude without scope_hosts (written by an older
+    // version) matches nothing: say so rather than "*" (all vhosts).
+    formatChallengeExcludeScope(row) {
+      const hosts = Array.isArray(row?.scope_hosts) ? row.scope_hosts : [];
+      if (row?.type === "path" && !hosts.length) return "none (inert: remove it)";
+      return hosts.length ? hosts.join(", ") : "*";
     },
     enforceScopedExcludeControls() {
       if (!this.isScoped) {
@@ -91,10 +101,13 @@ export const excludesMixin = {
         // rule-scoped exclude (WAF still runs; only these rule IDs are
         // suppressed); when absent it stays a whole-WAF exclude.
         const rules = isChallenge ? "" : String(this.wafExcludeRules || "").trim();
-        // scope_hosts is WAF+admin-only; the server ignores it for scoped
-        // tokens. Sending it from a scoped session is harmless (pinned to the
-        // token scope), but the input is hidden there anyway.
-        const scopeHosts = isChallenge ? "" : String(this.wafExcludeScope || "").trim();
+        // scope_hosts: WAF (admin-only; the server ignores it for scoped
+        // tokens) and challenge PATH excludes (required for an admin; a scoped
+        // token defaults to its own vhosts). The inputs are hidden for scoped
+        // sessions.
+        const scopeHosts = isChallenge
+          ? (type === "path" ? String(this.challengeExcludeScope || "").trim() : "")
+          : String(this.wafExcludeScope || "").trim();
         let path = `v1/${scope}/exclude/add?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`;
         if (rules) path += `&rule_ids=${encodeURIComponent(rules)}`;
         if (scopeHosts) path += `&scope_hosts=${encodeURIComponent(scopeHosts)}`;
@@ -102,6 +115,7 @@ export const excludesMixin = {
         this.actionMsg = `${scope.toUpperCase()} exclude added: ${type}=${value}${rules ? ` rules=${rules}` : ""}${scopeHosts ? ` scope=${scopeHosts}` : ""}`;
         if (isChallenge) {
           this.challengeExcludeValue = "";
+          this.challengeExcludeScope = "";
         } else {
           this.wafExcludeValue = "";
           this.wafExcludeRules = "";
