@@ -101,9 +101,26 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `journal_tail` recognise it. Nothing changes on a node without it: every
   edge list keeps its order and gains a cfm-edge entry after the existing
   engines' (a missing unit or file is skipped as before). No node runs
-  cfm-edge yet; its install script and packaging hooks come next. The agent
-  file sync and the bridge's upload directories stay closed to it (nothing
-  needs them).
+  cfm-edge yet; its install script comes next. The agent file sync and the
+  bridge's upload directories stay closed to it (nothing needs them).
+- **The CFM package keeps a cfm-edge node's edge config current**, as it does
+  OpenResty's and Angie's. On a host with `/usr/sbin/cfm-edge`, every
+  install/upgrade tests and deploys `/etc/cfm-edge/nginx.conf` and its
+  sidecars (`trusted_proxies.conf`, `challenge_waf_bypass.conf`, the panel
+  listeners) with `cfm-edge -T`, installs the IPv6 listen guard's drop-in on
+  `cfm-edge.service` and writes its IPv6 listen files to `/etc/cfm-edge`
+  (same decision, `EDGE_LISTEN_V6`), reloads an active `cfm-edge.service`,
+  and removes those files on package removal. Its config is
+  `configs/cfm-edge.conf`, generated from `openresty.conf` by its paths only
+  (`make cfm-edge-conf`; `make release` re-renders and commits it, and CI
+  fails a stale copy), so a WAF / Site Cache / IPv6 change reaches cfm-edge
+  without a second edit. Its logs (`/var/log/cfm-edge/`) are rotated by the
+  cfm-edge package; CFM's hourly logrotate pass now runs that package's
+  config too, so its size cap fires hourly as the OpenResty logs' does. The
+  deploy summary now names every active edge and calls more than one
+  ambiguous (it knew exactly two). Note: on a host where the cfm-edge rpm is
+  merely installed, the next CFM upgrade replaces its placeholder
+  `nginx.conf` with CFM's (the unit stays disabled and stopped).
 - **The edge can listen on IPv6 (`EDGE_LISTEN_V6 = on`; off by default until
   IPv6 /64 grouping).** The web DNAT
   redirect has always caught IPv6 (`table inet`), but the edge listened on

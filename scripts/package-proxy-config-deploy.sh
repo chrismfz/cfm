@@ -824,7 +824,7 @@ deploy_logrotate_dropin() {
 
 # The IPv6 listen decision (docs/edge-ipv6.md): install the oneshot unit that
 # runs scripts/cfm-edge-listen-v6.sh before every edge start and the drop-in
-# that pulls it into openresty.service / angie.service (refreshed when they
+# that pulls it into openresty.service / angie.service / cfm-edge.service (refreshed when they
 # differ, systemd reloaded only then; skipped on a host without systemd), then
 # run the script once (`deploy`): it keeps or removes the two listen sidecars
 # for every engine and re-tests kept ones with the engine's own config test,
@@ -843,7 +843,8 @@ deploy_edge_listen_v6() {
         for delv_pair in \
             "cfm-edge-listen-v6.service cfm-edge-listen-v6.service" \
             "cfm-edge-listen-v6-dropin.conf openresty.service.d/cfm-listen-v6.conf" \
-            "cfm-edge-listen-v6-dropin.conf angie.service.d/cfm-listen-v6.conf"; do
+            "cfm-edge-listen-v6-dropin.conf angie.service.d/cfm-listen-v6.conf" \
+            "cfm-edge-listen-v6-dropin.conf cfm-edge.service.d/cfm-listen-v6.conf"; do
             delv_src="$CFM_CONFIG_DIR/${delv_pair%% *}"
             delv_dst="$delv_unit_dir/${delv_pair#* }"
             if [ ! -f "$delv_src" ]; then

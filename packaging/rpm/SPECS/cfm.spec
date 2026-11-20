@@ -302,7 +302,7 @@ fi
 # perms — both prerequisites for a clean init_worker_by_lua run.
 if command -v systemctl >/dev/null 2>&1; then
     sleep 2
-    for svc in angie.service openresty.service; do
+    for svc in angie.service openresty.service cfm-edge.service; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             echo "CFM: reloading $svc to apply updated config..."
             systemctl reload "$svc" || true
@@ -323,10 +323,13 @@ if [ "$1" -eq 0 ]; then
     rm -f /etc/systemd/system/cfm-edge-listen-v6.service \
     /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \
     /etc/systemd/system/angie.service.d/cfm-listen-v6.conf \
+    /etc/systemd/system/cfm-edge.service.d/cfm-listen-v6.conf \
     /usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf \
     /usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf \
     /etc/angie/cfm-listen-v6-http.conf \
-    /etc/angie/cfm-listen-v6-https.conf || true
+    /etc/angie/cfm-listen-v6-https.conf \
+    /etc/cfm-edge/cfm-listen-v6-http.conf \
+    /etc/cfm-edge/cfm-listen-v6-https.conf || true
     systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 

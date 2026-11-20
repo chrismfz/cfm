@@ -15,10 +15,13 @@ case "$1" in
         rm -f /etc/systemd/system/cfm-edge-listen-v6.service \
         /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \
         /etc/systemd/system/angie.service.d/cfm-listen-v6.conf \
+        /etc/systemd/system/cfm-edge.service.d/cfm-listen-v6.conf \
         /usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf \
         /usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf \
         /etc/angie/cfm-listen-v6-http.conf \
-        /etc/angie/cfm-listen-v6-https.conf || true
+        /etc/angie/cfm-listen-v6-https.conf \
+        /etc/cfm-edge/cfm-listen-v6-http.conf \
+        /etc/cfm-edge/cfm-listen-v6-https.conf || true
         ;;
 esac
 

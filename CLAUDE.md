@@ -258,8 +258,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `/var/log/cfm/…` literal in Go) is neither matched by `configs/logrotate-cfm`
   nor in a directory documented as vendor-rotated. Never list a path a
   distro/panel logrotate config already globs (`/var/log/{angie,nginx,apache2,
-  httpd}/`, `/usr/local/apache/logs/`): a second declaration is a `duplicate
-  log entry` error that aborts the run. Prefer the existing directory glob over
+  httpd}/`, `/usr/local/apache/logs/`) or the cfm-edge package rotates
+  (`/var/log/cfm-edge/`; CFM's hourly pass runs its config too): a second
+  declaration is a `duplicate log entry` error that aborts the run. Prefer the existing directory glob over
   a filename (enumerated lists drifted). The OpenResty logs under `/usr/local`
   also need the `logrotate.service.d/cfm-openresty.conf` drop-in
   (`ProtectSystem=full`). `--host` checks a live server; details in
