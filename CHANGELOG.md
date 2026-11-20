@@ -20,6 +20,30 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Changed
+- **The edge may listen on IPv6 by default.** It stayed IPv4-only unless
+  `EDGE_LISTEN_V6 = on` until the per-IP defences grouped an IPv6 client by
+  its /64 (now done: bans, the detectors', admin API's, web detector's and
+  edge's counters). With no `EDGE_LISTEN_V6` in `cfm.conf`, a
+  `cfm-edge-listen-v6.sh render` (by hand, or the edge installers' re-run)
+  turns on `[::]:9080` / `[::]:9043` wherever the host can (a global IPv6
+  address, free ports, the origin on IPv6) and the origin trusts the edge's
+  IPv6 hop from `::1`, reloading the edge and confirming the listen;
+  otherwise it stays on IPv4 as before. An edge start (a reboot, a restart,
+  the edge's own package upgrade) and a cfm package upgrade never turn it on
+  by themselves: they keep what a render approved. `install-edge.sh` now runs
+  the new `prepare cfm-edge` (render's decision for cfm-edge alone, never a
+  reload, and no new files while cfm-edge runs: that is `render cfm-edge`'s
+  job), so a freshly prepared cfm-edge starts with IPv6 where the host is
+  ready; the script also takes an engine name after the action. `cfm realip` (and its
+  whats_wrong / edge_health finding) now asks for the `::1` trust on every
+  IPv6-capable host, and exits 1 until it is there: run `cfm realip fix`
+  (Apache / nginx; LiteSpeed needs `::1T` by hand) where it says so, then
+  render. `EDGE_LISTEN_V6 = off` keeps a node on IPv4 and silences that
+  finding. An existing `/etc/cfm/cfm.conf` keeps its old comment ("Off by
+  default … `# EDGE_LISTEN_V6 = on`"): the default is now on, `off` the kill
+  switch. `docs/edge-ipv6.md`.
+
 ### Security
 - **The edge counts an IPv6 client by its /64.** The traffic-rule throttle
   (429), the login burst (rule 501, and its one resumed login a window), the
@@ -240,6 +264,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `install-edge.sh`'s own cleanup now also keeps the logs of a cfm-edge whose
   unit is still starting or reloading or that runs outside systemd, and
   follows a symlinked `/var/log/cfm-edge`.
+- **A cfm upgrade no longer leaves empty cfm-edge logs that hide the live
+  edge's.** On a node prepared with `install-edge.sh` whose edge is still
+  OpenResty or Angie, the package deploy's cfm-edge config tests created
+  fresh empty files in `/var/log/cfm-edge/` on every upgrade (`nginx -t`
+  creates every log it names), and `edge_error_tail`, `ip_forensics` and
+  whats_wrong, which read the newest edge log, read those instead of the live
+  edge's. The deploy now removes the empty files its tests created (never one
+  that was there before or has content, and nothing while cfm-edge runs), as
+  `install-edge.sh` already did for its own tests.
 - **CFM's log rotation names every generation by date and time, on every
   run.** On EL the distro's daily logrotate applies `/etc/logrotate.conf`'s
   global `dateext` (`access.log-YYYYMMDD`), while CFM's hourly pass runs

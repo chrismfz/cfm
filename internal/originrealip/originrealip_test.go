@@ -1023,7 +1023,7 @@ func TestEdgeIPv6HostCapability(t *testing.T) {
 		{"v4-mapped does not count", true, ifGlobal, tcp6Line(0, mapped, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "", false},
 		{"not LISTEN", true, ifGlobal, tcp6Line(0, any6, 80, "01") + tcp6Line(1, any6, 443, "0A"), "", false},
 		{"other ports", true, ifGlobal, tcp6Line(0, any6, 8080, "0A") + tcp6Line(1, any6, 4430, "0A"), "", false},
-		{"no cfm.conf: edgeIPv6Default (off until /64 grouping)", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "-", edgeIPv6Default},
+		{"no cfm.conf: edgeIPv6Default", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "-", edgeIPv6Default},
 		{"no key: edgeIPv6Default", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "OTHER = 1\n", edgeIPv6Default},
 		{"yes", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6=\"Yes\" # opt in\n", true},
 		{"unknown value", true, ifGlobal, tcp6Line(0, any6, 80, "0A") + tcp6Line(1, any6, 443, "0A"), "EDGE_LISTEN_V6 = maybe\n", false},

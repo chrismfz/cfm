@@ -650,9 +650,9 @@ validate_panel_lua_guard_preflight() {
 }
 
 # ensure_edge_listen_v6: decide whether the edge listens on IPv6 too
-# (EDGE_LISTEN_V6 in /etc/cfm/cfm.conf, off by default for now; docs/edge-ipv6.md). The cfm package
-# installs the unit that repeats this before every edge start; this run makes a
-# fresh install decide now. It never fails the install: on any doubt the edge
+# (EDGE_LISTEN_V6 in /etc/cfm/cfm.conf, on by default, off the kill switch; docs/edge-ipv6.md). The cfm package
+# installs the unit that re-checks it before every edge start (it keeps or
+# removes; with no EDGE_LISTEN_V6 only a render, this one, turns IPv6 on). It never fails the install: on any doubt the edge
 # stays on IPv4 only. It runs AFTER ensure_origin_realip: it listens on IPv6 only
 # once the origin trusts the edge's IPv6 hop from ::1, which `cfm realip fix`
 # writes where IPv6 is allowed and the host can do it.

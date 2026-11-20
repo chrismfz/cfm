@@ -229,9 +229,9 @@ Reference: `docs/cfm-lsm.md`.
 ## 9c. Edge IPv6
 
 The edge can listen on IPv6 where the host can and the origin trusts `::1`
-(`docs/edge-ipv6.md`); for now only where `EDGE_LISTEN_V6 = on` allows it
-(default off until the /64 item below), and the
-origin hop brackets the address and binds `::1`.
+(`docs/edge-ipv6.md`), by default since IPv6 /64 grouping (`EDGE_LISTEN_V6
+= off` keeps a node on IPv4), and the origin hop brackets the address and
+binds `::1`.
 
 - **Watch the first real IPv6 traffic through the live edge** — [track].
   The origin hop is verified with a scratch edge on speedhost (OpenResty
@@ -249,16 +249,15 @@ origin hop brackets the address and binds `::1`.
   does today; no fleet site has one, so it is unproven. First real case: the
   operator node that reported the bug (AAAA records to the server). Check
   that the site (not the default vhost) answers over `curl -6`.
-- **Per-IP counters and bans by /64, then IPv6 on by default** — [next].
-  A direct IPv6 client with a /64 (any VPS) got a new identity per request
-  wherever a control keyed on the full address. Done: the automatic L7 bans
-  (`block_v6_clients`) and the detectors' and admin API's counters
-  (`docs/edge-ipv6.md` "IPv6 /64 grouping"), webdetector scoring, the
-  challenge server and the edge's counters. Left: flip `V6_DEFAULT`
-  (scripts/cfm-edge-listen-v6.sh) and `edgeIPv6Default`
-  (internal/originrealip) together to auto/true, and swap the reference
-  cfm.conf's commented `# EDGE_LISTEN_V6 = on` for `# EDGE_LISTEN_V6 = off`
-  (check_edge_listen_v6.sh checks all three).
+- **Per-IP counters and bans by /64, then IPv6 on by default** — [done
+  2026-11-20]. A direct IPv6 client with a /64 (any VPS) got a new identity
+  per request wherever a control keyed on the full address: the automatic
+  L7 bans (`block_v6_clients`), the detectors', admin API's, web detector's,
+  challenge server's and edge's counters now group it (`docs/edge-ipv6.md`
+  "IPv6 /64 grouping"), and the edge listens on IPv6 by default
+  (`V6_DEFAULT=auto` = `edgeIPv6Default = true`, the reference cfm.conf's
+  `# EDGE_LISTEN_V6 = off` kill switch; check_edge_listen_v6.sh pins all
+  three). Watch the first nodes that turn on (the item above).
 - **nft per-IP meters stay per address for IPv6** — [decided]. `pps_v6`,
   `syn_v6`, `new_v6`, `icmp6`, port flood and connlimit count packets whose
   source can be spoofed; a /64 meter would let a forged prefix throttle

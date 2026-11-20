@@ -33,7 +33,7 @@ relevant output and stop (don't keep going past a hard failure).
 17. `./scripts/tests/check_package_proxy_config_deploy.sh` (the package upgrade tests
    new edge sidecars staged; a failed run leaves the live dir untouched)
 18. `./scripts/tests/check_edge_listen_v6.sh` (edge IPv6 listen: script and confs
-   agree on ports and glob includes; the EDGE_LISTEN_V6 decision (default off); the deploy hook)
+   agree on ports and glob includes; the EDGE_LISTEN_V6 decision (default auto); the deploy hook)
 19. `./scripts/tests/check_install_edge.sh` (install-edge.sh prepares only: no
    systemctl switch, no `cfm dnat`; adoption line = the deploy's; `-t` before install)
 20. `./scripts/tests/check_rpm_spec_macros.sh`

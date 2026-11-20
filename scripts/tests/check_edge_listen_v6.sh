@@ -81,9 +81,9 @@ done
 
 # The default (no EDGE_LISTEN_V6 in cfm.conf) is ONE switch on each side:
 # the script's V6_DEFAULT and Go's edgeIPv6Default (internal/originrealip),
-# off/false until IPv6 /64 grouping lands, then auto/true together. The
-# reference cfm.conf sets no active key and carries the opposite of the
-# default commented out (the opt-in now, the kill switch later).
+# auto/true since IPv6 /64 grouping (off/false before it), always together.
+# The reference cfm.conf sets no active key and carries the opposite of the
+# default commented out (the kill switch for auto, the opt-in for off).
 sdef=$(sed -n 's/^V6_DEFAULT=\([a-z]*\)$/\1/p' "$SCRIPT")
 gdef=$(sed -n 's/^const edgeIPv6Default = \([a-z]*\)$/\1/p' internal/originrealip/probe.go)
 case "$sdef/$gdef" in
@@ -270,6 +270,11 @@ expect() { # expect present|absent DESC
   if "$1"; then ok "$2"; else fail "$2 (files $( (present && echo present) || (absent && echo absent) || echo partial)); output: $(cat "$tmp/out")"; fi
 }
 says() { grep -q -- "$1" "$tmp/out" || fail "expected '$1' in: $(cat "$tmp/out")"; }
+# expect_default DESC: what no EDGE_LISTEN_V6 gives on a ready host
+# (V6_DEFAULT: auto listens, off does not).
+expect_default() {
+  if [ "$sdef" = auto ]; then expect present "$1 (default auto)"; else expect absent "$1 (default off)"; fi
+}
 
 v6_global
 ss_v6
@@ -279,9 +284,10 @@ run render
 expect absent "EDGE_LISTEN_V6=off with a CRLF line ending (no spaces) -> IPv4 only"
 cp configs/cfm.conf "$cfm_conf"
 run render
-expect absent "the reference cfm.conf (nothing set): V6_DEFAULT=off until /64 grouping -> IPv4 only"
-says "EDGE_LISTEN_V6 is off"
+expect_default "the reference cfm.conf (nothing set) -> V6_DEFAULT"
+[ "$sdef" = auto ] || says "EDGE_LISTEN_V6 is off"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
 : >"$tmp/realip.calls"
 run render
 expect present "EDGE_LISTEN_V6 = on: kernel IPv6, ports free, origin on [::]:80/443, ::1 trusted -> listens"
@@ -530,7 +536,7 @@ expect absent "an unknown value reads as off"
 says 'not on/off'
 printf '# EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 run render
-expect absent "a commented key leaves the default (off)"
+expect_default "a commented key leaves the default"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 
 rm -f "$proc"
@@ -556,7 +562,91 @@ v6_global
 rm -f "$cfm_conf"
 ss_v6
 run render
-expect absent "no cfm.conf at all -> the default (off)"
+expect_default "no cfm.conf at all -> the default"
+# The default never turns IPv6 on at an edge start (a reboot, a restart, the
+# edge's own package upgrade): only a render does, which reloads and confirms.
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run prestart
+expect absent "default (no key), prestart with no files: an edge start does not turn IPv6 on"
+[ "$sdef" != auto ] || says "turn it on with"
+run render
+expect_default "default (no key), render turns it on"
+run prestart
+expect_default "default (no key), prestart keeps the files a render approved"
+printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run prestart
+expect present "EDGE_LISTEN_V6 = on: prestart writes them (the opt-in as before)"
+rm -f "$cfm_conf"
+# An engine argument limits the run to that engine (an engine's own installer
+# renders its edge without reloading the others).
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run render cfm-edge
+expect absent "render <another engine>: this engine is left alone"
+run render TEST
+expect_default "render <this engine> (case-insensitive) renders it"
+run render nginx
+says 'no edge engine named "nginx"'
+
+# prepare: render's decision and writes, the default included, but never a
+# reload (an engine's own installer, prepare-only). On a running edge it
+# writes no new files: they would go live at some unrelated reload,
+# unconfirmed; only render turns IPv6 on for a running edge.
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+rm -f "$tmp/edge.active"
+: >"$tmp/edgectl.calls"
+run prepare Test
+expect_default "prepare <engine> on a stopped edge under the default writes the files"
+[ "$sdef" != auto ] || says "applies at the next start or reload"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+touch "$tmp/edge.active"
+run prepare Test
+expect absent "prepare on a RUNNING edge writes no new files"
+[ "$sdef" != auto ] || says "prepare never reloads; turn IPv6 on with"
+grep -q '^reload' "$tmp/edgectl.calls" && fail "prepare reloaded the edge: $(cat "$tmp/edgectl.calls")"
+rm -f "$tmp/edge.active"
+run prepare Test
+touch "$tmp/edge.active"
+printf 'untrusted' >"$tmp/realip"
+run prepare Test
+expect absent "prepare: the origin does not trust ::1 -> removed, running edge or not"
+grep -q '^reload' "$tmp/edgectl.calls" && fail "prepare reloaded the edge after a removal: $(cat "$tmp/edgectl.calls")"
+printf 'trusted' >"$tmp/realip"
+rm -f "$tmp/edge.active"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run status
+[ "$sdef" != auto ] || says "an edge start never turns it on: run: sh"
+
+# prestart under the default with files a render approved: the trust and the
+# config test still apply; a half pair never starts.
+run render
+expect_default "default: render approves the files"
+if [ "$sdef" = auto ]; then
+  printf 'untrusted' >"$tmp/realip"
+  run prestart
+  expect absent "default, kept files, the origin no longer trusts ::1 -> prestart removes them"
+  printf 'trusted' >"$tmp/realip"
+  run render
+  printf 'with-v6' >"$tmp/engine.fail"
+  run prestart
+  expect absent "default, kept files that fail the config test -> prestart removes them"
+  rm -f "$tmp/engine.fail"
+  run render
+  rm -f "$conf_dir/cfm-listen-v6-https.conf"
+  run prestart
+  expect absent "default, a half pair (one file left) -> prestart removes it"
+fi
+printf 'EDGE_LISTEN_V6 = auto\n' >"$cfm_conf"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run prestart
+expect present "an explicit EDGE_LISTEN_V6 = auto lets prestart write them (only absent / empty is the default)"
+for v in '' '""' '; note'; do
+  printf 'EDGE_LISTEN_V6 = %s\n' "$v" >"$cfm_conf"
+  rm -f "$conf_dir"/cfm-listen-v6-*.conf
+  run prestart
+  expect absent "EDGE_LISTEN_V6 = $v reads as the default: prestart writes nothing"
+done
+rm -f "$cfm_conf"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 printf 'with-v6' >"$tmp/engine.fail"
