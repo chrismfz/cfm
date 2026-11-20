@@ -713,7 +713,7 @@ cPanel — every rule here exists because of that. Design + as-built:
 - **Tier A's static recipe/TTL are labels.** The static locations follow the
   origin's Cache-Control/Expires with a 1 h fallback; don't document or
   promise a static TTL the edge doesn't apply. Micro TTL snaps to
-  MICRO_BUCKETS {1,2,5,10,30,60,90,120}s; the guard pins the Lua list to the
+  MICRO_BUCKETS {5,10,30,60,90,120,300}s; the guard pins the Lua list to the
   conf zones/locations.
 - **Go↔Lua parity via a generated fixture.** `site_cache_edge_parity_test.go`
   renders `scripts/tests/fixtures/site_cache_edge_parity.lua` for the real

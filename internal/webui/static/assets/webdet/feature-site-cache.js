@@ -290,7 +290,7 @@ export const siteCacheMixin = {
     },
     scMicroTitle(row) {
       if (!row.microOn) return row.microRecipe ? `off (keeps ${recipeLabel(row.microRecipe)} for a re-enable)` : "off";
-      const ttl = row.microTTL || "none (1 s)";
+      const ttl = row.microTTL || "none (5 s)";
       const snap = row.microTTL && !isBucketTTL(row.microTTL) ? ` → snaps to ${row.microBucket} s` : "";
       const cookies = [
         row.strictCookies ? "strict cookies" : "",

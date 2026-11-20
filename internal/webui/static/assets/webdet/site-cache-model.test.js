@@ -182,8 +182,8 @@ test("buildPatch: an edit sends only the fields that changed", () => {
   const f = formFromEntry(STORED);
   assert.deepEqual(buildPatch(f, STORED), { host: "shop.example.com" }, "untouched: nothing but the host");
   assert.equal(patchChanges(buildPatch(f, STORED)), 0);
-  // The empty stored TTL shows as 1 s and is not rewritten.
-  assert.equal(f.microTTL, "1s");
+  // The empty stored TTL shows as 5 s and is not rewritten.
+  assert.equal(f.microTTL, "5s");
   assert.deepEqual(buildPatch({ ...f, microTTL: "10s" }, STORED), { host: "shop.example.com", micro: { ttl: "10s" } });
   assert.deepEqual(buildPatch({ ...f, strictCookies: true }, STORED), { host: "shop.example.com", strict_cookies: true });
   assert.deepEqual(buildPatch({ ...f, authCookies: "shop_login, shop_cart" }, STORED), { host: "shop.example.com", auth_cookies: ["shop_login", "shop_cart"] });
@@ -214,7 +214,7 @@ test("formFromEntry round-trips a stored policy", () => {
   const f = formFromEntry(STORED);
   assert.equal(f.staticRecipe, "static_aggressive");
   assert.equal(f.authCookies, "shop_login");
-  assert.equal(formFromEntry({ host: "x.com", micro: { enabled: true, recipe: "micro_safe" } }).microTTL, "1s");
+  assert.equal(formFromEntry({ host: "x.com", micro: { enabled: true, recipe: "micro_safe" } }).microTTL, "5s");
   assert.equal(formFromEntry({ host: "x.com", micro: { enabled: false, recipe: "micro_safe", ttl: "7s" } }).microTTL, "7s");
 });
 

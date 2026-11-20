@@ -169,7 +169,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Request carries **`Authorization`** → never read, never store | `map $http_authorization $cfm_req_auth` (any non-empty value → `"1"`; a raw predicate would read `Authorization: 0` as false) on `proxy_cache_bypass` **and** `proxy_no_cache` in every cache location; Tier B `micro_decision` also reports `bypass:authorization` and does not route | **basic-auth (cPanel Directory Privacy) / bearer response served to anonymous visitors** — nginx does not bypass on `Authorization` by itself |
 | **Forwarded headers pinned** in cache locations | `proxy_set_header X-Forwarded-Host $host;` and `""` (not sent) for `X-Forwarded-Server/-Port/-Scheme/-Protocol/-Prefix/-Ssl/-Uri/-Path`, `X-Host`, `X-Original-Host`, `X-Original-URL`, `X-Original-Uri`, `X-Rewrite-URL`, `Forwarded`, `Front-End-Https`, `X-Url-Scheme`, `X-Scheme`, `X-HTTP-Method(-Override)`, `X-Method-Override`. Applies to **every** request through a cache location, armed vhost or not (all vhosts' static assets use the Tier A location) | cache poisoning — an app building absolute URLs / routes from these writes attacker input into a page cached for everyone. A denylist of the known URL-building headers, not a proof |
 | Lock wait set **per tier** | `proxy_cache_lock_timeout 1s` (Tier A) / `5s` (Tier B) | the timeout must outlast the fill, or a cold-key burst all reaches the origin (when it expires every waiter is sent upstream and nothing is stored); yet on an uncacheable key (Set-Cookie / no-store / non-200) waiters queue at 500 ms steps until it expires — nginx has no hit-for-pass. Static files fill in well under 1 s and a popular 404 is the usual uncacheable key → 1 s. HTML can take seconds to render → 5 s, and Tier B remembers its uncacheable keys (next row) |
-| Tier B **remembers an uncacheable key** | `cfm_cache.micro_note()` in the http-level `log_by_lua`: a micro request that fetched (`MISS`/`EXPIRED`) an answer nginx could not store (non-200, `$cfm_sc_unsafe` — any non-tracking `Set-Cookie` — `$cfm_cc_nostore`, `$cfm_xae_nocache`, a `*` in `Vary` or a `Vary` over 128 bytes) marks `md5($server_addr\|$scheme\|$cf_xfp://$host$request_uri)` in `lua_shared_dict cfm_cache_uncacheable`; `micro_gate` skips micro for a marked key (debug token `bypass:uncacheable`), then the next request after the mark probes again. A `MISS` marks for 60 s; an `EXPIRED` refresh (the page changed: it sets a cookie, went private, redirects, 401/403/404/410) for 240 s — longer than the largest micro zone's `inactive` (210 s; the guard pins the 30 s margin), so the old copy is evicted before the next probe. A 5xx or a request-level 4xx (400, 405, 406, 408, 411-417, 421, 429, 431) is origin trouble or about the request, not the page: on an `EXPIRED` key it **never marks** (the stale copy absorbs it — next row — and any client could provoke one), on a `MISS` it marks for 5 s, the lock timeout (the lock does not spare the origin — every waiter reaches it, as the next filler or when its wait times out — it only delays each visitor up to 5 s; measured on a cold 503 key, 20 req/s: every request reached the origin either way, p50 5.5 s through the lock vs 0.5 s direct). `X-Accel-Buffering: no` (nginx then streams and stores nothing) counts as not storable; an `X-Accel-Redirect` answer is served by an internal redirect and is neither stored nor remembered | the lock queue above: measured on a 1 s page that sets a cookie, 8 concurrent clients finished at 1, 2, 3.5, 4.5, 5.5, 6, 6, 6 s before the mark and all in ~1 s after it. The dict evicts least-recently-used marks when full (a lost mark costs one re-probe); a conf without the dict just does not remember. Residual (like Varnish hit-for-miss): one client's non-storable answer — a UA or language redirect, a cookie, an origin WAF's 403 — skips micro for that URL for everyone until the mark expires, so a client can keep micro off for one URL with a request per mark; the URL is then served as without micro, nothing wrong is stored |
+| Tier B **remembers an uncacheable key** | `cfm_cache.micro_note()` in the http-level `log_by_lua`: a micro request that fetched (`MISS`/`EXPIRED`) an answer nginx could not store (non-200, `$cfm_sc_unsafe` — any non-tracking `Set-Cookie` — `$cfm_cc_nostore`, `$cfm_xae_nocache`, a `*` in `Vary` or a `Vary` over 128 bytes) marks `md5($server_addr\|$scheme\|$cf_xfp://$host$request_uri)` in `lua_shared_dict cfm_cache_uncacheable`; `micro_gate` skips micro for a marked key (debug token `bypass:uncacheable`), then the next request after the mark probes again. A `MISS` marks for 60 s; an `EXPIRED` refresh (the page changed: it sets a cookie, went private, redirects, 401/403/404/410) for 420 s — longer than the largest micro zone's `inactive` (390 s; the guard pins the 30 s margin), so the old copy is evicted before the next probe. A 5xx or a request-level 4xx (400, 405, 406, 408, 411-417, 421, 429, 431) is origin trouble or about the request, not the page: on an `EXPIRED` key it **never marks** (the stale copy absorbs it — next row — and any client could provoke one), on a `MISS` it marks for 5 s, the lock timeout (the lock does not spare the origin — every waiter reaches it, as the next filler or when its wait times out — it only delays each visitor up to 5 s; measured on a cold 503 key, 20 req/s: every request reached the origin either way, p50 5.5 s through the lock vs 0.5 s direct). `X-Accel-Buffering: no` (nginx then streams and stores nothing) counts as not storable; an `X-Accel-Redirect` answer is served by an internal redirect and is neither stored nor remembered | the lock queue above: measured on a 1 s page that sets a cookie, 8 concurrent clients finished at 1, 2, 3.5, 4.5, 5.5, 6, 6, 6 s before the mark and all in ~1 s after it. The dict evicts least-recently-used marks when full (a lost mark costs one re-probe); a conf without the dict just does not remember. Residual (like Varnish hit-for-miss): one client's non-storable answer — a UA or language redirect, a cookie, an origin WAF's 403 — skips micro for that URL for everyone until the mark expires, so a client can keep micro off for one URL with a request per mark; the URL is then served as without micro, nothing wrong is stored |
 | Tier B: a stale page is not kept alive by refreshes that cannot be stored; a failing origin is | `proxy_cache_background_update off` and `proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504` in the micro locations (Tier A keeps background updates on) | with background updates on, an expired page is served stale while a background fetch refreshes it — and when that fetch cannot be stored (the page now sets a cookie, turned 404, went private) the stale copy is served on every request for as long as the key stays warm. Off, the request that finds the page expired fetches it itself and only requests arriving during that fetch get the stale copy; a page-changed answer then marks the key long enough for the copy to age out (previous row), so it is served for one fetch window. An origin that fails — connection error, timeout, or a 500/502/503/504 answer — keeps the stale copy served, the fetching request included (measured, 10 clients on a hot page whose origin answers 503 after 1 s: 4 origin hits and all clients 200 with this, 31 hits and 31 clients 503 when a 5xx marked the key). There is **no bound** on that while the origin keeps failing and the key gets a request within its zone's `inactive` (30-210 s): an intentional 503 (a maintenance page) is not shown on a warm key — purge the vhost, or set `MICRO_CACHE_ENFORCE = 0`, to show it. Other 5xx (501, 505, 507, CloudLinux's 508 "resource limit reached") are outside what nginx's `use_stale` can cover: the request that refreshes gets them, everyone arriving meanwhile the stale copy. A worker killed during a refresh can leave its entry locked stale (nginx logs `ignore long locked inactive cache entry`); a purge clears it |
 | Tier B **forwards no forgeable client-IP / geo / hint header** | micro locations: `X-Forwarded-For $remote_addr` (the real client alone — `mod_remoteip` reads it behind 127.0.0.1, so `REMOTE_ADDR` is unchanged), `CF-IPCountry` / `CF-Visitor` only from the trusted peer (`$cfm_cf_ipcountry` / `$cfm_cf_visitor`, the `$cf_xfp` gate), and `True-Client-IP`, `Client-IP`, `X-Client-IP`, `X-Cluster-Client-IP`, `Fastly-Client-IP`, `X-Originating-IP`, `X-ProxyUser-Ip`, `X-Forwarded`, `X-Country-Code`, `HTTPS`, `X-Arr-Ssl`, `X-Proto`, `CloudFront-Forwarded-Proto`, `Surrogate-Capability`, `Proxy` (httpoxy), `Content-Type`, `Content-Encoding` not sent; `X-Real-IP` / `CF-Connecting-IP` are `$remote_addr` (guard-pinned) | WooCommerce geolocation takes `CF-IPCountry` before any IP lookup, PHP helpers read `Client-IP` / the `X-Forwarded-For` prefix, Flexible-SSL snippets read `CF-Visitor`: a direct client choosing any of them would store its forged answer for everyone. The client IP the origin sees is still a residual (above) — the real one |
 | Tier B **never forwards a request body** | `proxy_pass_request_body off` + `proxy_set_header Content-Length ""` in every micro location (micro serves only GET/HEAD) | fat-GET poisoning: a body on a GET is not in the key, yet an app may read it — the WordPress REST API reads a JSON body on any method, so `GET /wp-json/wp/v2/posts` with `{"search":…}` in the body would store an attacker-shaped listing for everyone (verified with Content-Length, chunked and HTTP/2 bodies). Tier A keeps forwarding bodies (static files, and a POST to a static-extension URL must keep working) |
@@ -310,15 +310,14 @@ create):
 ```nginx
 # Static (disk): one zone
 proxy_cache_path /var/cache/nginx/cfm_static      levels=1:2 keys_zone=cfm_static:20m    max_size=10g  min_free=2g inactive=7d   use_temp_path=off;
-# Micro (tiny, short-lived; on disk): 1/2/5/10/30/60/90/120s — cfm_cache.lua MICRO_BUCKETS
-proxy_cache_path /var/cache/nginx/cfm_micro_1s   levels=1:2 keys_zone=cfm_micro_1s:10m  max_size=512m min_free=2g inactive=30s  use_temp_path=off;
-proxy_cache_path /var/cache/nginx/cfm_micro_2s   levels=1:2 keys_zone=cfm_micro_2s:10m  max_size=512m min_free=2g inactive=30s  use_temp_path=off;
+# Micro (tiny, short-lived; on disk): 5/10/30/60/90/120/300s — cfm_cache.lua MICRO_BUCKETS
 proxy_cache_path /var/cache/nginx/cfm_micro_5s   levels=1:2 keys_zone=cfm_micro_5s:10m  max_size=512m min_free=2g inactive=60s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_10s  levels=1:2 keys_zone=cfm_micro_10s:10m max_size=512m min_free=2g inactive=60s  use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_30s  levels=1:2 keys_zone=cfm_micro_30s:10m max_size=1g   min_free=2g inactive=120s use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_60s  levels=1:2 keys_zone=cfm_micro_60s:10m max_size=1g   min_free=2g inactive=180s use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_90s  levels=1:2 keys_zone=cfm_micro_90s:10m max_size=1g   min_free=2g inactive=180s use_temp_path=off;
 proxy_cache_path /var/cache/nginx/cfm_micro_120s levels=1:2 keys_zone=cfm_micro_120s:10m max_size=1g  min_free=2g inactive=210s use_temp_path=off;
+proxy_cache_path /var/cache/nginx/cfm_micro_300s levels=1:2 keys_zone=cfm_micro_300s:10m max_size=1g  min_free=2g inactive=390s use_temp_path=off;
 ```
 
 Tier A has one zone and follows the origin's headers (§5.4); per-TTL static
@@ -413,13 +412,17 @@ pinning `proxy_cache cfm_micro_<n>s;` + `proxy_cache_valid 200 <n>s;`, and
 Step 4 `ngx.exec`s to the bucket the policy snaps to. A HIT costs the same in
 any zone, so more buckets cost only a little startup memory.
 
-- **Buckets:** `MICRO_BUCKETS = {1, 2, 5, 10, 30, 60, 90, 120}` s in
-  `cfm_cache.lua`; the guard pins the confs' zones and locations to it.
+- **Buckets:** `MICRO_BUCKETS = {5, 10, 30, 60, 90, 120, 300}` s in
+  `cfm_cache.lua`; the guard pins the confs' zones and locations to it, and
+  each server's `$cfm_micro_max` to the largest. 1 s and 2 s were buckets
+  until 2026-11-20 (no fleet vhost used them; 300 s took their place).
+  Version skew: Step 4 never routes above the conf's `$cfm_micro_max`; a
+  conf without it stops at 120 s (with `$cfm_sc_unsafe`) or 60 s.
 - **TTL source:** only the micro tier's `ttl` (`--micro-ttl`); a recipe name
   does not set it. The stored TTL is parsed with the units the daemon accepts
   (`s`/`m`/`h`/`d`, an optional leading `+`), snaps to the nearest bucket
-  (ties down), clamps above 120 s to 120 s; an empty or unparseable TTL gets
-  the 1 s bucket. For herd protection 7 s vs 8 s does not matter, so the
+  (ties down), clamps above 300 s to 300 s; an empty or unparseable TTL gets
+  the 5 s bucket. For herd protection 7 s vs 8 s does not matter, so the
   snapped menu behaves as continuous. A per-vhost choice is reload-free (a
   policy value the edge pulls); a new bucket is a zone-list change + reload,
   never a per-vhost event.
@@ -530,7 +533,7 @@ access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
    (`/usr/local/openresty/nginx/conf/nginx.conf`, `/etc/angie/angie.conf`):
    `set $cfm_micro_conf "1";` once (in the HTTPS `location /`) and
    `set $cfm_micro_conf "";` once (its server level),
-   `proxy_cache_background_update off;` eight times (one per bucket), `lua_shared_dict
+   `proxy_cache_background_update off;` once per bucket (seven), `lua_shared_dict
    cfm_cache_uncacheable`, the `$cfm_cc_nostore` and `$cfm_xae_nocache` maps;
    the nginx core is ≥ 1.23 (`openresty -V` / `angie -V`); then `-t` and a
    reload. Without the sentinel micro never routes (fail-safe), whatever the
@@ -593,7 +596,7 @@ access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
   "scope_hosts": ["myip.gr"],          // audit only: [host] if a scoped token created it, absent if an admin did
   "generation": 1758585600123,           // wall-clock ms, replaced by Purge (§10); part of the cache key
   "static": { "enabled": true,  "recipe": "static_aggressive", "ttl": "7d" },  // recipe/ttl: labels at the edge (§5.4)
-  "micro":  { "enabled": false, "recipe": "micro_safe",        "ttl": "1s" },  // ttl snaps to a bucket (§5.4)
+  "micro":  { "enabled": false, "recipe": "micro_safe",        "ttl": "5s" },  // ttl snaps to a bucket (§5.4)
   "strict_cookies": false,               // §4.1: bypass on ANY non-ignored cookie
   "auth_cookies": [],                    // §4.1: per-vhost extra app-session cookie names
   "created_at": "2026-09-21T...", "updated_at": "2026-09-21T..."
@@ -808,10 +811,10 @@ buckets).
 **A recipe is a label.** The daemon accepts the names below
 (`staticCacheRecipes` / `microCacheRecipes` in `site_cache.go`) and the edge
 uses one only in the debug stamp. What decides caching is the tier's `on`
-and, for micro, its `ttl` snapped to a bucket (empty = 1 s; §5.4) — so
-`micro_aggressive` without `--micro-ttl` behaves as 1 s, every static recipe
+and, for micro, its `ttl` snapped to a bucket (empty = 5 s; §5.4) — so
+`micro_aggressive` without `--micro-ttl` behaves as 5 s, every static recipe
 behaves the same (origin headers, 1 h fallback), and `fullpage_advanced` is
-an ordinary micro label, clamped to 120 s. The page's recipes therefore
+an ordinary micro label, clamped to 300 s. The page's recipes therefore
 always send the micro TTL.
 
 Stored vocabulary: `static_lean`, `static_aggressive` (static);
@@ -827,8 +830,8 @@ the tier it names:
 | Recipe (page) | Sets | For |
 |---|---|---|
 | Cache static assets | static on, `static_lean` | the usual first step |
-| Burst shield (micro-cache 1 s) | micro on, `micro_safe`, `1s` | heavy pages / bursts (`myip.gr`) |
-| Near-static pages (micro-cache 10–120 s) | micro on, `micro_aggressive`, `10s`, `30s`, `60s`, `90s` or `120s` | pages that rarely change |
+| Burst shield (micro-cache 5 s) | micro on, `micro_safe`, `5s` | heavy pages / bursts (`myip.gr`) |
+| Near-static pages (micro-cache 10–300 s) | micro on, `micro_aggressive`, `10s`, `30s`, `60s`, `90s`, `120s` or `300s` | pages that rarely change |
 | Static assets + burst shield | both of the above | |
 | Never cache this host (opt-out) | both tiers off | a sub-host under an armed wildcard |
 
@@ -887,7 +890,7 @@ admin-only.
 
 ## 10. Purge / invalidation
 
-- **Micro-cache is self-healing** (1–120 s buckets); it rarely needs a purge.
+- **Micro-cache is self-healing** (5–300 s buckets); it rarely needs a purge.
 - **Static needs purge.** Mechanism: the **generation bump** (§6). The key
   includes the generation; a purge stores a new, never-used one → new key
   space → old entries age out under `inactive`. No filesystem walk, no

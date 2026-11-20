@@ -13,7 +13,7 @@ Two tiers, both off for every vhost until one is armed:
 | Tier | What is cached | Where | TTL |
 |---|---|---|---|
 | **A: static** | Files ending in `.css .js .map .woff .woff2 .ttf .eot .png .jpg .jpeg .gif .webp .ico`, on :9080 and :9043 | the static-asset locations, zone `cfm_static` (10 GB, `inactive=7d`) | the origin's `Cache-Control` / `Expires`, **1 h fallback**. The stored static recipe and TTL are labels only. |
-| **B: micro** | Anonymous GET/HEAD responses through the HTTPS `location /`: HTML pages, but also anything else served there (REST JSON, feeds, svg…). It runs on the plain-allow path, after the WAF, challenge and bridge decisions. | internal `@cfm_micro_<n>s` locations, one zone per bucket | the vhost's micro TTL snapped to 1 / 2 / 5 / 10 / 30 / 60 / 90 / 120 s (empty = 1 s, above 120 s = 120 s). The origin's cache headers are ignored except for their "do not store" signals. |
+| **B: micro** | Anonymous GET/HEAD responses through the HTTPS `location /`: HTML pages, but also anything else served there (REST JSON, feeds, svg…). It runs on the plain-allow path, after the WAF, challenge and bridge decisions. | internal `@cfm_micro_<n>s` locations, one zone per bucket | the vhost's micro TTL snapped to 5 / 10 / 30 / 60 / 90 / 120 / 300 s (empty = 5 s, above 300 s = 300 s; a stored 1 s or 2 s, buckets until 2026-11-20, runs as 5 s). The origin's cache headers are ignored except for their "do not store" signals. |
 
 Tier B serves an armed vhost's anonymous pages from cache while
 `MICRO_CACHE_ENFORCE = 1`, the default since 2026-09-23. At `0` it is a dry
@@ -349,7 +349,7 @@ wildcard too (§6).
 ## 10. Disk and housekeeping
 
 - **Where the caches live.** Under `/var/cache/nginx`: `cfm_static` (10 GB,
-  `inactive=7d`) and `cfm_micro_{1,2,5,10,30,60,90,120}s` (512 MB to 1 GB each).
+  `inactive=7d`) and `cfm_micro_{5,10,30,60,90,120,300}s` (512 MB to 1 GB each). The retired `cfm_micro_1s` and `cfm_micro_2s` dirs of an older install are left in place (no conf uses them; `rm -rf` them once every edge runs the new conf). Downgrading cfm below 2026-11-20 needs the older edge conf back too (the package deploys it when its `-t` passes): the older Lua still routes a stored 1 s / 2 s or empty micro TTL to `@cfm_micro_1s`, which the new conf no longer has (a 500 for that vhost's anonymous visitors).
   The daemon creates them on start and the installers and packages create them
   before any `-t`, owned `root:cfm`.
 - **Disk rails.** They bound how much the cache can write; they do not make

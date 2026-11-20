@@ -25,10 +25,9 @@ ttl	99999999999999999999s	invalid
 ttl	<empty>	invalid
 #
 # bucket: the micro TTL the edge snaps a stored TTL to (cfm_cache.lua micro_bucket_seconds).
-bucket	1s	1
-bucket	2s	2
-bucket	3s	2
-bucket	4s	5
+bucket	1s	5
+bucket	2s	5
+bucket	3s	5
 bucket	7s	5
 bucket	8s	10
 bucket	20s	10
@@ -42,16 +41,19 @@ bucket	100s	90
 bucket	105s	90
 bucket	106s	120
 bucket	2m	120
-bucket	2h	120
-bucket	1d	120
+bucket	210s	120
+bucket	211s	300
+bucket	5m	300
+bucket	2h	300
+bucket	1d	300
 bucket	+5s	5
 bucket	5	5
 bucket	5 s	5
-bucket	5x	1
-bucket	0s	1
-bucket	-5s	1
-bucket	garbage	1
-bucket	<empty>	1
+bucket	5x	5
+bucket	0s	5
+bucket	-5s	5
+bucket	garbage	5
+bucket	<empty>	5
 #
 # host: the set API accepts the host (ok) or refuses it (bad).
 host	shop.example.com	ok
