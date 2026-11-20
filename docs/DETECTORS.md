@@ -927,9 +927,12 @@ cfm webtop challenge exclude remove /images/.tmb/ --type path --scope example.gr
   vhosts: an add is pinned to its vhosts (or the subset it names), and a
   remove takes its own hosts out of every entry on that path, so an entry
   shared with another site keeps covering that site.
-  `docs/endpoint_scope_inventory.md` has the rules. In cfm-admin the excludes
-  card offers it to admins (scope field); the tenant view still hides
-  `type=path`.
+  `docs/endpoint_scope_inventory.md` has the rules. In cfm-admin
+  (WebDetector → WAF engine → Dynamic excludes) the challenge card offers
+  `path` to admins and tenants, with a required scope field (a tenant picks
+  among its own sites, prefilled with the first in alphabetical order) and a
+  Scope column; the WAF card's `path` stays admin-only, and so does the
+  challenge card's for a token that holds only wildcard vhosts.
 - Each skipped hit is logged to the challenges log at most once a minute per
   (check, exclude): `[challenge][malpath] action=path_exclude_skip`.
 - This is only the malpath checks. The WAF has its own path + rule excludes
