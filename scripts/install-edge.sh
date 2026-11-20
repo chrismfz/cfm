@@ -135,6 +135,7 @@ create_default_certs_if_missing() {
     if [ -s "$cert_file" ] && [ -s "$key_file" ]; then
         log "Default certs already present: $cert_file and $key_file"
     else
+        command_exists openssl || die "openssl not found: needed for the fallback cert ($cert_dir)"
         log "Creating self-signed fallback cert in: $cert_dir"
         mkdir -p "$cert_dir"
         openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
@@ -226,6 +227,13 @@ take_deploy_lock() {
     flock -w 300 9 || die "a cfm package deploy has held $CFM_DEPLOY_LOCK for 5 minutes; try again when it is done"
 }
 
+# Release it as soon as the commit is done: fd 9 is inherited by every child,
+# and a daemon a later step starts (`cfm realip fix` may start httpd) would
+# hold the lock for good, so every cfm upgrade would skip its edge deploy.
+release_deploy_lock() {
+    { flock -u 9; exec 9>&-; } 2>/dev/null || true
+}
+
 # nginx -t creates every log file it names. On a node whose edge is still
 # openresty/angie, fresh empty files in /var/log/cfm-edge would become the
 # newest edge logs the daemon's log tools read. Remember what was there, and
@@ -249,6 +257,8 @@ adopt_cfm_edge() {
     [ -x "$EDGE_BIN" ] || die "$EDGE_BIN not found"
     mkdir -p "$EDGE_CONF_DIR"
     take_deploy_lock
+    # A stage an earlier run left behind (killed with SIGKILL): ours only.
+    find "$EDGE_CONF_DIR" -maxdepth 1 -type d -name '.cfm-install.*' -exec rm -rf -- {} + 2>/dev/null || true
 
     STAGE="$(mktemp -d "$EDGE_CONF_DIR/.cfm-install.XXXXXX")"
     local f
@@ -260,17 +270,22 @@ adopt_cfm_edge() {
     render_panel_listener_template "$EDGE_CONF_DIR/cfm-panel-listeners.conf" >"$STAGE/cfm-panel-listeners.conf"
     chmod 0644 "$STAGE/cfm-panel-listeners.conf"
 
-    # The tested copy: CFM's config with its sidecar includes pointed at the
+    # The main config is copied ONCE: the bytes tested below are the bytes
+    # committed (a cfm upgrade may rewrite $EDGE_SRC_CONF meanwhile).
+    install -m 0644 -o root -g root "$EDGE_SRC_CONF" "$STAGE/nginx.conf"
+    grep -qxF "$EDGE_ADOPT_MARKER" "$STAGE/nginx.conf" || die "$EDGE_SRC_CONF lost its adoption line; nothing changed"
+
+    # The tested copy: that config with its sidecar includes pointed at the
     # stage. Every sidecar include must have been redirected, or the test
     # would read the live (old) sidecar instead.
     local sed_args=()
     for f in "${EDGE_SIDECARS[@]}"; do
         sed_args+=(-e "s|include $EDGE_CONF_DIR/$f;|include $STAGE/$f;|")
     done
-    sed "${sed_args[@]}" "$EDGE_SRC_CONF" >"$STAGE/nginx.conf.test"
+    sed "${sed_args[@]}" "$STAGE/nginx.conf" >"$STAGE/nginx.conf.test"
     for f in "${EDGE_SIDECARS[@]}"; do
         grep -qF "include $STAGE/$f;" "$STAGE/nginx.conf.test" \
-            || die "$EDGE_SRC_CONF does not include $EDGE_CONF_DIR/$f; nothing changed"
+            || die "CFM's cfm-edge config does not include $EDGE_CONF_DIR/$f; nothing changed"
         if grep -qF "include $EDGE_CONF_DIR/$f;" "$STAGE/nginx.conf.test"; then
             die "could not redirect every include of $EDGE_CONF_DIR/$f for the test; nothing changed"
         fi
@@ -283,15 +298,16 @@ adopt_cfm_edge() {
         die "config test FAILED (above): nothing in $EDGE_CONF_DIR was changed"
     fi
 
-    # Commit: back up what is there, then move each file into place (a rename
-    # in the same directory: a reader never sees a half-written file).
+    # Commit: back up what is there, then renames only (same filesystem: no
+    # copy can fail half-way, a reader never sees a half-written file), the
+    # main config last.
     local ts
     ts="$(date -u +%Y%m%d-%H%M%S)"
     if [ -f "$EDGE_MAIN_CONF" ]; then
         if [ ! -e "$EDGE_MAIN_CONF.pre-cfm" ]; then
             cp -p "$EDGE_MAIN_CONF" "$EDGE_MAIN_CONF.pre-cfm"
             log "Backed up the package's $EDGE_MAIN_CONF -> $EDGE_MAIN_CONF.pre-cfm"
-        elif ! cmp -s "$EDGE_MAIN_CONF" "$EDGE_SRC_CONF"; then
+        elif ! cmp -s "$EDGE_MAIN_CONF" "$STAGE/nginx.conf"; then
             cp -p "$EDGE_MAIN_CONF" "$EDGE_MAIN_CONF.cfm-install.$ts"
             log "Backed up $EDGE_MAIN_CONF -> $EDGE_MAIN_CONF.cfm-install.$ts"
         fi
@@ -300,8 +316,8 @@ adopt_cfm_edge() {
         mv -f "$STAGE/$f" "$EDGE_CONF_DIR/$f"
         log "Installed $EDGE_CONF_DIR/$f"
     done
-    install -m 0644 -o root -g root "$EDGE_SRC_CONF" "$STAGE/nginx.conf"
     mv -f "$STAGE/nginx.conf" "$EDGE_MAIN_CONF"
+    release_deploy_lock
 
     if ! "$EDGE_BIN" -t -q; then
         drop_test_created_logs
@@ -396,9 +412,11 @@ EOF
     if [ -z "$old" ] && [ "$edges" = "cfm-edge" ] && cfm_edge_serves; then
         cat <<'EOF'
 
-cfm-edge is already the live edge; reload it to apply the new config:
+cfm-edge is already the live edge; reload it to apply the new config (and
+any IPv6 listen change), then check the IPv6 listen decision:
 
     systemctl reload cfm-edge
+    sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
 EOF
         return 0
     fi
@@ -411,7 +429,9 @@ Nothing below has been run: every step is yours.
    directly meanwhile, without WAF/challenge). Note what is on first:
 
     cfm dnat                    # web DNAT (80/443)
-    cfm dnat cpanel             # panel DNAT: state, mode and priority
+    cfm dnat cpanel             # panel DNAT: on/off and the installed priority
+                                # (the mode it prints is not the one it was
+                                # enabled with: note yours, e.g. from cfm.conf)
     cfm dnat off
     cfm dnat cpanel off         # only if panel DNAT was on
 

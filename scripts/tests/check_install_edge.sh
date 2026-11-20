@@ -77,9 +77,19 @@ if bad="$(grep -E '[[:space:]]-s[[:space:]]+(stop|quit|reload|reopen)\b|(^|[^A-Z
   fail "$SCRIPT signals a process or evals a command:
 $bad"
 fi
-# The IPv6 listen script: `render` walks every engine and reloads the live
-# one, `deploy` is the package's. Only a cfm-edge-scoped `prestart` (writes and
-# tests, never reloads) may run.
+if bad="$(grep -E '(^|[^A-Za-z_.-])(service|nft|initctl)[[:space:]]+[A-Za-z]' <<<"$ex")"; then
+  fail "$SCRIPT runs service / nft (the unit swap and the DNAT are the operator's):
+$bad"
+fi
+# The IPv6 listen script: `render` (also its default, with no argument) walks
+# every engine and reloads the live one, `deploy` is the package's. Only a
+# cfm-edge-scoped `prestart` (writes and tests, never reloads) may run, with
+# the scope on the SAME command; any other use of "$script" is a file test.
+if bad="$(grep -F '"$script"' <<<"$ex" | grep -vE '\[ !? ?-f "\$script" \]' \
+           | grep -vE '^[0-9]+: +CFM_EDGE_ENGINES="cfm-edge\|[^";]*" sh "\$script" prestart \|\| true$')"; then
+  fail "$SCRIPT runs the IPv6 listen script other than as the cfm-edge-scoped prestart:
+$bad"
+fi
 if bad="$(grep -E '(listen-v6\.sh|"\$script")[^#]*[[:space:]](render|deploy)\b' <<<"$ex")"; then
   fail "$SCRIPT runs cfm-edge-listen-v6.sh render/deploy (it reloads the live edge):
 $bad"
@@ -96,15 +106,20 @@ theirs="$(sed -n "s/^CFMEDGE_ADOPT_MARKER='\(.*\)'$/\1/p" "$DEPLOY")"
 [ -n "$theirs" ] || fail "CFMEDGE_ADOPT_MARKER not found in $DEPLOY"
 [ "$mine" = "$theirs" ] || fail "adoption line differs: $SCRIPT '$mine' vs $DEPLOY '$theirs'"
 
-# 3. The staged set is tested, then committed, then the live copy is tested.
+# 3. The staged set is tested (a failure dies), then committed (the main
+#    config last), then the live copy is tested.
+grep -qE '^[0-9]+: +if ! "\$EDGE_BIN" -t -c "\$STAGE/nginx.conf.test"; then$' <<<"$ex" \
+  || fail "$SCRIPT must act on the staged test's result (if ! \"\$EDGE_BIN\" -t -c \"\$STAGE/nginx.conf.test\"; then)"
+grep -qE '^[0-9]+: +if ! "\$EDGE_BIN" -t -q; then$' <<<"$ex" \
+  || fail "$SCRIPT must act on the live copy's test result (if ! \"\$EDGE_BIN\" -t -q; then)"
 t1="$(grep -nE '"\$EDGE_BIN" -t -c "\$STAGE/nginx.conf.test"' <<<"$ex" | head -1 | cut -d: -f2)"
 side="$(grep -nE 'mv -f "\$STAGE/\$f" "\$EDGE_CONF_DIR/\$f"' <<<"$ex" | head -1 | cut -d: -f2)"
 inst="$(grep -nE 'mv -f "\$STAGE/nginx.conf" "\$EDGE_MAIN_CONF"' <<<"$ex" | head -1 | cut -d: -f2)"
-t2="$(grep -nE '"\$EDGE_BIN" -t -q;' <<<"$ex" | head -1 | cut -d: -f2)"
+t2="$(grep -nE 'if ! "\$EDGE_BIN" -t -q;' <<<"$ex" | head -1 | cut -d: -f2)"
 [ -n "$t1" ] && [ -n "$side" ] && [ -n "$inst" ] && [ -n "$t2" ] || fail "$SCRIPT must test the staged set (-t -c \$STAGE/nginx.conf.test), move the sidecars and the main config in, then test the live copy"
-[ "$t1" -lt "$side" ] && [ "$t1" -lt "$inst" ] && [ "$inst" -lt "$t2" ] || fail "$SCRIPT must config-test before it moves anything into $EDGE_CONF_DIR (lines $t1 / $side / $inst / $t2)"
+[ "$t1" -lt "$side" ] && [ "$side" -lt "$inst" ] && [ "$inst" -lt "$t2" ] || fail "$SCRIPT must config-test before it moves anything into $EDGE_CONF_DIR (lines $t1 / $side / $inst / $t2)"
 # Nothing writes into the live conf dir before the staged test.
-if bad="$(awk -F': ' -v t="$t1" '$1+0 < t' <<<"$ex" | grep -E '(install|cp|mv|tee)[[:space:]].*"\$EDGE_CONF_DIR/|>[[:space:]]*"\$EDGE_(CONF_DIR/|MAIN_CONF)')"; then
+if bad="$(awk -F': ' -v t="$t1" '$1+0 < t' <<<"$ex" | grep -E '(install|cp|mv|tee|sed -i|ln)[[:space:]].*("\$EDGE_CONF_DIR/|"\$EDGE_MAIN_CONF"|/etc/cfm-edge/)|>>?[[:space:]]*("\$EDGE_(CONF_DIR/|MAIN_CONF)|/etc/cfm-edge/)')"; then
   fail "$SCRIPT writes into the live conf dir before the staged config test:
 $bad"
 fi
