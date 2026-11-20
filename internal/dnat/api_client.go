@@ -26,6 +26,10 @@ func SetAPIBase(base string) {
 	_apiBase.Store(strings.TrimRight(strings.TrimSpace(base), "/"))
 }
 
+// APIBase is the daemon API base URL main set (SetAPIBase), for the other
+// CLI commands that ask the daemon (`cfm edge check`): one copy.
+func APIBase() string { return apiBase() }
+
 func apiBase() string {
 	if v := _apiBase.Load(); v != nil {
 		return v.(string)

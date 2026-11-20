@@ -92,7 +92,11 @@ func TestCheckFlags(t *testing.T) {
 	if strings.TrimSpace(out.String()) != strings.TrimSpace(warnReport) {
 		t.Fatalf("--json must print the report as it came:\n%s", out.String())
 	}
-	for _, args := range [][]string{{"check", "--window", "x"}, {"check", "--window", "0"}, {"check", "extra"}} {
+	d, _, _ = checkDeps(okReport, nil, &w)
+	if rc := run([]string{"check", "--window=700"}, d); rc != 0 || w != 700 {
+		t.Fatalf("--window=: rc=%d window=%d", rc, w)
+	}
+	for _, args := range [][]string{{"check", "--window", "x"}, {"check", "--window", "0"}, {"check", "--window"}, {"check", "--window=-3"}, {"check", "extra"}} {
 		called := false
 		d, _, _ := checkDeps(okReport, nil, nil)
 		d.check = func(int) ([]byte, error) { called = true; return nil, nil }
@@ -106,6 +110,15 @@ func TestFetchEdgeHealth(t *testing.T) {
 	var gotAuth, gotQuery, gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth, gotQuery, gotPath = r.Header.Get("Authorization"), r.URL.RawQuery, r.URL.Path
+		switch r.URL.Query().Get("window") {
+		case "14":
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte("<html>" + strings.Repeat("x", 4096) + "</html>"))
+			return
+		case "15":
+			_, _ = w.Write(bytes.Repeat([]byte(" "), maxReport+10))
+			return
+		}
 		if r.URL.Query().Get("window") == "13" {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"ok":false,"error":"admin only"}`))
@@ -116,7 +129,8 @@ func TestFetchEdgeHealth(t *testing.T) {
 	defer srv.Close()
 	oldBase, oldTok := apiBase, clihttp.Token()
 	t.Cleanup(func() { apiBase = oldBase; clihttp.SetToken(oldTok) })
-	SetAPIBase(srv.URL + "/")
+	base := srv.URL + "/"
+	apiBase = func() string { return base }
 	clihttp.SetToken("tok")
 
 	body, err := fetchEdgeHealth(2000)
@@ -133,18 +147,33 @@ func TestFetchEdgeHealth(t *testing.T) {
 	if _, err := fetchEdgeHealth(13); err == nil || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "admin only") {
 		t.Fatalf("err=%v", err)
 	}
-	apiBase = ""
+	// A big error page is clipped; a report over the limit is an error.
+	if _, err := fetchEdgeHealth(14); err == nil || len(err.Error()) > 700 || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("clip: len=%d err=%.80v", len(err.Error()), err)
+	}
+	if _, err := fetchEdgeHealth(15); err == nil || !strings.Contains(err.Error(), "larger than 8 MB") {
+		t.Fatalf("limit: err=%v", err)
+	}
+	// Nothing listening: the daemon is down.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+	base = deadURL
+	if _, err := fetchEdgeHealth(0); err == nil || !strings.Contains(err.Error(), "is cfm running") {
+		t.Fatalf("down: err=%v", err)
+	}
+	base = ""
 	if _, err := fetchEdgeHealth(0); err == nil {
 		t.Fatal("no API base must be an error")
 	}
 	// A daemon that does not answer in time is an error, not a hang.
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { time.Sleep(300 * time.Millisecond) }))
 	defer slow.Close()
-	SetAPIBase(slow.URL)
+	base = slow.URL
 	oldTimeout := checkTimeout
 	checkTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { checkTimeout = oldTimeout })
-	if _, err := fetchEdgeHealth(0); err == nil || !strings.Contains(err.Error(), "cannot reach the daemon API") {
-		t.Fatalf("timeout: err=%v", err)
+	if _, err := fetchEdgeHealth(0); err == nil || !strings.Contains(err.Error(), "did not answer within") || strings.Contains(err.Error(), "is cfm running") {
+		t.Fatalf("a timeout must not read as the daemon down: err=%v", err)
 	}
 }

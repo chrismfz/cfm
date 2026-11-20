@@ -3,6 +3,7 @@ package edgecli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,14 +13,15 @@ import (
 	"time"
 
 	"cfm/internal/clihttp"
+	"cfm/internal/dnat"
 )
 
-// apiBase is the daemon API `cfm edge check` asks (set by main, as for
-// `cfm dnat`'s daemon state).
-var apiBase string
+// apiBase is the daemon API `cfm edge check` asks: the one main gives
+// `cfm dnat` (dnat.SetAPIBase), never a second copy. A seam for tests.
+var apiBase = dnat.APIBase
 
-// SetAPIBase sets the daemon API base URL (e.g. http://127.0.0.1:6060).
-func SetAPIBase(u string) { apiBase = strings.TrimRight(u, "/") }
+// maxReport bounds the report read; a larger one is an error, not a silent cut.
+const maxReport = 8 << 20
 
 // checkTimeout bounds one edge-health call: the daemon tails the edge logs
 // and runs the engine's `-v`, which takes seconds on a busy node.
@@ -45,10 +47,11 @@ type edgeHealthReport struct {
 // fetchEdgeHealth GETs the daemon's edge-health report (admin-only: the CLI's
 // token from cfm.conf, as every other CLI call to the daemon).
 func fetchEdgeHealth(window int) ([]byte, error) {
-	if apiBase == "" {
+	base := strings.TrimRight(apiBase(), "/")
+	if base == "" {
 		return nil, fmt.Errorf("no daemon API address configured")
 	}
-	u := apiBase + "/api/v1/system/edge-health"
+	u := base + "/api/v1/system/edge-health"
 	if window > 0 {
 		u += "?" + url.Values{"window": {strconv.Itoa(window)}}.Encode()
 	}
@@ -61,15 +64,25 @@ func fetchEdgeHealth(window int) ([]byte, error) {
 	req.Header.Set("Accept", "application/json")
 	resp, err := clihttp.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("cannot reach the daemon API at %s (is cfm running?): %w", apiBase, err)
+		if errors.Is(err, context.DeadlineExceeded) {
+			// The daemon is up but still scanning the edge logs.
+			return nil, fmt.Errorf("the daemon did not answer within %s (a large --window scans more of the edge logs; try a smaller one)", checkTimeout)
+		}
+		return nil, fmt.Errorf("cannot reach the daemon API at %s (is cfm running?): %w", base, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxReport+1))
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("the daemon did not finish the report within %s (try a smaller --window)", checkTimeout)
+		}
 		return nil, fmt.Errorf("read the edge-health report: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("the daemon answered %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("the daemon answered %s: %s", resp.Status, clip(strings.TrimSpace(string(body)), 512))
+	}
+	if len(body) > maxReport {
+		return nil, fmt.Errorf("the edge-health report is larger than %d MB", maxReport>>20)
 	}
 	return body, nil
 }
@@ -78,10 +91,19 @@ const checkUsage = `Usage: cfm edge check [--json] [--window N]
   The edge's health checks (the MCP edge_health tool, docs/edge-health.md):
   engine version traps, origin 421 / premature-close storms, origin keepalive,
   a CDN caching the challenge, origin real IP, web DNAT order.
-  --window N   access-log lines to scan (the daemon's default when omitted)
+  --window N   access-log lines to scan (default 50000, the daemon caps it at 500000)
   --json       the daemon's report as it came
-Exit status: 0 all ok, 1 a warn / unknown / critical finding or no report.
+Exit status: 0 all ok; 1 a warn / unknown / critical finding, or no report
+(a resolved 421 storm still in the log tail stays warn until it scrolls out);
+2 a usage error.
 `
+
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
 
 func runCheck(args []string, d deps) int {
 	asJSON, window := false, 0
@@ -89,13 +111,21 @@ func runCheck(args []string, d deps) int {
 		switch a := args[i]; {
 		case a == "--json":
 			asJSON = true
-		case a == "--window" && i+1 < len(args):
-			n, err := strconv.Atoi(args[i+1])
+		case a == "--window" || strings.HasPrefix(a, "--window="):
+			v, ok := strings.CutPrefix(a, "--window=")
+			if !ok {
+				if i+1 >= len(args) {
+					fmt.Fprintln(d.errOut, "edge check: --window wants a number")
+					return 2
+				}
+				v, i = args[i+1], i+1
+			}
+			n, err := strconv.Atoi(v)
 			if err != nil || n <= 0 {
-				fmt.Fprintf(d.errOut, "edge check: --window wants a positive number, not %q\n", args[i+1])
+				fmt.Fprintf(d.errOut, "edge check: --window wants a positive number, not %q\n", v)
 				return 2
 			}
-			window, i = n, i+1
+			window = n
 		case a == "help" || a == "-h" || a == "--help":
 			fmt.Fprint(d.out, checkUsage)
 			return 0
