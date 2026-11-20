@@ -34,19 +34,21 @@ relevant output and stop (don't keep going past a hard failure).
    new edge sidecars staged; a failed run leaves the live dir untouched)
 18. `./scripts/tests/check_edge_listen_v6.sh` (edge IPv6 listen: script and confs
    agree on ports and glob includes; the EDGE_LISTEN_V6 decision (default off); the deploy hook)
-19. `./scripts/tests/check_rpm_spec_macros.sh`
-20. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
+19. `./scripts/tests/check_install_edge.sh` (install-edge.sh prepares only: no
+   systemctl switch, no `cfm dnat`; adoption line = the deploy's; `-t` before install)
+20. `./scripts/tests/check_rpm_spec_macros.sh`
+21. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
    every `proxy_cache` location gated on `$cfm_cache_skip`)
-21. `./scripts/tests/stamp_changelog_test.sh`
-22. `./scripts/tests/release_notes_test.sh`
-23. `./scripts/tests/check_preflight_parity.sh` (this list and the CLAUDE.md §3
+22. `./scripts/tests/stamp_changelog_test.sh`
+23. `./scripts/tests/release_notes_test.sh`
+24. `./scripts/tests/check_preflight_parity.sh` (this list and the CLAUDE.md §3
    block == the commands `security.yml` runs)
-24. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
+25. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
    "code changed → needs a `[Unreleased]` entry" leg only runs in CI)
 
 Keep this list in sync with `security.yml`. It drifted twice — once silently
 dropping seven gates, later missing `check_site_cache_config.sh` — the same
-false-confidence failure the guardrails exist to prevent; step 23 now fails CI
+false-confidence failure the guardrails exist to prevent; step 24 now fails CI
 on any difference, in either direction.
 
 If everything passes, say so explicitly. If something fails, summarize what

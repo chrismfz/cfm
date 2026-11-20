@@ -126,7 +126,8 @@ nginx's default `X-Real-IP`). On cPanel the drop-in loads after
 visitors are already resolved by the edge. On DirectAdmin the managed block
 loads before `httpd-cloudflare.conf`, whose `X-Forwarded-For` stays in effect.
 
-The edge installers (`scripts/install-angie.sh`, `scripts/install-openresty.sh`)
+The edge installers (`scripts/install-angie.sh`, `scripts/install-openresty.sh`,
+`scripts/install-edge.sh`)
 run `cfm realip fix` after deploying the edge conf. It is never fatal: the edge
 works either way. `CFM_SKIP_REALIP=1` skips it, and a `cfm` without the command
 prints the upgrade hint.
