@@ -24,7 +24,10 @@ loopback, its access logs and PHP's REMOTE_ADDR read 127.0.0.1. fix writes:
   cPanel ea-nginx     /etc/nginx/conf.d/server-includes/cfm-realip.conf (every site server{})
   DirectAdmin nginx   a marked block in /etc/nginx/nginx-includes.conf
   nginx               /etc/nginx/conf.d/cfm-realip.conf
-LiteSpeed and NGM are reported with the manual step (CFM does not edit their config).
+  DirectAdmin OpenLiteSpeed  the allow list (and useIpInProxyHeader) in /etc/openlitespeed,
+                      and the same file in custombuild/custom/openlitespeed/conf/ (kept
+                      by rewrite_confs); graceful restart, restored if it does not come back
+LiteSpeed Enterprise, plain OpenLiteSpeed and NGM are reported with the manual step.
 Only the loopback is ever trusted, never the server's public IP.
 
 Exit status: status 0 = fine (or no edge in front), 1 = the edge is in front and
@@ -91,6 +94,12 @@ func runCLI(args []string, w io.Writer, l layout, edgeActive func() bool) int {
 			where = "a marked block in " + pl.Path
 		}
 		if flags["--dry-run"] {
+			if len(pl.Writes) > 0 {
+				for _, fw := range pl.Writes {
+					fmt.Fprintf(w, "  would write %s:\n%s", fw.Path, indent(fw.Content))
+				}
+				return 0
+			}
 			fmt.Fprintf(w, "  would write %s:\n%s", where, indent(pl.Content))
 			return 0
 		}
