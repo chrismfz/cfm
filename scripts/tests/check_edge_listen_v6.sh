@@ -619,7 +619,7 @@ printf 'trusted' >"$tmp/realip"
 rm -f "$tmp/edge.active"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 run status
-[ "$sdef" != auto ] || says "an edge start never turns it on: run: sh"
+[ "$sdef" != auto ] || says "an edge start never turns it on: run: cfm edge ipv6 on"
 
 # prestart under the default with files a render approved: the trust and the
 # config test still apply; a half pair never starts.

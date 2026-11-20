@@ -778,3 +778,16 @@ func TestApplyOLSRidesOutATransientMainPID(t *testing.T) {
 		t.Fatalf("want one reload, got %d: %v", n, *calls)
 	}
 }
+
+// server3: the OK line ended in an empty "header " for OpenLiteSpeed, whose
+// probe names no header.
+func TestVerdictWithoutAHeader(t *testing.T) {
+	_, text := Verdict(Probe{Panel: "directadmin", Stack: StackLiteSpeed, Trusted: true, Directive: "useIpInProxyHeader 2 (OpenLiteSpeed)", Source: "/etc/openlitespeed/httpd-accesscontrol.conf"}, true)
+	if strings.Contains(text, "header") || !strings.HasSuffix(text, "httpd-accesscontrol.conf)") {
+		t.Fatalf("text = %q", text)
+	}
+	_, text = Verdict(Probe{Panel: "cpanel", Stack: StackApache, Trusted: true, Directive: "RemoteIPInternalProxy", Source: "/x", Header: "X-Real-IP"}, true)
+	if !strings.HasSuffix(text, ", header X-Real-IP") {
+		t.Fatalf("text = %q", text)
+	}
+}

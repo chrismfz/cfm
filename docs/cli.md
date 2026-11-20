@@ -234,6 +234,9 @@ the origin real-IP verdict, then what needs a look:
   nothing);
 - DNAT off while its saved intent is on (the daemon's failsafe puts it back
   once the edge answers; `cfm edge off` / `cfm edge panel off` clear it).
+- the host can do IPv6 but the running edge listens on IPv4 only: the next
+  step, `cfm edge ipv6 on`, or `cfm edge realip fix` first when the origin
+  does not trust the edge's `::1`.
 
 A state it cannot read prints `UNKNOWN (…)` (an unreadable bypass list: "bypass
 list unreadable") and exits 1, never `OFF`; the panel priority is the live
