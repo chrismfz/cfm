@@ -143,6 +143,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_package_lua_delivery.sh    # Lua ships ONLY as /var/lib/cfm/lua/*, package-owned (see §5)
 ./scripts/tests/check_package_proxy_config_deploy.sh # upgrade tests new edge sidecars staged (-T, real nginx); a failed run leaves the live dir untouched
 ./scripts/tests/check_edge_listen_v6.sh          # edge IPv6 listen: script <-> conf ports/glob includes, default (script = Go) + EDGE_LISTEN_V6, the decision, deploy hook
+./scripts/tests/check_install_edge.sh            # install-edge.sh prepares only: no systemctl switch / cfm dnat, adoption line = deploy's, -t before install
 ./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments + build-dated top %changelog entry (see §5)
 ./scripts/tests/check_site_cache_config.sh       # Site Cache bypass-by-default: every proxy_cache location gated on $cfm_cache_skip (see §6)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test

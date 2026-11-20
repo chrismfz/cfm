@@ -83,7 +83,7 @@ grep -qE '(^|[[:space:]])(/var/lib/cfm/lua/\*|%\{_sharedstatedir\}/cfm/lua/\*)[[
 # The postinst loop that copied from /usr/share/cfm/configs/lua was removed
 # 2026-09-22. No shipped script may read that path again, in any spelling.
 for f in "$POSTINST" "$SPEC" scripts/package-proxy-config-deploy.sh \
-         scripts/install-angie.sh scripts/install-openresty.sh; do
+         scripts/install-angie.sh scripts/install-openresty.sh scripts/install-edge.sh; do
   [ -f "$f" ] || continue
   # A line that DELETES the path is the fix, not the failure — only reads count.
   # grep -vE reads every line (no early close), so this inner pipe can't SIGPIPE;

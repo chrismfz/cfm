@@ -45,7 +45,7 @@ for conf in configs/angie.conf configs/openresty.conf configs/cfm-panel-listener
   fi
 done
 
-for script in scripts/install-angie.sh scripts/install-openresty.sh; do
+for script in scripts/install-angie.sh scripts/install-openresty.sh scripts/install-edge.sh; do
   if ! diff_out="$(diff <(packaged_lua) <(installer_manifest "$script"))"; then
     echo "CFM_LUA_MANIFEST in $script does not match the packaged set (configs/lua/*.lua):" >&2
     echo "$diff_out" | sed -n 's/^< /  missing from the installer: /p;s/^> /  in the installer but not packaged: /p' >&2
@@ -64,5 +64,6 @@ fi
 
 rg -q "cfm-panel-listeners.conf.in" scripts/install-angie.sh || { echo "install-angie.sh must render canonical panel listener template" >&2; exit 1; }
 rg -q "cfm-panel-listeners.conf.in" scripts/install-openresty.sh || { echo "install-openresty.sh must render canonical panel listener template" >&2; exit 1; }
+rg -q "cfm-panel-listeners.conf.in" scripts/install-edge.sh || { echo "install-edge.sh must render canonical panel listener template" >&2; exit 1; }
 
 echo "OK: single template ownership enforced"
