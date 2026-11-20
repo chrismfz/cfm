@@ -522,12 +522,14 @@ done
 rm -f "$configs/cfm-edge.conf"
 
 # Only an ADOPTED cfm-edge is deployed: its live nginx.conf must carry the
-# render's header. The package's placeholder (or a missing file) is left
-# alone, and the marker must be the render's exact text.
+# adoption token line. The package's placeholder (or a missing file) is left
+# alone. The token is pinned to its exact text: every adopted node's live
+# config holds it, so a new text would silently un-adopt them all. Never
+# "fix" this check by changing the expected line.
 marker=$(sed -n "s/^CFMEDGE_ADOPT_MARKER='\(.*\)'$/\1/p" scripts/package-proxy-config-deploy.sh)
-[ -n "$marker" ] || { echo "FAIL: CFMEDGE_ADOPT_MARKER not found in the deploy script" >&2; exit 1; }
-rg -qF "$marker" scripts/render-cfm-edge-conf.sh || { echo "FAIL: the adoption marker is not what render-cfm-edge-conf.sh writes" >&2; exit 1; }
-rg -qF "$marker" configs/cfm-edge.conf || { echo "FAIL: configs/cfm-edge.conf lacks the adoption marker" >&2; exit 1; }
+[ "$marker" = '# cfm-edge-adopted-by: cfm' ] || { echo "FAIL: CFMEDGE_ADOPT_MARKER changed (or is missing): got '$marker'; it must stay '# cfm-edge-adopted-by: cfm' forever" >&2; exit 1; }
+rg -qxF "    echo \"$marker\"" scripts/render-cfm-edge-conf.sh || { echo "FAIL: render-cfm-edge-conf.sh does not write the adoption token line" >&2; exit 1; }
+rg -qxF "$marker" configs/cfm-edge.conf || { echo "FAIL: configs/cfm-edge.conf lacks the adoption token line" >&2; exit 1; }
 printf '# cfm-edge placeholder\nevents {}\n' >"$tmp/placeholder.conf"
 adopt_out=$(sh -c '. "$1"; cfmedge_adopted "$2" && echo adopted; cfmedge_adopted "$3" && echo adopted; cfmedge_adopted "$4" && echo adopted; echo done' sh \
   "$tmp/functions.sh" "$tmp/placeholder.conf" "$tmp/no-such.conf" configs/cfm-edge.conf)
@@ -536,9 +538,16 @@ adopt_out=$(sh -c '. "$1"; cfmedge_adopted "$2" && echo adopted; cfmedge_adopted
 # functions) must gate on adoption and deploy to cfm-edge's own paths.
 rg -qF 'if [ -n "$CFMEDGE_BIN" ] && ! cfmedge_adopted /etc/cfm-edge/nginx.conf; then' scripts/package-proxy-config-deploy.sh \
   || { echo "FAIL: the cfm-edge deploy is not gated on adoption" >&2; exit 1; }
-for want in '"$CFM_CONFIG_DIR/cfm-edge.conf" \' '/etc/cfm-edge/nginx.conf \' '/etc/cfm-edge \' 'cfm-edge.service \'; do
-  rg -qF "        $want" scripts/package-proxy-config-deploy.sh || { echo "FAIL: the cfm-edge process_engine call lacks: $want" >&2; exit 1; }
-done
+# The whole call, in argument order (engine, bin, src, dst, sidecar dir, unit):
+# a swapped src/dst would deploy the package's file over CFM's template.
+rg -qUF 'process_engine \
+        cfm-edge \
+        "$CFMEDGE_BIN" \
+        "$CFM_CONFIG_DIR/cfm-edge.conf" \
+        /etc/cfm-edge/nginx.conf \
+        /etc/cfm-edge \
+        cfm-edge.service \' scripts/package-proxy-config-deploy.sh \
+  || { echo "FAIL: the cfm-edge process_engine call is not engine, bin, cfm-edge.conf, /etc/cfm-edge/nginx.conf, /etc/cfm-edge, cfm-edge.service in that order" >&2; exit 1; }
 
 failure_output=$(
   PATH="$bin_dir:$PATH" \

@@ -18,12 +18,17 @@ CFMEDGE_DEPLOYED=0
 CFMEDGE_ACTIVE=0
 CFMEDGE_NOT_ADOPTED=0
 
-# cfmedge_adopted LIVE_CONF: true when cfm-edge's live config is CFM's (the
-# header scripts/render-cfm-edge-conf.sh writes; check_package_proxy_config_
-# deploy.sh pins the two texts equal), not the package's placeholder.
-CFMEDGE_ADOPT_MARKER='GENERATED from configs/openresty.conf by scripts/render-cfm-edge-conf.sh'
+# cfmedge_adopted LIVE_CONF: true when cfm-edge's live config is CFM's, not
+# the package's placeholder: it holds the adoption token line that
+# scripts/render-cfm-edge-conf.sh writes (check_package_proxy_config_deploy.sh
+# pins the two equal). A dedicated, never-changing line, not the header prose:
+# changing it would silently un-adopt every node, whose live config keeps the
+# old text. (The Go side's "CFM is wired in" signal for cfm-edge is its
+# trusted_proxies.conf sidecar, edgeengine.Profiles ConfigHookPaths, which
+# this deploy writes only on an adopted node.)
+CFMEDGE_ADOPT_MARKER='# cfm-edge-adopted-by: cfm'
 cfmedge_adopted() {
-    grep -qF "$CFMEDGE_ADOPT_MARKER" "$1" 2>/dev/null
+    grep -qxF "$CFMEDGE_ADOPT_MARKER" "$1" 2>/dev/null
 }
 
 find_first_executable() {

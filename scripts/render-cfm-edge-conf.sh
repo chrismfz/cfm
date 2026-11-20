@@ -34,6 +34,11 @@ trap 'rm -f "$tmp"' EXIT
     echo "#"
     echo "# GENERATED from configs/openresty.conf by scripts/render-cfm-edge-conf.sh."
     echo "# Do not edit: change openresty.conf and re-render (CI checks they match)."
+    # The adoption token: package-proxy-config-deploy.sh deploys to a
+    # cfm-edge only when its live nginx.conf carries this exact line. NEVER
+    # change it: every adopted node's live config holds the old text, and a
+    # new one would silently stop every CFM upgrade from updating them.
+    echo "# cfm-edge-adopted-by: cfm"
     sed '1d' "$SRC"
 } | sed \
     -e 's|/usr/local/openresty/nginx/logs/nginx\.pid|/run/cfm-edge.pid|g' \

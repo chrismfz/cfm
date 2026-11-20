@@ -527,8 +527,8 @@ release: bypass-list trusted-proxies cfm-edge-conf bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
 	@set -uo pipefail; \
 	REL_FILES="CHANGELOG.md"; \
-	if [ -z "$$(git status --porcelain -- configs/openresty.conf 2>/dev/null)" ]; then REL_FILES="$$REL_FILES configs/cfm-edge.conf"; \
-	else echo "⚠️  configs/openresty.conf has uncommitted changes: packaged as-is, but configs/cfm-edge.conf is NOT committed (it would not match the committed openresty.conf and fail CI). Commit both by hand."; fi; \
+	if [ -z "$$(git status --porcelain -- configs/openresty.conf scripts/render-cfm-edge-conf.sh 2>/dev/null)" ]; then REL_FILES="$$REL_FILES configs/cfm-edge.conf"; \
+	else echo "⚠️  configs/openresty.conf or scripts/render-cfm-edge-conf.sh has uncommitted changes: packaged as-is, but configs/cfm-edge.conf is NOT committed (it would not match what CI renders and fail it). Commit them together by hand."; fi; \
 	if [ "$(BYPASS_REFRESH)" != "0" ]; then REL_FILES="$$REL_FILES configs/challenge_waf_bypass.conf configs/trusted_proxies.conf"; fi; \
 	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- $$REL_FILES)" ]; then \
 	  echo "📝 Committing $$REL_FILES (only) for $(REL_DATE)..."; \
