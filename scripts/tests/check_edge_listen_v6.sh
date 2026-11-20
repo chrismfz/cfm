@@ -577,6 +577,56 @@ run render cfm-edge
 expect absent "render <another engine>: this engine is left alone"
 run render TEST
 expect_default "render <this engine> (case-insensitive) renders it"
+run render nginx
+says 'no edge engine named "nginx"'
+
+# prepare: render's decision and writes, the default included, but never a
+# reload, even of a running edge (an engine's own installer, prepare-only).
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+touch "$tmp/edge.active"
+: >"$tmp/edgectl.calls"
+run prepare Test
+expect_default "prepare <engine> under the default writes the files"
+grep -q '^reload' "$tmp/edgectl.calls" && fail "prepare reloaded the edge: $(cat "$tmp/edgectl.calls")"
+[ "$sdef" != auto ] || says "applies at the next start or reload"
+printf 'untrusted' >"$tmp/realip"
+run prepare Test
+expect absent "prepare: the origin does not trust ::1 -> removed"
+says "reload it to apply"
+grep -q '^reload' "$tmp/edgectl.calls" && fail "prepare reloaded the edge after a removal: $(cat "$tmp/edgectl.calls")"
+printf 'trusted' >"$tmp/realip"
+rm -f "$tmp/edge.active"
+
+# prestart under the default with files a render approved: the trust and the
+# config test still apply; a half pair never starts.
+run render
+expect_default "default: render approves the files"
+if [ "$sdef" = auto ]; then
+  printf 'untrusted' >"$tmp/realip"
+  run prestart
+  expect absent "default, kept files, the origin no longer trusts ::1 -> prestart removes them"
+  printf 'trusted' >"$tmp/realip"
+  run render
+  printf 'with-v6' >"$tmp/engine.fail"
+  run prestart
+  expect absent "default, kept files that fail the config test -> prestart removes them"
+  rm -f "$tmp/engine.fail"
+  run render
+  rm -f "$conf_dir/cfm-listen-v6-https.conf"
+  run prestart
+  expect absent "default, a half pair (one file left) -> prestart removes it"
+fi
+printf 'EDGE_LISTEN_V6 = auto\n' >"$cfm_conf"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run prestart
+expect present "an explicit EDGE_LISTEN_V6 = auto lets prestart write them (only absent / empty is the default)"
+for v in '' '""' '; note'; do
+  printf 'EDGE_LISTEN_V6 = %s\n' "$v" >"$cfm_conf"
+  rm -f "$conf_dir"/cfm-listen-v6-*.conf
+  run prestart
+  expect absent "EDGE_LISTEN_V6 = $v reads as the default: prestart writes nothing"
+done
+rm -f "$cfm_conf"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 printf 'with-v6' >"$tmp/engine.fail"

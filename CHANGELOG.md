@@ -31,7 +31,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   IPv6 hop from `::1`, reloading the edge and confirming the listen;
   otherwise it stays on IPv4 as before. An edge start (a reboot, a restart,
   the edge's own package upgrade) and a cfm package upgrade never turn it on
-  by themselves: they keep what a render approved. `cfm realip` (and its
+  by themselves: they keep what a render approved. `install-edge.sh` now runs
+  the new `prepare cfm-edge` (render's decision for cfm-edge alone, never a
+  reload), so a freshly prepared cfm-edge starts with IPv6 where the host is
+  ready; the script also takes an engine name after the action. `cfm realip` (and its
   whats_wrong / edge_health finding) now asks for the `::1` trust on every
   IPv6-capable host, and exits 1 until it is there: run `cfm realip fix`
   (Apache / nginx; LiteSpeed needs `::1T` by hand) where it says so, then

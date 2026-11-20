@@ -10,7 +10,7 @@
 #
 # It NEVER touches the live edge or the DNAT: no systemctl start / stop /
 # restart / enable / disable, no `cfm dnat`, and the IPv6 listen script only
-# as a cfm-edge-scoped `prestart`, which never reloads
+# as a cfm-edge-scoped `prepare`, which never reloads
 # (scripts/tests/check_install_edge.sh pins it). The switch and the way back are printed at the end, for the engine
 # that runs now: `cfm dnat off` first (the origin serves directly), then the
 # systemctl swap at leisure (both edges bind :9080 / :9043 and the panel
@@ -344,19 +344,26 @@ ensure_origin_realip() {
     return 0
 }
 
-# The IPv6 listen decision (EDGE_LISTEN_V6, off by default; docs/edge-ipv6.md)
-# for cfm-edge ONLY, and in `prestart` mode: it writes or removes cfm-edge's
-# IPv6 listen files and config-tests them, but never reloads anything. A
-# plain `render` would walk every engine and reload the live openresty/angie
-# (check_install_edge.sh refuses it). Never fails the install.
+# The IPv6 listen decision (EDGE_LISTEN_V6, on by default; docs/edge-ipv6.md)
+# for cfm-edge ONLY, as `prepare`: render's decision (the default included),
+# so it writes or removes cfm-edge's IPv6 listen files and config-tests them,
+# but it never reloads anything; the files apply when the operator starts
+# cfm-edge. A `render` reloads a running edge, and `prestart` writes nothing
+# new under the default (check_install_edge.sh refuses both). An older script
+# without `prepare` is left alone (IPv4 only until the package's own run).
+# Never fails the install.
 ensure_edge_listen_v6() {
     local script=/usr/share/cfm/scripts/cfm-edge-listen-v6.sh
     if [ ! -f "$script" ]; then
         warn "Edge IPv6 listen: $script missing; IPv4 only until the cfm package runs it"
         return 0
     fi
+    if ! grep -q '|prepare|' "$script"; then
+        warn "Edge IPv6 listen: $script predates 'prepare'; IPv4 only for now (upgrade cfm, then: sh $script render cfm-edge)"
+        return 0
+    fi
     snapshot_edge_logs
-    CFM_EDGE_ENGINES="cfm-edge|$EDGE_BIN|$EDGE_CONF_DIR|$EDGE_MAIN_CONF" sh "$script" prestart || true
+    CFM_EDGE_ENGINES="cfm-edge|$EDGE_BIN|$EDGE_CONF_DIR|$EDGE_MAIN_CONF" sh "$script" prepare cfm-edge || true
     drop_test_created_logs
     return 0
 }

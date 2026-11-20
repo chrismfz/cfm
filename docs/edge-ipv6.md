@@ -33,10 +33,10 @@ in `/etc/cfm/cfm.conf` keeps a node on IPv4.
 | Piece | What it does |
 |---|---|
 | `configs/openresty.conf`, `configs/angie.conf`, `configs/cfm-edge.conf` (rendered from openresty.conf) | each listener `server{}` includes `cfm-listen-v6-http.con[f]` / `cfm-listen-v6-https.con[f]` from the engine's conf dir (`/usr/local/openresty/nginx/conf`, `/etc/angie`, `/etc/cfm-edge`). The glob makes an **absent file mean IPv4 only**, not a failed config test. |
-| `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. A `render` that writes the files reloads a running edge at once and checks (`/proc/net/tcp6`) that it listens on `[::]:9080` and `[::]:9043`; if not, it removes them and reloads back. A `render` that removes files a running edge listens with reloads it too. `prestart` and `deploy` never reload. |
+| `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. A `render` that writes the files reloads a running edge at once and checks (`/proc/net/tcp6`) that it listens on `[::]:9080` and `[::]:9043`; if not, it removes them and reloads back. A `render` that removes files a running edge listens with reloads it too. `prepare`, `prestart` and `deploy` never reload. |
 | `cfm-edge-listen-v6.service` (`configs/`, installed to `/etc/systemd/system/`) | oneshot running the script (`prestart`) before every edge start; `TimeoutStartSec=60`. |
 | drop-in `openresty.service.d/cfm-listen-v6.conf`, `angie.service.d/cfm-listen-v6.conf`, `cfm-edge.service.d/cfm-listen-v6.conf` | `Wants=` + `After=` that unit, so it runs **before** the edge unit's own `ExecStartPre` config test (a drop-in `ExecStartPre` would run after it, too late). `Wants=`, not `Requires=`: the edge starts if the unit fails. |
-| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`deploy`) after the new edge configs are deployed: it keeps or removes files (prestart's rules) but never writes new ones and never reloads, so an upgrade never turns IPv6 on. It never rewrites a kept file either (a changed body is `render`'s to apply), and when it removes files a running edge listens with it says to reload. The installers `install-openresty.sh` and `install-angie.sh` run `render`, after `cfm realip fix`; `install-edge.sh` runs a `prestart` scoped to cfm-edge (`CFM_EDGE_ENGINES`), which writes and tests its files but never reloads (a `render` reloads every running edge, and that installer must not touch the live one). |
+| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`deploy`) after the new edge configs are deployed: it keeps or removes files (prestart's rules) but never writes new ones and never reloads, so an upgrade never turns IPv6 on. It never rewrites a kept file either (a changed body is `render`'s to apply), and when it removes files a running edge listens with it says to reload. The installers `install-openresty.sh` and `install-angie.sh` run `render`, after `cfm realip fix`; `install-edge.sh` runs `prepare cfm-edge` (scoped with `CFM_EDGE_ENGINES` too): render's decision, the default included, so it writes and tests cfm-edge's files, but it never reloads (that installer must not touch the live edge; the files apply when the operator starts cfm-edge). |
 
 ## The decision
 
@@ -45,7 +45,7 @@ otherwise (the script logs which one failed):
 
 0. `EDGE_LISTEN_V6` allows it: `on` / `yes` / `true` / `1` / `auto`; `off` /
    `no` / `false` / `0` / `disabled` and any unknown value forbid it; absent,
-   the default (off for now). Last uncommented line wins; an inline `;` / `#`
+   the default (`auto`, on where the host is ready). Last uncommented line wins; an inline `;` / `#`
    comment and one pair of matching quotes are stripped. The script and
    `cfm realip` read it the same way: both run
    `scripts/tests/fixtures/edge_listen_v6_mode.txt`;
@@ -82,8 +82,11 @@ otherwise (the script logs which one failed):
    a refused package deploy does not, and the files are then removed);
 6. the engine's config test passes with them.
 
-`render` (deploy, by hand) makes the full decision. `prestart` (before every
-edge start) makes the same one, except that files a `render` already approved
+`render` (by hand, the installers) makes the full decision; `prepare <engine>`
+makes the same one without ever reloading (an engine's own installer).
+`prestart` (before every edge start) makes it too, except that under the
+default (no or an empty `EDGE_LISTEN_V6`; an explicit `on` / `auto` lets it
+write) it never writes files that are not there, and that files a `render` already approved
 are **kept** when only readiness is missing, which at boot is common: no
 global IPv6 address yet (SLAAC, the network still coming up), the origin not
 seen on IPv6 yet (it can start after the edge), `cfm realip` giving no
