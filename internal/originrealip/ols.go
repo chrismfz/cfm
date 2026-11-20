@@ -784,7 +784,20 @@ func applyOLS(pl Plan, w io.Writer) error {
 		return runCmd(fixTimeout, olsCtl, "restart")
 	}
 	before := pid()
-	if before == "?" {
+	anyLive := false
+	for _, fw := range pl.Writes {
+		anyLive = anyLive || fw.Live
+	}
+	if anyLive && unit != "" && before == "" {
+		// The unit is not active: is litespeed serving outside it (a USR1
+		// from outside, a hand start)? Then a reload through the unit would
+		// not reach it, and writing alone would read trusted while the
+		// server keeps the old config (final review).
+		if out, err := runCmd(fixTimeout, olsCtl, "status"); err == nil && strings.Contains(out, "is running") {
+			return errors.New("OpenLiteSpeed runs outside its systemd unit " + unit + " (lswsctrl status says it runs, systemd does not); restart it with systemctl restart " + unit + " first; nothing written")
+		}
+	}
+	if anyLive && before == "?" {
 		// Running, but its master PID cannot be read: whether a restart took
 		// the new config could not be told (re-review).
 		return errors.New("OpenLiteSpeed runs but its master PID cannot be read (systemctl show MainPID / lswsctrl status); nothing written")
@@ -850,8 +863,9 @@ func applyOLS(pl Plan, w io.Writer) error {
 	}
 	rollback()
 	_, rerr := reload()
-	if rerr == nil && pid() == "" && unit != "" {
-		_, rerr = runCmd(fixTimeout, "systemctl", "start", unit) // a reload does not start a stopped unit
+	if pid() == "" && unit != "" {
+		// A reload does not start a stopped unit (and fails on an inactive one).
+		_, rerr = runCmd(fixTimeout, "systemctl", "start", unit)
 	}
 	state := "it was restarted on the restored files and runs"
 	if rerr != nil || pid() == "" {

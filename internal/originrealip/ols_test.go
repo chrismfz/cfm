@@ -657,3 +657,95 @@ func TestApplyOLSRefusesAnUnreadablePID(t *testing.T) {
 		t.Fatalf("written anyway: %q", got)
 	}
 }
+
+// Final review: the unit is inactive but litespeed serves outside it: refuse,
+// nothing written (writing alone would read trusted on the old config).
+func TestApplyOLSRefusesAServerOutsideItsUnit(t *testing.T) {
+	l, r := olsDAHost(t)
+	oldRun := runCmd
+	runCmd = func(_ time.Duration, name string, args ...string) (string, error) {
+		k := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		switch k {
+		case "systemctl show -p LoadState --value openlitespeed":
+			return "loaded\n", nil
+		case "systemctl is-active --quiet openlitespeed":
+			return "", errors.New("inactive")
+		case olsCtl + " status":
+			return "litespeed is running with PID 874874.", nil
+		}
+		return "", errors.New("unexpected " + k)
+	}
+	t.Cleanup(func() { runCmd = oldRun })
+	err := Apply(l.plan(l.probe("")), &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "outside its systemd unit") {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := read(t, filepath.Join(r, "etc/openlitespeed/httpd-accesscontrol.conf")); got != server3OLSACL {
+		t.Fatalf("written anyway: %q", got)
+	}
+}
+
+// Final review: a reload that took the server down gets a start, even though
+// the rollback's reload of an inactive unit fails.
+func TestApplyOLSRollbackStartsADownedUnit(t *testing.T) {
+	l, _ := olsDAHost(t)
+	oldPolls, oldSleep := olsRestartPolls, olsSleep
+	olsRestartPolls, olsSleep = 1, func(time.Duration) {}
+	active, started := true, false
+	var calls []string
+	oldRun := runCmd
+	runCmd = func(_ time.Duration, name string, args ...string) (string, error) {
+		k := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		calls = append(calls, k)
+		switch k {
+		case "systemctl show -p LoadState --value openlitespeed":
+			return "loaded\n", nil
+		case "systemctl is-active --quiet openlitespeed":
+			if active {
+				return "", nil
+			}
+			return "", errors.New("inactive")
+		case "systemctl show -p MainPID --value openlitespeed":
+			return "100\n", nil
+		case "systemctl reload openlitespeed":
+			if !active {
+				return "", errors.New("unit not active")
+			}
+			active = false // the reload takes it down
+			return "", nil
+		case "systemctl start openlitespeed":
+			active, started = true, true
+			return "", nil
+		}
+		return "", errors.New("unexpected " + k)
+	}
+	t.Cleanup(func() { runCmd, olsRestartPolls, olsSleep = oldRun, oldPolls, oldSleep })
+	err := Apply(l.plan(l.probe("")), &strings.Builder{})
+	if err == nil || !started || !strings.Contains(err.Error(), "runs") {
+		t.Fatalf("apply: %v, started=%v, calls=%v", err, started, calls)
+	}
+}
+
+// Final review: the keep plan (custom copies only, no reload) does not need
+// a readable master PID.
+func TestOLSKeepWithAnUnreadablePID(t *testing.T) {
+	l, r := olsDAHost(t)
+	tmpl := "usr/local/directadmin/custombuild/configure/openlitespeed/conf/"
+	put(t, r, tmpl+"httpd-accesscontrol.conf", server3OLSACL)
+	put(t, r, tmpl+"httpd-defaults.conf", server3OLSDefaults)
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", strings.Replace(server3OLSACL, "ALL,", "ALL, 127.0.0.1T, ::1T,", 1))
+	oldRun := runCmd
+	runCmd = func(_ time.Duration, name string, args ...string) (string, error) {
+		if name == olsCtl && args[0] == "status" {
+			return "litespeed is running.", nil
+		}
+		return "", errors.New("no")
+	}
+	t.Cleanup(func() { runCmd = oldRun })
+	if err := Apply(l.plan(l.probe("")), &strings.Builder{}); err != nil {
+		t.Fatalf("keep with no PID: %v", err)
+	}
+	if p := l.probe(""); !p.Trusted || p.Warning != "" {
+		t.Fatalf("after: %+v", p)
+	}
+}
