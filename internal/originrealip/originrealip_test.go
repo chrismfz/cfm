@@ -743,7 +743,7 @@ func TestCLI(t *testing.T) {
 		t.Fatalf("status without edge: rc=%d %s", rc, out.String())
 	}
 	out.Reset()
-	if rc := runCLI([]string{"status"}, &out, l, func() bool { return true }); rc != 1 || !strings.Contains(out.String(), "cfm realip fix") {
+	if rc := runCLI([]string{"status"}, &out, l, func() bool { return true }); rc != 1 || !strings.Contains(out.String(), "cfm edge realip fix") {
 		t.Fatalf("status with edge: rc=%d %s", rc, out.String())
 	}
 	out.Reset()

@@ -9,12 +9,13 @@
 # goes in place) and makes the node ready to switch.
 #
 # It NEVER touches the live edge or the DNAT: no systemctl start / stop /
-# restart / enable / disable, no `cfm dnat`, and the IPv6 listen script only
+# restart / enable / disable, no `cfm dnat` / `cfm edge` switch, and the IPv6 listen script only
 # as a cfm-edge-scoped `prepare`, which never reloads
 # (scripts/tests/check_install_edge.sh pins it). The switch and the way back are printed at the end, for the engine
-# that runs now: `cfm dnat off` first (the origin serves directly), then the
+# that runs now: `cfm edge off` first (the origin serves directly; `cfm dnat
+# off` on an older cfm), then the
 # systemctl swap at leisure (both edges bind :9080 / :9043 and the panel
-# listener ports, so only one runs at a time), then `cfm dnat on`.
+# listener ports, so only one runs at a time), then `cfm edge on`.
 #
 # Adoption is what makes every later CFM upgrade keep cfm-edge's config and
 # sidecars current (package-proxy-config-deploy.sh deploys only to an adopted
@@ -483,6 +484,64 @@ EOF
         return 0
     fi
 
+    # The steps in the words this cfm knows: `cfm edge` when it has it (a bare
+    # `cfm edge panel on` re-uses the mode and priority panel DNAT had), else
+    # `cfm dnat` (this script can run from a checkout on a node whose cfm is
+    # older). Reading the help changes nothing.
+    if command_exists cfm && cfm edge help >/dev/null 2>&1; then
+        steps_edge "$old"
+    else
+        steps_dnat "$old"
+    fi
+}
+
+steps_edge() {
+    local old="$1"
+    cat <<'EOF'
+
+Nothing below has been run: every step is yours.
+
+1) Take the edge out of the path first (the sites are served by the origin
+   directly meanwhile, without WAF/challenge). Note what is on first:
+
+    cfm edge                # engine, web + panel DNAT (mode, priority), IPv6, origin
+    cfm edge off
+    cfm edge panel off      # only if panel DNAT was on
+
+EOF
+    steps_switch "$old"
+    if [ -n "$old" ]; then
+        cat <<EOF
+3) When YOU are satisfied (nothing here runs it), put the edge back in the path:
+
+    cfm edge on
+    cfm edge panel on       # only if it was on (it re-uses its mode and priority)
+
+4) Once it serves well, make it survive a reboot:
+
+    systemctl disable ${old} && systemctl enable cfm-edge
+
+ROLLBACK (back to ${old}), at any point:
+
+    cfm edge off            # (and cfm edge panel off)
+    systemctl stop cfm-edge && systemctl start ${old}
+    systemctl disable cfm-edge && systemctl enable ${old}   # if step 4 ran
+    cfm edge on             # (and cfm edge panel on)
+EOF
+    else
+        cat <<'EOF'
+3) When YOU are satisfied (nothing here runs it), put the edge in the path,
+   and make it survive a reboot:
+
+    cfm edge on
+    cfm edge panel on       # if the panel ports go through the edge
+    systemctl enable cfm-edge
+EOF
+    fi
+}
+
+steps_dnat() {
+    local old="$1"
     cat <<'EOF'
 
 Nothing below has been run: every step is yours.
@@ -498,17 +557,9 @@ Nothing below has been run: every step is yours.
     cfm dnat cpanel off         # only if panel DNAT was on
 
 EOF
+    steps_switch "$old"
     if [ -n "$old" ]; then
         cat <<EOF
-2) Switch ${old} -> cfm-edge (both bind :9080/:9043 and the panel ports):
-
-    systemctl stop ${old}
-    systemctl restart cfm-edge                     # restart: also replaces a placeholder run
-    systemctl status cfm-edge --no-pager
-    ss -ltnp | grep -E ':(9080|9043)\\b'           # owner "cfm-edge"
-    curl -skI https://127.0.0.1:9043/ -H 'Host: <a site on this node>'
-    tail -f /var/log/cfm-edge/error.log
-
 3) When YOU are satisfied (nothing here runs it), put the edge back in the path:
 
     cfm dnat on
@@ -527,18 +578,39 @@ ROLLBACK (back to ${old}), at any point:
 EOF
     else
         cat <<'EOF'
-2) No other edge is running. Start cfm-edge and check it:
-
-    systemctl restart cfm-edge                     # restart: also replaces a placeholder run
-    systemctl status cfm-edge --no-pager
-    ss -ltnp | grep -E ':(9080|9043)\b'            # owner "cfm-edge"
-
 3) When YOU are satisfied (nothing here runs it), put the edge in the path,
    and make it survive a reboot:
 
     cfm dnat on
     cfm dnat cpanel on --mode <as before> --priority <as before>   # if the panel ports go through the edge
     systemctl enable cfm-edge
+EOF
+    fi
+}
+
+# Step 2, the unit swap: the same whichever command name the steps use.
+steps_switch() {
+    local old="$1"
+    if [ -n "$old" ]; then
+        cat <<EOF
+2) Switch ${old} -> cfm-edge (both bind :9080/:9043 and the panel ports):
+
+    systemctl stop ${old}
+    systemctl restart cfm-edge                     # restart: also replaces a placeholder run
+    systemctl status cfm-edge --no-pager
+    ss -ltnp | grep -E ':(9080|9043)\\b'           # owner "cfm-edge"
+    curl -skI https://127.0.0.1:9043/ -H 'Host: <a site on this node>'
+    tail -f /var/log/cfm-edge/error.log
+
+EOF
+    else
+        cat <<'EOF'
+2) No other edge is running. Start cfm-edge and check it:
+
+    systemctl restart cfm-edge                     # restart: also replaces a placeholder run
+    systemctl status cfm-edge --no-pager
+    ss -ltnp | grep -E ':(9080|9043)\b'            # owner "cfm-edge"
+
 EOF
     fi
 }

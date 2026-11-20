@@ -692,12 +692,12 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	case !ok && rp.Stack == originrealip.StackUnknown:
 		findings = append(findings, sev.add("origin-real-ip", "unknown", text, rEv, ""))
 	case !ok:
-		next := "run `cfm realip fix` (config test + graceful reload of the origin)"
+		next := "run `cfm edge realip fix` (config test + graceful reload of the origin)"
 		switch pl := originrealip.PlanFor(rp); {
 		case pl.Action == originrealip.ActionManual:
 			next = pl.Reason
 		case len(pl.Writes) > 0:
-			next = "run `cfm realip fix` (writes the allow list and its DirectAdmin custom copy, graceful OpenLiteSpeed restart, restored if it does not come back)"
+			next = "run `cfm edge realip fix` (writes the allow list and its DirectAdmin custom copy, graceful OpenLiteSpeed restart, restored if it does not come back)"
 		}
 		findings = append(findings, sev.add("origin-real-ip", "warn", text, rEv, next))
 	default:

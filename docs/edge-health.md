@@ -205,7 +205,7 @@ same probe as `cfm health` and `cfm realip` (`internal/originrealip`):
 
 - `ok` when the origin trusts the edge, or when no edge engine runs;
 - `unknown` when an edge runs and no origin stack is found;
-- `warn` otherwise. `next` is `cfm realip fix`, or, where CFM writes nothing
+- `warn` otherwise. `next` is `cfm edge realip fix`, or, where CFM writes nothing
   (LiteSpeed, NGM, some nginx cases), the manual step the finding names.
 
 Per panel and stack: [`origin-real-ip.md`](origin-real-ip.md).
@@ -240,7 +240,7 @@ For another owner's rule, `next` says to move that DNAT after CFM's redirect
 or set `NFT_DNAT_PRIORITY` below its priority. For Imunify's:
 `NFT_DNAT_PRIORITY = <ahead priority − 1>` in
 `/etc/cfm/cfm.conf` (-101 for Imunify's -100) and
-`cfm dnat on --priority <same>` (one transaction). nft refuses a nat chain at
+`cfm edge on --priority <same>` (one transaction). nft refuses a nat chain at
 -200 or below, so a chain ahead at -199 or lower has to move instead. With CFM
 first, a client on Imunify's graylist is dropped by Imunify's own filter on the
 edge's ports, not given a WebShield captcha.
