@@ -1,10 +1,16 @@
 package originrealip
 
 import (
+	"errors"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // OpenLiteSpeed keeps its server config as plain text, not LiteSpeed
@@ -38,9 +44,10 @@ type olsVerdict struct {
 	// a setting appears twice is not measured, so the verdict asks all of
 	// them: a wrong "trusted" would let the edge listen on IPv6 while the
 	// origin sees ::1 for every IPv6 visitor.
-	modes       []string
-	modeSources []string
-	allows      [][]string
+	modes        []string
+	modeSources  []string
+	allows       [][]string
+	allowSources []string
 
 	files []string // every file read, in order
 }
@@ -110,7 +117,7 @@ func (l layout) readOLSWith(overlay func(logical string) ([]byte, bool)) olsVerd
 				if inACL >= 0 && depth < inACL {
 					// A server-level list closed.
 					v.aclSource, v.allow, inACL = logical, curAllow, -1
-					v.allows = append(v.allows, curAllow)
+					v.allows, v.allowSources = append(v.allows, curAllow), append(v.allowSources, logical)
 				}
 				continue
 			}
@@ -295,6 +302,15 @@ func (l layout) probeOLS() Probe {
 	return p
 }
 
+// olsRewriteCulprits: the live files whose rewrite alone breaks the trust
+// (olsRewriteWarning's reading), for the fix to keep.
+func (l layout) olsRewriteCulprits() []string {
+	var out []string
+	l.culpritsOut = &out
+	l.olsRewriteWarning()
+	return out
+}
+
 // olsRewriteWarning: on DirectAdmin, whether the trust survives `da build
 // rewrite_confs`. The config is read again with each DirectAdmin-managed file
 // replaced by what CustomBuild would install (its custom copy, else its
@@ -336,7 +352,7 @@ func (l layout) olsRewriteWarning() string {
 	}
 	// Name the files whose rewrite alone breaks the trust; a file that only
 	// differs from its template (a tuned httpd-tuning.conf) is not one.
-	var changed, culprits []string
+	var changed, culprits, culpritFiles []string
 	for _, f := range live.files {
 		b, ok := installed(f)
 		if !ok {
@@ -355,10 +371,14 @@ func (l layout) olsRewriteWarning() string {
 		}
 		if !survives(l.readOLSWith(only)) {
 			culprits = append(culprits, entry)
+			culpritFiles = append(culpritFiles, f)
 		}
 	}
 	if len(culprits) > 0 {
 		changed = culprits
+	}
+	if l.culpritsOut != nil {
+		*l.culpritsOut = culpritFiles
 	}
 	w := "trusted now, but not after `da build rewrite_confs`, which rewrites the files under " + olsDALiveDir + " from CustomBuild's templates"
 	if len(changed) > 0 {
@@ -447,3 +467,453 @@ func (l layout) olsReason(p Probe) string {
 		"(/usr/local/lsws/bin/lswsctrl restart); in WebAdmin (:7080): Server Configuration > General > Use Client IP in Header, " +
 		"and Security > Access Control > Allowed List. CFM does not edit the OpenLiteSpeed config"
 }
+
+// ── cfm realip fix on DirectAdmin ──────────────────────────────────────────
+
+// olsCtl is OpenLiteSpeed's control script; `restart` is graceful (SIGUSR1,
+// "zero down time" by its own help). It has no config test. A var for tests.
+var olsCtl = "/usr/local/lsws/bin/lswsctrl"
+
+// olsFixTokens are what the fix adds to the allow list: the edge's two
+// source addresses, marked trusted (both always, as the Apache and nginx
+// files trust both).
+var olsFixTokens = []string{"127.0.0.1T", "::1T"}
+
+// planOLS: on DirectAdmin, the fix edits the one file holding the server-level
+// allow list (and, if needed, the one holding useIpInProxyHeader) and writes
+// the same content to its custom copy, so the live file is already what
+// `da build rewrite_confs` would install; Apply then restarts OpenLiteSpeed
+// gracefully. Anything less clear-cut (several lists or values, a custom copy
+// that differs from the live file, a file outside /etc/openlitespeed) is the
+// manual step.
+func (l layout) planOLS(pl *Plan) {
+	p := pl.Probe
+	pl.Reason = l.olsReason(p)
+	v := p.ols
+	if p.Panel != PanelDirectAdmin || v == nil {
+		return
+	}
+	edits := map[string][]byte{} // logical path -> new content
+	if !v.modeOK() || v.needACL() {
+		// Trust through the allow list: one server-level list, in a DA file.
+		if len(v.allows) != 1 || filepath.Dir(v.allowSources[0]) != olsDALiveDir {
+			return
+		}
+		src := v.allowSources[0]
+		cf := readConfFile(l.fs(src))
+		if !cf.ok {
+			return
+		}
+		nb, ok := olsAddTrust(cf.b)
+		if !ok {
+			return
+		}
+		if string(nb) != string(cf.b) {
+			edits[src] = nb
+		}
+	}
+	if !v.modeOK() {
+		if len(v.modes) != 1 || filepath.Dir(v.modeSources[0]) != olsDALiveDir {
+			return
+		}
+		src := v.modeSources[0]
+		b := edits[src]
+		if b == nil {
+			cf := readConfFile(l.fs(src))
+			if !cf.ok {
+				return
+			}
+			b = cf.b
+		}
+		nb, ok := olsSetMode(b, "2")
+		if !ok {
+			return
+		}
+		edits[src] = nb
+	}
+	if len(edits) == 0 {
+		return
+	}
+	// The result must read trusted for both addresses, as written.
+	overlay := func(logical string) ([]byte, bool) { b, ok := edits[logical]; return b, ok }
+	after := l.readOLSWith(overlay)
+	l4, l6 := l, l
+	l4.loopIP, l6.loopIP = "", "::1"
+	if !after.trusted(l4) || !after.trusted(l6) {
+		return
+	}
+	var writes []FileWrite
+	paths := make([]string, 0, len(edits))
+	for src := range edits {
+		paths = append(paths, src)
+	}
+	sort.Strings(paths)
+	for _, src := range paths {
+		custom := filepath.Join(olsDACustomDir, filepath.Base(src))
+		// A custom copy that differs from the live file holds edits the live
+		// file does not show: which one is meant is the operator's call.
+		if c := readConfFile(l.fs(custom)); c.ok {
+			if live := readConfFile(l.fs(src)); !live.ok || string(live.b) != string(c.b) {
+				pl.Reason = custom + " differs from " + src + "; reconcile them by hand, then: " + pl.Reason
+				return
+			}
+		} else if isFile(l.fs(custom)) || isDir(l.fs(custom)) {
+			return
+		}
+		base, cbase := readConfFile(l.fs(src)), readConfFile(l.fs(custom))
+		writes = append(writes,
+			FileWrite{Path: l.fs(src), Content: string(edits[src]), Live: true, base: string(base.b), baseExists: base.ok, checkBase: true},
+			FileWrite{Path: l.fs(custom), Content: string(edits[src]), base: string(cbase.b), baseExists: cbase.ok, checkBase: true})
+	}
+	// And after the next rewrite_confs: the edited files are what it installs
+	// (their custom copies), every other file what CustomBuild has for it.
+	rewritten := func(logical string) ([]byte, bool) {
+		if b, ok := edits[logical]; ok {
+			return b, true
+		}
+		if inst, ok := l.olsDAInstalled(logical); ok {
+			cf := readConfFile(l.fs(inst))
+			return cf.b, cf.ok
+		}
+		return nil, false
+	}
+	if ar := l.readOLSWith(rewritten); !ar.trusted(l4) || !ar.trusted(l6) {
+		pl.Reason = "the trust would not survive `da build rewrite_confs`: a custom copy or template under " +
+			olsDACustomDir + " / " + olsDATemplateDir + " sets it otherwise; reconcile them by hand, then: " + pl.Reason
+		return
+	}
+	pl.Action, pl.Reason, pl.Writes = ActionWrite, "", writes
+	pl.Path = writes[0].Path
+}
+
+// planOLSKeep: trusted now, but not after `da build rewrite_confs` (the
+// warning): write the custom copies of the files whose rewrite breaks the
+// trust, with their live content, so a rebuild installs what runs. Nothing
+// live changes, so nothing restarts.
+func (l layout) planOLSKeep(pl *Plan) {
+	culprits := l.olsRewriteCulprits()
+	if len(culprits) == 0 {
+		return
+	}
+	var writes []FileWrite
+	for _, f := range culprits {
+		live := readConfFile(l.fs(f))
+		if !live.ok {
+			return
+		}
+		custom := filepath.Join(olsDACustomDir, filepath.Base(f))
+		prev := readConfFile(l.fs(custom))
+		if prev.ok && string(prev.b) != string(live.b) {
+			// The custom copy may hold what the operator means a rebuild to
+			// install: as planOLS, the operator's call.
+			pl.Reason += "; " + custom + " differs from " + f + ": reconcile them by hand (a rebuild installs the custom copy)"
+			return
+		}
+		writes = append(writes, FileWrite{Path: l.fs(custom), Content: string(live.b), base: string(prev.b), baseExists: prev.ok, checkBase: true})
+	}
+	pl.Action, pl.Reason, pl.Writes, pl.Path = ActionWrite, "", writes, writes[0].Path
+}
+
+// olsAddTrust appends the missing olsFixTokens to the last allow line of the
+// file's one top-level accessControl block. false when the file has no such
+// block, more than one, or the block has no allow line.
+func olsAddTrust(b []byte) ([]byte, bool) {
+	lines := strings.Split(string(b), "\n")
+	depth, inACL, blocks, last := 0, false, 0, -1
+	var have []string
+	for i, raw := range lines {
+		line := olsStripComment(raw)
+		switch {
+		case line == "":
+		case strings.HasSuffix(line, "{"):
+			if depth == 0 && strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(line, "{")), "accesscontrol") {
+				inACL, blocks = true, blocks+1
+			}
+			depth++
+		case line == "}":
+			if depth > 0 {
+				depth--
+			}
+			if depth == 0 {
+				inACL = false
+			}
+		default:
+			if key, val := olsSplit(line); inACL && depth == 1 && strings.EqualFold(key, "allow") {
+				last = i
+				have = append(have, olsList(val)...)
+			}
+		}
+	}
+	if blocks != 1 || last < 0 {
+		return nil, false
+	}
+	var add []string
+	for _, tok := range olsFixTokens {
+		addr := strings.TrimSuffix(tok, "T")
+		var t []string
+		for _, h := range have {
+			if strings.HasSuffix(h, "T") {
+				t = append(t, strings.TrimSuffix(h, "T"))
+			}
+		}
+		covered := anyLoopback(t)
+		if addr == "::1" {
+			covered = anyLoopback6(t)
+		}
+		if !covered {
+			add = append(add, tok)
+		}
+	}
+	if len(add) == 0 {
+		return b, true
+	}
+	// Before an inline comment, if there is one.
+	raw := lines[last]
+	body, comment := raw, ""
+	if i := olsCommentIndex(raw); i >= 0 {
+		body, comment = raw[:i], raw[i:]
+	}
+	body = strings.TrimRight(body, " \t")
+	sep := ", "
+	if _, val := olsSplit(strings.TrimSpace(body)); val == "" {
+		sep = " "
+	}
+	lines[last] = body + sep + strings.Join(add, ", ")
+	if comment != "" {
+		lines[last] += " " + comment
+	}
+	return []byte(strings.Join(lines, "\n")), true
+}
+
+// olsSetMode sets the value of the file's one top-level useIpInProxyHeader.
+func olsSetMode(b []byte, val string) ([]byte, bool) {
+	lines := strings.Split(string(b), "\n")
+	depth, at := 0, -1
+	for i, raw := range lines {
+		line := olsStripComment(raw)
+		switch {
+		case line == "":
+		case strings.HasSuffix(line, "{"):
+			depth++
+		case line == "}":
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if key, _ := olsSplit(line); depth == 0 && strings.EqualFold(key, "useIpInProxyHeader") {
+				if at >= 0 {
+					return nil, false
+				}
+				at = i
+			}
+		}
+	}
+	if at < 0 {
+		return nil, false
+	}
+	raw := lines[at]
+	indent := raw[:len(raw)-len(strings.TrimLeft(raw, " \t"))]
+	lines[at] = indent + "useIpInProxyHeader " + val
+	return []byte(strings.Join(lines, "\n")), true
+}
+
+// olsCommentIndex: where a # comment starts on a raw line (as
+// olsStripComment reads it), or -1.
+func olsCommentIndex(s string) int {
+	t := strings.TrimLeft(s, " \t")
+	off := len(s) - len(t)
+	if strings.HasPrefix(t, "#") {
+		return off
+	}
+	for i := 1; i < len(t); i++ {
+		if t[i] == '#' && (t[i-1] == ' ' || t[i-1] == '\t') {
+			return off + i
+		}
+	}
+	return -1
+}
+
+// applyOLS writes every file of the plan, restarts OpenLiteSpeed gracefully
+// and checks it runs; on any failure it restores the files and restarts
+// again. OpenLiteSpeed has no config test, so the check is that it comes back.
+func applyOLS(pl Plan, w io.Writer) error {
+	type saved struct {
+		path    string
+		prev    []byte
+		existed bool
+	}
+	var done []saved
+	rollback := func() {
+		for i := len(done) - 1; i >= 0; i-- {
+			restore(done[i].path, done[i].prev, done[i].existed)
+		}
+	}
+	// The master's PID, "" when it does not run: a graceful restart (SIGUSR1)
+	// that took the new config starts a new master (server3, 2026-11-20: the
+	// reload at 00:12 moved MainPID 1280735 -> 1482302); the old one still
+	// running is the config NOT taken (review). Under systemd (DirectAdmin's
+	// openlitespeed.service: Type=forking, PIDFile, ExecReload=kill -USR1
+	// $MAINPID) the reload goes through the unit, as DirectAdmin's own does,
+	// so systemd follows the new master; a USR1 from outside can leave the unit
+	// failed with the server running unsupervised (re-review).
+	unit := olsSystemdUnit()
+	pid := func() string {
+		if unit != "" {
+			if _, err := runCmd(fixTimeout, "systemctl", "is-active", "--quiet", unit); err != nil {
+				return ""
+			}
+			out, err := runCmd(fixTimeout, "systemctl", "show", "-p", "MainPID", "--value", unit)
+			if p := strings.TrimSpace(out); err == nil && p != "" && p != "0" {
+				return p
+			}
+			return "?"
+		}
+		out, err := runCmd(fixTimeout, olsCtl, "status")
+		if err != nil || !strings.Contains(out, "is running") {
+			return ""
+		}
+		if m := olsPIDRe.FindStringSubmatch(out); m != nil {
+			return m[1]
+		}
+		return "?"
+	}
+	reload := func() (string, error) {
+		if unit != "" {
+			return runCmd(fixTimeout, "systemctl", "reload", unit)
+		}
+		return runCmd(fixTimeout, olsCtl, "restart")
+	}
+	before := pid()
+	anyLive := false
+	for _, fw := range pl.Writes {
+		anyLive = anyLive || fw.Live
+	}
+	if anyLive && unit != "" && before == "" {
+		// The unit is not active: is litespeed serving outside it (a USR1
+		// from outside, a hand start)? Then a reload through the unit would
+		// not reach it, and writing alone would read trusted while the
+		// server keeps the old config (final review).
+		if out, err := runCmd(fixTimeout, olsCtl, "status"); err == nil && strings.Contains(out, "is running") {
+			return errors.New("OpenLiteSpeed runs outside its systemd unit " + unit + " (lswsctrl status says it runs, systemd does not); restart it with systemctl restart " + unit + " first; nothing written")
+		}
+	}
+	if anyLive && before == "?" {
+		// Running, but its master PID cannot be read: whether a restart took
+		// the new config could not be told (re-review).
+		return errors.New("OpenLiteSpeed runs but its master PID cannot be read (systemctl show MainPID / lswsctrl status); nothing written")
+	}
+	live := false
+	for _, fw := range pl.Writes {
+		path := fw.Path
+		if real, err := filepath.EvalSymlinks(path); err == nil {
+			path = real
+		}
+		prev, existed, err := readIfExists(path)
+		if err != nil {
+			rollback()
+			return err
+		}
+		if existed && string(prev) == fw.Content {
+			continue
+		}
+		// Planned from the file as it was: one changed since (a rebuild, a
+		// hand edit) is not overwritten (review).
+		if fw.checkBase && (existed != fw.baseExists || (existed && string(prev) != fw.base)) {
+			rollback()
+			return fmt.Errorf("%s changed since the plan; nothing written, run the fix again", path)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			rollback()
+			return err
+		}
+		if err := writeFile(path, []byte(fw.Content)); err != nil {
+			rollback()
+			return err
+		}
+		done = append(done, saved{path, prev, existed})
+		live = live || fw.Live
+		fmt.Fprintf(w, "  wrote %s\n", path)
+	}
+	switch {
+	case len(done) == 0:
+		fmt.Fprintln(w, "  the files already hold the trust; nothing changed")
+		return nil
+	case !live:
+		fmt.Fprintln(w, "  only CustomBuild's custom copies changed: OpenLiteSpeed is not restarted (rewrite_confs installs them as they are)")
+		return nil
+	case before == "":
+		fmt.Fprintln(w, "  OpenLiteSpeed is not running: the change applies when it starts")
+		return nil
+	}
+	out, err := reload()
+	// Until a new master shows, for a bounded while: lswsctrl waits ~15 s and
+	// returns either way, and right after a reload systemd can show MainPID 0
+	// ("?") or not-yet-active (""), lswsctrl a missing PID file. Only a
+	// settled reading decides (medium review: a transient one rolled back a
+	// reload that was being taken).
+	settled := func(p string) bool { return p != "" && p != "?" && p != before }
+	after := pid()
+	for i := 0; err == nil && !settled(after) && i < olsRestartPolls; i++ {
+		olsSleep(time.Second)
+		after = pid()
+	}
+	if err == nil && after != "" && after != "?" && after != before {
+		fmt.Fprintln(w, "  OpenLiteSpeed restarted gracefully (pid "+before+" -> "+after+")")
+		return nil
+	}
+	why := "it is not running"
+	switch {
+	case after == "?":
+		why = "its master PID could not be read after the reload"
+	case after != "":
+		why = "its master still runs as pid " + after + ", so the new config was not taken"
+	}
+	rollback()
+	_, rerr := reload()
+	up := func() bool { // running again, after a bounded wait
+		for i := 0; ; i++ {
+			if p := pid(); p != "" {
+				return true
+			}
+			if i >= olsRestartPolls {
+				return false
+			}
+			olsSleep(time.Second)
+		}
+	}
+	if !up() && unit != "" {
+		// A reload does not start a stopped unit (and fails on an inactive one).
+		_, rerr = runCmd(fixTimeout, "systemctl", "start", unit)
+	}
+	state := "it was restarted on the restored files and runs"
+	if !up() {
+		state = "and it is NOT running now: start it with " + olsCtl + " start"
+		if unit != "" {
+			state = "and it is NOT running now: start it with systemctl start " + unit
+		}
+	}
+	return fmt.Errorf("OpenLiteSpeed did not take the new config (%s; reload: %v); the files were restored, %s (rollback reload/start: %v)\n%s", why, err, state, rerr, strings.TrimSpace(out))
+}
+
+var olsPIDRe = regexp.MustCompile(`with PID (\d+)`)
+
+// olsUnits: the systemd units OpenLiteSpeed runs as (DirectAdmin installs
+// openlitespeed.service with the aliases lsws / lshttpd / litespeed).
+var olsUnits = []string{"openlitespeed", "lsws"}
+
+// olsSystemdUnit: the loaded systemd unit OpenLiteSpeed runs as, or "".
+func olsSystemdUnit() string {
+	for _, u := range olsUnits {
+		out, err := runCmd(probeTimeout, "systemctl", "show", "-p", "LoadState", "--value", u)
+		if err == nil && strings.TrimSpace(out) == "loaded" {
+			return u
+		}
+	}
+	return ""
+}
+
+// olsRestartPolls / olsSleep: the extra wait for a new master (vars for tests).
+var (
+	olsRestartPolls = 30
+	olsSleep        = time.Sleep
+)
