@@ -2,15 +2,21 @@
 //
 // Challenge and WAF exclude endpoints.
 //
-// These excludes are GLOBAL — they affect the entire server, not a single vhost.
-// A "host" exclude suppresses challenge/WAF for that hostname across all requests;
-// a "path" exclude suppresses it for a URL path across all vhosts.
+// A "host" exclude suppresses challenge/WAF for that hostname across all
+// requests. A WAF "path" exclude suppresses the WAF (or some of its rules) for a
+// URL path, on every vhost or only on its scope_hosts. A challenge "path"
+// exclude is always host-scoped and only stops the malpath checks (below).
 //
 // Scope model:
 //   - list endpoints: admin + scoped tokens can read.
 //   - add/remove endpoints:
 //       * admin: unrestricted global management.
 //       * scoped: host excludes only, and value must stay within token scope.
+//   - challenge PATH excludes (challengePathExcludeWrite) are the exception:
+//     they carve a path out of the log-driven malpath checks on named hosts
+//     only, so they always carry scope_hosts (an admin must name them; a
+//     scoped token names a subset of its own vhosts or gets its whole set),
+//     and a scoped token may manage them on its own vhosts.
 
 package webdetector
 
@@ -167,6 +173,10 @@ func filterExcludeListForScope(entries []excludeEntry, scope map[string]struct{}
 }
 
 // GET /api/v1/challenge/exclude/list
+//
+// A scoped caller sees its in-scope host entries (filterExcludeListForScope)
+// and every path entry with at least one scope host it holds, with
+// scope_hosts cut to its own vhosts (filterChallengePathExcludesForScope).
 func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -176,7 +186,178 @@ func (e *Engine) handleChallengeExcludeList(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	scope := vhostScopeFromContext(r.Context())
-	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.ChallengeExcludeList(), scope))
+	all := e.ChallengeExcludeList()
+	if scope == nil {
+		writeJSON(w, http.StatusOK, all)
+		return
+	}
+	out := append(filterExcludeListForScope(all, scope), filterChallengePathExcludesForScope(all, scope)...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Type < out[j].Type })
+	writeJSON(w, http.StatusOK, out)
+}
+
+// filterChallengePathExcludesForScope returns the challenge path entries a
+// scoped caller may see: those with at least one scope host the caller holds
+// literally, with scope_hosts cut to those hosts (the writer's other domains
+// are not the caller's to see). A path entry without scope_hosts is inert
+// (MatchChallengePath) and hidden.
+func filterChallengePathExcludesForScope(entries []excludeEntry, scope map[string]struct{}) []excludeEntry {
+	var out []excludeEntry
+	for _, entry := range entries {
+		if !strings.EqualFold(strings.TrimSpace(entry.Type), "path") || len(entry.ScopeHosts) == 0 {
+			continue
+		}
+		seen := scopeHostsSeenBy(entry.ScopeHosts, scope)
+		if len(seen) == 0 {
+			continue
+		}
+		entry.ScopeHosts = seen
+		out = append(out, entry)
+	}
+	return out
+}
+
+// challengePathExcludeScope resolves the scope_hosts of a challenge path
+// exclude write. The entry is ALWAYS host-scoped:
+//
+//   - admin: `scope_hosts` is required to add (400 without it); a bare `*` is
+//     refused, it would exempt the path on every site. A remove without it
+//     targets an unscoped entry left by an older version (inert, but listed).
+//   - scoped: its vhost set (403 when it has none); a `scope_hosts` param may
+//     only NARROW it to vhosts the token holds literally (403 otherwise), so a
+//     tenant can never write or remove an entry that reaches another tenant.
+func challengePathExcludeScope(r *http.Request, add bool) (map[string]struct{}, int, string) {
+	asked := parseQueryVhostSet(r, "scope_hosts")
+	if h, wide := matchAllScopeHost(asked); wide {
+		return nil, http.StatusBadRequest, "scope_hosts must name hosts, not match (nearly) every host: " + h
+	}
+	if IsAdminRequest(r) {
+		if len(asked) == 0 && add {
+			return nil, http.StatusBadRequest, "a path exclude needs scope_hosts (--scope <host>): without it the path would be exempt on every site"
+		}
+		return asked, 0, ""
+	}
+	scope := vhostScopeFromContext(r.Context())
+	if len(scope) == 0 {
+		return nil, http.StatusForbidden, "exclude value outside token scope"
+	}
+	if len(asked) == 0 {
+		// The token's own set becomes the entry's scope: it must not hold a
+		// match-all glob either (a `*` vhost would exempt every site).
+		if h, wide := matchAllScopeHost(scope); wide {
+			return nil, http.StatusForbidden, "token scope matches (nearly) every host (" + h + "): name hosts with scope_hosts"
+		}
+		return scope, 0, ""
+	}
+	for h := range asked {
+		if !vhostAllowed(h, scope) {
+			return nil, http.StatusForbidden, "scope_hosts outside token scope"
+		}
+	}
+	return asked, 0, ""
+}
+
+// matchAllScopeHost reports a scope host that is a glob with no literal label
+// (`*`, `*.*`, `?*.*`, `[a-z]*`): compileScopeMatcher would match (nearly)
+// every host with it. `*.example.gr` keeps a literal label and is fine.
+func matchAllScopeHost(hosts map[string]struct{}) (string, bool) {
+	for h := range hosts {
+		if !strings.ContainsAny(h, "*?[]") {
+			continue
+		}
+		bare := h
+		if i := strings.IndexByte(bare, '['); i >= 0 {
+			bare = bare[:i] // a class is no literal label
+		}
+		if strings.Trim(bare, "*?.") == "" || !strings.ContainsAny(strings.Trim(bare, "*?"), "abcdefghijklmnopqrstuvwxyz0123456789-") {
+			return h, true
+		}
+	}
+	return "", false
+}
+
+// validChallengePathExcludeValue refuses a value with no literal part (`/`,
+// `/*`, `/*/*`): it would carve (nearly) the whole site out, which is a host
+// exclude and says so. Everything else is a path-segment prefix or an
+// anchored glob (compileValueMatcher; `*` stays within one segment), e.g.
+// `/images/.tmb/` or `/*/.tmb/*`.
+func validChallengePathExcludeValue(value string) bool {
+	literal := strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '*', '?', '[', ']':
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	return literal != ""
+}
+
+// challengePathExcludeShared reports a path entry on value that the caller
+// can see (one of its hosts is in scope) but not remove (another is not).
+func challengePathExcludeShared(entries []excludeEntry, value string, scope map[string]struct{}) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if !strings.HasPrefix(v, "/") {
+		v = "/" + v
+	}
+	for _, e := range filterChallengePathExcludesForScope(entries, scope) {
+		if e.Value == v {
+			return true
+		}
+	}
+	return false
+}
+
+// POST /api/v1/challenge/exclude/add|remove?type=path&value=/images/.tmb/[&scope_hosts=a.gr,b.gr]
+//
+// A host-scoped path carve-out of the log-driven malpath checks
+// (CHALLENGE_PATHS and the MALPATH flood counter): a request on one of the
+// scope hosts whose path is under value is not counted. The same path on any
+// other host, and every other path on these hosts, still is. Scope rules:
+// challengePathExcludeScope. Remove targets the entry written with the same
+// scope; without an exact match a scoped caller removes every entry on value
+// whose scope hosts its token holds all of (its vhost set may have changed
+// since the write, and the list shows it scope_hosts cut to its own vhosts;
+// removing a carve-out only restores protection).
+func (e *Engine) challengePathExcludeWrite(w http.ResponseWriter, r *http.Request, add bool, value string) {
+	if strings.TrimSpace(value) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
+		return
+	}
+	if add && !validChallengePathExcludeValue(value) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a path exclude must name a path below the site root (use a host exclude for the whole site)"})
+		return
+	}
+	scope, code, msg := challengePathExcludeScope(r, add)
+	if code != 0 {
+		writeJSON(w, code, map[string]string{"error": msg})
+		return
+	}
+	if e == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine not ready"})
+		return
+	}
+	if add {
+		if !e.ChallengeExcludeAdd("path", value, scope) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	ok := e.ChallengeExcludeRemove("path", value, scope)
+	if !ok && !IsAdminRequest(r) {
+		token := vhostScopeFromContext(r.Context())
+		ok = e.ChallengePathExcludeRemoveWithin(value, token)
+		if !ok && challengePathExcludeShared(e.ChallengeExcludeList(), value, token) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "this path exclude also covers hosts outside your scope; ask the server administrator to remove it"})
+			return
+		}
+	}
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // POST /api/v1/challenge/exclude/add?type=host&value=example.com
@@ -185,6 +366,10 @@ func (e *Engine) handleChallengeExcludeAdd(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	typ, value := readExcludeParams(r)
+	if strings.EqualFold(typ, "path") {
+		e.challengePathExcludeWrite(w, r, true, value)
+		return
+	}
 	scope := vhostScopeFromContext(r.Context())
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
@@ -207,6 +392,10 @@ func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Req
 		return
 	}
 	typ, value := readExcludeParams(r)
+	if strings.EqualFold(typ, "path") {
+		e.challengePathExcludeWrite(w, r, false, value)
+		return
+	}
 	scope := vhostScopeFromContext(r.Context())
 	if !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})

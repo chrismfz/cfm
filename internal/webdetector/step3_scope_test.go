@@ -212,13 +212,14 @@ func TestChallengeExclude_ScopedAndAdmin(t *testing.T) {
 		t.Fatalf("scoped exclude remove in-scope: should not be 403, got body=%s", rr.Body.String())
 	}
 
-	// Scoped path excludes are denied.
+	// A scoped path exclude is pinned to the token's vhosts (challenge path
+	// excludes only, challengePathExcludeWrite): naming another host is denied.
 	rr = doRequest(mux, scoped, http.MethodPost,
-		"/api/v1/challenge/exclude/add?type=path&value=/global", nil)
+		"/api/v1/challenge/exclude/add?type=path&value=/global&scope_hosts="+outOfScopeHost, nil)
 	if rr.Code != http.StatusForbidden {
-		t.Fatalf("scoped exclude add path: expected 403, got %d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("scoped exclude add path on another host: expected 403, got %d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "exclude value outside token scope") {
+	if !strings.Contains(rr.Body.String(), "outside token scope") {
 		t.Fatalf("scoped exclude add path: expected explicit error, got body=%s", rr.Body.String())
 	}
 
@@ -229,8 +230,8 @@ func TestChallengeExclude_ScopedAndAdmin(t *testing.T) {
 		t.Fatalf("admin exclude add out-of-scope host: should not be 403, got body=%s", rr.Body.String())
 	}
 	rr = doRequest(mux, adminCtx(), http.MethodPost,
-		"/api/v1/challenge/exclude/add?type=path&value=/global", nil)
-	if rr.Code == http.StatusForbidden {
+		"/api/v1/challenge/exclude/add?type=path&value=/global&scope_hosts="+outOfScopeHost, nil)
+	if rr.Code != http.StatusOK {
 		t.Fatalf("admin exclude add path: should not be 403, got body=%s", rr.Body.String())
 	}
 

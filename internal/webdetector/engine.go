@@ -634,6 +634,8 @@ type Engine struct {
 	chalExpiredSeen map[string]time.Time
 
 	challengeExcludes *excludeStore
+	// Rate limit of the path_exclude_skip log line (malpathExcluded), under mu.
+	malpathExclLogAt  map[string]time.Time
 	wafExcludes       *excludeStore
 	clamScanOverrides *excludeStore
 	clamModeOverrides *excludeStore
@@ -2143,7 +2145,7 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	if rec.IP != "" && e.cfg.MalPathCount > 0 && len(e.cfg.MalPathList) > 0 {
 
 		if rec.IP != "" && len(e.malRules) > 0 && !isCpanelSessionPath(p) {
-			if ridx := pm.first(e.malMatch); ridx >= 0 && ridx < len(e.malRules) {
+			if ridx := pm.first(e.malMatch); ridx >= 0 && ridx < len(e.malRules) && !e.malpathExcluded(rec, &pm, "MALPATH") {
 				if b.ipsMalPath == nil {
 					b.ipsMalPath = make(map[string]int)
 				}
@@ -4407,6 +4409,17 @@ func (e *Engine) ChallengeExcludeRemove(typ, value string, scope map[string]stru
 	}
 	ok := e.challengeExcludes.Remove(typ, value, scope)
 	logExcludeChange("challenge", "remove", typ, value, scope, nil, ok)
+	return ok
+}
+
+// ChallengePathExcludeRemoveWithin is a scoped caller's path-exclude remove
+// when no entry carries exactly its vhost set (excludeStore.RemovePathWithin).
+func (e *Engine) ChallengePathExcludeRemoveWithin(value string, within map[string]struct{}) bool {
+	if e == nil || e.challengeExcludes == nil {
+		return false
+	}
+	ok := e.challengeExcludes.RemovePathWithin(value, within)
+	logExcludeChange("challenge", "remove", "path", value, within, nil, ok)
 	return ok
 }
 

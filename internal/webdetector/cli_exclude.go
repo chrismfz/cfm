@@ -84,7 +84,7 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 	value := args[1]
 	typ := "host"
 	var rules []string  // collected raw specifiers; sent verbatim to API for parsing
-	var scopes []string // WAF-only: host(s) to scope the entry to (admin only)
+	var scopes []string // waf / challenge: host(s) to scope the entry to
 	for i := 2; i < len(args); i++ {
 		switch {
 		case args[i] == "--type" && i+1 < len(args):
@@ -97,10 +97,10 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			i++
 		case prefix == "waf" && strings.HasPrefix(args[i], "--rule="):
 			rules = append(rules, strings.TrimPrefix(args[i], "--rule="))
-		case prefix == "waf" && args[i] == "--scope" && i+1 < len(args):
+		case (prefix == "waf" || prefix == "challenge") && args[i] == "--scope" && i+1 < len(args):
 			scopes = append(scopes, args[i+1])
 			i++
-		case prefix == "waf" && strings.HasPrefix(args[i], "--scope="):
+		case (prefix == "waf" || prefix == "challenge") && strings.HasPrefix(args[i], "--scope="):
 			scopes = append(scopes, strings.TrimPrefix(args[i], "--scope="))
 		default:
 			return fmt.Errorf("unknown flag %q", args[i])
@@ -123,8 +123,10 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 		q.Set("rule_ids", strings.Join(rules, ","))
 	}
 	if len(scopes) > 0 {
-		// Host(s) to scope the entry to. The server honours this only for an
-		// admin token; a scoped token is always pinned to its own vhost set.
+		// Host(s) to scope the entry to. WAF: honoured only for an admin token
+		// (a scoped token is pinned to its own vhost set). Challenge path
+		// excludes: required for an admin, and a scoped token may narrow its
+		// own vhost set with it.
 		q.Set("scope_hosts", strings.Join(scopes, ","))
 	}
 	u := fmt.Sprintf("%s/api/v1/%s/%s/%s?%s",
@@ -175,6 +177,9 @@ func formatRuleIDs(ids []int) string {
 }
 
 func ruleFlagUsage(prefix string) string {
+	if prefix == "challenge" {
+		return " [--scope host ...]"
+	}
 	if prefix != "waf" {
 		return ""
 	}

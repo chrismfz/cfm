@@ -417,6 +417,9 @@ func (e *Engine) trackChallengePaths(rec LogRec, pm *pathMatchOnce, b *bucketSW)
 		return
 	}
 	r := e.chalRules[ridx]
+	if e.malpathExcluded(rec, pm, "CHALLENGE_PATHS") {
+		return
+	}
 
 	// total challenge-path hits
 	if b.ipsChalPath == nil {
@@ -445,6 +448,42 @@ func (e *Engine) trackChallengePaths(rec LogRec, pm *pathMatchOnce, b *bucketSW)
             TS:     rec.TS,
             UA:     rec.UA,
 	}
+}
+
+// malpathExcluded reports whether a request that matched a malpath rule is
+// carved out of the malpath checks by a host-scoped path exclude
+// (`cfm webtop challenge exclude add <path> --type path --scope <host>`). It
+// is decided at COUNTING time: the per-IP counters aggregate across hosts, and
+// by emission time the (host, path) that matched is gone (chalLast keeps only
+// the IP's last request). The store is asked at most once per request, and a
+// skip is logged at most once a minute per (check, host, exclude). Called from
+// ingest with e.mu held.
+func (e *Engine) malpathExcluded(rec LogRec, pm *pathMatchOnce, check string) bool {
+	if e.challengeExcludes == nil {
+		return false
+	}
+	if !pm.exclChecked {
+		pm.exclValue, pm.excluded = e.challengeExcludes.MatchChallengePath(rec.Host, pm.p)
+		pm.exclChecked = true
+	}
+	if !pm.excluded {
+		return false
+	}
+	now := time.Now()
+	k := check + "|" + strings.ToLower(rec.Host) + "|" + pm.exclValue
+	if last, seen := e.malpathExclLogAt[k]; !seen || now.Sub(last) >= time.Minute {
+		if e.malpathExclLogAt == nil || len(e.malpathExclLogAt) >= 4096 {
+			e.malpathExclLogAt = make(map[string]time.Time)
+		}
+		e.malpathExclLogAt[k] = now
+		path := pm.p
+		if len(path) > 200 {
+			path = path[:200] + "..."
+		}
+		logging.LogfCHALLENGES("[challenge][malpath] action=path_exclude_skip check=%s host=%q path=%q ip=%s exclude=%q note=not_counted (per check+host+exclude, 1/min)",
+			check, rec.Host, path, rec.IP, pm.exclValue)
+	}
+	return true
 }
 
 func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {

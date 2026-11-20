@@ -886,6 +886,46 @@ Raise thresholds or widen `WINDOW`; use `BLOCK = dryrun` or a short TTL while
 tuning; use the section's allow keys, `[global] IGNORE_IPS` / `IGNORE_NETS`
 and leniency companions. For web traffic, review path / UA lists.
 
+#### One site's tool trips the malpath list: a host-scoped path exclude
+
+The webdetector's two malpath checks read `/etc/cfm/webdetector_malpaths.txt`
+(substring, case-insensitive, query cut): `CHALLENGE_PATHS` challenges an IP
+on its first hit (v2 tier, and it revokes the clearance cookie), and `MALPATH`
+bans an IP after `20` hits in `WINDOW`. When a legitimate tool on ONE site
+hits a listed name (elFinder thumbnails, Duplicator's `dup-installer/`
+during a migration), carve that path out on that site instead of editing the
+list for every site:
+
+```
+cfm webtop challenge exclude add /images/.tmb/ --type path --scope example.gr
+cfm webtop challenge exclude list
+cfm webtop challenge exclude remove /images/.tmb/ --type path --scope example.gr
+```
+
+- A request on a scope host under the path is not counted by either check
+  (decided when the line is counted; the per-IP counters span hosts). The
+  same path on another site, and every other path on this one, still count.
+- Matching is a path-segment prefix (`/images/.tmb/` covers everything under
+  it; `/admin` covers `/admin` and `/admin/x`, not `/administrator`), or an
+  anchored glob (`/*/.tmb/*`; `*` stays within one segment), case-insensitive.
+- `--scope` matches the host exactly: `--scope example.gr` does not cover
+  `www.example.gr`, so name every alias the site is served on
+  (`--scope example.gr --scope www.example.gr`); a glob with a literal label
+  (`*.example.gr`) covers the subdomains.
+- `--scope` is required (repeat it for several sites): a path exclude without
+  it would exempt the path everywhere, so it is refused, and one an older
+  version stored stays inert (`list` shows it with scope `*`; remove it
+  without `--scope`). A value with no literal part (`/`, `/*`) is refused:
+  that is a host exclude.
+- A cPanel tenant's scoped token may add, list and remove these on its own
+  vhosts (the entry is pinned to its vhost set, or to the subset it names);
+  `docs/endpoint_scope_inventory.md` has the rules.
+- Each skipped hit is logged to the challenges log at most once a minute per
+  (check, host, exclude): `[challenge][malpath] action=path_exclude_skip`.
+- This is only the malpath checks. The WAF has its own path + rule excludes
+  (`cfm webtop waf exclude add … --type path --rule <id> --scope <host>`), and
+  a host exclude (`challenge exclude add <host>`) keeps its meaning.
+
 ### Outbound alerts need DNS corroboration
 
 When the outbound sentinel warns on per-uid destination churn or burst rates,
