@@ -28,6 +28,88 @@ time someone chose, with the reload-and-confirm. `EDGE_LISTEN_V6 = on` lets
 an edge start turn it on too (the opt-in as before); `EDGE_LISTEN_V6 = off`
 in `/etc/cfm/cfm.conf` keeps a node on IPv4.
 
+## Turning it on: the operator's runbook
+
+A cfm upgrade does not turn IPv6 on. A reboot and an edge restart do not
+either. On each node it takes two commands, in this order:
+
+```bash
+cfm realip fix
+sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render
+```
+
+Then check the result:
+
+```bash
+sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
+cfm realip
+```
+
+`status` prints each engine's decision and the reason for it. `render` logs
+the same reason when it leaves a node on IPv4.
+
+**Why these two steps:**
+
+- **`cfm realip fix` comes first** because an IPv6 visitor reaches the origin
+  from `::1`. An origin that trusts only `127.0.0.1` would see every IPv6
+  visitor as localhost. That passes `Require local`, passes apps that trust
+  localhost, and puts every IPv6 visitor in one login-limiter bucket. `render`
+  asks `cfm realip` before it writes anything, and stays on IPv4 while the
+  trust is missing. Details: "The origin's `::1` trust" below.
+- **`render` is the one action that turns IPv6 on**, so it happens at a time
+  someone chose. It writes the two listen files and runs the config test. It
+  then reloads the running edge and checks `/proc/net/tcp6` that it really
+  listens on `[::]:9080` / `[::]:9043`. If any step fails, it removes the files
+  and reloads back. An edge start (`prestart`) and a package upgrade
+  (`deploy`) only keep or remove what a render approved. That was a
+  deliberate choice: a fleet-wide upgrade or reboot must not open IPv6 on
+  every node at once, unconfirmed.
+- **Why the confs have no plain `listen [::]`:**
+  - On a host booted with `ipv6.disable=1`, that line fails the config test
+    and the edge does not start, IPv4 included.
+  - When another process holds `[::]:9080`, `nginx -t` still passes but the
+    START fails.
+  - A sysctl `disable_ipv6=1` alone would be harmless: the bind works there.
+    The first two cases are why the files are generated per host.
+
+**Gotchas:**
+
+1. **Wrong order.** If you run `render` before `realip fix`, `render` logs
+   "the origin does not trust the edge's IPv6 hop from ::1" and stays on IPv4.
+   Run `cfm realip fix`, then `render` again.
+2. **LiteSpeed.** `cfm realip fix` only prints the step there: add `::1T` to
+   its Access Control allow list by hand. On rigel and titan the Apache
+   RemoteIP trust that LiteSpeed loads already covers `::1`.
+3. **AAAA records whose vhost has no IPv6.** This is the one visible change for
+   visitors. Before, an IPv6 visitor was refused at the edge and the browser
+   fell back to IPv4. Now the origin serves its default vhost (cPanel's
+   `defaultwebpage.cgi`) and there is no fallback. The usual cases are a
+   customer's own AAAA record at an external DNS, or an account without IPv6
+   in cPanel. Check suspicious domains with
+   `curl -6 -sI https://<domain>/` after the render. Fix the record or give
+   the account IPv6.
+4. **A running cfm-edge.** `install-edge.sh` runs `prepare cfm-edge`, which
+   never reloads. On a running edge it writes nothing new: run
+   `render cfm-edge` yourself. A stopped cfm-edge gets the files and listens
+   on IPv6 from its first start.
+5. **`systemctl reload` of the edge does not re-decide.** A restart re-checks
+   the kept files (`prestart`), but only `render` turns IPv6 on.
+6. **One engine only.** `render cfm-edge`, `render OpenResty` or
+   `render Angie` acts on that engine and leaves the others alone. A plain
+   `render` walks every engine found, which is what the OpenResty and Angie
+   installers run.
+7. **It stays on IPv4 by itself** when the host has no IPv6 stack or no global
+   IPv6 address, when the origin does not listen on IPv6 on 80 and 443, when
+   a tenant holds `[::]:9080` / `[::]:9043`, or when the main conf predates
+   the include. `status` names the reason. At boot, a missing global address
+   or an origin that is not up yet does not remove files a render already
+   approved.
+8. **Panel ports stay IPv4.** 2083/2087/2096 and the rest: cpsrvd does not
+   listen on IPv6 on the fleet.
+9. **Turning it off.** Set `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf`, then
+   run `render`. It removes the files and reloads the edge. Do the same
+   before downgrading to a cfm without this script.
+
 ## How it works
 
 | Piece | What it does |
@@ -122,7 +204,7 @@ checks (`/proc/net/tcp6`) that it listens on IPv6, else removes them and
 reloads back: a failed reload leaves nginx on its old config, never down.
 When it removes files a running edge listens with, it reloads it too. A
 restart re-decides as well (`prestart`: it keeps or removes, and writes new
-files only under an explicit `EDGE_LISTEN_V6 = on`), but a plain `systemctl
+files only under an explicit `EDGE_LISTEN_V6 = on` / `auto`), but a plain `systemctl
 reload` does not. A package upgrade (`deploy`) never turns IPv6 on.
 
 **Limits.** A hand-written `listen [::]` with `ipv6only=off` is not
