@@ -356,3 +356,80 @@ func TestChallengePathsBudgetAndRanking(t *testing.T) {
 		t.Fatalf("over the ticks %d challenged, want every hitter (%d): a member past the budget lost its hit", len(seen), 1+5*maxClientAddrs)
 	}
 }
+
+// Each of the other per-IP challenge rules judges a /64's members on the
+// client's counts: three addresses, each under the rule alone, are all
+// challenged together (unique paths, the no-UA threshold, UA churn).
+func TestPerIPChallengeRulesJudgeTheClient(t *testing.T) {
+	cases := []struct {
+		rule string
+		cfg  Config
+		rec  func(i int) (uri, ua string)
+	}{
+		{"CHALLENGE_UNIQPATHS_IP", Config{ChallengeIPUniqPathsEnabled: true, ChallengeIPUniqPathsMin: 3}, func(i int) (string, string) { return fmt.Sprintf("/p%d", i), "ua" }},
+		{"CHALLENGE_NO_UA", Config{ChallengeIPNoUAMin: 3}, func(i int) (string, string) { return "/x", "" }},
+		{"CHALLENGE_UNIQUA", Config{ChallengeIPUniqUAMin: 3}, func(i int) (string, string) { return "/x", fmt.Sprintf("ua%d", i) }},
+	}
+	for _, c := range cases {
+		t.Run(c.rule, func(t *testing.T) {
+			cfg := c.cfg
+			cfg.Every, cfg.Window, cfg.ChallengeNotify = time.Second, 2*time.Minute, true
+			e := NewEngine(cfg)
+			t0 := float64(time.Now().Add(-time.Minute).Unix())
+			for i, ip := range []string{"2001:db8:1:2::a", "2001:db8:1:2::b", "2001:db8:1:2::c"} {
+				uri, ua := c.rec(i)
+				e.ingest(LogRec{TS: t0 + float64(i), IP: ip, Host: "example.com", Method: "get", URI: uri, Status: 404, UA: ua}, "raw")
+			}
+			e.ingest(LogRec{TS: t0, IP: "203.0.113.7", Host: "example.com", Method: "get", URI: "/x", Status: 404, UA: "ua"}, "raw")
+			out := make(chan core.Alert, 32)
+			e.emitIPChallenges(time.Now(), out)
+			close(out)
+			got := map[string]bool{}
+			notifying := 0
+			for a := range out {
+				if a.Extra["rule"] != c.rule {
+					continue
+				}
+				got[a.Key] = true
+				if a.Extra["challenge_notify"] != "0" {
+					notifying++
+				}
+			}
+			if len(got) != 3 || got["203.0.113.7"] || notifying != 1 {
+				t.Fatalf("challenged %v (%d notifying), want the three /64 members, one notifying", got, notifying)
+			}
+		})
+	}
+}
+
+// A client's new address is judged though 16 older ones fill its window
+// (the members are its most recent, not its busiest).
+func TestChallengePathsSeventeenthAddress(t *testing.T) {
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengePathsEnabled: true, ChallengePathsList: []string{"/.env"}, ChallengePathsCount: 1})
+	t0 := float64(time.Now().Add(-time.Minute).Unix())
+	hit := func(ts float64, ip string) {
+		e.ingest(LogRec{TS: ts, IP: ip, Host: "example.com", Method: "get", URI: "/.env", Status: 404, UA: "ua"}, "raw")
+	}
+	for i := 0; i < maxClientAddrs; i++ {
+		hit(t0+float64(i), fmt.Sprintf("2001:db8:1:2::%x", i+1))
+	}
+	tick := func(at time.Time) map[string]bool {
+		out := make(chan core.Alert, 64)
+		e.emitIPChallenges(at, out)
+		close(out)
+		got := map[string]bool{}
+		for a := range out {
+			if a.Extra["rule"] == "CHALLENGE_PATHS" {
+				got[a.Key] = true
+			}
+		}
+		return got
+	}
+	if n := len(tick(time.Now())); n != maxClientAddrs {
+		t.Fatalf("first tick: %d challenged, want %d", n, maxClientAddrs)
+	}
+	hit(t0+30, "2001:db8:1:2::ff")
+	if got := tick(time.Now().Add(10 * time.Second)); !got["2001:db8:1:2::ff"] {
+		t.Fatalf("the client's 17th address was not challenged: %v", got)
+	}
+}

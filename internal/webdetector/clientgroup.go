@@ -16,8 +16,9 @@ const maxClientAddrs = 16
 // clientGroup is one grouped row's client: its /64 ("" when the row is a
 // single address) and its addresses, busiest first.
 type clientGroup struct {
-	client string
-	addrs  []string
+	client  string
+	addrs   []string // the busiest maxClientAddrs, busiest first
+	members []string // every address, busiest first (challengeMembers picks from it)
 }
 
 // groupIPAggs folds per-address aggregates into per-client ones: an IPv6
@@ -64,7 +65,11 @@ func groupIPAggs[T any](perIP map[string]*T, merge func(dst, src *T), weight fun
 		top := ms[0].ip
 		out[top] = sum
 		if strings.Contains(k, "/") {
-			groups[top] = clientGroup{client: k, addrs: addrs}
+			all := make([]string, len(ms))
+			for i, m := range ms {
+				all[i] = m.ip
+			}
+			groups[top] = clientGroup{client: k, addrs: addrs, members: all}
 		}
 	}
 	return out, groups
@@ -76,13 +81,30 @@ func groupIPAggs[T any](perIP map[string]*T, merge func(dst, src *T), weight fun
 // fresh addresses must not stall the tick nor crowd the alert channel.
 const maxExtraMembersPerTick = 32
 
+// challengeMembers is the addresses of g a challenge rule judges: its
+// maxClientAddrs most recent (lastCtx's last matching request; ties and
+// addresses without one: busiest first), so a client's new address is judged
+// though older, busier ones fill its window (they are gated out without a new
+// hit anyway).
+func challengeMembers(g clientGroup, lastCtx map[string]chalCtx) []string {
+	ms := append([]string(nil), g.members...)
+	if len(ms) == 0 {
+		ms = append(ms, g.addrs...)
+	}
+	sort.SliceStable(ms, func(i, j int) bool { return lastCtx[ms[i]].TS > lastCtx[ms[j]].TS })
+	if len(ms) > maxClientAddrs {
+		ms = ms[:maxClientAddrs]
+	}
+	return ms
+}
+
 // expandClients maps each address of a grouped client back to the client's
 // summed aggregate: a per-IP challenge rule then judges every member on the
 // client's counts while each member keeps its own per-address gates (a new
 // matching hit, the burst cooldown, its host bypass and excludes, its
-// context): no address decides for another. clientOf names each member's
-// client (/64).
-func expandClients[T any](grouped map[string]*T, groups map[string]clientGroup) (map[string]*T, map[string]string) {
+// context): no address decides for another. The members are
+// challengeMembers'. clientOf names each member's client (/64).
+func expandClients[T any](grouped map[string]*T, groups map[string]clientGroup, lastCtx map[string]chalCtx) (map[string]*T, map[string]string) {
 	out := make(map[string]*T, len(grouped))
 	clientOf := make(map[string]string)
 	for top, a := range grouped {
@@ -91,7 +113,7 @@ func expandClients[T any](grouped map[string]*T, groups map[string]clientGroup) 
 			out[top] = a
 			continue
 		}
-		for _, m := range g.addrs {
+		for _, m := range challengeMembers(g, lastCtx) {
 			out[m] = a
 			clientOf[m] = g.client
 		}

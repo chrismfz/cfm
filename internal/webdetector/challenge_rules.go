@@ -580,7 +580,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         }, func(a *uAgg) int { return len(a.paths) + len(a.hosts) }, func() *uAgg { return &uAgg{} })
         // Every member is judged on the client's sets, through its own gates.
         var clientOf map[string]string
-        agg, clientOf = expandClients(agg, groups)
+        agg, clientOf = expandClients(agg, groups, lastCtx)
         tk = newClientTick() // this section's own budget and notifier
 
         if len(agg) > 0 {
@@ -812,7 +812,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 expanded = append(expanded, c)
                                                 continue
                                         }
-                                        for _, m := range g.addrs {
+                                        for _, m := range challengeMembers(g, lastCtx) {
                                                 mc := c
                                                 mctx := lastCtx[m]
                                                 mc.ip, mc.host, mc.uri = m, mctx.Host, mctx.URI
@@ -1029,7 +1029,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             a.exempt = 0
         }
         // Every member is judged on the client's counts, through its own gates.
-        st, clientOf := expandClients(st, groups)
+        st, clientOf := expandClients(st, groups, lastCtx)
         tk = newClientTick() // this section's own budget and notifier
 
         winSec := e.cfg.Window.Seconds()
@@ -1188,12 +1188,12 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         pmf, groups := groupIPAggs(pmf, func(dst, src *int) { *dst += *src },
             func(n *int) int { return *n }, func() *int { return new(int) })
-        pmf, clientOf := expandClients(pmf, groups)
-        tk = newClientTick() // this section's own budget and notifier
-
         if lastCtx == nil { // the sections above may not have run
             lastCtx = e.chalLastSnapshot()
         }
+        pmf, clientOf := expandClients(pmf, groups, lastCtx)
+        tk = newClientTick() // this section's own budget and notifier
+
         for ipStr, cntp := range pmf {
             cnt := *cntp
             if cnt < e.cfg.ChallengeIPMalformedMin { continue }
@@ -1297,11 +1297,11 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 dst.uniq[h] = struct{}{}
             }
         }, func(a *uaAgg) int { return len(a.uniq) }, func() *uaAgg { return &uaAgg{uniq: make(map[uint64]struct{}, 8)} })
-        agg, clientOf := expandClients(agg, groups)
-        tk = newClientTick() // this section's own budget and notifier
         if lastCtx == nil { // the sections above may not have run
             lastCtx = e.chalLastSnapshot()
         }
+        agg, clientOf := expandClients(agg, groups, lastCtx)
+        tk = newClientTick() // this section's own budget and notifier
 
         for ipStr, a := range agg {
             if len(a.uniq) < e.cfg.ChallengeIPUniqUAMin { continue }

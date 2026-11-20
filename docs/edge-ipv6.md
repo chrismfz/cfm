@@ -322,23 +322,29 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   - **A ban** takes the /64 (the sink's `ExtendClientBlock`), once per
     client per emit cooldown.
   - **A challenge** is per address at the edge. A per-IP challenge rule
-    judges every address of the client (its 16 busiest in the window) on the
-    client's summed counts (`expandClients`), and each goes through its own
+    judges the client's addresses (its 16 most recent in the window,
+    `challengeMembers`: a new address is judged though older, busier ones
+    fill the window) on the client's summed counts (`expandClients`), and
+    each goes through its own
     gates exactly as an address alone does: its new matching hit, the burst
     cooldown, its host bypass, `IGNORE_IPS` / chalExclude, its own context.
     No address decides for another: an excluded or bypassed address, however
     busy, is not challenged and shields no neighbour; a new malpath hit from
     another address of the /64 is challenged on its own. Per rule and tick,
     each client's first alert notifies, the rest carry
-    `challenge_notify=0`, and the members beyond each client's first are
-    bounded (32); a member past the budget keeps its hit for the next tick
-    (its gate is written only once it is judged). `CHALLENGE_PATHS` ranks
+    `challenge_notify=0` (a first alert the sink then suppresses or
+    excludes leaves that tick's others without a notification), and the
+    members beyond each client's first are bounded (32 per rule and tick,
+    all clients together); a member past the budget keeps its hit for the
+    next tick (its gate is written only once it is judged). `CHALLENGE_PATHS` ranks
     one candidate per client (topN 50), then expands it to its members, all
     of them addresses that hit a malpath rule themselves (no v2 mark or
     clearance revoke for a neighbour that never did). Rotating per request
     still outruns the next emit until the edge's shared dicts group by /64.
   - The web detector's flood challenge (`emitIPBlocks`, the score rule)
-    asks the edge to challenge every listed address of the row.
+    asks the edge to challenge every listed address of the row (its 16
+    busiest); the good-bot check runs on the busiest one, as the ban's
+    does, and the edge's own per-address exemptions still apply to each.
   - The vhost uniqIP count counts clients (`ipkey.Client`: a count, no
     guard): one client rotating inside its /64 no longer looks like a crowd
     that arms the vhost's automatic challenge.
