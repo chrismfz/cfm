@@ -102,13 +102,16 @@ The WAF, challenge and Site Cache need the in-path edge. Install one:
 ```bash
 bash scripts/install-openresty.sh    # the original default
 bash scripts/install-angie.sh        # nginx fork tracking mainline; first-class EL10 / Debian 13 packages
+bash scripts/install-edge.sh         # cfm-edge: CFM's own nginx.org nginx + OpenResty Lua package (EL 8/9/10)
 ```
 
-Both run the same CFM Lua modules (`configs/lua/`, delivered to
-`/var/lib/cfm/lua/`) and talk to the same daemon; they can both be installed,
-but only one may run (`:9080` / `:9043`). Pick Angie on EL10 / Debian 13 or for
-faster nginx CVE fixes; stay on OpenResty if it already works. `cfm dnat on`
-then redirects 80/443 to the edge. Design: [`docs/edge-unification-plan.md`](docs/edge-unification-plan.md).
+None of the installers starts, stops or swaps a running edge, nor touches the
+DNAT (`install-angie.sh` and `install-edge.sh` print the switch). All run the same CFM Lua
+modules (`configs/lua/`, delivered to `/var/lib/cfm/lua/`) and talk to the
+same daemon; they can all be installed, but only one may run (`:9080` /
+`:9043`). Pick Angie on EL10 / Debian 13 or for faster nginx CVE fixes; stay
+on OpenResty if it already works; cfm-edge is being adopted across the fleet
+(canary first). `cfm dnat on` then redirects 80/443 to the edge. Design: [`docs/edge-unification-plan.md`](docs/edge-unification-plan.md).
 
 ### From source
 

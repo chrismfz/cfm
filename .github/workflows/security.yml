@@ -71,6 +71,8 @@ jobs:
         run: ./scripts/tests/check_package_proxy_config_deploy.sh
       - name: Edge IPv6 listen decision (script, conf includes, deploy hook)
         run: ./scripts/tests/check_edge_listen_v6.sh
+      - name: install-edge.sh stays prepare-only (no systemctl switch, no cfm dnat)
+        run: ./scripts/tests/check_install_edge.sh
       - name: Reject unescaped RPM macros in spec comments; require build-dated top %changelog
         run: ./scripts/tests/check_rpm_spec_macros.sh
       - name: Enforce Site Cache bypass-by-default config invariant
