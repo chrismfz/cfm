@@ -148,7 +148,9 @@ func TestSummaryFlagsWhatNeedsALook(t *testing.T) {
 			errors.New("script missing"), []string{"Web DNAT:    UNKNOWN (nft: boom)", "Panel DNAT:  UNKNOWN (nft: bang)", "IPv6 listen: UNKNOWN (script missing)"}, 1},
 		{"failed probe", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebOn: true, LastProbe: dnat.ProbeResult{At: time.Unix(1, 0), Reason: "timeout"}},
 			nil, []string{"last health probe FAILED", "timeout"}, 0},
-		{"unreadable bypass", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebBypass: -1}, nil, []string{"bypass list unreadable"}, 0},
+		{"unreadable bypass", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebBypass: -1}, nil, []string{"bypass list unreadable"}, 1},
+		{"panel priority from the saved file", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, PanelOn: true, PanelPriority: -101, PanelFromSaved: true},
+			nil, []string{"priority -101 (saved value: the live chain could not be parsed)"}, 0},
 	}
 	for _, c := range cases {
 		d, out, _ := testDeps(&recorder{}, c.s, nil, c.v6)
@@ -207,6 +209,9 @@ func TestOriginVerdictSeesTheRedirectNotJustTheProcess(t *testing.T) {
 		{dnat.Summary{PanelOn: true}, true},
 		{dnat.Summary{ActiveEdge: "angie", EdgeRunning: true}, true},
 		{dnat.Summary{ActiveEdge: "angie"}, false},
+		{dnat.Summary{WebErr: errors.New("x")}, true},
+		{dnat.Summary{PanelErr: errors.New("x")}, true},
+		{dnat.Summary{Ambiguous: true}, true},
 	} {
 		r := &recorder{}
 		d, _, _ := testDeps(r, c.s, nil, nil)

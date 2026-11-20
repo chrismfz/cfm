@@ -211,7 +211,7 @@ adds no logic: each subcommand is an existing one under a name that says what
 it is about, and `cfm dnat` / `cfm realip` keep working as before.
 
 ```bash
-cfm edge                         # the edge at a glance (read-only)
+cfm edge [status]                # the edge at a glance (read-only)
 cfm edge on | off                # = cfm dnat on | off: 80/443 through the edge, or straight to the origin
 cfm edge web                     # = cfm dnat: the full web DNAT report
 cfm edge bypass list|add|remove  # = cfm dnat bypass …
@@ -233,7 +233,9 @@ the origin real-IP verdict, then what needs a look:
 - DNAT off while its saved intent is on (the daemon's failsafe puts it back
   once the edge answers; `cfm edge off` / `cfm edge panel off` clear it).
 
-A state it cannot read prints `UNKNOWN (…)` and exits 1, never `OFF`. The
+A state it cannot read prints `UNKNOWN (…)` (an unreadable bypass list: "bypass
+list unreadable") and exits 1, never `OFF`; the panel priority is the live
+chain's, the saved one only when the rules do not parse (and it says so). The
 routes that need no firewall (`realip`, `ipv6`, `help`) also work where the
 nft backend cannot start. Flags go after the subcommand (`cfm edge panel on
 --priority -99`); one before it is refused.

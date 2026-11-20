@@ -112,7 +112,7 @@ func run(args []string, d deps) int {
 }
 
 const usage = `Usage:
-  cfm edge                         the edge at a glance (engine, web and panel DNAT, IPv6, origin real-IP)
+  cfm edge [status]                the edge at a glance (engine, web and panel DNAT, IPv6, origin real-IP)
   cfm edge on                      put the edge in the path: DNAT 80/443 to it (= cfm dnat on; same flags)
   cfm edge off                     take it out: the origin serves 80/443 directly (= cfm dnat off)
   cfm edge web                     the full web DNAT report (= cfm dnat)
@@ -168,7 +168,11 @@ func printSummary(d deps) int {
 		fmt.Fprintf(w, "  Panel DNAT:  UNKNOWN (%v)\n", s.PanelErr)
 		rc = 1
 	case s.PanelOn:
-		fmt.Fprintf(w, "  Panel DNAT:  ON   priority %d%s\n", s.PanelPriority, bypassNote(s.PanelBypass))
+		saved := ""
+		if s.PanelFromSaved {
+			saved = " (saved value: the live chain could not be parsed)"
+		}
+		fmt.Fprintf(w, "  Panel DNAT:  ON   priority %d%s%s\n", s.PanelPriority, saved, bypassNote(s.PanelBypass))
 	default:
 		fmt.Fprintf(w, "  Panel DNAT:  OFF%s\n", bypassNote(s.PanelBypass))
 	}
@@ -194,7 +198,9 @@ func printSummary(d deps) int {
 	// The origin's trust matters as soon as traffic is sent to an edge, running
 	// or not: with DNAT on and the edge down, "n/a, no edge in front" would
 	// contradict the DNAT lines above.
-	ok, text := d.verdict(s.EdgeRunning || s.WebOn || s.PanelOn)
+	// An unknown DNAT state or an ambiguous engine counts as "in front" too:
+	// "n/a, no edge" must never print for something it could not read.
+	ok, text := d.verdict(s.EdgeRunning || s.WebOn || s.PanelOn || s.Ambiguous || s.WebErr != nil || s.PanelErr != nil)
 	mark := "OK  "
 	if !ok {
 		mark = "WARN"
@@ -218,6 +224,9 @@ func printSummary(d deps) int {
 		if !s.PanelOn && s.PanelIntent == "on" {
 			notes = append(notes, "panel DNAT is OFF but its saved intent is ON: the daemon's failsafe puts it back (cfm edge panel off clears the intent)")
 		}
+	}
+	if s.WebBypass < 0 || s.PanelBypass < 0 {
+		rc = 1
 	}
 	if len(notes) > 0 {
 		fmt.Fprintln(w)

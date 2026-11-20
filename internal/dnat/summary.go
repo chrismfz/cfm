@@ -1,6 +1,9 @@
 package dnat
 
 import (
+	"fmt"
+	"strings"
+
 	"cfm/internal/firewall"
 )
 
@@ -29,15 +32,18 @@ type Summary struct {
 	// WebFromConfig: the live chain could not be read or parsed, so the
 	// priority / ports above are the configured ones, not the installed.
 	WebFromConfig bool
-	WebIntent   string // "on", "off" or "" (no intent file)
-	WebBypass   int    // entries in the web bypass file
-	LastProbe   ProbeResult
+	WebIntent     string // "on", "off" or "" (no intent file)
+	WebBypass     int    // entries in the web bypass file
+	LastProbe     ProbeResult
 
 	PanelOn       bool
 	PanelErr      error
-	PanelPriority int // the persisted priority panel on installs (only when PanelOn)
-	PanelIntent   string
-	PanelBypass   int
+	PanelPriority int // the live chain's priority (only when PanelOn)
+	// PanelFromSaved: the live chain's priority could not be parsed, so
+	// PanelPriority is the saved one `panel on` / the failsafe install.
+	PanelFromSaved bool
+	PanelIntent    string
+	PanelBypass    int
 }
 
 // CollectSummary reads the DNAT state. Errors are kept per scope: an unknown
@@ -57,6 +63,15 @@ func CollectSummary(backend firewall.Backend) Summary {
 		s.PanelErr = errNoBackend
 	} else {
 		s.WebOn, s.WebErr = backend.DNATStatus(DefaultFamily, DefaultTable)
+		if s.WebErr == nil && !s.WebOn {
+			// The exec backend's DNATStatus reads any failure to list the
+			// table as "off" (it has no error path): a non-root run or an nft
+			// that cannot reach the kernel printed OFF. Ask once more and
+			// keep only "the table does not exist" as off.
+			if out, err := backend.DNATShow(DefaultFamily, DefaultTable); err != nil && !tableAbsent(err, out) {
+				s.WebErr = fmt.Errorf("cannot read the web DNAT table: %v", err)
+			}
+		}
 		if s.WebErr == nil && s.WebOn {
 			s.WebPriority = ConfiguredWebDNATPriority()
 			s.HTTPPort, s.HTTPSPort = EffectiveTargetPorts()
@@ -73,9 +88,15 @@ func CollectSummary(backend firewall.Backend) Summary {
 				s.HTTPPort, s.HTTPSPort = h, hs
 			}
 		}
-		s.PanelOn, _, s.PanelErr = panelStatusWithBackend(backend)
+		var rules string
+		s.PanelOn, rules, s.PanelErr = panelStatusWithBackend(backend)
 		if s.PanelErr == nil && s.PanelOn {
-			s.PanelPriority = PanelStartupPriority()
+			if p, ok := parseDNATChainPriority(rules); ok {
+				s.PanelPriority = p
+			} else {
+				s.PanelPriority = PanelStartupPriority()
+				s.PanelFromSaved = true
+			}
 		}
 	}
 
@@ -94,6 +115,13 @@ func edgeRunning(svc string) bool {
 		return st.Active
 	}
 	return panelListenerProcessDetector() == svc
+}
+
+// tableAbsent: the error says the table is not there (off), the same test
+// the panel status uses; anything else is an unknown.
+func tableAbsent(err error, out string) bool {
+	msg := err.Error() + out
+	return strings.Contains(msg, "No such file") || strings.Contains(msg, "does not exist")
 }
 
 type summaryError string

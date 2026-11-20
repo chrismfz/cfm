@@ -16,14 +16,16 @@ type summaryBackend struct {
 	webOn    bool
 	webErr   error
 	show     string
+	showErr  error
 	panelOn  bool
+	rules    string
 	panelErr error
 }
 
 func (b summaryBackend) DNATStatus(string, string) (bool, error) { return b.webOn, b.webErr }
-func (b summaryBackend) DNATShow(string, string) (string, error) { return b.show, nil }
+func (b summaryBackend) DNATShow(string, string) (string, error) { return b.show, b.showErr }
 func (b summaryBackend) PanelDNATStatus() (bool, string, error) {
-	return b.panelOn, "", b.panelErr
+	return b.panelOn, b.rules, b.panelErr
 }
 
 // isolateSummaryFiles points every file CollectSummary reads at a temp dir.
@@ -71,7 +73,7 @@ func TestCollectSummaryReadsTheLiveRedirect(t *testing.T) {
 	if s.WebIntent != "on" || s.WebBypass != 2 {
 		t.Fatalf("web intent/bypass: %q %d", s.WebIntent, s.WebBypass)
 	}
-	if !s.PanelOn || s.PanelPriority != -99 || s.PanelBypass != 0 || s.PanelIntent != "" {
+	if !s.PanelOn || s.PanelPriority != -99 || !s.PanelFromSaved || s.PanelBypass != 0 || s.PanelIntent != "" {
 		t.Fatalf("panel: %+v", s)
 	}
 	if s.ActiveEdge != "" || s.Ambiguous {
@@ -197,5 +199,39 @@ func TestStrayWordsAndDeprecatedChallenge(t *testing.T) {
 	}
 	if b.onCalls != 0 || b.offCalls != 0 {
 		t.Fatalf("a refused command changed web DNAT: on=%d off=%d", b.onCalls, b.offCalls)
+	}
+}
+
+// The exec backend's DNATStatus says "off" for any failure to list the table:
+// the summary must tell "no table" (off) from "could not ask" (unknown).
+func TestCollectSummaryUnreadableWebTableIsUnknown(t *testing.T) {
+	isolateSummaryFiles(t)
+	s := CollectSummary(summaryBackend{showErr: errors.New("exit status 1: Error: Operation not permitted")})
+	if s.WebErr == nil || s.WebOn {
+		t.Fatalf("an unreadable table read as off: %+v", s)
+	}
+	for _, absent := range []string{"Error: No such file or directory", "table inet cfm_redirect does not exist"} {
+		if s := CollectSummary(summaryBackend{showErr: errors.New(absent)}); s.WebErr != nil || s.WebOn {
+			t.Fatalf("%q: a missing table must read as off: %+v", absent, s)
+		}
+	}
+	if s := CollectSummary(summaryBackend{}); s.WebErr != nil {
+		t.Fatalf("an empty listing (nftlib, no chain) must read as off: %+v", s)
+	}
+}
+
+// The panel priority is the live chain's; the saved one only when the rules
+// do not parse, and then it says so.
+func TestCollectSummaryPanelPriorityIsLive(t *testing.T) {
+	isolateSummaryFiles(t)
+	if err := os.WriteFile(panelDNATPriorityPath, []byte("-101\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules := "table inet cfm_panel_redirect {\n\tchain prerouting {\n\t\ttype nat hook prerouting priority dstnat + 1; policy accept;\n\t}\n}\n"
+	if s := CollectSummary(summaryBackend{panelOn: true, rules: rules}); s.PanelPriority != -99 || s.PanelFromSaved {
+		t.Fatalf("live: %+v", s)
+	}
+	if s := CollectSummary(summaryBackend{panelOn: true, rules: "garbage"}); s.PanelPriority != -101 || !s.PanelFromSaved {
+		t.Fatalf("saved fallback: %+v", s)
 	}
 }
