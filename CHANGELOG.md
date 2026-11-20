@@ -32,8 +32,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `--scope` is required (an old unscoped entry stays inert), the first path
   segment must be a literal name (`/`, `/*`, `/*.php` are refused), and
   match-all scope globs are refused. A cPanel tenant's scoped token may
-  manage these on its own vhosts through the same API; the cfm-admin excludes
-  card offers it to admins (scope field and column; an inert entry says so).
+  manage these on its own vhosts, from the API or the cfm-admin excludes
+  card: admins and tenants both get `path` on the challenge card, with a
+  required scope field (a tenant's is prefilled with its first site in
+  alphabetical order, and checked against its own sites) and a Scope column
+  where an inert entry says so. WAF path excludes stay admin-only.
+  `tokens/me` now lists a token's vhosts sorted.
   A skipped hit is logged once a minute per exclude
   (`action=path_exclude_skip`). Details: `docs/DETECTORS.md`.
 

@@ -98,9 +98,11 @@ func RegisterTokenManagementEndpoints(m *http.ServeMux, store *TokenStore) {
 			apiJSONError(w, "token not found", http.StatusUnauthorized)
 			return
 		}
-		vhosts := make([]string, 0, len(st.Vhosts))
-		for v := range st.Vhosts {
-			vhosts = append(vhosts, v)
+		// Sorted, so "the first site" the UI prefills is stable across loads
+		// (a map's iteration order is not). Never null: the UI reads an array.
+		vhosts := sortedScopeKeys(st.Vhosts)
+		if vhosts == nil {
+			vhosts = []string{}
 		}
 		dbUsers := sortedScopeKeys(st.DBUsers)
 		databases := sortedScopeKeys(st.Databases)
