@@ -188,7 +188,11 @@ access log:
 - `mwhy="…"` (last field) says why a request on a micro-armed vhost was NOT
   micro-cached: one of the reasons in the table above, e.g.
   `mwhy="auth:wordpress_logged_in_<hash>"` for a visitor still carrying a
-  session cookie. It carries a cookie's NAME only, never its value, with
+  session cookie. Three reasons come from cfm.lua, for a request allowed
+  before micro is ever asked: `clearance` (a visitor holding a valid
+  `cfm_clearance` cookie takes the fast path, which never micro-caches, by
+  design §5.5.1), `waf` (a logonly WAF hit or an uninspected request) and
+  `self-ip` (the node's own addresses). It carries a cookie's NAME only, never its value, with
   anything outside `[A-Za-z0-9_.:-]` as `_`. `-` for every other request: a
   micro-served one, a vhost without micro, a static asset, the panel
   listeners. (cfm_cache.micro_gate sets `$cfm_micro_why`; the log reads it

@@ -1091,6 +1091,28 @@ do
   check(ngx.var.cfm_micro_why == "unknown", "nil reads as unknown")
   ngx.var = saved
 end
+-- note_skip: an allow before Step 4 (clearance fast-path, WAF logonly,
+-- self-IP) records its reason, on a micro-armed vhost only.
+do
+  local saved = ngx.var
+  _site_cache_on = true
+  cache._rebuild_cache({
+    { host = "myip.gr", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "1s" } },
+    { host = "assets.cdn.example.com", gen = 1, static = { on = true, recipe = "static_lean", ttl = "1h" } },
+  })
+  ngx.var = { host = "myip.gr", cfm_micro_why = "-" }
+  cache.note_skip("clearance")
+  check(ngx.var.cfm_micro_why == "clearance", "note_skip on a micro-armed vhost: " .. tostring(ngx.var.cfm_micro_why))
+  ngx.var = { host = "assets.cdn.example.com", cfm_micro_why = "-" }
+  cache.note_skip("clearance")
+  check(ngx.var.cfm_micro_why == "-", "note_skip on a vhost without micro leaves -")
+  ngx.var = { host = "nope.example", cfm_micro_why = "-" }
+  cache.note_skip("clearance")
+  check(ngx.var.cfm_micro_why == "-", "note_skip on a vhost with no policy leaves -")
+  ngx.var = setmetatable({ host = "myip.gr" }, { __newindex = function(_, k) error("no " .. k) end })
+  check(pcall(cache.note_skip, "clearance"), "note_skip with an old conf does not raise")
+  ngx.var = saved
+end
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")

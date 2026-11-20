@@ -1326,6 +1326,19 @@ local function note_micro_why(why)
 end
 _M._note_micro_why = note_micro_why
 
+-- note_skip: cfm.lua allowed the request BEFORE Step 4, the only micro entry
+-- (the clearance fast-path, a WAF logonly hit or an uninspected request, the
+-- self-IP / well-known bypasses), so micro_gate never ran: record that as the
+-- reason, for a micro-armed vhost only (on any other vhost mwhy stays "-",
+-- as for every request micro has nothing to say about). One policy lookup;
+-- never raises past the caller's pcall.
+function _M.note_skip(why)
+    if not site_cache_enabled() then return end
+    local p = _M.policy_for(ngx.var.host)
+    if not p or type(p.micro) ~= "table" or not p.micro.on then return end
+    note_micro_why(why)
+end
+
 -- micro_gate: ACCESS-phase hook for Tier B (micro-cache of anonymous
 -- HTML). Called from cfm.lua at the Step 4 plain-allow return, AFTER $cfm_pass is
 -- set. (The Step 2b clearance fast-path is deferred until the §5.5.1 clearance-

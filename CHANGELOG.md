@@ -42,7 +42,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **The edge's access log says why a request was not micro-cached.** A new
   last field, `mwhy="…"`, carries Site Cache Tier B's request-side reason
   for a micro-armed vhost (`auth:<cookie name>` for a session cookie,
-  `method`, `path`, `uncacheable`, …; a cookie's name, never its value), and
+  `method`, `path`, `uncacheable`, …; a cookie's name, never its value;
+  `clearance` for a visitor whose challenge-clearance cookie takes the fast
+  path, which never micro-caches; `waf`, `self-ip`), and
   `-` for everything else. Before, "why was my page not cached?" needed the
   trusted-source debug header, which cannot see a visitor's own cookies.
   An old conf with the new Lua simply has no field (no error); the panel
