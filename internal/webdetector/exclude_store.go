@@ -217,43 +217,54 @@ func (s *excludeStore) removeHostAnyScopeLocked(t, v string, scope map[string]st
 	return removed
 }
 
-// RemovePathWithin removes every path entry on value whose scope_hosts are
-// all held (literally) by within: a scoped caller's fallback when no entry
-// carries exactly its current vhost set. An unscoped entry is never removed
-// this way. Returns whether anything was removed.
-func (s *excludeStore) RemovePathWithin(v string, within map[string]struct{}) bool {
+// RemovePathHosts takes the hosts in strip out of every path entry on value
+// that names at least one of them: an entry left with no host is deleted, the
+// others keep applying to their remaining hosts. A scoped caller's remove: it
+// acts on its own hosts only, so an entry shared with another tenant (or one a
+// domain move left behind) stops applying to the caller's sites without
+// touching anyone else's. An unscoped entry is never changed this way.
+// Returns whether anything changed.
+func (s *excludeStore) RemovePathHosts(v string, strip map[string]struct{}) bool {
 	t, v, ok := s.normalize("path", v)
-	if !ok || len(within) == 0 {
+	if !ok || len(strip) == 0 {
 		return false
 	}
-	held := make(map[string]struct{}, len(within))
-	for h := range within {
-		held[strings.ToLower(strings.TrimSpace(h))] = struct{}{}
+	drop := make(map[string]struct{}, len(strip))
+	for h := range strip {
+		drop[strings.ToLower(strings.TrimSpace(h))] = struct{}{}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	removed := false
+	changed := false
 	for k, e := range s.entries {
 		if e.Type != t || e.Value != v || len(e.ScopeHosts) == 0 {
 			continue
 		}
-		all := true
+		keep := make([]string, 0, len(e.ScopeHosts))
 		for _, h := range e.ScopeHosts {
-			if _, ok := held[h]; !ok {
-				all = false
-				break
+			if _, gone := drop[h]; !gone {
+				keep = append(keep, h)
 			}
 		}
-		if all {
-			delete(s.entries, k)
-			removed = true
+		if len(keep) == len(e.ScopeHosts) {
+			continue
+		}
+		delete(s.entries, k)
+		changed = true
+		if len(keep) == 0 {
+			continue
+		}
+		e.ScopeHosts = keep
+		nk := s.key(e.Type, e.Value, e.ScopeHosts, e.RuleIDs)
+		if _, dup := s.entries[nk]; !dup {
+			s.entries[nk] = e
 		}
 	}
-	if removed {
+	if changed {
 		s.rebuildCompiledLocked()
 		_ = s.saveLocked()
 	}
-	return removed
+	return changed
 }
 
 func (s *excludeStore) List() []excludeEntry {
@@ -483,8 +494,14 @@ func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// A literal scope host also covers its www. alias: cPanel lists a domain
+	// without it (a tenant's token cannot name it), and nginx serves both.
+	apex := ""
+	if strings.HasPrefix(host, "www.") {
+		apex = host[len("www."):]
+	}
 	for _, e := range s.pathEntries {
-		if !e.Scoped || !e.Scope.Match(host) {
+		if !e.Scoped || !(e.Scope.Match(host) || (apex != "" && e.Scope.matchExact(apex))) {
 			continue
 		}
 		if e.Value.Match(path) {
@@ -492,6 +509,12 @@ func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// matchExact reports host among the literal (non-glob) scope hosts.
+func (m compiledScopeMatcher) matchExact(host string) bool {
+	_, ok := m.exact[host]
+	return ok
 }
 
 func (s *excludeStore) load() {

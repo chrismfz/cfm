@@ -62,6 +62,25 @@ func TestChallengePathExcludeStopsBothCounters(t *testing.T) {
 	if c, m := malpathCounts(e, "192.0.2.3"); c != 1 || m != 1 {
 		t.Fatalf("other path on the excluded host: chal=%d mal=%d, want 1/1", c, m)
 	}
+	// A traversal / encoded path under the prefix is another file: it counts.
+	for i, uri := range []string{
+		"/images/.tmb/../../.env",
+		"/images/.tmb/%2e%2e/%2e%2e/.env",
+		"/images/.tmb/..%2f..%2f.env",
+		"/images/.tmb//../.env",
+		"/images/.tmb/.\\..\\.env",
+	} {
+		ip := "192.0.2." + string(rune('a'+i))
+		hit(ip, "site.gr", uri)
+		if c, m := malpathCounts(e, ip); c != 1 || m != 1 {
+			t.Fatalf("%s skipped: chal=%d mal=%d, want 1/1", uri, c, m)
+		}
+	}
+	// The www. alias of a literal scope host is covered.
+	hit("192.0.2.9", "www.site.gr", "/images/.tmb/l1_abc.png")
+	if c, m := malpathCounts(e, "192.0.2.9"); c != 0 || m != 0 {
+		t.Fatalf("www alias counted: chal=%d mal=%d", c, m)
+	}
 	// Segment boundary: /images/.tmb/ is a pure prefix; /images2/.tmb/ is not under it.
 	hit("192.0.2.4", "site.gr", "/images2/.tmb/x.png")
 	if c, m := malpathCounts(e, "192.0.2.4"); c != 1 || m != 1 {
@@ -124,6 +143,13 @@ func TestChallengePathExcludeAPIScope(t *testing.T) {
 		"type=path&value=/&scope_hosts=a.gr",
 		"type=path&value=/*&scope_hosts=a.gr",
 		"type=path&value=/*/*&scope_hosts=a.gr",
+		"type=path&value=/*.php&scope_hosts=a.gr",
+		"type=path&value=/[!/]*&scope_hosts=a.gr",
+		"type=path&value=/[a-z]*&scope_hosts=a.gr",
+		"type=path&value=/*/.tmb/*&scope_hosts=a.gr",
+		"type=path&value=/.tmb/&scope_hosts=*-*",
+		"type=path&value=/.tmb/&scope_hosts=*a*",
+		"type=path&value=/.tmb/&scope_hosts=*.gr",
 	} {
 		if rr := call(add, adminReq("POST", "/api/v1/challenge/exclude/add?"+q)); rr.Code != http.StatusBadRequest {
 			t.Fatalf("admin %s: %d %s", q, rr.Code, rr.Body.String())
@@ -132,10 +158,10 @@ func TestChallengePathExcludeAPIScope(t *testing.T) {
 	if rr := call(add, adminReq("POST", "/api/v1/challenge/exclude/add?type=path&value=/.tmb/&scope_hosts=a.gr")); rr.Code != http.StatusOK {
 		t.Fatalf("admin scoped add: %d %s", rr.Code, rr.Body.String())
 	}
-	if rr := call(add, adminReq("POST", "/api/v1/challenge/exclude/add?type=path&value=/*/.tmb/*&scope_hosts=a.gr")); rr.Code != http.StatusOK {
+	if rr := call(add, adminReq("POST", "/api/v1/challenge/exclude/add?type=path&value=/images/*/.tmb/*&scope_hosts=a.gr")); rr.Code != http.StatusOK {
 		t.Fatalf("admin glob add: %d %s", rr.Code, rr.Body.String())
 	}
-	if _, ok := e.challengeExcludes.MatchChallengePath("a.gr", "/images/.tmb/l1.png"); !ok {
+	if _, ok := e.challengeExcludes.MatchChallengePath("a.gr", "/images/x/.tmb/l1.png"); !ok {
 		t.Fatal("glob entry did not match")
 	}
 
@@ -188,8 +214,46 @@ func TestChallengePathExcludeAPIScope(t *testing.T) {
 	if !e.ChallengeExcludeAdd("path", "/shared/", scopeSet("t1.gr", "a.gr")) {
 		t.Fatal("add")
 	}
-	if rr := call(rm, scopedReq("POST", "/api/v1/challenge/exclude/remove?type=path&value=/shared/", "t1.gr")); rr.Code != http.StatusForbidden {
-		t.Fatalf("a partial owner removing a shared entry: %d, want 403", rr.Code)
+	// A partial owner takes only its own host out of a shared entry.
+	if rr := call(rm, scopedReq("POST", "/api/v1/challenge/exclude/remove?type=path&value=/shared/", "t1.gr")); rr.Code != http.StatusOK {
+		t.Fatalf("a partial owner removing its host: %d %s", rr.Code, rr.Body.String())
+	}
+	if _, ok := e.challengeExcludes.MatchChallengePath("t1.gr", "/shared/x"); ok {
+		t.Fatal("the partial owner's host is still covered")
+	}
+	if _, ok := e.challengeExcludes.MatchChallengePath("a.gr", "/shared/x"); !ok {
+		t.Fatal("another tenant's host lost its exclude")
+	}
+	// A domain move: A wrote [m1.gr, m2.gr]; m2.gr moves to B, who removes it
+	// for m2.gr only, and A keeps m1.gr.
+	if !e.ChallengeExcludeAdd("path", "/moved/", scopeSet("m1.gr", "m2.gr")) {
+		t.Fatal("add")
+	}
+	if rr := call(rm, scopedReq("POST", "/api/v1/challenge/exclude/remove?type=path&value=/moved/", "m2.gr", "bb.gr")); rr.Code != http.StatusOK {
+		t.Fatalf("new owner remove: %d %s", rr.Code, rr.Body.String())
+	}
+	if _, ok := e.challengeExcludes.MatchChallengePath("m2.gr", "/moved/x"); ok {
+		t.Fatal("moved domain still covered")
+	}
+	if _, ok := e.challengeExcludes.MatchChallengePath("m1.gr", "/moved/x"); !ok {
+		t.Fatal("the writer's remaining host lost its exclude")
+	}
+	// A narrowed remove takes only the named host out.
+	if !e.ChallengeExcludeAdd("path", "/two/", scopeSet("t1.gr", "t2.gr")) {
+		t.Fatal("add")
+	}
+	if rr := call(rm, scopedReq("POST", "/api/v1/challenge/exclude/remove?type=path&value=/two/&scope_hosts=t1.gr", "t1.gr", "t2.gr")); rr.Code != http.StatusOK {
+		t.Fatalf("narrowed remove: %d", rr.Code)
+	}
+	if _, ok := e.challengeExcludes.MatchChallengePath("t2.gr", "/two/x"); !ok {
+		t.Fatal("narrowed remove dropped the other host")
+	}
+	// A tenant holding a wildcard vhost never gets it as a scope.
+	if rr := call(add, scopedReq("POST", "/api/v1/challenge/exclude/add?type=path&value=/x/", "*.t5.gr")); rr.Code != http.StatusForbidden {
+		t.Fatalf("wildcard-only token: %d", rr.Code)
+	}
+	if rr := call(add, scopedReq("POST", "/api/v1/challenge/exclude/add?type=path&value=/x/&scope_hosts=*.t5.gr", "*.t5.gr")); rr.Code != http.StatusForbidden {
+		t.Fatalf("wildcard scope_hosts from a tenant: %d", rr.Code)
 	}
 	// A token whose own set holds a match-all glob cannot use it as the scope.
 	if rr := call(add, scopedReq("POST", "/api/v1/challenge/exclude/add?type=path&value=/x/", "*")); rr.Code != http.StatusForbidden {

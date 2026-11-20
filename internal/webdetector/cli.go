@@ -106,7 +106,7 @@ func printWebTopHelp() {
 	fmt.Println("  cfm webtop challenge exclude add <host>")
 	fmt.Println("  cfm webtop challenge exclude add <path> --type path --scope <host> [--scope <host> ...]")
 	fmt.Println("      # path: not counted by the malpath challenge (CHALLENGE_PATHS) nor the MALPATH ban on those hosts only")
-	fmt.Println("      #   exact hosts: add --scope www.<host> too if the site answers there")
+	fmt.Println("      #   each --scope host also covers its www. alias; the first path segment must be a literal name")
 	fmt.Println("  cfm webtop challenge exclude remove <host|path> [--type host|path] [--scope <host> ...]")
 	fmt.Println("  cfm webtop attack                         # Under-Attack status + vhosts currently under attack")
 	fmt.Println("  cfm webtop attack on <H> [--ttl 6h]       # force a vhost into UNDER_ATTACK for a TTL (default UNDER_ATTACK_OVERRIDE_TTL, 6h);")

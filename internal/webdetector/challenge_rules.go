@@ -456,21 +456,28 @@ func (e *Engine) trackChallengePaths(rec LogRec, pm *pathMatchOnce, b *bucketSW)
 // is decided at COUNTING time: the per-IP counters aggregate across hosts, and
 // by emission time the (host, path) that matched is gone (chalLast keeps only
 // the IP's last request). The store is asked at most once per request, and a
-// skip is logged at most once a minute per (check, host, exclude). Called from
+// skip is logged at most once a minute per (check, exclude). Called from
 // ingest with e.mu held.
 func (e *Engine) malpathExcluded(rec LogRec, pm *pathMatchOnce, check string) bool {
 	if e.challengeExcludes == nil {
 		return false
 	}
 	if !pm.exclChecked {
-		pm.exclValue, pm.excluded = e.challengeExcludes.MatchChallengePath(rec.Host, pm.p)
+		// Only a plain path can be carved out: the log carries the raw URI,
+		// and `/images/.tmb/../../.env` or `/images/.tmb/%2e%2e/x` sit under
+		// the prefix while the origin serves another file.
+		if plainExcludablePath(pm.p) {
+			pm.exclValue, pm.excluded = e.challengeExcludes.MatchChallengePath(rec.Host, pm.p)
+		}
 		pm.exclChecked = true
 	}
 	if !pm.excluded {
 		return false
 	}
 	now := time.Now()
-	k := check + "|" + strings.ToLower(rec.Host) + "|" + pm.exclValue
+	// Keyed on the exclude, not the request host: a wildcard scope must not
+	// turn rotating Host headers into one log line per request.
+	k := check + "|" + pm.exclValue
 	if last, seen := e.malpathExclLogAt[k]; !seen || now.Sub(last) >= time.Minute {
 		if e.malpathExclLogAt == nil || len(e.malpathExclLogAt) >= 4096 {
 			e.malpathExclLogAt = make(map[string]time.Time)
@@ -480,8 +487,29 @@ func (e *Engine) malpathExcluded(rec LogRec, pm *pathMatchOnce, check string) bo
 		if len(path) > 200 {
 			path = path[:200] + "..."
 		}
-		logging.LogfCHALLENGES("[challenge][malpath] action=path_exclude_skip check=%s host=%q path=%q ip=%s exclude=%q note=not_counted (per check+host+exclude, 1/min)",
+		logging.LogfCHALLENGES("[challenge][malpath] action=path_exclude_skip check=%s host=%q path=%q ip=%s exclude=%q note=not_counted (per check+exclude, 1/min)",
 			check, rec.Host, path, rec.IP, pm.exclValue)
+	}
+	return true
+}
+
+// plainExcludablePath reports a request path with no dot segment, empty
+// segment, backslash or percent-encoded dot / slash / backslash: what the log
+// shows is then the file the origin serves, so a path exclude may apply.
+func plainExcludablePath(p string) bool {
+	if strings.Contains(p, "\\") || strings.Contains(p, "//") {
+		return false
+	}
+	pl := strings.ToLower(p)
+	for _, enc := range []string{"%2e", "%2f", "%5c", "%00"} {
+		if strings.Contains(pl, enc) {
+			return false
+		}
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
 	}
 	return true
 }

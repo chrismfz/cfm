@@ -4412,14 +4412,15 @@ func (e *Engine) ChallengeExcludeRemove(typ, value string, scope map[string]stru
 	return ok
 }
 
-// ChallengePathExcludeRemoveWithin is a scoped caller's path-exclude remove
-// when no entry carries exactly its vhost set (excludeStore.RemovePathWithin).
-func (e *Engine) ChallengePathExcludeRemoveWithin(value string, within map[string]struct{}) bool {
+// ChallengePathExcludeRemoveHosts is a scoped caller's path-exclude remove:
+// it takes the caller's hosts out of the entries on value
+// (excludeStore.RemovePathHosts).
+func (e *Engine) ChallengePathExcludeRemoveHosts(value string, hosts map[string]struct{}) bool {
 	if e == nil || e.challengeExcludes == nil {
 		return false
 	}
-	ok := e.challengeExcludes.RemovePathWithin(value, within)
-	logExcludeChange("challenge", "remove", "path", value, within, nil, ok)
+	ok := e.challengeExcludes.RemovePathHosts(value, hosts)
+	logExcludeChange("challenge", "remove", "path", value, hosts, nil, ok)
 	return ok
 }
 

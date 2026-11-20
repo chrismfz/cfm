@@ -24,15 +24,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **A host-scoped PATH exclude for the malpath checks.**
   `cfm webtop challenge exclude add /images/.tmb/ --type path --scope example.gr`
   stops the malpath challenge (`CHALLENGE_PATHS`) and the `MALPATH` ban from
-  counting that path on that site only; the same path elsewhere, and every
-  other path on the site, still count. Before, the command was accepted and
-  stored but matched nothing, so the only remedy for one site's tool tripping
-  the list was deleting the entry for every site. `--scope` is required (a
-  path exclude without it would exempt the path everywhere; an old unscoped
-  entry stays inert), and a value with no literal part (`/`, `/*`) is refused. A cPanel tenant's scoped
-  token may manage these on its own vhosts through the same API (ready for
-  the cfm-admin excludes card). A skipped hit is logged once a minute per
-  host and exclude (`action=path_exclude_skip`). Details: `docs/DETECTORS.md`.
+  counting that path on that site (and its `www.` alias) only; the same path
+  elsewhere, every other path on the site, and a traversal or encoded path
+  under the prefix (`/images/.tmb/../../.env`) still count. Before, the
+  command was accepted and stored but matched nothing, so the only remedy for
+  one site's tool tripping the list was deleting the entry for every site.
+  `--scope` is required (an old unscoped entry stays inert), the first path
+  segment must be a literal name (`/`, `/*`, `/*.php` are refused), and
+  match-all scope globs are refused. A cPanel tenant's scoped token may
+  manage these on its own vhosts through the same API; the cfm-admin excludes
+  card offers it to admins (scope field and column; an inert entry says so).
+  A skipped hit is logged once a minute per exclude
+  (`action=path_exclude_skip`). Details: `docs/DETECTORS.md`.
 
 ### Fixed
 - **The malpath list no longer challenges elFinder's thumbnails.** `/.tmb/`
