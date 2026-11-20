@@ -72,7 +72,7 @@ func RunCLI(args []string, defaultSockPath, defaultToken string) {
 				return net.Dial("unix", *sockPath)
 			},
 		}
-		return &http.Client{
+		return &http.Client{ // clihttp-exception: the sslcollector unix socket, not the daemon API
 			Transport: tr,
 			Timeout:   10 * time.Second,
 		}

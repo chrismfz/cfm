@@ -287,7 +287,7 @@ func SnapshotScope(scope DNATScope) StateSnapshot {
 }
 
 func newProbeHTTPClient() *http.Client {
-	return &http.Client{
+	return &http.Client{ // clihttp-exception: probes the edge's own listener, not the daemon API
 		Transport: &http.Transport{
 			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 			DisableKeepAlives:   true,

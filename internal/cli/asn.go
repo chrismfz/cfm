@@ -47,7 +47,7 @@ func RunASN(args []string) int {
 	}
 
 	url := "https://stat.ripe.net/data/announced-prefixes/data.json?resource=" + asn
-	client := http.Client{Timeout: 15 * time.Second}
+	client := http.Client{Timeout: 15 * time.Second} // clihttp-exception: RIPE stat, an external API
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "asn lookup failed:", err)
