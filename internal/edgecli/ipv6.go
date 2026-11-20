@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"cfm/internal/dnat"
 	"cfm/internal/edgeengine"
 	"cfm/internal/originrealip"
 )
@@ -27,26 +26,21 @@ import (
 // a kill switch (an off-like or unreadable value) and leaves any other line
 // as the operator wrote it.
 
-// confPath is cfm.conf, in the config dir main gives `cfm dnat`
-// (dnat.SetConfigDir): one copy. A seam for tests.
-var confPath = func() string {
-	dir := dnat.ConfigDir()
-	if dir == "" {
-		dir = "/etc/cfm"
-	}
-	return filepath.Join(dir, "cfm.conf")
-}
+// confPath is THE cfm.conf the listen script and `cfm realip` read: the
+// script takes EDGE_LISTEN_V6 from $CFM_CONF but asks `cfm realip` for the
+// ::1 trust, which always reads /etc/cfm/cfm.conf, so any other file would
+// make the two disagree. Fixed, and CFM_CONF is not passed. A seam for tests.
+var confPath = func() string { return "/etc/cfm/cfm.conf" }
 
 // renderTimeout bounds one render: it reloads the edge and waits for its IPv6
 // listen to show up.
 var renderTimeout = 3 * time.Minute
 
 // renderRunner runs the script's render; a seam for tests.
-var renderRunner = func(conf string, args ...string) (string, error) {
+var renderRunner = func(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), renderTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", append([]string{ListenV6Script}, args...)...) // #nosec G204 -- fixed packaged script, args validated
-	cmd.Env = append(os.Environ(), "CFM_CONF="+conf)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -228,13 +222,25 @@ func setIPv6(d deps, sub string, renderArgs []string) int {
 		fmt.Fprintf(d.out, "%s: %s\n", path, describeV6(updated))
 	}
 	fmt.Fprintf(d.out, "Running: sh %s %s (reloads a running edge)\n", ListenV6Script, strings.Join(renderArgs, " "))
-	out, err := renderRunner(path, renderArgs...)
+	out, err := renderRunner(renderArgs...)
 	for _, l := range ipv6Lines(out) {
 		fmt.Fprintln(d.out, l)
 	}
 	if err != nil {
 		fmt.Fprintf(d.errOut, "edge ipv6: render: %v (cfm.conf is changed; run `cfm edge ipv6` to see the decision)\n", err)
 		return 1
+	}
+	// The script exits 0 whatever it decided (an edge must start whatever
+	// happens): what it did is in the lines above, and the decision now is
+	// its status.
+	lines, serr := d.ipv6()
+	if serr != nil {
+		fmt.Fprintln(d.errOut, "edge ipv6: status:", serr)
+		return 1
+	}
+	fmt.Fprintln(d.out, "Now:")
+	for _, l := range lines {
+		fmt.Fprintln(d.out, "  "+l)
 	}
 	return 0
 }

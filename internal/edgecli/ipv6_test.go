@@ -68,14 +68,13 @@ func TestSetIPv6WritesTheConfAndRenders(t *testing.T) {
 	t.Cleanup(func() { confPath, renderRunner, ListenV6Script = oldConf, oldRun, oldScript })
 	confPath = func() string { return conf }
 	ListenV6Script = script
-	var gotConf string
 	var gotArgs []string
-	renderRunner = func(c string, a ...string) (string, error) {
-		gotConf, gotArgs = c, a
+	renderRunner = func(a ...string) (string, error) {
+		gotArgs = a
 		return "CFM edge IPv6 listen: cfm-edge: listening on IPv6 too (ready)\n", nil
 	}
 
-	d, out, _ := testDeps(&recorder{}, dnat.Summary{}, nil, nil)
+	d, out, _ := testDeps(&recorder{}, dnat.Summary{}, []string{"cfm-edge: listening on IPv6 too (now)"}, nil)
 	if rc := setIPv6(d, "on", []string{"render", "cfm-edge"}); rc != 0 {
 		t.Fatalf("rc=%d", rc)
 	}
@@ -86,10 +85,10 @@ func TestSetIPv6WritesTheConfAndRenders(t *testing.T) {
 	if st, _ := os.Stat(conf); st.Mode().Perm() != 0o640 {
 		t.Fatalf("mode changed: %v", st.Mode())
 	}
-	if gotConf != conf || !reflect.DeepEqual(gotArgs, []string{"render", "cfm-edge"}) {
-		t.Fatalf("render got conf=%q args=%v", gotConf, gotArgs)
+	if !reflect.DeepEqual(gotArgs, []string{"render", "cfm-edge"}) {
+		t.Fatalf("render got args=%v", gotArgs)
 	}
-	for _, want := range []string{"no EDGE_LISTEN_V6 line (the default", "reloads a running edge", "cfm-edge: listening on IPv6 too"} {
+	for _, want := range []string{"no EDGE_LISTEN_V6 line (the default", "reloads a running edge", "cfm-edge: listening on IPv6 too (ready)", "Now:\n  cfm-edge: listening on IPv6 too (now)"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q in:\n%s", want, out.String())
 		}
@@ -105,7 +104,7 @@ func TestSetIPv6WritesTheConfAndRenders(t *testing.T) {
 	}
 
 	// A failed render: exit 1, the conf change stays (and it says so).
-	renderRunner = func(string, ...string) (string, error) { return "", errors.New("exit status 1") }
+	renderRunner = func(...string) (string, error) { return "", errors.New("exit status 1") }
 	d, _, errOut := testDeps(&recorder{}, dnat.Summary{}, nil, nil)
 	if rc := setIPv6(d, "off", []string{"render"}); rc != 1 || !strings.Contains(errOut.String(), "cfm.conf is changed") {
 		t.Fatalf("rc=%d err=%s", rc, errOut.String())
@@ -120,7 +119,7 @@ func TestSetIPv6RefusesWithoutTheScriptOrTheConf(t *testing.T) {
 	t.Cleanup(func() { confPath, renderRunner, ListenV6Script = oldConf, oldRun, oldScript })
 	confPath = func() string { return conf }
 	ran := false
-	renderRunner = func(string, ...string) (string, error) { ran = true; return "", nil }
+	renderRunner = func(...string) (string, error) { ran = true; return "", nil }
 
 	ListenV6Script = filepath.Join(dir, "missing.sh")
 	if err := os.WriteFile(conf, []byte("A = 1\n"), 0o644); err != nil {
@@ -198,5 +197,30 @@ func TestV6UpdateAgainstTheSharedFixture(t *testing.T) {
 	}
 	if n < 20 {
 		t.Fatalf("only %d fixture cases read", n)
+	}
+}
+
+// THE cfm.conf: the one the script's `cfm realip` call reads too.
+func TestIPv6EditsTheConfRealIPReads(t *testing.T) {
+	if got := confPath(); got != "/etc/cfm/cfm.conf" {
+		t.Fatalf("confPath() = %q", got)
+	}
+}
+
+// A status that cannot be read after the render is an error, not a silent 0.
+func TestSetIPv6StatusAfterRender(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "cfm.conf")
+	if err := os.WriteFile(conf, []byte("A = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldConf, oldRun, oldScript := confPath, renderRunner, ListenV6Script
+	t.Cleanup(func() { confPath, renderRunner, ListenV6Script = oldConf, oldRun, oldScript })
+	confPath = func() string { return conf }
+	ListenV6Script = conf
+	renderRunner = func(...string) (string, error) { return "", nil }
+	d, _, errOut := testDeps(&recorder{}, dnat.Summary{}, nil, errors.New("sh failed"))
+	if rc := setIPv6(d, "off", []string{"render"}); rc != 1 || !strings.Contains(errOut.String(), "status") {
+		t.Fatalf("rc=%d err=%s", rc, errOut.String())
 	}
 }

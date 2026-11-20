@@ -23,10 +23,6 @@ var _cfgDir atomic.Value // string
 // once during `cfm dnat` dispatch, mirroring SetAPIBase.
 func SetConfigDir(dir string) { _cfgDir.Store(strings.TrimSpace(dir)) }
 
-// ConfigDir is the config dir main set (SetConfigDir), for the other CLI
-// commands that read or edit cfm.conf (`cfm edge ipv6`): one copy.
-func ConfigDir() string { return configDir() }
-
 func configDir() string {
 	if v := _cfgDir.Load(); v != nil {
 		return v.(string)
