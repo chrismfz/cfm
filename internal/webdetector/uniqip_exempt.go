@@ -1,7 +1,9 @@
 package webdetector
 
 import (
+	"cfm/internal/ipkey"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -104,19 +106,29 @@ func (b *NginxBridge) vhostChallengeExemptClient(ip, host, ua string, bypass boo
 	return false
 }
 
-// countedUniqueIPs is the vhost uniqIP count: the distinct IPs in counts that
-// sent at least one request vhostChallengeExemptClient did not exempt. An IP
-// counts as soon as one of its requests could be challenged (a crawler IP that
-// also sends a browser UA a ua= rule does not cover).
+// countedUniqueIPs is the vhost uniqIP count: the distinct clients in counts
+// that sent at least one request vhostChallengeExemptClient did not exempt.
+// An IP counts as soon as one of its requests could be challenged (a crawler
+// IP that also sends a browser UA a ua= rule does not cover). A client is its
+// address, an IPv6 one its /64 (ipkey.Client: a count, not a ban, so no
+// guard applies, and it runs under the engine lock without reading nft): a
+// client rotating its address inside its /64 is one client, not a crowd that
+// arms the vhost's automatic challenge.
 func countedUniqueIPs(counts, exempt map[string]int) int {
-	if len(exempt) == 0 {
-		return len(counts)
-	}
+	var seen map[string]struct{}
 	n := 0
 	for ip, c := range counts {
-		if c > exempt[ip] {
-			n++
+		if c <= exempt[ip] {
+			continue
 		}
+		if !strings.Contains(ip, ":") {
+			n++ // IPv4: the address
+			continue
+		}
+		if seen == nil {
+			seen = make(map[string]struct{})
+		}
+		seen[ipkey.Client(ip)] = struct{}{}
 	}
-	return n
+	return n + len(seen)
 }

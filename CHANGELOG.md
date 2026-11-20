@@ -21,6 +21,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Security
+- **The web detector and the challenge server count an IPv6 client by its
+  /64.** A client rotating its address inside its /64 stayed under every
+  per-IP threshold: the 404 / 403 / WAF-403 / bot / malpath floods, the 40x
+  combo, the request score, and the challenge rules (unique paths / hosts,
+  `CHALLENGE_PATHS`, the rate and ratio thresholds, malformed requests, UA
+  churn). They now add up the /64's addresses (per address where a ban would
+  not take the /64), named by its busiest address. A ban takes the /64 as
+  before. A challenge, which the edge applies per address, judges every
+  address of the client seen in the window (its 16 busiest) on the client's
+  counts, each through its own exemptions and gates (an excluded address
+  shields no neighbour), one alert per client and rule notifying. The
+  malformed and UA-churn challenges now read
+  the request context (host, UA) their excludes match on: it was empty
+  unless an earlier challenge rule was enabled. The vhost unique-IP count counts clients, so one rotating
+  client no longer arms a vhost's automatic challenge. The challenge
+  server's rate limits and abuse count hold the /64 too. `docs/edge-ipv6.md`
+  "IPv6 /64 grouping".
 - **The detectors and the admin API count an IPv6 client by its /64.** A
   client rotating its address inside the /64 any VPS or ISP line hands it got
   a fresh count per address, so it never reached a threshold. The login and
