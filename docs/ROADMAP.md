@@ -265,6 +265,16 @@ origin hop brackets the address and binds `::1`.
   someone else's whole /64 (as the kernel autoblock stays per address).
   Revisit only if the burn-in shows a client rotating its /64 there.
 
+- **A malpath hit inside another rule's challenge cooldown sets no v2 mark**
+  — [open]. Found by the /64 counters review (2026-11-20), pre-existing
+  and IPv4 too: the webdetector's per-IP challenge rules share one emit gate
+  per address (5 s), and the sink's `CHALLENGE_COOLDOWN` (45 m shipped)
+  returns before `ChallengeIPWithReason`, where the `CHALLENGE_PATHS` v2
+  mark and clearance revoke are written. So an address challenged by
+  another rule (unique paths, a threshold) first gets no malpath mark or
+  revoke for the cooldown. A gate of its own for `CHALLENGE_PATHS` in the
+  detector alone did not help (the sink swallows it): fix both, as one
+  change, by letting a v2-arming alert pass or upgrade the sink cooldown.
 - **The RFC1918 peer bypass at cfm.lua Step 0a** — [open]. Found while
   closing the `fe80::` self bypass (2026-11-19): a direct (non-Cloudflare)
   peer in 10/8, 172.16/12 or 192.168/16 skips WAF and challenge, so a host on

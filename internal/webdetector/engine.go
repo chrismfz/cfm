@@ -2302,9 +2302,7 @@ func (e *Engine) pruneEmitMaps(now time.Time) {
 		// If no emit exists (already pruned above), the ctx is also stale.
 		e.emitMu.Lock()
 		for ip := range e.chalLast {
-			_, active := e.ipLastChalEmit[ip]
-			_, activePaths := e.ipLastChalEmit[chalPathsGateKey(ip)]
-			if !active && !activePaths {
+			if _, active := e.ipLastChalEmit[ip]; !active {
 				delete(e.chalLast, ip)
 			}
 		}
@@ -2328,9 +2326,6 @@ func (e *Engine) pruneEmitMaps(now time.Time) {
 					_, inEmit = e.ipLastEmit[ipkey.Client(ip)]
 				}
 				_, inChal := e.ipLastChalEmit[ip]
-				if !inChal {
-					_, inChal = e.ipLastChalEmit[chalPathsGateKey(ip)]
-				}
 				e.emitMu.Unlock()
 				if !inEmit && !inChal {
 					delete(e.ipLong.stats, ip)

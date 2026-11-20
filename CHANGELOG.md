@@ -31,10 +31,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   before. A challenge, which the edge applies per address, judges every
   address of the client seen in the window (its 16 busiest) on the client's
   counts, each through its own exemptions and gates (an excluded address
-  shields no neighbour), one alert per client notifying. The malpath
-  challenge (`CHALLENGE_PATHS`) has its own emit gate, so another rule's
-  challenge of the same address no longer swallows its malpath hit and the
-  ChallengeV2 mark it sets. The malformed and UA-churn challenges now read
+  shields no neighbour), one alert per client and rule notifying. The
+  malformed and UA-churn challenges now read
   the request context (host, UA) their excludes match on: it was empty
   unless an earlier challenge rule was enabled. The vhost unique-IP count counts clients, so one rotating
   client no longer arms a vhost's automatic challenge. The challenge

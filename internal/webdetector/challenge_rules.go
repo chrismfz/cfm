@@ -480,7 +480,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
 		maxSamples = 8
 	)
 
-	tk := newClientTick() // grouped IPv6 clients: one notifier each, a budget for the rest
+	var tk *clientTick // grouped IPv6 clients, per section: one notifier each, a budget for the rest
 
 	tsToTime := func(ts float64) time.Time {
 		return time.Unix(0, int64(ts*1e9))
@@ -581,6 +581,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
         // Every member is judged on the client's sets, through its own gates.
         var clientOf map[string]string
         agg, clientOf = expandClients(agg, groups)
+        tk = newClientTick() // this section's own budget and notifier
 
         if len(agg) > 0 {
             for ipStr, a := range agg {
@@ -616,6 +617,9 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 }
 
                 // burst cooldown (reuse the same map)
+                if !tk.can(clientOf[ipStr]) {
+                    continue // past this section's budget: its gate stays unwritten
+                }
                 skip := func() bool {
                     e.emitMu.Lock()
                     defer e.emitMu.Unlock()
@@ -662,9 +666,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                 if ctx.Method != "" { extra["method"] = ctx.Method }
                 if ctx.Status != 0  { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
-                if !tk.member(clientOf[ipStr]) {
-                    continue
-                }
+                tk.take(clientOf[ipStr]) // past its gate: counts against the section's budget
                 alet := core.Alert{
                     When:    now,
                     Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -756,9 +758,13 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                         }
                         return t
                 }, func() *map[int]int { m := map[int]int{}; return &m })
-                // Every member is judged on the client's counts, through its own
-                // gates (its new matching hit, its excludes, its context).
-                pm, clientOf := expandClients(pm, groups)
+                // One candidate per client in the ranking (topN), keyed by its
+                // busiest address; its members follow it below, each judged on the
+                // client's counts through its own gates (its new matching hit, its
+                // excludes, its context). Only addresses that hit a CHALLENGE_PATHS
+                // rule themselves are members (pm holds no other).
+                clientOf := map[string]string{}
+                tk = newClientTick() // this section's own budget and notifier
                 agg = make(map[string]map[int]int, len(pm))
                 for ip, m := range pm {
                         agg[ip] = *m
@@ -798,6 +804,23 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                 if len(cands) > topN {
                                         cands = cands[:topN]
                                 }
+                                // The ranked clients' members, after the ranking.
+                                expanded := make([]cand, 0, len(cands))
+                                for _, c := range cands {
+                                        g, ok := groups[c.ip]
+                                        if !ok {
+                                                expanded = append(expanded, c)
+                                                continue
+                                        }
+                                        for _, m := range g.addrs {
+                                                mc := c
+                                                mctx := lastCtx[m]
+                                                mc.ip, mc.host, mc.uri = m, mctx.Host, mctx.URI
+                                                expanded = append(expanded, mc)
+                                                clientOf[m] = g.client
+                                        }
+                                }
+                                cands = expanded
 
                                 for _, c := range cands {
                                         ip := net.ParseIP(c.ip)
@@ -818,23 +841,20 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         matchAt := tsToTime(ctx.TS)
 
 
-                                        // Its own gate key (chalPathsGateKey): another
-                                        // rule's emit for this address (a uniq-paths
-                                        // challenge of its /64, say) must not swallow
-                                        // its malpath hit, and with it the v2 mark and
-                                        // the clearance revoke.
+                                        if !tk.can(clientOf[c.ip]) {
+                                                continue // past this section's budget: its gate stays unwritten
+                                        }
                                         skip := func() bool {
                                                 e.emitMu.Lock()
                                                 defer e.emitMu.Unlock()
-                                                gk := chalPathsGateKey(c.ip)
-                                                last, ok := e.ipLastChalEmit[gk]
+                                                last, ok := e.ipLastChalEmit[c.ip]
                                                 if ok && !matchAt.After(last) {
                                                         return true
                                                 }
                                                 if ok && now.Sub(last) < cooldown {
                                                         return true
                                                 }
-                                                e.ipLastChalEmit[gk] = now
+                                                e.ipLastChalEmit[c.ip] = now
                                                 return false
                                         }()
                                         if skip {
@@ -881,9 +901,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         if ctx := lastCtx[c.ip]; ctx.Method != "" { extra["method"] = ctx.Method }
                                         if ctx := lastCtx[c.ip]; ctx.Status != 0 { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
-                                        if !tk.member(clientOf[c.ip]) {
-                                                continue
-                                        }
+                                        tk.take(clientOf[c.ip]) // past its gate: counts against the section's budget
                                         a := core.Alert{
                                                 When:    now,
                                                 Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -1012,6 +1030,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         }
         // Every member is judged on the client's counts, through its own gates.
         st, clientOf := expandClients(st, groups)
+        tk = newClientTick() // this section's own budget and notifier
 
         winSec := e.cfg.Window.Seconds()
         if winSec <= 0 { winSec = 60 }
@@ -1068,6 +1087,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
 
             // cooldown gating (reuses the same per-IP chal emit map)
 
+            if !tk.can(clientOf[ipStr]) {
+                continue // past this section's budget: its gate stays unwritten
+            }
             skip := func() bool {
                 e.emitMu.Lock()
                 defer e.emitMu.Unlock()
@@ -1113,9 +1135,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ctx.Method != "" { extra["method"] = ctx.Method }
             if ctx.Status != 0  { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
-            if !tk.member(clientOf[ipStr]) {
-                continue
-            }
+            tk.take(clientOf[ipStr]) // past its gate: counts against the section's budget
             alet := core.Alert{
                 When:    now,
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -1169,6 +1189,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         pmf, groups := groupIPAggs(pmf, func(dst, src *int) { *dst += *src },
             func(n *int) int { return *n }, func() *int { return new(int) })
         pmf, clientOf := expandClients(pmf, groups)
+        tk = newClientTick() // this section's own budget and notifier
 
         if lastCtx == nil { // the sections above may not have run
             lastCtx = e.chalLastSnapshot()
@@ -1180,6 +1201,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ip == nil { continue }
             if isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() { continue }
 
+            if !tk.can(clientOf[ipStr]) {
+                continue // past this section's budget: its gate stays unwritten
+            }
             skip := func() bool {
                 e.emitMu.Lock()
                 defer e.emitMu.Unlock()
@@ -1213,9 +1237,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ctx.URI != ""  { extra["uri"]  = ctx.URI }
             if ctx.Status != 0 { extra["status"] = fmt.Sprintf("%d", ctx.Status) }
 
-            if !tk.member(clientOf[ipStr]) {
-                continue
-            }
+            tk.take(clientOf[ipStr]) // past its gate: counts against the section's budget
             alet := core.Alert{
                 When:    now,
                 Kind:    core.AlertKind("WEB/CHALLENGE"),
@@ -1276,6 +1298,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             }
         }, func(a *uaAgg) int { return len(a.uniq) }, func() *uaAgg { return &uaAgg{uniq: make(map[uint64]struct{}, 8)} })
         agg, clientOf := expandClients(agg, groups)
+        tk = newClientTick() // this section's own budget and notifier
         if lastCtx == nil { // the sections above may not have run
             lastCtx = e.chalLastSnapshot()
         }
@@ -1286,6 +1309,9 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ip == nil { continue }
             if isLocalInterfaceIP(ip) || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() { continue }
 
+            if !tk.can(clientOf[ipStr]) {
+                continue // past this section's budget: its gate stays unwritten
+            }
             skip := func() bool {
                 e.emitMu.Lock()
                 defer e.emitMu.Unlock()
@@ -1318,9 +1344,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             if ctx.Host != "" { extra["host"] = ctx.Host }
             if ctx.URI != ""  { extra["uri"]  = ctx.URI }
 
-            if !tk.member(clientOf[ipStr]) {
-                continue
-            }
+            tk.take(clientOf[ipStr]) // past its gate: counts against the section's budget
             alet := core.Alert{
                 When:    now,
                 Kind:    core.AlertKind("WEB/CHALLENGE"),

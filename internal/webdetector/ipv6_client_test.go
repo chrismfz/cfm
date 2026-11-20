@@ -170,7 +170,10 @@ func TestEveryPerIPChallengeAggregatorGroupsClients(t *testing.T) {
 	if n := strings.Count(src, "groupIPAggs("); n != 5 {
 		t.Fatalf("groupIPAggs calls: %d, want 5", n)
 	}
-	for _, call := range []string{"expandClients(", "tk.member(", "tk.notify("} {
+	if n := strings.Count(src, "expandClients("); n != 4 { // CHALLENGE_PATHS expands its ranked candidates
+		t.Fatalf("expandClients calls: %d, want 4", n)
+	}
+	for _, call := range []string{"tk.can(", "tk.take(", "tk.notify("} {
 		if n := strings.Count(src, call); n != 5 {
 			t.Fatalf("%s calls: %d, want 5", call, n)
 		}
@@ -270,9 +273,10 @@ func keys(m map[string]core.Alert) []string {
 
 // A new malpath hit from another address of a /64 is challenged on its own
 // gate, though an earlier, busier address of the /64 was challenged already
-// (CHALLENGE_PATHS carries the v2 mark and the clearance revoke).
+// and the new address alone is under the rule's count (CHALLENGE_PATHS carries
+// the v2 mark and the clearance revoke).
 func TestChallengePathsNewMemberHitIsChallenged(t *testing.T) {
-	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengePathsEnabled: true, ChallengePathsList: []string{"/.env"}, ChallengePathsCount: 1})
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengePathsEnabled: true, ChallengePathsList: []string{"2:/.env"}, ChallengePathsCount: 2})
 	t0 := float64(time.Now().Unix())
 	hit := func(ts float64, ip string) {
 		e.ingest(LogRec{TS: ts, IP: ip, Host: "example.com", Method: "get", URI: "/.env", Status: 404, UA: "ua"}, "raw")
@@ -305,25 +309,50 @@ func TestChallengePathsNewMemberHitIsChallenged(t *testing.T) {
 	}
 }
 
-// CHALLENGE_PATHS has its own emit gate: another rule's challenge of the
-// same address in the tick (unique paths here) does not swallow its malpath
-// hit, and with it the v2 mark and the clearance revoke.
-func TestChallengePathsOwnGate(t *testing.T) {
-	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute,
-		ChallengePathsEnabled: true, ChallengePathsList: []string{"/.env"}, ChallengePathsCount: 1,
-		ChallengeIPUniqPathsEnabled: true, ChallengeIPUniqPathsMin: 2})
-	t0 := float64(time.Now().Unix())
-	for i, uri := range []string{"/a", "/.env"} {
-		e.ingest(LogRec{TS: t0 + float64(i), IP: "203.0.113.9", Host: "example.com", Method: "get", URI: uri, Status: 404, UA: "ua"}, "raw")
+// A member past the section's budget keeps its malpath hit for the next tick
+// (its emit gate is written only once it is judged), and the topN ranking
+// takes one candidate per client, so a few /64s never crowd out another
+// address's malpath hit.
+func TestChallengePathsBudgetAndRanking(t *testing.T) {
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengePathsEnabled: true, ChallengePathsList: []string{"/.env"}, ChallengePathsCount: 1})
+	t0 := float64(time.Now().Add(-time.Minute).Unix()) // hits before the ticks
+	n := 0
+	for c := 0; c < 5; c++ { // 5 clients x 16 members: past the budget
+		for i := 0; i < maxClientAddrs; i++ {
+			e.ingest(LogRec{TS: t0 + float64(n)/100, IP: fmt.Sprintf("2001:db8:%x:1::%x", c, i+1), Host: "example.com", Method: "get", URI: "/.env", Status: 404, UA: "ua"}, "raw")
+			n++
+		}
 	}
-	out := make(chan core.Alert, 16)
-	e.emitIPChallenges(time.Now(), out)
-	close(out)
-	rules := map[string]bool{}
-	for a := range out {
-		rules[a.Extra["rule"]] = true
+	e.ingest(LogRec{TS: t0 + 2, IP: "203.0.113.9", Host: "example.com", Method: "get", URI: "/.env", Status: 404, UA: "ua"}, "raw")
+	tick := func(at time.Time) map[string]bool {
+		out := make(chan core.Alert, 256)
+		e.emitIPChallenges(at, out)
+		close(out)
+		got := map[string]bool{}
+		for a := range out {
+			if a.Extra["rule"] == "CHALLENGE_PATHS" {
+				got[a.Key] = true
+			}
+		}
+		return got
 	}
-	if !rules["CHALLENGE_PATHS"] || !rules["CHALLENGE_UNIQPATHS_IP"] {
-		t.Fatalf("rules emitted: %v, want both", rules)
+	first := tick(time.Now())
+	if !first["203.0.113.9"] {
+		t.Fatal("the IPv4 hitter was crowded out of the ranking by the /64s' members")
+	}
+	if len(first) != 1+5+maxExtraMembersPerTick {
+		t.Fatalf("first tick challenged %d, want %d", len(first), 1+5+maxExtraMembersPerTick)
+	}
+	seen := first
+	for k := 1; k <= 3; k++ { // the budget refills each tick: every hitter in turn
+		for ip := range tick(time.Now().Add(time.Duration(k) * 10 * time.Second)) {
+			if seen[ip] {
+				t.Fatalf("%s challenged twice for one hit", ip)
+			}
+			seen[ip] = true
+		}
+	}
+	if len(seen) != 1+5*maxClientAddrs {
+		t.Fatalf("over the ticks %d challenged, want every hitter (%d): a member past the budget lost its hit", len(seen), 1+5*maxClientAddrs)
 	}
 }

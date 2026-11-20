@@ -328,14 +328,15 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     cooldown, its host bypass, `IGNORE_IPS` / chalExclude, its own context.
     No address decides for another: an excluded or bypassed address, however
     busy, is not challenged and shields no neighbour; a new malpath hit from
-    another address of the /64 is challenged on its own. Each client's first
-    alert of a tick notifies, the rest carry `challenge_notify=0`; the
-    members beyond each client's first are bounded (32 a tick in all).
-    `CHALLENGE_PATHS` has an emit gate of its own (`chalPathsGateKey`), so
-    another rule's challenge of the same address never swallows its malpath
-    hit, its v2 mark and its clearance revoke (for IPv4 too: an address
-    tripping both now gets both). Rotating per request still outruns the
-    next emit until the edge's shared dicts group by /64.
+    another address of the /64 is challenged on its own. Per rule and tick,
+    each client's first alert notifies, the rest carry
+    `challenge_notify=0`, and the members beyond each client's first are
+    bounded (32); a member past the budget keeps its hit for the next tick
+    (its gate is written only once it is judged). `CHALLENGE_PATHS` ranks
+    one candidate per client (topN 50), then expands it to its members, all
+    of them addresses that hit a malpath rule themselves (no v2 mark or
+    clearance revoke for a neighbour that never did). Rotating per request
+    still outruns the next emit until the edge's shared dicts group by /64.
   - The web detector's flood challenge (`emitIPBlocks`, the score rule)
     asks the edge to challenge every listed address of the row.
   - The vhost uniqIP count counts clients (`ipkey.Client`: a count, no

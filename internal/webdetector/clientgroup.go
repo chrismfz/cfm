@@ -70,8 +70,8 @@ func groupIPAggs[T any](perIP map[string]*T, merge func(dst, src *T), weight fun
 	return out, groups
 }
 
-// maxExtraMembersPerTick bounds, per emitIPChallenges tick, the members of
-// grouped clients challenged beyond each client's first: each costs an
+// maxExtraMembersPerTick bounds, per challenge section and tick, the members
+// of grouped clients challenged beyond each client's first: each costs an
 // exclude check (maybe a PTR lookup) here and in the sink, so a spray of
 // fresh addresses must not stall the tick nor crowd the alert channel.
 const maxExtraMembersPerTick = 32
@@ -99,7 +99,9 @@ func expandClients[T any](grouped map[string]*T, groups map[string]clientGroup) 
 	return out, clientOf
 }
 
-// clientTick is one emitIPChallenges tick's state for grouped clients.
+// clientTick is one per-IP challenge section's state for grouped clients
+// (each section of emitIPChallenges has its own: one rule's members never
+// spend another's budget or notification).
 type clientTick struct {
 	extraLeft int
 	seen      map[string]bool // client -> a member reached the checks
@@ -110,22 +112,25 @@ func newClientTick() *clientTick {
 	return &clientTick{extraLeft: maxExtraMembersPerTick, seen: map[string]bool{}, notified: map[string]bool{}}
 }
 
-// member says whether a grouped client's member may go on to the exclude
-// checks and the alert: its client's first this tick always, the others while
-// the tick's budget lasts. An ungrouped address (client "") always may.
-func (t *clientTick) member(client string) bool {
+// can says whether a grouped client's member may still be judged in this
+// section: its client's first always, the others while the budget lasts. It
+// takes nothing: the caller writes the member's emit gate only after it, so a
+// member past the budget keeps its hit for the next tick. An ungrouped
+// address (client "") always may.
+func (t *clientTick) can(client string) bool {
+	return client == "" || !t.seen[client] || t.extraLeft > 0
+}
+
+// take counts a member that passed its gate against the section's budget.
+func (t *clientTick) take(client string) {
 	if client == "" {
-		return true
+		return
 	}
 	if !t.seen[client] {
 		t.seen[client] = true
-		return true
-	}
-	if t.extraLeft <= 0 {
-		return false
+		return
 	}
 	t.extraLeft--
-	return true
 }
 
 // notify tags a, about to be sent, with its client; only the client's first
@@ -141,10 +146,6 @@ func (t *clientTick) notify(a *core.Alert, client string) {
 	}
 	t.notified[client] = true
 }
-
-// chalPathsGateKey is CHALLENGE_PATHS' own emit-gate key for ip in
-// ipLastChalEmit (the other per-IP rules share the plain address key).
-func chalPathsGateKey(ip string) string { return "paths|" + ip }
 
 // chalLastSnapshot copies chalLast (each address's last challenge-matching
 // request): a per-IP challenge section reads its host / URI / UA for the
