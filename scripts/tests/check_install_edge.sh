@@ -2,13 +2,14 @@
 # check_install_edge.sh — scripts/install-edge.sh stays prepare-only.
 #
 # The installer adopts cfm-edge and PRINTS the switch; the operator runs it.
-# Taking the edge out of the path (`cfm dnat off`), swapping the units and
-# putting it back (`cfm dnat on`) are the operator's calls, so this pins:
+# Taking the edge out of the path (`cfm edge off`, `cfm dnat off` on an older
+# cfm), swapping the units and putting it back (`cfm edge on`) are the
+# operator's calls, so this pins:
 #
 # 1. No executed line (comments and heredoc bodies, i.e. the printed steps,
 #    removed) runs systemctl start/stop/restart/reload/enable/disable/…, a
-#    `cfm dnat …` / `cfm edge on|off|panel|…`, or signals an edge (`-s stop|quit|reload`). Read-only
-#    systemctl (is-active, status) is fine.
+#    `cfm dnat …` / `cfm edge on|off|panel|…`, or signals an edge
+#    (`-s stop|quit|reload`). Read-only systemctl (is-active, status) is fine.
 # 2. Its adoption line is the one package-proxy-config-deploy.sh looks for
 #    (a drift would leave an adopted cfm-edge un-updated on every upgrade).
 # 3. Sidecars + main config are tested together from a stage dir before
@@ -68,7 +69,12 @@ grep -q 'print_next_steps' <<<"$ex" || fail "matcher lost the executed body of $
 grep -q 'is already the live edge' <<<"$ex" && fail "matcher kept a quoted heredoc body (the printed steps)"
 # 'cfm edge off' sits in steps_edge's UNQUOTED rollback heredoc (it carries
 # ${old}): keep a line of it unquoted, or this sentinel proves nothing.
-grep -q 'cfm edge off' <<<"$ex" && fail "matcher kept a heredoc body line without a command substitution (the printed steps)"
+# Anchored on the printed rollback line, so an EXECUTED `cfm edge off` is
+# reported by the switch check below, not here.
+grep -q 'cfm edge off            # (and' <<<"$ex" && fail "matcher kept a heredoc body line without a command substitution (the printed steps)"
+# And the other way: an unquoted heredoc line WITH a command substitution
+# (the report's "Config test:" line runs the edge's config test) is kept.
+grep -q 'edge_test -q' <<<"$ex" || fail "matcher dropped an unquoted heredoc line with a command substitution"
 
 if bad="$(grep -E 'systemctl[[:space:]]+(-[^[:space:]]+[[:space:]]+)*(start|stop|restart|try-restart|reload|reload-or-restart|try-reload-or-restart|enable|disable|reenable|mask|unmask|kill|isolate)\b' <<<"$ex")"; then
   fail "$SCRIPT runs a unit-changing systemctl (it must only print the switch):
