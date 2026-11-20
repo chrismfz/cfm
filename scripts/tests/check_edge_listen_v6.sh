@@ -14,8 +14,9 @@
 #    edge_listen_v6_mode.txt), no IPv6 stack, taken ports (by kernel uid),
 #    origin not on IPv6 (render removes, prestart keeps), the ::1 trust, a
 #    config test that fails with the files (removed again), the reload and
-#    listen check after a render, no engine binary, ss forms, and the exit
-#    status (always 0).
+#    listen check after a render, no engine binary, ss forms, the exit
+#    status (always 0), and the empty logs cfm-edge's config test creates
+#    (removed again unless cfm-edge may run).
 # 3. package-proxy-config-deploy.sh deploy_edge_listen_v6: installs the unit and
 #    the two drop-ins (systemd reloaded once, not again when unchanged) and runs
 #    the script.
@@ -214,7 +215,14 @@ cat >"$tmp/bin/edgectl" <<EOF
 #!/bin/sh
 echo "\$*" >> "$tmp/edgectl.calls"
 case "\$1" in
-  is-active) [ -e "$tmp/edge.active" ] ;;
+  is-active)
+    # cfm-edge's state as \`systemctl is-active cfm-edge.service\` prints it
+    # (\$tmp/cfmedge.state, default inactive): the log cleanup reads it.
+    if [ "\$2" = cfm-edge.service ]; then
+      st=\$(cat "$tmp/cfmedge.state" 2>/dev/null || echo inactive)
+      echo "\$st"; [ "\$st" = active ]; exit
+    fi
+    [ -e "$tmp/edge.active" ] ;;
   reload)
     [ -e "$tmp/reload.fail" ] && exit 1
     if [ -e "$tmp/reload.listens" ] && [ -e "$conf_dir/cfm-listen-v6-http.conf" ]; then
@@ -707,6 +715,158 @@ CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="
 grep -qF "'OpenResty|%s|%s|%s\\n' \"\$e_bin\" /usr/local/openresty/nginx/conf /usr/local/openresty/nginx/conf/nginx.conf" "$SCRIPT" || fail "OpenResty engine row"
 grep -qF "'Angie|%s|%s|%s\\n' \"\$e_bin\" /etc/angie /etc/angie/angie.conf" "$SCRIPT" || fail "Angie engine row"
 grep -qF "'cfm-edge|%s|%s|%s\\n' \"\$e_bin\" /etc/cfm-edge /etc/cfm-edge/nginx.conf" "$SCRIPT" || fail "cfm-edge engine row"
+
+# cfm-edge's config test creates its logs (nginx -t opens every access_log /
+# error_log it names). prestart walks every engine (systemd does not tell it
+# which edge unit is starting), so each openresty / angie start tests an idle
+# cfm-edge that has IPv6 files: the EMPTY logs that test created must go
+# again, or internal/edgelog (newest mtime wins) reads cfm-edge's empty logs
+# instead of the live edge's. Kept: files that were there, files with
+# content, and everything while cfm-edge may run (a unit not
+# inactive/failed/unknown, or a cfm-edge process).
+cel="$tmp/cfmedge-logs"
+# fake cfm-edge: offers -e in its -h only with $tmp/cfmedge.has_e; with
+# $tmp/cfmedge.warn and no -e, the test's [warn] lands in error.log (a build
+# whose startup error log is that file, as nginx.org's --error-log-path).
+cat >"$tmp/bin/cfm-edge" <<EOF_CFMEDGE
+#!/bin/sh
+if [ "\$1" = "-h" ]; then
+  echo 'Usage: cfm-edge [-?hvVtTq] [-s signal] [-p prefix]'
+  [ -e "$tmp/cfmedge.has_e" ] && echo '  -e filename   : set error log file (default: /var/log/cfm-edge/error.log)'
+  exit 0
+fi
+echo "\$*" >> "$tmp/cfmedge.calls"
+noe=1
+if [ "\$1" = "-e" ]; then
+  [ -e "$tmp/cfmedge.has_e" ] || exit 2
+  noe=0; shift 2
+fi
+[ "\$1" = "-t" ] || exit 2
+[ -d "\${CFM_CFMEDGE_LOG_DIR:-/nonexistent}" ] || exit 0
+: >>"\$CFM_CFMEDGE_LOG_DIR/error.log"
+[ "\$noe" = 1 ] && [ -e "$tmp/cfmedge.warn" ] && echo '[warn] conflicting server name' >>"\$CFM_CFMEDGE_LOG_DIR/error.log"
+: >>"\$CFM_CFMEDGE_LOG_DIR/access.log"
+printf 'x\n' >>"\$CFM_CFMEDGE_LOG_DIR/written.log"
+case "\$(cat "$tmp/engine.fail" 2>/dev/null)" in
+  always) exit 1 ;;
+  with-v6) [ -e "$conf_dir/cfm-listen-v6-http.conf" ] && exit 1 ;;
+esac
+exit 0
+EOF_CFMEDGE
+chmod 0755 "$tmp/bin/cfm-edge"
+cel_reset() {
+  rm -rf "$cel" "$cel.real"; mkdir -p "$cel"
+  : >"$cel/old-empty.log"; printf 'old\n' >"$cel/old-full.log"
+  rm -f "$tmp/cfmedge.state"; rm -rf "$tmp/proc/4242"
+}
+cel_list() { (cd "$cel" && find . -maxdepth 1 -type f | sort | tr '\n' ' '); }
+cel_run() { # cel_run ACTION: the cfm-edge engine, its logs in $cel
+  local rc=0
+  CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+    CFM_CFMEDGE_LOG_DIR="$cel" CFM_EDGE_ENGINES="cfm-edge|$tmp/bin/cfm-edge|$conf_dir|$main_conf" \
+    sh "$SCRIPT" "$@" >"$tmp/out" 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "exit status $rc for cfm-edge '$*' (must always be 0)"
+}
+printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
+printf 'trusted' >"$tmp/realip"
+rm -f "$tmp/engine.fail" "$tmp/edge.active"
+ss_v6
+run render
+expect present "cfm-edge log cleanup: files approved by a render"
+cel_reset
+: >"$tmp/cfmedge.calls"
+cel_run prestart
+expect present "prestart on an idle cfm-edge: files kept, config test passed"
+[ -s "$tmp/cfmedge.calls" ] || fail "prestart did not config-test cfm-edge (the premise of the log cleanup)"
+[ "$(cel_list)" = "./old-empty.log ./old-full.log ./written.log " ] \
+  && ok "prestart, cfm-edge inactive: only the EMPTY logs its test created are removed" \
+  || fail "prestart, cfm-edge inactive: left $(cel_list); output: $(cat "$tmp/out")"
+says "removed $cel/error.log (empty, created by its config test"
+for st in active activating reloading deactivating; do
+  cel_reset; printf '%s' "$st" >"$tmp/cfmedge.state"
+  cel_run prestart
+  [ -f "$cel/error.log" ] && [ -f "$cel/access.log" ] \
+    && ok "prestart, cfm-edge.service $st: its new empty logs are kept (it may hold them open)" \
+    || fail "prestart, cfm-edge.service $st: a cfm-edge that may run lost its new empty log; left $(cel_list)"
+done
+for st in failed unknown; do
+  cel_reset; printf '%s' "$st" >"$tmp/cfmedge.state"
+  cel_run prestart
+  [ ! -e "$cel/error.log" ] && ok "prestart, cfm-edge.service $st: the test-created logs are removed" \
+    || fail "prestart, cfm-edge.service $st: left $(cel_list)"
+done
+cel_reset; mkdir -p "$tmp/proc/4242"; printf 'cfm-edge\n' >"$tmp/proc/4242/comm"
+cel_run prestart
+[ -f "$cel/error.log" ] && ok "prestart, a cfm-edge process outside systemd: its logs are kept" \
+  || fail "prestart, a cfm-edge process (comm) outside systemd lost its new empty log"
+cel_reset; mkdir -p "$tmp/proc/4242"; printf 'cfm-edge-x\n' >"$tmp/proc/4242/comm"
+cel_run prestart
+[ ! -e "$cel/error.log" ] && ok "prestart, a process named cfm-edge-x is not cfm-edge (exact comm match)" \
+  || fail "prestart: a cfm-edge-x process kept the test-created logs"
+cel_reset; mv "$cel" "$cel.real"; ln -s "$cel.real" "$cel"
+cel_run prestart
+[ ! -e "$cel.real/error.log" ] && [ -f "$cel.real/old-empty.log" ] && ok "prestart, a symlinked cfm-edge log dir is cleaned like a plain one" \
+  || fail "prestart, a symlinked cfm-edge log dir: $(ls -A "$cel.real" | tr '\n' ' ')"
+rm -f "$cel"; cel_reset
+cel_run render
+expect present "render, cfm-edge: files unchanged"
+[ "$(cel_list)" = "./old-empty.log ./old-full.log " ] || fail "render with unchanged files ran cfm-edge's test (or created logs): $(cel_list)"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+cel_reset
+cel_run render
+expect present "render, cfm-edge: files written, config test passed"
+[ "$(cel_list)" = "./old-empty.log ./old-full.log ./written.log " ] \
+  && ok "render, cfm-edge inactive: the test-created empty logs are removed" || fail "render: left $(cel_list)"
+cel_reset; printf 'with-v6' >"$tmp/engine.fail"
+cel_run prestart
+expect absent "prestart, cfm-edge: the test fails with the files -> removed"
+[ ! -e "$cel/error.log" ] && [ ! -e "$cel/access.log" ] && ok "... and the logs of both of its config tests are removed" \
+  || fail "prestart, failed test: left $(cel_list)"
+rm -f "$tmp/engine.fail"
+run render
+cel_reset
+cel_run deploy
+expect present "deploy, cfm-edge: kept"
+[ ! -e "$cel/error.log" ] && ok "deploy, cfm-edge inactive: the test-created empty logs are removed" || fail "deploy: left $(cel_list)"
+# A build that offers -e: the test runs with -e /dev/null, so its warnings
+# never fill error.log (a non-empty file would be kept, and read as the
+# newest edge log). One that does not: plain -t (an unknown -e would fail
+# every test and remove the IPv6 files).
+cel_reset; : >"$tmp/cfmedge.has_e"; : >"$tmp/cfmedge.warn"; : >"$tmp/cfmedge.calls"
+cel_run prestart
+expect present "prestart, cfm-edge offering -e: config test passed"
+grep -qx -- '-e /dev/null -t -q' "$tmp/cfmedge.calls" || fail "cfm-edge offering -e was not tested with -e /dev/null: $(cat "$tmp/cfmedge.calls")"
+[ ! -e "$cel/error.log" ] && ok "a warning of cfm-edge's test (-e /dev/null) leaves no error.log behind" \
+  || fail "with -e: error.log left ($(wc -c <"$cel/error.log") bytes)"
+rm -f "$tmp/cfmedge.has_e"; cel_reset; : >"$tmp/cfmedge.calls"
+cel_run prestart
+expect present "prestart, cfm-edge without -e: config test passed"
+grep -q -- '-e' "$tmp/cfmedge.calls" && fail "a cfm-edge without -e was passed -e: $(cat "$tmp/cfmedge.calls")"
+[ -s "$cel/error.log" ] && ok "without -e, a warning fills error.log and it is kept (content is never removed)" \
+  || fail "without -e: a non-empty error.log was removed"
+rm -f "$tmp/cfmedge.warn"
+rm -rf "$cel"
+cel_run prestart
+[ ! -e "$cel" ] && ok "a missing cfm-edge log dir: no error, nothing created" || fail "a missing cfm-edge log dir was created"
+# dash applies redirections in order: 2>/dev/null must come before the <,
+# or a process exiting mid-scan prints "cannot open" into the journal.
+grep -qF 'read -r cmr_comm 2>/dev/null <"$cmr_f"' "$SCRIPT" \
+  && ok "the /proc comm read silences its own open error (dash order)" \
+  || fail "$SCRIPT: the comm read must be: read -r cmr_comm 2>/dev/null <\"\$cmr_f\""
+# Another engine's test is not wrapped: an empty file appearing in the
+# cfm-edge log dir meanwhile is not its to remove.
+cel_reset
+cat >"$tmp/bin/other-engine" <<EOF_OTHER
+#!/bin/sh
+[ "\$1" = "-t" ] || exit 2
+: >>"$cel/error.log"
+exit 0
+EOF_OTHER
+chmod 0755 "$tmp/bin/other-engine"
+CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="$tmp/bin/ss" CFM_BIN="$tmp/bin/cfm" \
+  CFM_CFMEDGE_LOG_DIR="$cel" CFM_EDGE_ENGINES="Other|$tmp/bin/other-engine|$conf_dir|$main_conf" sh "$SCRIPT" prestart >"$tmp/out" 2>&1 || true
+[ -f "$cel/error.log" ] && ok "another engine's config test leaves the cfm-edge log dir alone" || fail "another engine's test removed a cfm-edge log"
+rm -rf "$cel"; rm -f "$conf_dir"/cfm-listen-v6-*.conf
 
 # --- 3. package deploy hook ----------------------------------------------------
 awk '/^deploy_logrotate_config$/{exit} {print}' scripts/package-proxy-config-deploy.sh >"$tmp/functions.sh"
