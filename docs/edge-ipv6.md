@@ -364,8 +364,10 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   on the edge; these counters end in a 429, a challenge or a WAF hit, and
   the daemon's ban applies its own: an nft-allowed address now shares a
   /64's counters with its neighbours, as it shares an IPv4 NAT address's).
-  The guarded /64s are worked out once per reload of the self / IGNORE
-  files, so a counted request costs a lookup. A force unblock of any address
+  The /64s of the self and `IGNORE_IPS` addresses are worked out once per
+  reload of their files (every 30 s per worker), so a counted request costs
+  a lookup and a pass over the `IGNORE_NETS` IPv6 ranges (~6 µs measured,
+  whatever the lists' size; IPv4 ~25 ns). A force unblock of any address
   of a grouped /64, or of its network address, frees its throttle
   (`cfm_purge`); in a guarded /64 the address's own.
 - **Still per address:**

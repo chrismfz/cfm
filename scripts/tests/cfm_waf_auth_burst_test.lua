@@ -16,6 +16,8 @@ _G.ngx = {
   ERR           = 0, WARN = 1, INFO = 2,
 }
 package.path = "configs/lua/?.lua;" .. package.path
+-- No self / IGNORE files: the host's /var/lib/cfm/lua must not steer the test.
+package.loaded["cfm_filecache"] = { get = function() return nil end }
 local waf = require("cfm_waf")
 
 local fails = 0

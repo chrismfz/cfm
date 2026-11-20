@@ -46,6 +46,8 @@ _G.ngx = {
 }
 
 package.path = "configs/lua/?.lua;" .. package.path -- cfm_rules requires cfm_shdict
+-- No self / IGNORE files: the host's /var/lib/cfm/lua must not steer the test.
+package.loaded["cfm_filecache"] = { get = function() return nil end }
 local rules = dofile("configs/lua/cfm_rules.lua")
 rules.init({})
 
