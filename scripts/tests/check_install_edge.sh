@@ -284,8 +284,8 @@ grep -qx 'rc=0' <<<"$out" && [ ! -e "$el" ] || fail "a missing cfm-edge log dir:
 for fn in adopt_cfm_edge ensure_edge_listen_v6 print_next_steps; do
   body="$(awk -v fn="$fn" '$0 ~ "^"fn"\\(\\) *\\{" {p=1} p {print} p && /^}/ {exit}' "$SCRIPT")"
   sn="$(grep -n 'snapshot_edge_logs' <<<"$body" | head -1 | cut -d: -f1 || true)"
-  ts="$(grep -nE 'edge_test |"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1 || true)"
-  tl="$(grep -nE 'edge_test |"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | tail -1 | cut -d: -f1 || true)"
+  ts="$(grep -nE 'edge_test |"\$script" prepare cfm-edge' <<<"$body" | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1 || true)"
+  tl="$(grep -nE 'edge_test |"\$script" prepare cfm-edge' <<<"$body" | grep -v '^[0-9]*: *#' | tail -1 | cut -d: -f1 || true)"
   dr="$(grep -n 'drop_test_created_logs' <<<"$body" | tail -1 | cut -d: -f1 || true)"
   [ -n "$sn" ] && [ -n "$ts" ] && [ -n "$dr" ] && [ "$sn" -lt "$ts" ] && [ "$tl" -lt "$dr" ] \
     || fail "$SCRIPT $fn: the cfm-edge config test must sit between snapshot_edge_logs and drop_test_created_logs"
