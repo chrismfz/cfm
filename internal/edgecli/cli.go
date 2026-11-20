@@ -237,7 +237,7 @@ func printSummary(d deps) int {
 			}
 			step := "cfm edge ipv6 on (it reloads the edge and confirms the listen)"
 			if !ok {
-				step = "cfm edge realip fix first (the origin must trust the edge's ::1), then cfm edge ipv6 on"
+				step = "cfm edge realip fix first (the origin must trust the edge's 127.0.0.1 and ::1), then cfm edge ipv6 on"
 			}
 			notes = append(notes, "the host can do IPv6 but the edge listens on IPv4 only: "+step)
 			break
