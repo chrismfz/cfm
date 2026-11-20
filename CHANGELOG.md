@@ -38,6 +38,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   instead of `sh …/cfm-edge-listen-v6.sh render`, and the origin real-IP OK
   line no longer ends in an empty "header " on OpenLiteSpeed / LiteSpeed.
 
+### Added
+- **The edge's access log says why a request was not micro-cached.** A new
+  last field, `mwhy="…"`, carries Site Cache Tier B's request-side reason
+  for a micro-armed vhost (`auth:<cookie name>` for a session cookie,
+  `method`, `path`, `uncacheable`, …; a cookie's name, never its value), and
+  `-` for everything else. Before, "why was my page not cached?" needed the
+  trusted-source debug header, which cannot see a visitor's own cookies.
+  An old conf with the new Lua simply has no field (no error); the panel
+  listeners log `-` without warnings.
+
 ## 2026.11.20
 
 _Nothing yet._

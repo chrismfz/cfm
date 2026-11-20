@@ -1312,6 +1312,20 @@ function _M.static_gate()
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
 end
 
+-- note_micro_why: put why a micro-armed request was not micro-cached into
+-- $cfm_micro_why, which the access log writes as mwhy= (an operator's "why was
+-- this not cached?" for any visitor, not only a debug request). Only a conf
+-- that declares the variable gets it: an older conf has none, and writing an
+-- undeclared variable would raise, so a nil read skips it (version skew, as
+-- $cfm_sc_unsafe below). A cookie NAME, never its value; anything outside
+-- [A-Za-z0-9_.:-] becomes "_" (the log line stays one field), capped at 80.
+local function note_micro_why(why)
+    if ngx.var.cfm_micro_why == nil then return end
+    local s = tostring(why or "unknown"):gsub("[^%w_%.:%-]", "_")
+    ngx.var.cfm_micro_why = s:sub(1, 80)
+end
+_M._note_micro_why = note_micro_why
+
 -- micro_gate: ACCESS-phase hook for Tier B (micro-cache of anonymous
 -- HTML). Called from cfm.lua at the Step 4 plain-allow return, AFTER $cfm_pass is
 -- set. (The Step 2b clearance fast-path is deferred until the §5.5.1 clearance-
@@ -1365,8 +1379,11 @@ function _M.micro_gate()
     if not p then return nil end
     if ngx.var.cfm_micro_conf ~= "1" then return nil end
     if ngx.req.is_internal() then return nil end
-    local ok, bucket = micro_verdict(p)
-    if not ok then return nil end
+    local ok, bucket, why = micro_verdict(p)
+    if not ok then
+        note_micro_why(why)
+        return nil
+    end
     -- Version skew: the package always installs this file, but the edge conf
     -- is deployed only when `-t` passes, so a node can run this Lua with an
     -- older conf. That conf has no @cfm_micro_90s / @cfm_micro_120s (an exec
