@@ -116,7 +116,7 @@ const usage = `Usage:
                                    the panel ports through the edge (= cfm dnat cpanel …; alias: cfm edge cpanel)
   cfm edge realip [status|fix]     does the origin log the visitor, not 127.0.0.1 (= cfm realip …)
   cfm edge ipv6 [status]           the IPv6 listen decision of every installed engine (docs/edge-ipv6.md)
-  cfm edge ipv6 on|off [engine]    lift / set the EDGE_LISTEN_V6 kill switch, then render (RELOADS a running edge)
+  cfm edge ipv6 on [engine] | off  lift / set the EDGE_LISTEN_V6 kill switch, then render (RELOADS a running edge)
   cfm edge check [--json] [--window N]
                                    the edge's health checks, as the MCP edge_health tool (docs/edge-health.md)
 
@@ -301,6 +301,8 @@ func ipv6Status() ([]string, error) {
 	defer cancel()
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "sh", ListenV6Script, "status") // #nosec G204 -- fixed packaged script path
+	cmd.Env = scriptEnv()
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()

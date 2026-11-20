@@ -16,11 +16,10 @@ import (
 
 func TestIPv6Routing(t *testing.T) {
 	for args, want := range map[string][]string{
-		"ipv6 on":            {"on", "render"},
-		"ipv6 off":           {"off", "render"},
-		"ipv6 on cfm-edge":   {"on", "render", "cfm-edge"},
-		"ipv6 off OpenResty": {"off", "render", "OpenResty"},
-		"ipv6 on ANGIE":      {"on", "render", "Angie"},
+		"ipv6 on":          {"on", "render"},
+		"ipv6 off":         {"off", "render"},
+		"ipv6 on cfm-edge": {"on", "render", "cfm-edge"},
+		"ipv6 on ANGIE":    {"on", "render", "Angie"},
 	} {
 		r := &recorder{}
 		d, _, _ := testDeps(r, dnat.Summary{}, nil, nil)
@@ -222,5 +221,53 @@ func TestSetIPv6StatusAfterRender(t *testing.T) {
 	d, _, errOut := testDeps(&recorder{}, dnat.Summary{}, nil, errors.New("sh failed"))
 	if rc := setIPv6(d, "off", []string{"render"}); rc != 1 || !strings.Contains(errOut.String(), "status") {
 		t.Fatalf("rc=%d err=%s", rc, errOut.String())
+	}
+}
+
+// off is node-wide: an engine argument is refused before anything changes.
+func TestIPv6OffRefusesAnEngine(t *testing.T) {
+	r := &recorder{}
+	d, _, errOut := testDeps(r, dnat.Summary{}, nil, nil)
+	if rc := run([]string{"ipv6", "off", "cfm-edge"}, d); rc != 2 || len(r.ipv6Set) != 0 || !strings.Contains(errOut.String(), "node-wide") {
+		t.Fatalf("rc=%d calls=%v err=%s", rc, r.ipv6Set, errOut.String())
+	}
+}
+
+// The script gets THE cfm.conf, never an exported CFM_* seam.
+func TestScriptEnvDropsTheSeams(t *testing.T) {
+	t.Setenv("CFM_CONF", "/tmp/other.conf")
+	t.Setenv("CFM_EDGE_ENGINES", "x|y|z|w")
+	t.Setenv("CFM_BIN", "/tmp/fake-cfm")
+	env := strings.Join(scriptEnv(), "\n")
+	if strings.Contains(env, "/tmp/other.conf") || strings.Contains(env, "CFM_EDGE_ENGINES") || strings.Contains(env, "CFM_BIN") {
+		t.Fatalf("a seam reached the script:\n%s", env)
+	}
+	if !strings.Contains(env, "CFM_CONF=/etc/cfm/cfm.conf") {
+		t.Fatalf("no CFM_CONF:\n%s", env)
+	}
+}
+
+// A symlinked cfm.conf: the target is rewritten, the link stays.
+func TestWriteConfAtomicFollowsASymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.conf")
+	link := filepath.Join(dir, "cfm.conf")
+	if err := os.WriteFile(target, []byte("A = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeConfAtomic(link, []byte("A = 2\n")); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the link was replaced: %v %v", fi.Mode(), err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "A = 2\n" {
+		t.Fatalf("target: %q", b)
+	}
+	if st, _ := os.Stat(target); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode: %v", st.Mode())
 	}
 }

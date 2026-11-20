@@ -32,6 +32,20 @@ import (
 // make the two disagree. Fixed, and CFM_CONF is not passed. A seam for tests.
 var confPath = func() string { return "/etc/cfm/cfm.conf" }
 
+// scriptEnv is the listen script's environment: the operator's, without the
+// script's CFM_* test seams (CFM_CONF, CFM_BIN, CFM_EDGE_ENGINES, …) an
+// exported shell variable would set, and with CFM_CONF = the one cfm.conf
+// this command edits and `cfm realip` reads.
+func scriptEnv() []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "CFM_") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "CFM_CONF="+confPath())
+}
+
 // renderTimeout bounds one render: it reloads the edge and waits for its IPv6
 // listen to show up.
 var renderTimeout = 3 * time.Minute
@@ -41,6 +55,10 @@ var renderRunner = func(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), renderTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", append([]string{ListenV6Script}, args...)...) // #nosec G204 -- fixed packaged script, args validated
+	cmd.Env = scriptEnv()
+	// On timeout sh is killed; a child still holding the output pipe
+	// (systemctl reload, sleep) must not keep Wait blocked past it.
+	cmd.WaitDelay = 5 * time.Second
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -93,6 +111,11 @@ func setEdgeListenV6(conf, value string) string {
 // writeConfAtomic replaces path with data, keeping its mode and owner; a
 // rename in the same directory, so a reader never sees a half-written file.
 func writeConfAtomic(path string, data []byte) error {
+	// A symlinked cfm.conf: write the target, keep the link (a rename onto
+	// the link would replace it with a file and leave the target stale).
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -134,9 +157,12 @@ const ipv6Usage = `Usage: cfm edge ipv6 [status]
             realip fix first). An EDGE_LISTEN_V6 = on / auto you wrote stays,
             and it also lets every edge start turn IPv6 on
             (docs/edge-ipv6.md "The decision")
-  off       EDGE_LISTEN_V6 = off in cfm.conf (the kill switch), then render:
-            back to IPv4
-  engine    OpenResty, Angie or cfm-edge: render only that one
+  off       EDGE_LISTEN_V6 = off in cfm.conf (the kill switch, node-wide), then
+            render every engine: back to IPv4
+  engine    with on: OpenResty, Angie or cfm-edge, render only that one
+Exit 0 means the render ran, not that IPv6 is on: a render that keeps the
+edge on IPv4 (no ::1 trust, a taken port, ...) says why, and "Now:" prints the
+decision afterwards (exit 1 if it cannot be read).
 render RELOADS a running edge (and confirms the IPv6 listen, else goes back
 to IPv4). docs/edge-ipv6.md.
 `
@@ -171,6 +197,13 @@ func runIPv6(args []string, d deps) int {
 	switch len(args) {
 	case 1:
 	case 2:
+		// The kill switch is node-wide: every engine must drop its IPv6
+		// listen now, or an engine left out keeps listening until its next
+		// start while its status already reads "IPv4 only".
+		if sub == "off" {
+			fmt.Fprintln(d.errOut, "edge ipv6: off is node-wide (EDGE_LISTEN_V6 in cfm.conf): it renders every engine, run it without an engine; nothing changed")
+			return 2
+		}
 		name := scriptEngineName(args[1])
 		if name == "" {
 			fmt.Fprintf(d.errOut, "edge ipv6: unknown engine %q (OpenResty, Angie, cfm-edge); nothing changed\n", args[1])
