@@ -162,7 +162,10 @@ const ipv6Usage = `Usage: cfm edge ipv6 [status]
   engine    with on: OpenResty, Angie or cfm-edge, render only that one
 Exit 0 means the render ran, not that IPv6 is on: a render that keeps the
 edge on IPv4 (no ::1 trust, a taken port, ...) says why, and "Now:" prints the
-decision afterwards (exit 1 if it cannot be read).
+status afterwards (exit 1 if it cannot be read). The status does not re-check
+the ::1 trust: when the render's lines say the origin does not trust ::1, run
+cfm edge realip fix, then cfm edge ipv6 on again. Writing cfm.conf makes the
+running daemon apply it, as after any edit.
 render RELOADS a running edge (and confirms the IPv6 listen, else goes back
 to IPv4). docs/edge-ipv6.md.
 `
@@ -239,6 +242,25 @@ func setIPv6(d deps, sub string, renderArgs []string) int {
 	if _, err := os.Stat(ListenV6Script); err != nil {
 		fmt.Fprintf(d.errOut, "edge ipv6: %s not found; nothing changed\n", ListenV6Script)
 		return 1
+	}
+	// A named engine must be one the script finds here: else the conf edit
+	// would be a node-wide change for a render that does nothing.
+	if len(renderArgs) > 1 {
+		lines, err := d.ipv6()
+		if err != nil {
+			fmt.Fprintf(d.errOut, "edge ipv6: status: %v; nothing changed\n", err)
+			return 1
+		}
+		found := false
+		for _, l := range lines {
+			if engineOfLine(l) == strings.ToLower(renderArgs[1]) {
+				found = true
+			}
+		}
+		if !found {
+			fmt.Fprintf(d.errOut, "edge ipv6: no %s engine on this host; nothing changed\n", renderArgs[1])
+			return 2
+		}
 	}
 	path := confPath()
 	old, err := os.ReadFile(path)

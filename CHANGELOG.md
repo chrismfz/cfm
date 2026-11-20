@@ -51,7 +51,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   ran, not that IPv6 came on. cfm.conf is rewritten in place (mode, owner and
   a symlink kept, comments and every other line untouched), read the way the
   script reads it (one reader, pinned to the script by the shared fixture),
-  and the script gets that same file, never an exported `CFM_*` variable.
+  and the script gets that same file, never an exported `CFM_*` variable. A
+  named engine the script does not find on the host is refused, nothing
+  changed. The running daemon applies the edited cfm.conf, as after any edit.
 
 ### Fixed
 - **`cfm realip` reads OpenLiteSpeed.** It read only LiteSpeed Enterprise's

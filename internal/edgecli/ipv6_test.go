@@ -52,7 +52,8 @@ func TestSetEdgeListenV6(t *testing.T) {
 }
 
 // The production path: cfm.conf rewritten in place (mode kept), the script's
-// render run with CFM_CONF pointing at that same file, its output printed.
+// render run (its environment: TestScriptEnvDropsTheSeams), its output and
+// the status after it printed.
 func TestSetIPv6WritesTheConfAndRenders(t *testing.T) {
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "cfm.conf")
@@ -186,8 +187,16 @@ func TestV6UpdateAgainstTheSharedFixture(t *testing.T) {
 			t.Fatalf("fixture %q: %v", body, err)
 		}
 		content += "\n"
-		if on := v6Update(content, "on"); !originrealip.EdgeListenV6Allowed(on) || strings.Contains(on, "EDGE_LISTEN_V6 = on\n# Set by") {
+		on := v6Update(content, "on")
+		if !originrealip.EdgeListenV6Allowed(on) {
 			t.Errorf("on %q -> %q: IPv6 not allowed", content, on)
+		}
+		// on never writes a line: every EDGE_LISTEN_V6 line after it was
+		// already there.
+		for _, l := range strings.Split(on, "\n") {
+			if _, ok := originrealip.EdgeListenV6Line(l); ok && !strings.Contains(content, l) {
+				t.Errorf("on %q wrote %q", content, l)
+			}
 		}
 		if off := v6Update(content, "off"); originrealip.EdgeListenV6Allowed(off) {
 			t.Errorf("off %q -> %q: IPv6 still allowed", content, off)
@@ -269,5 +278,32 @@ func TestWriteConfAtomicFollowsASymlink(t *testing.T) {
 	}
 	if st, _ := os.Stat(target); st.Mode().Perm() != 0o600 {
 		t.Fatalf("mode: %v", st.Mode())
+	}
+}
+
+// A named engine the script does not find here: refused, cfm.conf untouched.
+func TestSetIPv6RefusesAnEngineNotHere(t *testing.T) {
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "cfm.conf")
+	if err := os.WriteFile(conf, []byte("EDGE_LISTEN_V6 = off\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldConf, oldRun, oldScript := confPath, renderRunner, ListenV6Script
+	t.Cleanup(func() { confPath, renderRunner, ListenV6Script = oldConf, oldRun, oldScript })
+	confPath = func() string { return conf }
+	ListenV6Script = conf
+	ran := false
+	renderRunner = func(...string) (string, error) { ran = true; return "", nil }
+	d, _, errOut := testDeps(&recorder{}, dnat.Summary{}, []string{"OpenResty: IPv4 only (off)"}, nil)
+	if rc := setIPv6(d, "on", []string{"render", "Angie"}); rc != 2 || ran || !strings.Contains(errOut.String(), "no Angie engine") {
+		t.Fatalf("rc=%d ran=%v err=%s", rc, ran, errOut.String())
+	}
+	if b, _ := os.ReadFile(conf); string(b) != "EDGE_LISTEN_V6 = off\n" {
+		t.Fatalf("conf changed: %q", b)
+	}
+	// The engine that is here goes ahead.
+	d, _, _ = testDeps(&recorder{}, dnat.Summary{}, []string{"OpenResty: IPv4 only (off)"}, nil)
+	if rc := setIPv6(d, "on", []string{"render", "OpenResty"}); rc != 0 || !ran {
+		t.Fatalf("rc=%d ran=%v", rc, ran)
 	}
 }
