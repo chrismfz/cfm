@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.20
+
 ### Added
 - **`cfm realip fix` writes OpenLiteSpeed's trust on DirectAdmin.** It
   appends `127.0.0.1T, ::1T` to the server-level allow list (and sets
@@ -125,8 +129,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   panel DNAT had, so nothing needs noting beforehand), and the old
   `cfm dnat` steps on an older cfm (run from a checkout). `cfm dnat` and
   `cfm realip` work as before, and their own help is unchanged.
-
-## 2026.11.20
 
 ### Changed
 - **The edge may listen on IPv6 by default.** It stayed IPv4-only unless
