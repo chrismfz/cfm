@@ -62,6 +62,7 @@ type Probe struct {
 	Source    string `json:"source,omitempty"`    // file holding the loopback trust
 	Header    string `json:"header,omitempty"`    // the effective header the origin reads the client from, when known
 	Note      string `json:"note,omitempty"`      // why it is not trusted, or other context
+	Warning   string `json:"warning,omitempty"`   // trusted now, but something will undo it (OpenLiteSpeed on DirectAdmin: rewrite_confs)
 
 	// nginx: the site server{} blocks read, and how many of them do not trust
 	// the edge (0 and 0 when the http-level settings decided).
@@ -75,7 +76,8 @@ type Probe struct {
 	EdgeIPv6          bool `json:"edge_ipv6,omitempty"`
 	EdgeIPv6Listening bool `json:"edge_ipv6_listening,omitempty"`
 
-	ng *nginxVerdict // nginx: what the plan needs
+	ng  *nginxVerdict // nginx: what the plan needs
+	ols *olsVerdict   // OpenLiteSpeed: where its settings were read (the plan names those files)
 
 	v6Only bool // untrusted only on the ::1 pass: 127.0.0.1 is trusted (Verdict's wording)
 }
@@ -129,7 +131,8 @@ type layout struct {
 	apacheMains []apacheMain // the first that exists is the server's main config
 	nginxMain   string
 	nginxPrefix string // what relative nginx includes resolve against
-	lsConfig    string
+	lsConfig    string // LiteSpeed Enterprise
+	olsConfig   string // OpenLiteSpeed (ols.go)
 
 	// activeStack names the origin family that is serving, or "", and whether
 	// that came from the :80 listener (decisive) or only from systemd unit
@@ -164,6 +167,7 @@ var system = layout{
 	nginxMain:                 "/etc/nginx/nginx.conf",
 	nginxPrefix:               "/etc/nginx",
 	lsConfig:                  "/usr/local/lsws/conf/httpd_config.xml",
+	olsConfig:                 "/usr/local/lsws/conf/httpd_config.conf",
 	activeStack:               activeOriginStack,
 	cpanelApacheDir:           "/etc/apache2/conf.d",
 	debApacheDir:              "/etc/apache2/conf-enabled",
@@ -432,8 +436,13 @@ func (l layout) probeStack(stack, panel string) Probe {
 	case StackApache:
 		return l.probeApache(StackApache)
 	case StackLiteSpeed:
-		// LiteSpeed resolves the client natively (useIpInProxyHeader) or through
-		// the Apache RemoteIP conf it loads (loadApacheConf=1).
+		// OpenLiteSpeed: a plain-text config and no httpd_config.xml (ols.go).
+		// It loads no Apache config, so no RemoteIP fallback.
+		if !isFile(l.fs(l.lsConfig)) && isFile(l.fs(l.olsConfig)) {
+			return l.probeOLS()
+		}
+		// LiteSpeed Enterprise resolves the client natively (useIpInProxyHeader)
+		// or through the Apache RemoteIP conf it loads (loadApacheConf=1).
 		if b, err := os.ReadFile(l.fs(l.lsConfig)); err == nil && l.lsNativeMatch(b) {
 			return Probe{Stack: StackLiteSpeed, Trusted: true, Directive: "useIpInProxyHeader", Source: l.lsConfig}
 		}

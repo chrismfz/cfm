@@ -681,7 +681,14 @@ func buildEdgeHealthReport(ctx context.Context, window int) map[string]any {
 	if rp.Note != "" {
 		rEv["note"] = rp.Note
 	}
+	if rp.Warning != "" {
+		rEv["warning"] = rp.Warning
+	}
 	switch ok, text := originrealip.Verdict(rp, edgeUp); {
+	case ok && edgeUp && rp.Trusted && rp.Warning != "":
+		// Trusted now, but something will undo it (OpenLiteSpeed on
+		// DirectAdmin: the next `da build rewrite_confs`).
+		findings = append(findings, sev.add("origin-real-ip", "warn", text, rEv, rp.Warning))
 	case !ok && rp.Stack == originrealip.StackUnknown:
 		findings = append(findings, sev.add("origin-real-ip", "unknown", text, rEv, ""))
 	case !ok:

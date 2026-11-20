@@ -34,6 +34,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   unchanged. Docs: `docs/cli.md`.
 
 ### Fixed
+- **`cfm realip` reads OpenLiteSpeed.** It read only LiteSpeed Enterprise's
+  `httpd_config.xml`, so on an OpenLiteSpeed origin (DirectAdmin CustomBuild
+  `webserver=openlitespeed`) it reported the trust missing whatever the
+  config said, `cfm realip fix` printed the Enterprise WebAdmin steps, and the
+  edge's IPv6 listen stayed off. It now reads `httpd_config.conf` and the files
+  it includes (server level only), and names the files to edit
+  (`/etc/openlitespeed/httpd-defaults.conf`, `httpd-accesscontrol.conf` on
+  DirectAdmin). On DirectAdmin it gives the DirectAdmin way (a copy in
+  `custombuild/custom/openlitespeed/conf/`, then `da build rewrite_confs`),
+  and warns (in `cfm realip`, `cfm health` and edge_health) when the trust
+  would not survive the next `rewrite_confs`, naming the live files that
+  differ from what CustomBuild would install. CFM still does not edit the OpenLiteSpeed config.
 - **`cfm dnat cpanel --priority -99 on` turned panel DNAT on at its default
   priority**: a flag before the subcommand was taken by the web DNAT flags.
   The panel and bypass commands now get their arguments untouched, and a word

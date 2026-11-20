@@ -126,6 +126,8 @@ func StatusLine(p Probe, edgeActive bool) string {
 // or no CFM edge in front) or not, and the sentence saying so.
 func Verdict(p Probe, edgeActive bool) (ok bool, text string) {
 	switch {
+	case p.Trusted && p.Warning != "":
+		return true, fmt.Sprintf("Origin real-IP: %s/%s trusts the edge via %s (%s), header %s; WARNING: %s", p.Panel, p.Stack, p.Directive, p.Source, p.Header, p.Warning)
 	case p.Trusted:
 		return true, fmt.Sprintf("Origin real-IP: %s/%s trusts the edge via %s (%s), header %s", p.Panel, p.Stack, p.Directive, p.Source, p.Header)
 	case !edgeActive:

@@ -89,6 +89,10 @@ func (l layout) plan(p Probe) Plan {
 	case StackNginx:
 		l.planNginx(&pl)
 	case StackLiteSpeed:
+		if p.ols != nil {
+			pl.Reason = l.olsReason(p)
+			break
+		}
 		trusted := "127.0.0.1T"
 		if p.EdgeIPv6 {
 			// The edge listens on IPv6 too: its IPv6 hops come from ::1.
