@@ -204,21 +204,31 @@ func (v olsVerdict) modeOK() bool {
 	return len(v.modes) > 0 && v.badMode() < 0
 }
 
-// badMode: the index of the first server-level value that is neither 1 nor
-// 2, or -1.
+// OpenLiteSpeed's useIpInProxyHeader values (its WebAdmin, Ols/DTblDefBase.php
+// on server3): 0 No, 1 Yes, 2 Trusted IP Only, 3 Keep Header from Trusted IP
+// (2, with the backend's X-Forwarded-For left as it came), 4 Use Last IP (for
+// AWS ELB: the last X-Forwarded-For entry, the one the edge appends). 1 and 4
+// take the header from any peer, 2 and 3 only from a trusted one.
+var (
+	olsModeAnyPeer = map[string]bool{"1": true, "4": true}
+	olsModeTrusted = map[string]bool{"2": true, "3": true}
+)
+
+// badMode: the index of the first server-level value that does not take the
+// client from the edge's header (0, or anything unknown), or -1.
 func (v olsVerdict) badMode() int {
 	for i, m := range v.modes {
-		if m != "1" && m != "2" {
+		if !olsModeAnyPeer[m] && !olsModeTrusted[m] {
 			return i
 		}
 	}
 	return -1
 }
 
-// needACL: a value is 2 ("Trusted IP Only"), so the allow list decides.
+// needACL: a value is 2 or 3 (trusted peers only), so the allow list decides.
 func (v olsVerdict) needACL() bool {
 	for _, m := range v.modes {
-		if m == "2" {
+		if olsModeTrusted[m] {
 			return true
 		}
 	}
@@ -252,7 +262,12 @@ func (l layout) probeOLS() Probe {
 		p.Trusted, p.Directive = true, "useIpInProxyHeader "+v.mode+" (OpenLiteSpeed)"
 		p.Source = v.modeSource
 		if v.needACL() {
-			p.Directive = "useIpInProxyHeader 2 (OpenLiteSpeed)"
+			for _, m := range v.modes {
+				if olsModeTrusted[m] {
+					p.Directive = "useIpInProxyHeader " + m + " (OpenLiteSpeed)"
+					break
+				}
+			}
 			p.Source = v.aclSource
 		}
 		p.Warning = l.olsRewriteWarning()
@@ -263,9 +278,9 @@ func (l layout) probeOLS() Probe {
 		p.Note = "OpenLiteSpeed: no server-level useIpInProxyHeader in " + l.olsConfig + " or the files it includes"
 	case v.badMode() >= 0:
 		i := v.badMode()
-		p.Note = "OpenLiteSpeed: useIpInProxyHeader " + v.modes[i] + " (" + v.modeSources[i] + ") does not take the client from the edge's header (1, or 2 with 127.0.0.1T)"
+		p.Note = "OpenLiteSpeed: useIpInProxyHeader " + v.modes[i] + " (" + v.modeSources[i] + ") does not take the client from the edge's header (1 or 4, or 2 / 3 with 127.0.0.1T)"
 		if len(v.modes) > 1 {
-			p.Note += "; the server-level values disagree (" + strings.Join(v.modes, ", ") + "), and every one must be 1 or 2"
+			p.Note += "; the server-level values disagree (" + strings.Join(v.modes, ", ") + "), and every one must be 1-4"
 		}
 	default:
 		where := "no server-level accessControl block"
@@ -275,7 +290,7 @@ func (l layout) probeOLS() Probe {
 		if len(v.allows) > 1 {
 			where = "every one of the " + strconv.Itoa(len(v.allows)) + " server-level accessControl allow lists (the last in " + v.aclSource + ")"
 		}
-		p.Note = "OpenLiteSpeed: useIpInProxyHeader 2 but 127.0.0.1T is not in " + where
+		p.Note = "OpenLiteSpeed: useIpInProxyHeader 2 / 3 (trusted IP only) but 127.0.0.1T is not in " + where
 	}
 	return p
 }
@@ -297,25 +312,53 @@ func (l layout) olsRewriteWarning() string {
 		cf := readConfFile(l.fs(src))
 		return cf.b, cf.ok
 	}
-	after := l.readOLSWith(installed)
-	ok := after.trusted(l)
-	if ok && l.loopIP == "" && l.edgeIPv6() {
+	// Each address the edge proxies from that the live config trusts: a ::1
+	// the live config does not trust already is not rewrite_confs' doing.
+	live := l.readOLS()
+	passes := []layout{l}
+	if l.loopIP == "" && l.edgeIPv6() {
 		l6 := l
 		l6.loopIP = "::1"
-		ok = after.trusted(l6)
+		if live.trusted(l6) {
+			passes = append(passes, l6)
+		}
 	}
-	if ok {
+	survives := func(v olsVerdict) bool {
+		for _, lp := range passes {
+			if !v.trusted(lp) {
+				return false
+			}
+		}
+		return true
+	}
+	if survives(l.readOLSWith(installed)) {
 		return ""
 	}
-	var changed []string
-	for _, f := range l.readOLS().files {
+	// Name the files whose rewrite alone breaks the trust; a file that only
+	// differs from its template (a tuned httpd-tuning.conf) is not one.
+	var changed, culprits []string
+	for _, f := range live.files {
 		b, ok := installed(f)
 		if !ok {
 			continue
 		}
-		if live := readConfFile(l.fs(f)); !live.ok || string(live.b) != string(b) {
-			changed = append(changed, f+" (keep it in "+filepath.Join(olsDACustomDir, filepath.Base(f))+")")
+		if lf := readConfFile(l.fs(f)); lf.ok && string(lf.b) == string(b) {
+			continue
 		}
+		entry := f + " (keep it in " + filepath.Join(olsDACustomDir, filepath.Base(f)) + ")"
+		changed = append(changed, entry)
+		only := func(logical string) ([]byte, bool) {
+			if logical != f {
+				return nil, false
+			}
+			return installed(logical)
+		}
+		if !survives(l.readOLSWith(only)) {
+			culprits = append(culprits, entry)
+		}
+	}
+	if len(culprits) > 0 {
+		changed = culprits
 	}
 	w := "trusted now, but not after `da build rewrite_confs`, which rewrites the files under " + olsDALiveDir + " from CustomBuild's templates"
 	if len(changed) > 0 {

@@ -65,8 +65,10 @@ What counts, per stack:
   `useIpInProxyHeader` in `httpd-defaults.conf` and the allow list in
   `httpd-accesscontrol.conf`, which CustomBuild writes with Cloudflare's
   ranges: server3, 2026-11-20). The same rule, at server level: every
-  `useIpInProxyHeader` 1, or 1 / 2 with `127.0.0.1T` (and `::1T` for an IPv6
-  edge) in every `accessControl` allow list (which one OpenLiteSpeed keeps
+  `useIpInProxyHeader` 1 or 4 (any peer: Yes, Use Last IP), or 2 / 3 (Trusted
+  IP Only, Keep Header from Trusted IP) with `127.0.0.1T` (and `::1T` for an
+  IPv6 edge) in every `accessControl` allow list (the values from OLS's own
+  WebAdmin) (which one OpenLiteSpeed keeps
   when a setting appears twice is not measured, so all of them must agree). A
   `virtualhost{}` block's own settings do not count, and it loads no Apache
   config.

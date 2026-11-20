@@ -261,3 +261,51 @@ func TestOpenLiteSpeedDAStepNamesWhatIsMissing(t *testing.T) {
 		t.Fatalf("0 then 2: %q", p.Note)
 	}
 }
+
+// Re-review: OpenLiteSpeed's 3 (Keep Header from Trusted IP) is trusted-only
+// like 2, 4 (Use Last IP, for AWS ELB) takes the header from any peer like 1.
+func TestOpenLiteSpeedModes3And4(t *testing.T) {
+	for _, c := range []struct {
+		mode, acl string
+		want      bool
+	}{
+		{"3", "accessControl{\n  allow ALL, 127.0.0.1T\n}\n", true},
+		{"3", "accessControl{\n  allow ALL\n}\n", false},
+		{"4", "accessControl{\n  allow ALL\n}\n", true},
+		{"5", "accessControl{\n  allow ALL, 127.0.0.1T\n}\n", false},
+	} {
+		l, r := olsDAHost(t)
+		put(t, r, "etc/openlitespeed/httpd-defaults.conf", strings.Replace(server3OLSDefaults, "\t\t 2", " "+c.mode, 1))
+		put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", c.acl)
+		if p := l.probe(""); p.Trusted != c.want {
+			t.Fatalf("mode %s, %q: %+v", c.mode, c.acl, p)
+		}
+	}
+}
+
+// Re-review: the rewrite warning covers only what the live config trusts, and
+// names only the files whose rewrite breaks it.
+func TestOpenLiteSpeedRewriteWarningScope(t *testing.T) {
+	l, r := olsDAHost(t)
+	tmpl := "usr/local/directadmin/custombuild/configure/openlitespeed/conf/"
+	custom := "usr/local/directadmin/custombuild/custom/openlitespeed/conf/"
+	acl4 := "accessControl{\n  allow ALL, 127.0.0.1T\n}\n"
+	put(t, r, tmpl+"httpd-accesscontrol.conf", server3OLSACL)
+	put(t, r, tmpl+"httpd-defaults.conf", server3OLSDefaults)
+	put(t, r, tmpl+"httpd-logs.conf", "errorlog x {\n}\n")
+	put(t, r, "etc/openlitespeed/httpd-logs.conf", "errorlog y {\n  logLevel DEBUG\n}\n") // differs, irrelevant
+	put(t, r, custom+"httpd-accesscontrol.conf", acl4)
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", acl4)
+	edgeV6(t, r)
+	// ::1 is untrusted live as after: no rewrite warning, only the ::1 gap.
+	if p := l.probe(""); p.Trusted || p.Warning != "" {
+		t.Fatalf("::1 missing live: %+v", p)
+	}
+	// Live edit with ::1T, custom copy without it: the warning names the ACL
+	// file only, not the differing log file.
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", "accessControl{\n  allow ALL, 127.0.0.1T, ::1T\n}\n")
+	p := l.probe("")
+	if !p.Trusted || !strings.Contains(p.Warning, "httpd-accesscontrol.conf") || strings.Contains(p.Warning, "httpd-logs.conf") {
+		t.Fatalf("culprit only: %+v", p)
+	}
+}
