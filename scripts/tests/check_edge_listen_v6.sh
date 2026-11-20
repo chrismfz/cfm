@@ -39,7 +39,7 @@ http_port=$(sed -n 's/^V6_HTTP_PORT=\([0-9][0-9]*\)$/\1/p' "$SCRIPT")
 https_port=$(sed -n 's/^V6_HTTPS_PORT=\([0-9][0-9]*\)$/\1/p' "$SCRIPT")
 [ -n "$http_port" ] && [ -n "$https_port" ] || fail "cannot read V6_HTTP_PORT / V6_HTTPS_PORT from $SCRIPT"
 
-for pair in "configs/openresty.conf|/usr/local/openresty/nginx/conf" "configs/angie.conf|/etc/angie"; do
+for pair in "configs/openresty.conf|/usr/local/openresty/nginx/conf" "configs/angie.conf|/etc/angie" "configs/cfm-edge.conf|/etc/cfm-edge"; do
   conf=${pair%%|*}
   dir=${pair#*|}
   [ -f "$conf" ] || { fail "$conf missing"; continue; }
@@ -616,6 +616,7 @@ CFM_CONF="$cfm_conf" CFM_V6_PROC_FILE="$proc" CFM_PROC_ROOT="$tmp/proc" CFM_SS="
 # The default engine table points at each engine's real main config.
 grep -qF "'OpenResty|%s|%s|%s\\n' \"\$e_bin\" /usr/local/openresty/nginx/conf /usr/local/openresty/nginx/conf/nginx.conf" "$SCRIPT" || fail "OpenResty engine row"
 grep -qF "'Angie|%s|%s|%s\\n' \"\$e_bin\" /etc/angie /etc/angie/angie.conf" "$SCRIPT" || fail "Angie engine row"
+grep -qF "'cfm-edge|%s|%s|%s\\n' \"\$e_bin\" /etc/cfm-edge /etc/cfm-edge/nginx.conf" "$SCRIPT" || fail "cfm-edge engine row"
 
 # --- 3. package deploy hook ----------------------------------------------------
 awk '/^deploy_logrotate_config$/{exit} {print}' scripts/package-proxy-config-deploy.sh >"$tmp/functions.sh"
@@ -638,7 +639,7 @@ deploy() {
     bash -c '. "$1"; deploy_edge_listen_v6' sh "$tmp/functions.sh" >"$tmp/out" 2>&1
 }
 deploy
-for f in cfm-edge-listen-v6.service openresty.service.d/cfm-listen-v6.conf angie.service.d/cfm-listen-v6.conf; do
+for f in cfm-edge-listen-v6.service openresty.service.d/cfm-listen-v6.conf angie.service.d/cfm-listen-v6.conf cfm-edge.service.d/cfm-listen-v6.conf; do
   [ -f "$units/$f" ] || fail "deploy did not install $units/$f"
 done
 cmp -s configs/cfm-edge-listen-v6.service "$units/cfm-edge-listen-v6.service" || fail "unit content differs"
@@ -695,8 +696,10 @@ for pkg in packaging/debian/DEBIAN/postrm packaging/rpm/SPECS/cfm.spec; do
   for f in /etc/systemd/system/cfm-edge-listen-v6.service \
     /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \
     /etc/systemd/system/angie.service.d/cfm-listen-v6.conf \
+    /etc/systemd/system/cfm-edge.service.d/cfm-listen-v6.conf \
     /usr/local/openresty/nginx/conf/cfm-listen-v6-http.conf /usr/local/openresty/nginx/conf/cfm-listen-v6-https.conf \
-    /etc/angie/cfm-listen-v6-http.conf /etc/angie/cfm-listen-v6-https.conf; do
+    /etc/angie/cfm-listen-v6-http.conf /etc/angie/cfm-listen-v6-https.conf \
+    /etc/cfm-edge/cfm-listen-v6-http.conf /etc/cfm-edge/cfm-listen-v6-https.conf; do
     grep -qE "^[[:space:]]*(rm -f )?$(printf '%s' "$f" | sed 's/[.]/\\./g')( \\\\)?( \\|\\| true)?$" "$pkg" \
       || fail "$pkg does not remove $f on package removal"
   done

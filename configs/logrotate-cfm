@@ -11,6 +11,9 @@
 # Deliberately NOT listed, even though CFM writes into them:
 #
 #   /var/log/angie/          -> vendor  /etc/logrotate.d/angie    globs *.log
+#   /var/log/cfm-edge/       -> package /etc/logrotate.d/cfm-edge globs *.log
+#                               (CFM's hourly pass, cfm-logrotate.cron, also
+#                               runs that file so its maxsize applies hourly)
 #   /var/log/nginx/          -> distro  /etc/logrotate.d/nginx    globs *.log
 #   /var/log/apache2/        -> distro  /etc/logrotate.d/apache2  globs *.log
 #   /var/log/httpd/          -> distro  /etc/logrotate.d/httpd    globs *log

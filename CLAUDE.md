@@ -139,6 +139,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
 ./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
+./scripts/tests/check_cfm_edge_conf.sh           # configs/cfm-edge.conf == a fresh render of openresty.conf (make cfm-edge-conf)
 ./scripts/tests/check_package_lua_delivery.sh    # Lua ships ONLY as /var/lib/cfm/lua/*, package-owned (see §5)
 ./scripts/tests/check_package_proxy_config_deploy.sh # upgrade tests new edge sidecars staged (-T, real nginx); a failed run leaves the live dir untouched
 ./scripts/tests/check_edge_listen_v6.sh          # edge IPv6 listen: script <-> conf ports/glob includes, default (script = Go) + EDGE_LISTEN_V6, the decision, deploy hook
@@ -257,8 +258,9 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `/var/log/cfm/…` literal in Go) is neither matched by `configs/logrotate-cfm`
   nor in a directory documented as vendor-rotated. Never list a path a
   distro/panel logrotate config already globs (`/var/log/{angie,nginx,apache2,
-  httpd}/`, `/usr/local/apache/logs/`): a second declaration is a `duplicate
-  log entry` error that aborts the run. Prefer the existing directory glob over
+  httpd}/`, `/usr/local/apache/logs/`) or the cfm-edge package rotates
+  (`/var/log/cfm-edge/`; CFM's hourly pass runs its config too): a second
+  declaration is a `duplicate log entry` error that aborts the run. Prefer the existing directory glob over
   a filename (enumerated lists drifted). The OpenResty logs under `/usr/local`
   also need the `logrotate.service.d/cfm-openresty.conf` drop-in
   (`ProtectSystem=full`). `--host` checks a live server; details in

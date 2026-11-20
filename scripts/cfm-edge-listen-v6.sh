@@ -1,12 +1,14 @@
 #!/bin/sh
-# cfm-edge-listen-v6.sh — decide whether the edge (OpenResty / Angie) listens
+# cfm-edge-listen-v6.sh — decide whether the edge (OpenResty / Angie / the
+# cfm-edge package; "edge" in this script's name is the role) listens
 # on IPv6, and write or remove the two listen sidecars the main config
 # includes (docs/edge-ipv6.md):
 #
 #   <engine conf dir>/cfm-listen-v6-http.conf    listen [::]:9080;
 #   <engine conf dir>/cfm-listen-v6-https.conf   listen [::]:9043 ssl; + quic
 #
-# configs/openresty.conf and configs/angie.conf include them through a glob
+# configs/openresty.conf and configs/angie.conf (and cfm-edge.conf, rendered
+# from openresty.conf) include them through a glob
 # (cfm-listen-v6-http.con[f]), so an ABSENT file is fine and means IPv4 only.
 # That is the fail-safe state: anything unknown removes the files.
 #
@@ -14,7 +16,8 @@
 # without an IPv6 stack (ipv6.disable=1) that listen fails the config test and
 # the edge does not start. So this runs before every edge start
 # (cfm-edge-listen-v6.service, pulled in by a drop-in on openresty.service /
-# angie.service) and from the package deploy, and decides from the host:
+# angie.service / cfm-edge.service) and from the package deploy, and decides
+# from the host:
 #
 # Whether a node may listen on IPv6 at all is EDGE_LISTEN_V6 in cfm.conf: on
 # (yes / true / 1 / auto) or off (no / false / 0 / disabled); absent, it is
@@ -611,6 +614,11 @@ engines() {
     e_bin=$(first_executable /usr/sbin/angie /sbin/angie || true)
     if [ -n "$e_bin" ] || [ -d /etc/angie ]; then
         printf 'Angie|%s|%s|%s\n' "$e_bin" /etc/angie /etc/angie/angie.conf
+    fi
+    # cfm-edge (chrismfz/cfm-edge): its unit is cfm-edge.service (unit_of).
+    e_bin=$(first_executable /usr/sbin/cfm-edge || true)
+    if [ -n "$e_bin" ] || [ -d /etc/cfm-edge ]; then
+        printf 'cfm-edge|%s|%s|%s\n' "$e_bin" /etc/cfm-edge /etc/cfm-edge/nginx.conf
     fi
     return 0
 }

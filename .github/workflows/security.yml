@@ -61,6 +61,8 @@ jobs:
         run: ./scripts/tests/check_origin_ka_config.sh
       - name: Enforce shared-Lua layout + installer manifest parity
         run: ./scripts/tests/check_shared_lua_layout.sh
+      - name: configs/cfm-edge.conf is the current render of openresty.conf
+        run: ./scripts/tests/check_cfm_edge_conf.sh
       - name: Enforce package Lua delivery invariants
         run: ./scripts/tests/check_package_lua_delivery.sh
       - name: Package proxy-config deploy stages + tests sidecars, never leaves a failed run live

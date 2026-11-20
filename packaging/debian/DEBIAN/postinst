@@ -169,7 +169,7 @@ fi
 # init_worker_by_lua run.
 if command -v systemctl >/dev/null 2>&1; then
     sleep 2
-    for svc in angie.service openresty.service; do
+    for svc in angie.service openresty.service cfm-edge.service; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             echo "CFM: reloading $svc to apply updated config..."
             systemctl reload "$svc" || true

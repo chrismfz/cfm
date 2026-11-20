@@ -121,8 +121,10 @@ cat >"$bin_dir/systemctl" <<'EOF_SYSTEMCTL'
 case "$1 $2 $3" in
   "is-active --quiet angie.service") [ "${FAKE_ANGIE_ACTIVE:-0}" = "1" ] && exit 0 || exit 3 ;;
   "is-active --quiet openresty.service") [ "${FAKE_OPENRESTY_ACTIVE:-0}" = "1" ] && exit 0 || exit 3 ;;
+  "is-active --quiet cfm-edge.service") [ "${FAKE_CFMEDGE_ACTIVE:-0}" = "1" ] && exit 0 || exit 3 ;;
   "list-unit-files angie.service --no-legend") printf '%s\n' "angie.service enabled"; exit 0 ;;
   "list-unit-files openresty.service --no-legend") printf '%s\n' "openresty.service enabled"; exit 0 ;;
+  "list-unit-files cfm-edge.service --no-legend") printf '%s\n' "cfm-edge.service disabled"; exit 0 ;;
 esac
 exit 1
 EOF_SYSTEMCTL
@@ -461,6 +463,91 @@ if ! printf '%s\n' "$both_active_output" | rg -q 'systemctl reload openresty'; t
   printf '%s\n' "$both_active_output" >&2
   exit 1
 fi
+
+# cfm-edge: deployed like the others (its main config is a render of
+# openresty.conf; the fake engine is OpenResty's), named alone when it is the
+# only active edge, and one of three in the ambiguity line when all are active
+# (the summary used to know exactly two engines).
+cp "$configs/openresty.conf" "$configs/cfm-edge.conf"
+cfmedge_output=$(
+  PATH="$bin_dir:$PATH" \
+  CFM_CONFIG_DIR="$configs" \
+  FAKE_CFMEDGE_ACTIVE=1 \
+  FAKE_OPENRESTY_ARGS="$tmp/cfmedge.args" \
+  sh -c '. "$1";
+    process_engine cfm-edge "$2" "$3" "$4" "$5" cfm-edge.service "systemctl reload cfm-edge";
+    print_proxy_config_summary' sh \
+    "$tmp/functions.sh" \
+    "$bin_dir/fake-openresty" \
+    "$configs/cfm-edge.conf" \
+    "$tmp/cfmedge-conf/nginx.conf" \
+    "$tmp/cfmedge-conf"
+)
+for want in 'cfm-edge: detected, active, config deployed' \
+    'Active edge: cfm-edge' 'Reload active edge with: systemctl reload cfm-edge'; do
+  if ! printf '%s\n' "$cfmedge_output" | rg -qF "$want"; then
+    echo "FAIL: cfm-edge summary lacks: $want" >&2
+    printf '%s\n' "$cfmedge_output" >&2
+    exit 1
+  fi
+done
+for f in nginx.conf challenge_waf_bypass.conf trusted_proxies.conf cfm-panel-listeners.conf; do
+  [ -f "$tmp/cfmedge-conf/$f" ] || { echo "FAIL: cfm-edge deploy did not install $f into its conf dir" >&2; exit 1; }
+done
+
+three_active_output=$(
+  PATH="$bin_dir:$PATH" \
+  CFM_CONFIG_DIR="$configs" \
+  FAKE_ANGIE_ACTIVE=1 FAKE_OPENRESTY_ACTIVE=1 FAKE_CFMEDGE_ACTIVE=1 \
+  FAKE_ANGIE_ARGS="$tmp/angie-three.args" \
+  FAKE_OPENRESTY_ARGS="$tmp/openresty-three.args" \
+  sh -c '. "$1";
+    process_engine Angie "$2" "$3" "$4" "$5" angie.service "angie -s reload";
+    process_engine OpenResty "$6" "$7" "$8" "$9" openresty.service x;
+    process_engine cfm-edge "$6" "${10}" "${11}" "${12}" cfm-edge.service x;
+    print_proxy_config_summary' sh \
+    "$tmp/functions.sh" \
+    "$bin_dir/fake-angie" "$configs/angie.conf" "$tmp/three-angie/angie.conf" "$tmp/three-angie" \
+    "$bin_dir/fake-openresty" "$configs/openresty.conf" "$tmp/three-or/nginx.conf" "$tmp/three-or" \
+    "$configs/cfm-edge.conf" "$tmp/three-ce/nginx.conf" "$tmp/three-ce"
+)
+for want in 'Active edge: ambiguous' 'systemctl reload angie' \
+    'systemctl reload openresty' 'systemctl reload cfm-edge'; do
+  if ! printf '%s\n' "$three_active_output" | rg -qF "$want"; then
+    echo "FAIL: three-active summary lacks: $want" >&2
+    printf '%s\n' "$three_active_output" >&2
+    exit 1
+  fi
+done
+rm -f "$configs/cfm-edge.conf"
+
+# Only an ADOPTED cfm-edge is deployed: its live nginx.conf must carry the
+# adoption token line. The package's placeholder (or a missing file) is left
+# alone. The token is pinned to its exact text: every adopted node's live
+# config holds it, so a new text would silently un-adopt them all. Never
+# "fix" this check by changing the expected line.
+marker=$(sed -n "s/^CFMEDGE_ADOPT_MARKER='\(.*\)'$/\1/p" scripts/package-proxy-config-deploy.sh)
+[ "$marker" = '# cfm-edge-adopted-by: cfm' ] || { echo "FAIL: CFMEDGE_ADOPT_MARKER changed (or is missing): got '$marker'; it must stay '# cfm-edge-adopted-by: cfm' forever" >&2; exit 1; }
+rg -qxF "    echo \"$marker\"" scripts/render-cfm-edge-conf.sh || { echo "FAIL: render-cfm-edge-conf.sh does not write the adoption token line" >&2; exit 1; }
+rg -qxF "$marker" configs/cfm-edge.conf || { echo "FAIL: configs/cfm-edge.conf lacks the adoption token line" >&2; exit 1; }
+printf '# cfm-edge placeholder\nevents {}\n' >"$tmp/placeholder.conf"
+adopt_out=$(sh -c '. "$1"; cfmedge_adopted "$2" && echo adopted; cfmedge_adopted "$3" && echo adopted; cfmedge_adopted "$4" && echo adopted; echo done' sh \
+  "$tmp/functions.sh" "$tmp/placeholder.conf" "$tmp/no-such.conf" configs/cfm-edge.conf)
+[ "$adopt_out" = "$(printf 'adopted\ndone')" ] || { echo "FAIL: cfmedge_adopted: placeholder/missing must be no, the rendered conf yes; got: $adopt_out" >&2; exit 1; }
+# The top-level cfm-edge call (not run by these tests, which source only the
+# functions) must gate on adoption and deploy to cfm-edge's own paths.
+rg -qF 'if [ -n "$CFMEDGE_BIN" ] && ! cfmedge_adopted /etc/cfm-edge/nginx.conf; then' scripts/package-proxy-config-deploy.sh \
+  || { echo "FAIL: the cfm-edge deploy is not gated on adoption" >&2; exit 1; }
+# The whole call, in argument order (engine, bin, src, dst, sidecar dir, unit):
+# a swapped src/dst would deploy the package's file over CFM's template.
+rg -qUF 'process_engine \
+        cfm-edge \
+        "$CFMEDGE_BIN" \
+        "$CFM_CONFIG_DIR/cfm-edge.conf" \
+        /etc/cfm-edge/nginx.conf \
+        /etc/cfm-edge \
+        cfm-edge.service \' scripts/package-proxy-config-deploy.sh \
+  || { echo "FAIL: the cfm-edge process_engine call is not engine, bin, cfm-edge.conf, /etc/cfm-edge/nginx.conf, /etc/cfm-edge, cfm-edge.service in that order" >&2; exit 1; }
 
 failure_output=$(
   PATH="$bin_dir:$PATH" \

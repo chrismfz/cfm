@@ -13,6 +13,23 @@ ANGIE_ACTIVE=0
 OPENRESTY_DETECTED=0
 OPENRESTY_DEPLOYED=0
 OPENRESTY_ACTIVE=0
+CFMEDGE_DETECTED=0
+CFMEDGE_DEPLOYED=0
+CFMEDGE_ACTIVE=0
+CFMEDGE_NOT_ADOPTED=0
+
+# cfmedge_adopted LIVE_CONF: true when cfm-edge's live config is CFM's, not
+# the package's placeholder: it holds the adoption token line that
+# scripts/render-cfm-edge-conf.sh writes (check_package_proxy_config_deploy.sh
+# pins the two equal). A dedicated, never-changing line, not the header prose:
+# changing it would silently un-adopt every node, whose live config keeps the
+# old text. (The Go side's "CFM is wired in" signal for cfm-edge is its
+# trusted_proxies.conf sidecar, edgeengine.Profiles ConfigHookPaths, which
+# this deploy writes only on an adopted node.)
+CFMEDGE_ADOPT_MARKER='# cfm-edge-adopted-by: cfm'
+cfmedge_adopted() {
+    grep -qxF "$CFMEDGE_ADOPT_MARKER" "$1" 2>/dev/null
+}
 
 find_first_executable() {
     ffe_cmd_name=$1
@@ -89,6 +106,11 @@ set_engine_state() {
             OPENRESTY_ACTIVE=$ses_active
             OPENRESTY_DEPLOYED=$ses_deployed
             ;;
+        cfm-edge)
+            CFMEDGE_DETECTED=$ses_detected
+            CFMEDGE_ACTIVE=$ses_active
+            CFMEDGE_DEPLOYED=$ses_deployed
+            ;;
     esac
 }
 
@@ -124,22 +146,32 @@ print_proxy_config_summary() {
     echo "CFM proxy config summary:"
     print_engine_summary_line Angie "$ANGIE_DETECTED" "$ANGIE_ACTIVE" "$ANGIE_DEPLOYED"
     print_engine_summary_line OpenResty "$OPENRESTY_DETECTED" "$OPENRESTY_ACTIVE" "$OPENRESTY_DEPLOYED"
+    if [ "$CFMEDGE_NOT_ADOPTED" -eq 1 ]; then
+        echo "  cfm-edge: installed, not adopted (left unchanged)"
+    else
+        print_engine_summary_line cfm-edge "$CFMEDGE_DETECTED" "$CFMEDGE_ACTIVE" "$CFMEDGE_DEPLOYED"
+    fi
 
-    if [ "$ANGIE_ACTIVE" -eq 1 ] && [ "$OPENRESTY_ACTIVE" -eq 1 ]; then
-        echo "  Active edge: ambiguous; both Angie and OpenResty services are active"
+    # Every active edge, as "Label unit" pairs. More than one is ambiguous
+    # (count with > 1: three engines can be active, not just two).
+    ppcs_active=""
+    ppcs_n=0
+    [ "$ANGIE_ACTIVE" -eq 1 ] && { ppcs_active="$ppcs_active Angie:angie"; ppcs_n=$((ppcs_n + 1)); }
+    [ "$OPENRESTY_ACTIVE" -eq 1 ] && { ppcs_active="$ppcs_active OpenResty:openresty"; ppcs_n=$((ppcs_n + 1)); }
+    [ "$CFMEDGE_ACTIVE" -eq 1 ] && { ppcs_active="$ppcs_active cfm-edge:cfm-edge"; ppcs_n=$((ppcs_n + 1)); }
+
+    if [ "$ppcs_n" -gt 1 ]; then
+        ppcs_labels=""
+        for ppcs_e in $ppcs_active; do ppcs_labels="$ppcs_labels ${ppcs_e%%:*}"; done
+        echo "  Active edge: ambiguous; more than one edge service is active:$ppcs_labels"
         echo "  Reload active edges with:"
-        echo "    systemctl reload angie"
-        echo "    systemctl reload openresty"
+        for ppcs_e in $ppcs_active; do echo "    systemctl reload ${ppcs_e#*:}"; done
 	echo
 	echo
-    elif [ "$ANGIE_ACTIVE" -eq 1 ]; then
-        echo "  Active edge: Angie"
-        echo "  Reload active edge with: systemctl reload angie"
-	echo
-	echo
-    elif [ "$OPENRESTY_ACTIVE" -eq 1 ]; then
-        echo "  Active edge: OpenResty"
-        echo "  Reload active edge with: systemctl reload openresty"
+    elif [ "$ppcs_n" -eq 1 ]; then
+        ppcs_e=${ppcs_active# }
+        echo "  Active edge: ${ppcs_e%%:*}"
+        echo "  Reload active edge with: systemctl reload ${ppcs_e#*:}"
 	echo
 	echo
     else
@@ -810,7 +842,7 @@ deploy_logrotate_dropin() {
 
 # The IPv6 listen decision (docs/edge-ipv6.md): install the oneshot unit that
 # runs scripts/cfm-edge-listen-v6.sh before every edge start and the drop-in
-# that pulls it into openresty.service / angie.service (refreshed when they
+# that pulls it into openresty.service / angie.service / cfm-edge.service (refreshed when they
 # differ, systemd reloaded only then; skipped on a host without systemd), then
 # run the script once (`deploy`): it keeps or removes the two listen sidecars
 # for every engine and re-tests kept ones with the engine's own config test,
@@ -829,7 +861,8 @@ deploy_edge_listen_v6() {
         for delv_pair in \
             "cfm-edge-listen-v6.service cfm-edge-listen-v6.service" \
             "cfm-edge-listen-v6-dropin.conf openresty.service.d/cfm-listen-v6.conf" \
-            "cfm-edge-listen-v6-dropin.conf angie.service.d/cfm-listen-v6.conf"; do
+            "cfm-edge-listen-v6-dropin.conf angie.service.d/cfm-listen-v6.conf" \
+            "cfm-edge-listen-v6-dropin.conf cfm-edge.service.d/cfm-listen-v6.conf"; do
             delv_src="$CFM_CONFIG_DIR/${delv_pair%% *}"
             delv_dst="$delv_unit_dir/${delv_pair#* }"
             if [ ! -f "$delv_src" ]; then
@@ -931,6 +964,34 @@ if [ -n "$OPENRESTY_BIN" ]; then
         /usr/local/openresty/sbin/nginx\ -s\ reload
 else
     echo "CFM proxy config: OpenResty not detected; skipping"
+fi
+
+# cfm-edge (chrismfz/cfm-edge): its main config is configs/cfm-edge.conf, a
+# render of openresty.conf with cfm-edge's paths (check_cfm_edge_conf.sh), and
+# its sidecars live in /etc/cfm-edge next to it.
+#
+# Only once ADOPTED: its live nginx.conf is CFM's (it carries the render's
+# header; install-edge.sh puts it there). A host that merely has the rpm keeps
+# the package's placeholder: deploying here would replace it with a config
+# that binds the edge ports (a stray `systemctl start cfm-edge` would then
+# fight the live edge for them), and the config test would create
+# /var/log/cfm-edge/*.log, whose fresh mtime makes edgelog read cfm-edge's
+# empty logs instead of the live edge's.
+CFMEDGE_BIN=$(find_first_executable cfm-edge /usr/sbin/cfm-edge || true)
+if [ -n "$CFMEDGE_BIN" ] && ! cfmedge_adopted /etc/cfm-edge/nginx.conf; then
+    CFMEDGE_NOT_ADOPTED=1
+    echo "CFM proxy config: cfm-edge installed but not adopted (its nginx.conf is not CFM's; install-edge.sh adopts it); leaving it unchanged"
+elif [ -n "$CFMEDGE_BIN" ]; then
+    process_engine \
+        cfm-edge \
+        "$CFMEDGE_BIN" \
+        "$CFM_CONFIG_DIR/cfm-edge.conf" \
+        /etc/cfm-edge/nginx.conf \
+        /etc/cfm-edge \
+        cfm-edge.service \
+        systemctl\ reload\ cfm-edge
+else
+    echo "CFM proxy config: cfm-edge not detected; skipping"
 fi
 
 deploy_edge_listen_v6
