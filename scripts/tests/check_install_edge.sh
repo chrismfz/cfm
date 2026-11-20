@@ -209,10 +209,31 @@ el_run ': >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
 # Every config test goes through edge_test (-e /dev/null where the binary
 # offers it: a test warning never fills a file startup log), and edge_test
 # passes -e only where -h lists it (an unknown -e would fail every test).
-if bad="$(grep -E '"\$EDGE_BIN"[^|]* -t( |$|\))' <<<"$ex" | grep -vE '^[0-9]*: *"\$EDGE_BIN" -(e /dev/null -)?t "\$@"$')"; then
+# A test is the binary ("$EDGE_BIN", ${EDGE_BIN}, unquoted, or its path) in
+# command position with a -t / -T flag (alone or combined, e.g. -tq) anywhere
+# in that command; only the lines of edge_test's own body are exempt.
+et_from="$(grep -nE '^edge_test\(\) *\{' "$SCRIPT" | head -1 | cut -d: -f1 || true)"
+et_to="$(awk -v f="${et_from:-0}" 'NR > f && /^}/ { print NR; exit }' "$SCRIPT")"
+[ -n "$et_from" ] && [ -n "$et_to" ] || fail "$SCRIPT: edge_test() not found"
+et_cmd='(^[0-9]+:[[:space:]]*|[;&|(][[:space:]]*|\$\([[:space:]]*|(if|then|else|elif|do|while|until|!)[[:space:]]+)'
+et_bin='"?(\$\{?EDGE_BIN\}?|/usr/sbin/cfm-edge)"?'
+et_flag='([[:space:]][^|;&]*)?[[:space:]]-[A-Za-z]*[tT][A-Za-z]*([^A-Za-z0-9_-]|$)'
+if bad="$(awk -F': ' -v a="$et_from" -v b="$et_to" '!($1+0 > a && $1+0 < b)' <<<"$ex" | grep -E "$et_cmd$et_bin$et_flag")"; then
   fail "$SCRIPT runs a cfm-edge config test outside edge_test:
 $bad"
 fi
+# The pin catches the rewrites a direct test would take.
+for et_case in '"$EDGE_BIN" -t -q' 'if ! "$EDGE_BIN" -c X -t; then' '"$EDGE_BIN" -t&&true' '"$EDGE_BIN" -q -t>/dev/null' \
+  '"${EDGE_BIN}" -t -q' '$EDGE_BIN -t -q' '"$EDGE_BIN" -tq' '"$EDGE_BIN" -T -q' 'x="$("$EDGE_BIN" -t 2>&1)"' '/usr/sbin/cfm-edge -t'; do
+  grep -qE "$et_cmd$et_bin$et_flag" <<<"1: $et_case" || fail "the edge_test pin misses: $et_case"
+done
+for et_case in 'die "$EDGE_BIN not found"' 'echo "FAILED: run $EDGE_BIN -t"' '[ -x "$EDGE_BIN" ] || die x' 'help="$("$EDGE_BIN" -h 2>&1 || true)"'; do
+  grep -qE "$et_cmd$et_bin$et_flag" <<<"1: $et_case" && fail "the edge_test pin false-positives on: $et_case"
+done
+# -h is captured before grep reads it: in a pipe under pipefail, an early
+# `grep -q` exit could SIGPIPE the binary and read as "no -e".
+awk '/^edge_test\(\) *\{/,/^}/' "$SCRIPT" | grep -qF 'help="$("$EDGE_BIN" -h 2>&1 || true)"' \
+  || fail "$SCRIPT edge_test: capture -h first (help=\"\$(\"\$EDGE_BIN\" -h 2>&1 || true)\"), never pipe it into grep"
 cat >"$tmp/bin/fake-edge" <<'EOF_FAKE'
 #!/bin/sh
 case "$1" in
