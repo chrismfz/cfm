@@ -111,13 +111,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **`scripts/install-edge.sh` prepares cfm-edge as the node's edge** (EL
   8/9/10): installs the `cfm-edge` rpm from the repo cfm comes from, checks the
   cfm user, temp dirs, fallback cert, the shared Lua set and the Site Cache
-  dirs, puts the sidecars in `/etc/cfm-edge/`, tests CFM's config
-  (`cfm-edge -t`) and only then installs it as `/etc/cfm-edge/nginx.conf`
-  (the package's placeholder is kept as `nginx.conf.pre-cfm`). That adopts
+  dirs, and tests CFM's config together with its sidecars from a staging
+  dir (`cfm-edge -t`); only a passing set goes into `/etc/cfm-edge/`, a failed
+  one changes nothing there (the package's placeholder is kept as
+  `nginx.conf.pre-cfm`, a replaced CFM config as a timestamped copy). That adopts
   it: from then on every cfm upgrade keeps its config and sidecars current.
   Like the other two installers it never touches the live edge (no
-  `systemctl` start / stop / enable, no `cfm dnat`; `check_install_edge.sh`
-  pins it): it prints the steps for the operator, `cfm dnat off`, the
+  `systemctl` start / stop / enable, no `cfm dnat`, the IPv6 listen decision
+  for cfm-edge only and without a reload; `check_install_edge.sh` pins it): it prints the steps for the operator, `cfm dnat off`, the
   systemctl swap from the engine running now, `cfm dnat on` when satisfied,
   and the way back.
 - **The daemon knows cfm-edge**, CFM's own edge package (nginx.org nginx +

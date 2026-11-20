@@ -105,8 +105,8 @@ bash scripts/install-angie.sh        # nginx fork tracking mainline; first-class
 bash scripts/install-edge.sh         # cfm-edge: CFM's own nginx.org nginx + OpenResty Lua package (EL 8/9/10)
 ```
 
-All three installers prepare the edge and print the switch; none starts,
-stops or swaps a running edge, nor touches the DNAT. All run the same CFM Lua
+None of the installers starts, stops or swaps a running edge, nor touches the
+DNAT (`install-angie.sh` and `install-edge.sh` print the switch). All run the same CFM Lua
 modules (`configs/lua/`, delivered to `/var/lib/cfm/lua/`) and talk to the
 same daemon; they can all be installed, but only one may run (`:9080` /
 `:9043`). Pick Angie on EL10 / Debian 13 or for faster nginx CVE fixes; stay
