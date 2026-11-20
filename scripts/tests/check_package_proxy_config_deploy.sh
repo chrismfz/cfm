@@ -122,6 +122,10 @@ case "$1 $2 $3" in
   "is-active --quiet angie.service") [ "${FAKE_ANGIE_ACTIVE:-0}" = "1" ] && exit 0 || exit 3 ;;
   "is-active --quiet openresty.service") [ "${FAKE_OPENRESTY_ACTIVE:-0}" = "1" ] && exit 0 || exit 3 ;;
   "is-active --quiet cfm-edge.service") [ "${FAKE_CFMEDGE_ACTIVE:-0}" = "1" ] && exit 0 || exit 3 ;;
+  "is-active cfm-edge.service ")
+    st=${FAKE_CFMEDGE_STATE:-}
+    [ -n "$st" ] || { [ "${FAKE_CFMEDGE_ACTIVE:-0}" = "1" ] && st=active || st=inactive; }
+    printf '%s\n' "$st"; [ "$st" = active ] && exit 0 || exit 3 ;;
   "list-unit-files angie.service --no-legend") printf '%s\n' "angie.service enabled"; exit 0 ;;
   "list-unit-files openresty.service --no-legend") printf '%s\n' "openresty.service enabled"; exit 0 ;;
   "list-unit-files cfm-edge.service --no-legend") printf '%s\n' "cfm-edge.service disabled"; exit 0 ;;
@@ -129,6 +133,14 @@ esac
 exit 1
 EOF_SYSTEMCTL
 chmod 0755 "$bin_dir/systemctl"
+# pgrep shim: a running cfm-edge process only when FAKE_CFMEDGE_PROC=1 (the
+# host's own processes must never decide a test).
+cat >"$bin_dir/pgrep" <<'EOF_PGREP'
+#!/bin/sh
+[ "$*" = "-x cfm-edge" ] && [ "${FAKE_CFMEDGE_PROC:-0}" = "1" ] && exit 0
+exit 1
+EOF_PGREP
+chmod 0755 "$bin_dir/pgrep"
 
 cat >"$bin_dir/openssl" <<'EOF_OPENSSL'
 #!/bin/sh
@@ -1229,6 +1241,20 @@ el_reset
 el_run 1 ': >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
 [ "$(el_list)" = "./error.log ./old-empty.log ./old-full.log " ] \
   || { echo "FAIL: cfm-edge ACTIVE: its empty log is the live one and must be kept; left: $(el_list)" >&2; exit 1; }
+# A unit still starting (is-active --quiet says no) or a cfm-edge process
+# outside systemd: the new empty logs may be held open by it, so they stay.
+for el_case in "FAKE_CFMEDGE_STATE=activating" "FAKE_CFMEDGE_STATE=reloading" "FAKE_CFMEDGE_PROC=1"; do
+  el_reset
+  env "$el_case" sh -c 'PATH="$1:$PATH" CFM_CFMEDGE_LOG_DIR="$2" sh -c ". \"\$1\"; snapshot_cfmedge_logs; : >\"\$2/error.log\"; drop_test_created_cfmedge_logs" sh "$3" "$2"' sh \
+    "$bin_dir" "$el" "$tmp/functions.sh" >/dev/null
+  [ -f "$el/error.log" ] || { echo "FAIL: $el_case: a cfm-edge that may be running lost its new empty log" >&2; exit 1; }
+done
+# A symlinked log dir (moved to a bigger disk) is cleaned like a plain one.
+el_reset; rm -rf "$el.real"; mv "$el" "$el.real"; ln -s "$el.real" "$el"
+el_run 0 ': >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
+[ ! -e "$el.real/error.log" ] && [ -f "$el.real/old-empty.log" ] \
+  || { echo "FAIL: a symlinked cfm-edge log dir: the test-created log was not removed (or an old one was)" >&2; ls -la "$el.real" >&2; exit 1; }
+rm -f "$el"; rm -rf "$el.real"
 # No snapshot (a run that never reached the cfm-edge section): nothing goes;
 # and a second drop after the first (the EXIT trap) removes nothing new.
 el_reset; : >"$el/error.log"

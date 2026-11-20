@@ -547,27 +547,44 @@ cleanup_on_exit() {
 # instead of the live edge's logs (edge_error_tail, whats_wrong). Remember
 # what was there before the first test, and afterwards remove only the EMPTY
 # regular files that were not (the same rule as install-edge.sh's
-# snapshot_edge_logs / drop_test_created_logs), never while cfm-edge.service
-# is active: its own empty log is then the live one. A file that was already
+# snapshot_edge_logs / drop_test_created_logs), never while cfm-edge may be
+# running (cfm_edge_may_run): its own empty log is then the live one. A file that was already
 # there, or one with content, is never touched.
 CFMEDGE_LOG_DIR=${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}
 CFMEDGE_LOG_SNAPSHOT_TAKEN=0
 CFMEDGE_LOG_SNAPSHOT=""
 snapshot_cfmedge_logs() {
-    CFMEDGE_LOG_SNAPSHOT=$(find "$CFMEDGE_LOG_DIR" -maxdepth 1 -type f 2>/dev/null | sort)
+    # The trailing / makes find list a symlinked log dir's files.
+    CFMEDGE_LOG_SNAPSHOT=$(find "$CFMEDGE_LOG_DIR/" -maxdepth 1 -type f 2>/dev/null | sort)
     CFMEDGE_LOG_SNAPSHOT_TAKEN=1
+}
+
+# cfm_edge_may_run: true unless cfm-edge.service is plainly down and no
+# cfm-edge process exists. `is-active --quiet` alone reads a unit that is
+# still `activating` (or `reloading`) as down, and a cfm-edge started after
+# the snapshot holds its new, still-empty logs open: removing them would
+# send its log lines to deleted files.
+cfm_edge_may_run() {
+    if command -v systemctl >/dev/null 2>&1; then
+        case $(systemctl is-active cfm-edge.service 2>/dev/null) in
+            inactive|failed|unknown|"") ;;
+            *) return 0 ;;
+        esac
+    fi
+    command -v pgrep >/dev/null 2>&1 && pgrep -x cfm-edge >/dev/null 2>&1 && return 0
+    return 1
 }
 
 # Idempotent (the EXIT trap runs it again); a no-op without a snapshot.
 drop_test_created_cfmedge_logs() {
     [ "$CFMEDGE_LOG_SNAPSHOT_TAKEN" -eq 1 ] || return 0
     CFMEDGE_LOG_SNAPSHOT_TAKEN=0
-    service_is_active cfm-edge.service && return 0
-    find "$CFMEDGE_LOG_DIR" -maxdepth 1 -type f 2>/dev/null | while IFS= read -r dtc_f; do
+    cfm_edge_may_run && return 0
+    find "$CFMEDGE_LOG_DIR/" -maxdepth 1 -type f 2>/dev/null | while IFS= read -r dtc_f; do
         [ -n "$dtc_f" ] || continue
         printf '%s\n' "$CFMEDGE_LOG_SNAPSHOT" | grep -qxF -- "$dtc_f" && continue
         if [ ! -s "$dtc_f" ] && rm -f -- "$dtc_f"; then
-            echo "CFM proxy config: removed $dtc_f (empty, created by the cfm-edge config test; cfm-edge is not running)"
+            echo "CFM proxy config: removed $dtc_f (empty, created by the cfm-edge config test; cfm-edge.service not active, no cfm-edge process)"
         fi
     done
     return 0
