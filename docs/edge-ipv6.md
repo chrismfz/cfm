@@ -77,12 +77,13 @@ the same reason when it leaves a node on IPv4.
 1. **Wrong order.** If you run `render` before `realip fix`, `render` logs
    "the origin does not trust the edge's IPv6 hop from ::1" and stays on IPv4.
    Run `cfm realip fix`, then `render` again.
-2. **LiteSpeed and OpenLiteSpeed.** `cfm realip fix` only prints the step
-   there: add `::1T` (and `127.0.0.1T`) to the Access Control allow list by
-   hand. On rigel and titan the Apache RemoteIP trust that LiteSpeed loads
-   already covers `::1`. OpenLiteSpeed on DirectAdmin keeps the list in
-   `/etc/openlitespeed/httpd-accesscontrol.conf` ("Origin real IP" names the
-   files: [origin-real-ip.md](origin-real-ip.md)).
+2. **LiteSpeed and OpenLiteSpeed.** On LiteSpeed Enterprise and a plain
+   OpenLiteSpeed, `cfm realip fix` only prints the step: add `::1T` (and
+   `127.0.0.1T`) to the Access Control allow list by hand. On rigel and titan
+   the Apache RemoteIP trust that LiteSpeed loads already covers `::1`.
+   OpenLiteSpeed on DirectAdmin is written by the fix (the allow list, live
+   and as its CustomBuild custom copy, then a graceful restart:
+   [origin-real-ip.md](origin-real-ip.md)).
 3. **AAAA records whose vhost has no IPv6.** This is the one visible change for
    visitors. Before, an IPv6 visitor was refused at the edge and the browser
    fell back to IPv4. Now the origin serves its default vhost (cPanel's

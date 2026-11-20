@@ -1,6 +1,9 @@
 package originrealip
 
 import (
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -38,9 +41,10 @@ type olsVerdict struct {
 	// a setting appears twice is not measured, so the verdict asks all of
 	// them: a wrong "trusted" would let the edge listen on IPv6 while the
 	// origin sees ::1 for every IPv6 visitor.
-	modes       []string
-	modeSources []string
-	allows      [][]string
+	modes        []string
+	modeSources  []string
+	allows       [][]string
+	allowSources []string
 
 	files []string // every file read, in order
 }
@@ -110,7 +114,7 @@ func (l layout) readOLSWith(overlay func(logical string) ([]byte, bool)) olsVerd
 				if inACL >= 0 && depth < inACL {
 					// A server-level list closed.
 					v.aclSource, v.allow, inACL = logical, curAllow, -1
-					v.allows = append(v.allows, curAllow)
+					v.allows, v.allowSources = append(v.allows, curAllow), append(v.allowSources, logical)
 				}
 				continue
 			}
@@ -446,4 +450,285 @@ func (l layout) olsReason(p Probe) string {
 		trusted + " to the server-level accessControl allow list (" + acl + "), then restart it " +
 		"(/usr/local/lsws/bin/lswsctrl restart); in WebAdmin (:7080): Server Configuration > General > Use Client IP in Header, " +
 		"and Security > Access Control > Allowed List. CFM does not edit the OpenLiteSpeed config"
+}
+
+// ── cfm realip fix on DirectAdmin ──────────────────────────────────────────
+
+// olsCtl is OpenLiteSpeed's control script; `restart` is graceful (SIGUSR1,
+// "zero down time" by its own help). It has no config test. A var for tests.
+var olsCtl = "/usr/local/lsws/bin/lswsctrl"
+
+// olsFixTokens are what the fix adds to the allow list: the edge's two
+// source addresses, marked trusted (both always, as the Apache and nginx
+// files trust both).
+var olsFixTokens = []string{"127.0.0.1T", "::1T"}
+
+// planOLS: on DirectAdmin, the fix edits the one file holding the server-level
+// allow list (and, if needed, the one holding useIpInProxyHeader) and writes
+// the same content to its custom copy, so the live file is already what
+// `da build rewrite_confs` would install; Apply then restarts OpenLiteSpeed
+// gracefully. Anything less clear-cut (several lists or values, a custom copy
+// that differs from the live file, a file outside /etc/openlitespeed) is the
+// manual step.
+func (l layout) planOLS(pl *Plan) {
+	p := pl.Probe
+	pl.Reason = l.olsReason(p)
+	v := p.ols
+	if p.Panel != PanelDirectAdmin || v == nil {
+		return
+	}
+	edits := map[string][]byte{} // logical path -> new content
+	if !v.modeOK() || v.needACL() {
+		// Trust through the allow list: one server-level list, in a DA file.
+		if len(v.allows) != 1 || filepath.Dir(v.allowSources[0]) != olsDALiveDir {
+			return
+		}
+		src := v.allowSources[0]
+		cf := readConfFile(l.fs(src))
+		if !cf.ok {
+			return
+		}
+		nb, ok := olsAddTrust(cf.b)
+		if !ok {
+			return
+		}
+		if string(nb) != string(cf.b) {
+			edits[src] = nb
+		}
+	}
+	if !v.modeOK() {
+		if len(v.modes) != 1 || filepath.Dir(v.modeSources[0]) != olsDALiveDir {
+			return
+		}
+		src := v.modeSources[0]
+		b := edits[src]
+		if b == nil {
+			cf := readConfFile(l.fs(src))
+			if !cf.ok {
+				return
+			}
+			b = cf.b
+		}
+		nb, ok := olsSetMode(b, "2")
+		if !ok {
+			return
+		}
+		edits[src] = nb
+	}
+	if len(edits) == 0 {
+		return
+	}
+	// The result must read trusted for both addresses, as written.
+	overlay := func(logical string) ([]byte, bool) { b, ok := edits[logical]; return b, ok }
+	after := l.readOLSWith(overlay)
+	l4, l6 := l, l
+	l4.loopIP, l6.loopIP = "", "::1"
+	if !after.trusted(l4) || !after.trusted(l6) {
+		return
+	}
+	var writes []FileWrite
+	paths := make([]string, 0, len(edits))
+	for src := range edits {
+		paths = append(paths, src)
+	}
+	sort.Strings(paths)
+	for _, src := range paths {
+		custom := filepath.Join(olsDACustomDir, filepath.Base(src))
+		// A custom copy that differs from the live file holds edits the live
+		// file does not show: which one is meant is the operator's call.
+		if c := readConfFile(l.fs(custom)); c.ok {
+			if live := readConfFile(l.fs(src)); !live.ok || string(live.b) != string(c.b) {
+				pl.Reason = custom + " differs from " + src + "; reconcile them by hand, then: " + pl.Reason
+				return
+			}
+		} else if isFile(l.fs(custom)) || isDir(l.fs(custom)) {
+			return
+		}
+		writes = append(writes,
+			FileWrite{Path: l.fs(src), Content: string(edits[src])},
+			FileWrite{Path: l.fs(custom), Content: string(edits[src])})
+	}
+	pl.Action, pl.Reason, pl.Writes = ActionWrite, "", writes
+	pl.Path = writes[0].Path
+}
+
+// olsAddTrust appends the missing olsFixTokens to the last allow line of the
+// file's one top-level accessControl block. false when the file has no such
+// block, more than one, or the block has no allow line.
+func olsAddTrust(b []byte) ([]byte, bool) {
+	lines := strings.Split(string(b), "\n")
+	depth, inACL, blocks, last := 0, false, 0, -1
+	var have []string
+	for i, raw := range lines {
+		line := olsStripComment(raw)
+		switch {
+		case line == "":
+		case strings.HasSuffix(line, "{"):
+			if depth == 0 && strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(line, "{")), "accesscontrol") {
+				inACL, blocks = true, blocks+1
+			}
+			depth++
+		case line == "}":
+			if depth > 0 {
+				depth--
+			}
+			if depth == 0 {
+				inACL = false
+			}
+		default:
+			if key, val := olsSplit(line); inACL && depth == 1 && strings.EqualFold(key, "allow") {
+				last = i
+				have = append(have, olsList(val)...)
+			}
+		}
+	}
+	if blocks != 1 || last < 0 {
+		return nil, false
+	}
+	var add []string
+	for _, tok := range olsFixTokens {
+		addr := strings.TrimSuffix(tok, "T")
+		var t []string
+		for _, h := range have {
+			if strings.HasSuffix(h, "T") {
+				t = append(t, strings.TrimSuffix(h, "T"))
+			}
+		}
+		covered := anyLoopback(t)
+		if addr == "::1" {
+			covered = anyLoopback6(t)
+		}
+		if !covered {
+			add = append(add, tok)
+		}
+	}
+	if len(add) == 0 {
+		return b, true
+	}
+	// Before an inline comment, if there is one.
+	raw := lines[last]
+	body, comment := raw, ""
+	if i := olsCommentIndex(raw); i >= 0 {
+		body, comment = raw[:i], raw[i:]
+	}
+	body = strings.TrimRight(body, " \t")
+	sep := ", "
+	if _, val := olsSplit(strings.TrimSpace(body)); val == "" {
+		sep = " "
+	}
+	lines[last] = body + sep + strings.Join(add, ", ")
+	if comment != "" {
+		lines[last] += " " + comment
+	}
+	return []byte(strings.Join(lines, "\n")), true
+}
+
+// olsSetMode sets the value of the file's one top-level useIpInProxyHeader.
+func olsSetMode(b []byte, val string) ([]byte, bool) {
+	lines := strings.Split(string(b), "\n")
+	depth, at := 0, -1
+	for i, raw := range lines {
+		line := olsStripComment(raw)
+		switch {
+		case line == "":
+		case strings.HasSuffix(line, "{"):
+			depth++
+		case line == "}":
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if key, _ := olsSplit(line); depth == 0 && strings.EqualFold(key, "useIpInProxyHeader") {
+				if at >= 0 {
+					return nil, false
+				}
+				at = i
+			}
+		}
+	}
+	if at < 0 {
+		return nil, false
+	}
+	raw := lines[at]
+	indent := raw[:len(raw)-len(strings.TrimLeft(raw, " \t"))]
+	lines[at] = indent + "useIpInProxyHeader " + val
+	return []byte(strings.Join(lines, "\n")), true
+}
+
+// olsCommentIndex: where a # comment starts on a raw line (as
+// olsStripComment reads it), or -1.
+func olsCommentIndex(s string) int {
+	t := strings.TrimLeft(s, " \t")
+	off := len(s) - len(t)
+	if strings.HasPrefix(t, "#") {
+		return off
+	}
+	for i := 1; i < len(t); i++ {
+		if t[i] == '#' && (t[i-1] == ' ' || t[i-1] == '\t') {
+			return off + i
+		}
+	}
+	return -1
+}
+
+// applyOLS writes every file of the plan, restarts OpenLiteSpeed gracefully
+// and checks it runs; on any failure it restores the files and restarts
+// again. OpenLiteSpeed has no config test, so the check is that it comes back.
+func applyOLS(pl Plan, w io.Writer) error {
+	type saved struct {
+		path    string
+		prev    []byte
+		existed bool
+	}
+	var done []saved
+	rollback := func() {
+		for i := len(done) - 1; i >= 0; i-- {
+			restore(done[i].path, done[i].prev, done[i].existed)
+		}
+	}
+	running := func() bool {
+		out, err := runCmd(fixTimeout, olsCtl, "status")
+		return err == nil && strings.Contains(out, "is running")
+	}
+	wasRunning := running()
+	for _, fw := range pl.Writes {
+		path := fw.Path
+		if real, err := filepath.EvalSymlinks(path); err == nil {
+			path = real
+		}
+		prev, existed, err := readIfExists(path)
+		if err != nil {
+			rollback()
+			return err
+		}
+		if existed && string(prev) == fw.Content {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			rollback()
+			return err
+		}
+		if err := writeFile(path, []byte(fw.Content)); err != nil {
+			rollback()
+			return err
+		}
+		done = append(done, saved{path, prev, existed})
+		fmt.Fprintf(w, "  wrote %s\n", path)
+	}
+	if len(done) == 0 {
+		fmt.Fprintln(w, "  the files already hold the trust; nothing changed")
+		return nil
+	}
+	if !wasRunning {
+		fmt.Fprintln(w, "  OpenLiteSpeed is not running: the change applies when it starts")
+		return nil
+	}
+	out, err := runCmd(fixTimeout, olsCtl, "restart")
+	if err == nil && running() {
+		fmt.Fprintln(w, "  OpenLiteSpeed restarted gracefully")
+		return nil
+	}
+	rollback()
+	_, _ = runCmd(fixTimeout, olsCtl, "restart")
+	return fmt.Errorf("OpenLiteSpeed did not come back after the restart (%v); the files were restored and it was restarted again\n%s", err, strings.TrimSpace(out))
 }

@@ -21,6 +21,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **`cfm realip fix` writes OpenLiteSpeed's trust on DirectAdmin.** It
+  appends `127.0.0.1T, ::1T` to the server-level allow list (and sets
+  `useIpInProxyHeader 2` where it is not 1-4), writes each edited file both
+  live and as its copy in `custombuild/custom/openlitespeed/conf/`, so
+  `da build rewrite_confs` keeps it (the DirectAdmin way; no rebuild is run),
+  and restarts OpenLiteSpeed gracefully. OpenLiteSpeed has no config test:
+  if it does not come back, the files are restored and it is restarted again.
+  Several lists or values, or a custom copy that differs from the live file,
+  stay a manual step. LiteSpeed Enterprise and a plain OpenLiteSpeed are
+  unchanged (manual).
 - **`cfm edge`: one command for the edge proxy.** A bare `cfm edge` shows
   the edge at a glance: the engine that runs (a warning when more than one
   does), web DNAT (priority, ports, bypass count, last health probe), panel

@@ -1,8 +1,12 @@
 package originrealip
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // server3 (DirectAdmin, CustomBuild webserver=openlitespeed, 2026-11-20): the
@@ -51,7 +55,24 @@ func TestOpenLiteSpeedDirectAdminServer3(t *testing.T) {
 	if !strings.Contains(p.Note, "OpenLiteSpeed") || !strings.Contains(p.Note, "/etc/openlitespeed/httpd-accesscontrol.conf") {
 		t.Fatalf("note = %q", p.Note)
 	}
+	// fix: the allow list gets the loopback, in the live file and its custom copy.
 	pl := l.plan(p)
+	acl6 := strings.Replace(server3OLSACL, "2c0f:f248::/32T\n", "2c0f:f248::/32T, 127.0.0.1T, ::1T\n", 1)
+	if pl.Action != ActionWrite || len(pl.Writes) != 2 ||
+		pl.Writes[0].Path != filepath.Join(r, "etc/openlitespeed/httpd-accesscontrol.conf") ||
+		pl.Writes[1].Path != filepath.Join(r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf") ||
+		pl.Writes[0].Content != acl6 || pl.Writes[1].Content != acl6 {
+		t.Fatalf("fix plan = %+v", pl)
+	}
+	// A custom copy that differs from the live file: the operator's call.
+	stale := put(t, r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf", "accessControl{\n  allow ALL\n}\n")
+	pl = l.plan(l.probe(""))
+	if pl.Action != ActionManual || !strings.Contains(pl.Reason, "differs from /etc/openlitespeed/httpd-accesscontrol.conf; reconcile") {
+		t.Fatalf("differing custom copy: %+v", pl)
+	}
+	if err := os.Remove(stale); err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(pl.Reason, "httpd-defaults.conf") {
 		t.Fatalf("the mode is fine, yet the step names the defaults file: %q", pl.Reason)
 	}
@@ -119,7 +140,7 @@ func TestOpenLiteSpeedDirectAdminServer3(t *testing.T) {
 	if p.Trusted || !p.EdgeIPv6 || !strings.Contains(p.Note, "::1T") {
 		t.Fatalf("IPv6 edge, 127.0.0.1T only: %+v", p)
 	}
-	if pl := l.plan(p); !strings.Contains(pl.Reason, "127.0.0.1T, ::1T") {
+	if pl := l.plan(p); pl.Action != ActionWrite || !strings.Contains(pl.Writes[0].Content, ", ::1T\n") || strings.Count(pl.Writes[0].Content, "127.0.0.1T") != 1 {
 		t.Fatalf("plan = %+v", pl)
 	}
 	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", strings.Replace(server3OLSACL, "ALL,", "ALL, 127.0.0.1T, ::1T,", 1))
@@ -247,9 +268,17 @@ func TestOpenLiteSpeedHeredoc(t *testing.T) {
 func TestOpenLiteSpeedDAStepNamesWhatIsMissing(t *testing.T) {
 	l, r := olsDAHost(t)
 	put(t, r, "etc/openlitespeed/httpd-defaults.conf", strings.Replace(server3OLSDefaults, "\t\t 2", " 0", 1))
-	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", "accessControl{\n  allow ALL, 127.0.0.1T\n}\n")
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", "accessControl{\n  allow ALL, 127.0.0.1T, ::1T\n}\n")
 	p := l.probe("")
+	// fix: the mode only, the list is already fine.
 	pl := l.plan(p)
+	if pl.Action != ActionWrite || len(pl.Writes) != 2 || !strings.HasSuffix(pl.Writes[0].Path, "etc/openlitespeed/httpd-defaults.conf") ||
+		!strings.Contains(pl.Writes[0].Content, "\nuseIpInProxyHeader 2\ninclude") {
+		t.Fatalf("mode 0 fix: %+v", pl)
+	}
+	// Manual (a differing custom copy): the step names the defaults file only.
+	put(t, r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-defaults.conf", "useIpInProxyHeader 0\n")
+	pl = l.plan(p)
 	if p.Trusted || !strings.Contains(pl.Reason, "custom/openlitespeed/conf/httpd-defaults.conf and set useIpInProxyHeader 2") ||
 		strings.Contains(pl.Reason, "httpd-accesscontrol.conf") {
 		t.Fatalf("mode 0, list fine: %+v / %q", p, pl.Reason)
@@ -307,5 +336,109 @@ func TestOpenLiteSpeedRewriteWarningScope(t *testing.T) {
 	p := l.probe("")
 	if !p.Trusted || !strings.Contains(p.Warning, "httpd-accesscontrol.conf") || strings.Contains(p.Warning, "httpd-logs.conf") {
 		t.Fatalf("culprit only: %+v", p)
+	}
+}
+
+func TestOLSAddTrustAndSetMode(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"accessControl{\n\tallow ALL\n}\n", "accessControl{\n\tallow ALL, 127.0.0.1T, ::1T\n}\n"},
+		{"accessControl {\n  allow ALL, 127.0.0.1T # edge\n}\n", "accessControl {\n  allow ALL, 127.0.0.1T, ::1T # edge\n}\n"},
+		{"accessControl{\n  allow ALL, 127.0.0.1T, ::1T\n}\n", "accessControl{\n  allow ALL, 127.0.0.1T, ::1T\n}\n"},
+		{"accessControl{\n  allow ALL\n  allow 10.0.0.0/8T\n  deny\n}\n", "accessControl{\n  allow ALL\n  allow 10.0.0.0/8T, 127.0.0.1T, ::1T\n  deny\n}\n"},
+	}
+	for _, c := range cases {
+		got, ok := olsAddTrust([]byte(c.in))
+		if !ok || string(got) != c.want {
+			t.Errorf("olsAddTrust(%q) = %q, %v; want %q", c.in, got, ok, c.want)
+		}
+	}
+	for _, in := range []string{
+		"useIpInProxyHeader 2\n",                                         // no block
+		"accessControl{\n  deny\n}\n",                                    // no allow line
+		"accessControl{\n allow ALL\n}\naccessControl{\n allow ALL\n}\n", // two blocks
+		"virtualhost x {\n  accessControl{\n    allow ALL\n  }\n}\n",     // a vhost's only
+	} {
+		if _, ok := olsAddTrust([]byte(in)); ok {
+			t.Errorf("olsAddTrust(%q) should refuse", in)
+		}
+	}
+	if got, ok := olsSetMode([]byte("a 1\n  useIpInProxyHeader\t\t 0\nb 2\n"), "2"); !ok || string(got) != "a 1\n  useIpInProxyHeader 2\nb 2\n" {
+		t.Errorf("olsSetMode = %q %v", got, ok)
+	}
+	for _, in := range []string{"a 1\n", "useIpInProxyHeader 0\nuseIpInProxyHeader 1\n"} {
+		if _, ok := olsSetMode([]byte(in), "2"); ok {
+			t.Errorf("olsSetMode(%q) should refuse", in)
+		}
+	}
+}
+
+func olsCtlStub(t *testing.T, statusAfter string) *[]string {
+	t.Helper()
+	var calls []string
+	restarted := false
+	oldRun := runCmd
+	runCmd = func(_ time.Duration, name string, args ...string) (string, error) {
+		calls = append(calls, strings.TrimSpace(name+" "+strings.Join(args, " ")))
+		if name != olsCtl {
+			return "", errors.New("unexpected " + name)
+		}
+		switch args[0] {
+		case "restart":
+			restarted = true
+			return "[OK] Send SIGUSR1", nil
+		case "status":
+			if restarted && statusAfter != "" {
+				return statusAfter, errors.New("exit status 1")
+			}
+			return "litespeed is running with PID 42.", nil
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { runCmd = oldRun })
+	return &calls
+}
+
+func TestApplyOLSWritesAndRestarts(t *testing.T) {
+	l, r := olsDAHost(t)
+	calls := olsCtlStub(t, "")
+	pl := l.plan(l.probe(""))
+	var out strings.Builder
+	if err := Apply(pl, &out); err != nil {
+		t.Fatalf("apply: %v\n%s", err, out.String())
+	}
+	for _, fw := range pl.Writes {
+		if read(t, fw.Path) != fw.Content {
+			t.Fatalf("%s not written", fw.Path)
+		}
+	}
+	if !strings.Contains(strings.Join(*calls, "|"), olsCtl+" restart") {
+		t.Fatalf("no restart: %v", *calls)
+	}
+	if p := l.probe(""); !p.Trusted || p.Warning != "" {
+		t.Fatalf("after the fix: %+v", p)
+	}
+	// Nothing left to do.
+	if pl := l.plan(l.probe("")); pl.Action != ActionNone {
+		t.Fatalf("second plan = %+v", pl)
+	}
+	_ = r
+}
+
+func TestApplyOLSRollsBackWhenItDoesNotComeBack(t *testing.T) {
+	l, r := olsDAHost(t)
+	calls := olsCtlStub(t, "[ERROR] litespeed is not running.")
+	pl := l.plan(l.probe(""))
+	var out strings.Builder
+	if err := Apply(pl, &out); err == nil || !strings.Contains(err.Error(), "restored") {
+		t.Fatalf("apply should fail and restore: %v", err)
+	}
+	if got := read(t, filepath.Join(r, "etc/openlitespeed/httpd-accesscontrol.conf")); got != server3OLSACL {
+		t.Fatalf("live file not restored: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf")); !os.IsNotExist(err) {
+		t.Fatalf("custom copy not removed: %v", err)
+	}
+	if n := strings.Count(strings.Join(*calls, "|"), olsCtl+" restart"); n != 2 {
+		t.Fatalf("want a restart and a restart back, got %v", *calls)
 	}
 }

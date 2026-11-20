@@ -23,6 +23,17 @@ type Plan struct {
 	Managed bool   // a marked block inside an existing operator file, not a whole file
 	Content string // the directives written
 	Reason  string // why nothing is written (ActionNone / ActionManual)
+
+	// Writes: several whole files (OpenLiteSpeed on DirectAdmin: the live file
+	// and its CustomBuild custom copy). When set, Path is the first of them
+	// and Content is unused.
+	Writes []FileWrite
+}
+
+// FileWrite is one whole file a plan writes, as it is on disk.
+type FileWrite struct {
+	Path    string
+	Content string
 }
 
 const (
@@ -90,7 +101,7 @@ func (l layout) plan(p Probe) Plan {
 		l.planNginx(&pl)
 	case StackLiteSpeed:
 		if p.ols != nil {
-			pl.Reason = l.olsReason(p)
+			l.planOLS(&pl)
 			break
 		}
 		trusted := "127.0.0.1T"
@@ -210,6 +221,12 @@ func (l layout) planNginx(pl *Plan) {
 func Apply(pl Plan, w io.Writer) error {
 	if pl.Action != ActionWrite {
 		return nil
+	}
+	if len(pl.Writes) > 0 {
+		if pl.Probe.Stack != StackLiteSpeed {
+			return fmt.Errorf("no multi-file writer for stack %q", pl.Probe.Stack)
+		}
+		return applyOLS(pl, w)
 	}
 	var test, reload []string
 	switch pl.Probe.Stack {
