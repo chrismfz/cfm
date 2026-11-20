@@ -478,24 +478,24 @@ cfm-edge is already the live edge; reload it to apply the new config (and
 any IPv6 listen change), then check the IPv6 listen decision:
 
     systemctl reload cfm-edge
-    sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
+    sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status    # or: cfm edge ipv6
 EOF
         return 0
     fi
 
-    cat <<'EOF'
+    # The steps use `cfm edge` (this script ships in the same package as the
+    # binary that has it): a bare `cfm edge panel on` re-uses the mode and
+    # priority panel DNAT had, so nothing needs noting beforehand.
+    cat <<EOF
 
 Nothing below has been run: every step is yours.
 
 1) Take the edge out of the path first (the sites are served by the origin
    directly meanwhile, without WAF/challenge). Note what is on first:
 
-    cfm dnat                    # web DNAT (80/443)
-    cfm dnat cpanel             # panel DNAT: on/off and the installed priority
-                                # (the mode it prints is not the one it was
-                                # enabled with: note yours, e.g. from cfm.conf)
-    cfm dnat off
-    cfm dnat cpanel off         # only if panel DNAT was on
+    cfm edge                    # engine, web + panel DNAT (mode, priority), IPv6, origin real-IP
+    cfm edge off
+    cfm edge panel off         # only if panel DNAT was on
 
 EOF
     if [ -n "$old" ]; then
@@ -511,8 +511,8 @@ EOF
 
 3) When YOU are satisfied (nothing here runs it), put the edge back in the path:
 
-    cfm dnat on
-    cfm dnat cpanel on --mode <as before> --priority <as before>   # only if it was on
+    cfm edge on
+    cfm edge panel on   # only if it was on
 
 4) Once it serves well, make it survive a reboot:
 
@@ -520,24 +520,24 @@ EOF
 
 ROLLBACK (back to ${old}), at any point:
 
-    cfm dnat off                # (and cfm dnat cpanel off)
+    cfm edge off                # (and cfm edge panel off)
     systemctl stop cfm-edge && systemctl start ${old}
     systemctl disable cfm-edge && systemctl enable ${old}   # if step 4 ran
-    cfm dnat on                 # (and cfm dnat cpanel on --mode/--priority as before)
+    cfm edge on                 # (and cfm edge panel on)
 EOF
     else
-        cat <<'EOF'
+        cat <<EOF
 2) No other edge is running. Start cfm-edge and check it:
 
     systemctl restart cfm-edge                     # restart: also replaces a placeholder run
     systemctl status cfm-edge --no-pager
-    ss -ltnp | grep -E ':(9080|9043)\b'            # owner "cfm-edge"
+    ss -ltnp | grep -E ':(9080|9043)\\b'            # owner "cfm-edge"
 
 3) When YOU are satisfied (nothing here runs it), put the edge in the path,
    and make it survive a reboot:
 
-    cfm dnat on
-    cfm dnat cpanel on --mode <as before> --priority <as before>   # if the panel ports go through the edge
+    cfm edge on
+    cfm edge panel on   # if the panel ports go through the edge
     systemctl enable cfm-edge
 EOF
     fi

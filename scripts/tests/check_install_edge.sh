@@ -7,7 +7,7 @@
 #
 # 1. No executed line (comments and heredoc bodies, i.e. the printed steps,
 #    removed) runs systemctl start/stop/restart/reload/enable/disable/…, a
-#    `cfm dnat …`, or signals an edge (`-s stop|quit|reload`). Read-only
+#    `cfm dnat …` / `cfm edge on|off|panel|…`, or signals an edge (`-s stop|quit|reload`). Read-only
 #    systemctl (is-active, status) is fine.
 # 2. Its adoption line is the one package-proxy-config-deploy.sh looks for
 #    (a drift would leave an adopted cfm-edge un-updated on every upgrade).
@@ -65,7 +65,8 @@ executed() {
 ex="$(executed "$SCRIPT")"
 [ -n "$ex" ] || fail "no executed lines found in $SCRIPT (matcher broken?)"
 grep -q 'print_next_steps' <<<"$ex" || fail "matcher lost the executed body of $SCRIPT"
-grep -q 'cfm dnat off' <<<"$ex" && fail "matcher kept a quoted heredoc body (the printed steps)"
+grep -q 'is already the live edge' <<<"$ex" && fail "matcher kept a quoted heredoc body (the printed steps)"
+grep -q 'cfm edge off' <<<"$ex" && fail "matcher kept an unquoted heredoc body line without a command substitution (the printed steps)"
 
 if bad="$(grep -E 'systemctl[[:space:]]+(-[^[:space:]]+[[:space:]]+)*(start|stop|restart|try-restart|reload|reload-or-restart|try-reload-or-restart|enable|disable|reenable|mask|unmask|kill|isolate)\b' <<<"$ex")"; then
   fail "$SCRIPT runs a unit-changing systemctl (it must only print the switch):
@@ -73,6 +74,12 @@ $bad"
 fi
 if bad="$(grep -E '(^|[^A-Za-z_-])cfm["'\'']?[[:space:]]+["'\'']?dnat\b' <<<"$ex")"; then
   fail "$SCRIPT runs \`cfm dnat\` (taking the edge out of / into the path is the operator's call):
+$bad"
+fi
+# `cfm edge` is the same commands under one name: its writers are refused too
+# (only `cfm edge help` / a bare `cfm edge` / `check` / `ipv6 status` read).
+if bad="$(grep -E '(^|[^A-Za-z_-])cfm["'\'']?[[:space:]]+["'\'']?edge["'\'']?[[:space:]]+["'\'']?(on|off|panel|cpanel|bypass|realip|web|ipv6[[:space:]]+(on|off))\b' <<<"$ex")"; then
+  fail "$SCRIPT runs a \`cfm edge\` writer (the switch is the operator's call):
 $bad"
 fi
 if bad="$(grep -E '[[:space:]]-s[[:space:]]+(stop|quit|reload|reopen)\b|(^|[^A-Za-z_])(kill|pkill|killall)[[:space:]]|(^|[^A-Za-z_])eval[[:space:]]' <<<"$ex")"; then
