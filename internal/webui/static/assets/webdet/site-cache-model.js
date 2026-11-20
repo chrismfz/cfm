@@ -248,7 +248,7 @@ function normTTL(v) {
 //     fields that differ from it. A tier's recipe and the micro TTL go with it
 //     only while it is on — a disabled tier keeps its stored recipe, which is
 //     how the daemon knows a re-enable must start from an empty cache. An
-//     empty stored TTL shown as the 1 s default is not rewritten.
+//     empty stored TTL shown as the 5 s default is not rewritten.
 //   * never the static TTL: it is a label the edge does not apply.
 export function buildPatch(form, original = null) {
   const f = form || emptyForm();
@@ -312,7 +312,7 @@ export function validateForm(form, { original = null, inScope = () => true, exis
   if (f.microOn) {
     const terr = ttlError(f.microTTL);
     if (terr) errors.push(`Micro TTL: ${terr}.`);
-    else if (!String(f.microTTL || "").trim()) warnings.push("Micro TTL is empty: the edge runs it at 1 s.");
+    else if (!String(f.microTTL || "").trim()) warnings.push("Micro TTL is empty: the edge runs it at 5 s.");
     else if (!isBucketTTL(f.microTTL)) warnings.push(`Micro TTL ${String(f.microTTL).trim()} is not a bucket: the edge snaps it to ${microBucketSeconds(String(f.microTTL))} s.`);
     if (f.microRecipe === "fullpage_advanced") warnings.push("full-page advanced is a label only: the micro tier never caches longer than 300 s.");
   }

@@ -1071,6 +1071,17 @@ do
   check(cache.micro_gate() == "@cfm_micro_90s", "an off-menu $cfm_micro_max clamps to the largest bucket at or below it")
   micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"; ngx.var.cfm_micro_max = "junk"
   check(cache.micro_gate() == "@cfm_micro_120s", "an unreadable $cfm_micro_max falls back to the marker rule")
+  -- the debug stamp names the bucket micro_gate would exec, after the clamp
+  local function stamp(max)
+    for k in pairs(_header) do _header[k] = nil end
+    micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"; ngx.var.cfm_micro_max = max
+    ngx.var.http_x_cfm_cache_debug = "1"; ngx.var.request_method = "GET"; ngx.var.http_cookie = nil
+    cache.observe()
+    return _header["X-CFM-Cache"] or ""
+  end
+  check(stamp("300"):find("microcache=would/300s", 1, true), "debug stamp: 300s on a conf that has it: " .. stamp("300"))
+  check(stamp(nil):find("microcache=would/120s", 1, true), "debug stamp: clamped to 120s on an older conf: " .. stamp(nil))
+  for k in pairs(_header) do _header[k] = nil end
   ngx.var.cfm_micro_max = nil
   cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "30s" } } })
   -- micro_note on an old conf reads the origin's Set-Cookie as before

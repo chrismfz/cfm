@@ -737,6 +737,11 @@ for f in "$ORT" "$ANG"; do
   # never route to the top bucket (too low) or exec a missing one (too high).
   want_max=$(tr ' ' '\n' <<< "$micro_ttls" | tr -d 's' | sort -n | tail -1)
   got_max=$(sed -nE 's/^[[:space:]]*set[[:space:]]+\$cfm_micro_max[[:space:]]+"?([^";[:space:]]*)"?[[:space:]]*;.*$/\1/p' "$f" | sort -u)
+  # once per main server (:80 and the HTTPS one that holds the micro
+  # locations), so dropping it from the HTTPS server alone fails here
+  n_max=$(grep -cE '^[[:space:]]*set[[:space:]]+\$cfm_micro_max[[:space:]]' "$f" || true)
+  n_why=$(grep -cE '^[[:space:]]*set[[:space:]]+\$cfm_micro_why[[:space:]]' "$f" || true)
+  [ "$n_max" = "$n_why" ] && [ "$n_max" -ge 2 ] || err "$f: 'set \$cfm_micro_max' appears $n_max time(s), want one per main server ($n_why, next to \$cfm_micro_why) — the HTTPS server must carry it."
   if [ -z "$got_max" ]; then
     err "$f: no 'set \$cfm_micro_max \"$want_max\";' — cfm_cache.lua would clamp every micro TTL to the 120s bucket of an older conf."
   elif [ "$got_max" != "$want_max" ]; then

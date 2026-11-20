@@ -533,7 +533,7 @@ access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
    (`/usr/local/openresty/nginx/conf/nginx.conf`, `/etc/angie/angie.conf`):
    `set $cfm_micro_conf "1";` once (in the HTTPS `location /`) and
    `set $cfm_micro_conf "";` once (its server level),
-   `proxy_cache_background_update off;` eight times (one per bucket), `lua_shared_dict
+   `proxy_cache_background_update off;` once per bucket (seven), `lua_shared_dict
    cfm_cache_uncacheable`, the `$cfm_cc_nostore` and `$cfm_xae_nocache` maps;
    the nginx core is ≥ 1.23 (`openresty -V` / `angie -V`); then `-t` and a
    reload. Without the sentinel micro never routes (fail-safe), whatever the

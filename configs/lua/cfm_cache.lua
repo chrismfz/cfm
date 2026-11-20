@@ -560,6 +560,20 @@ local function micro_zone_name(ttl)
     return "cfm_micro_" .. micro_bucket_seconds(ttl) .. "s"
 end
 
+-- micro_conf_max_bucket: the largest MICRO_BUCKETS entry the running conf
+-- serves (see the version-skew note in micro_gate).
+local function micro_conf_max_bucket()
+    local max = tonumber(ngx.var.cfm_micro_max)
+    if not max then
+        max = (ngx.var.cfm_sc_unsafe ~= nil) and PRE_300S_MAX_BUCKET or LEGACY_MAX_BUCKET
+    end
+    local best = MICRO_BUCKETS[1]
+    for _, b in ipairs(MICRO_BUCKETS) do
+        if b <= max then best = b end
+    end
+    return best
+end
+
 -- ---------------------------------------------------------------------------
 -- Tier B micro-cache — request classification.
 --
@@ -1276,6 +1290,9 @@ function _M.observe()
                 end
             end
             if okc then
+                -- the bucket micro_gate would exec, after the conf clamp
+                local mx = micro_conf_max_bucket()
+                if type(bkt) == "number" and bkt > mx then bkt = mx end
                 lbl = lbl .. " microcache=would/" .. tostring(bkt) .. "s"
             else
                 lbl = lbl .. " microcache=bypass:" .. tostring(why)
@@ -1342,20 +1359,6 @@ function _M.note_skip(why)
     local p = _M.policy_for(ngx.var.host)
     if not p or type(p.micro) ~= "table" or not p.micro.on then return end
     note_micro_why(why)
-end
-
--- micro_conf_max_bucket: the largest MICRO_BUCKETS entry the running conf
--- serves (see the version-skew note in micro_gate).
-local function micro_conf_max_bucket()
-    local max = tonumber(ngx.var.cfm_micro_max)
-    if not max then
-        max = (ngx.var.cfm_sc_unsafe ~= nil) and PRE_300S_MAX_BUCKET or LEGACY_MAX_BUCKET
-    end
-    local best = MICRO_BUCKETS[1]
-    for _, b in ipairs(MICRO_BUCKETS) do
-        if b <= max then best = b end
-    end
-    return best
 end
 
 -- micro_gate: ACCESS-phase hook for Tier B (micro-cache of anonymous
