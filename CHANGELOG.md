@@ -26,7 +26,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `useIpInProxyHeader 2` where it is not 1-4), writes each edited file both
   live and as its copy in `custombuild/custom/openlitespeed/conf/`, so
   `da build rewrite_confs` keeps it (the DirectAdmin way; no rebuild is run),
-  and restarts OpenLiteSpeed gracefully. OpenLiteSpeed has no config test:
+  and reloads OpenLiteSpeed gracefully: through its systemd unit
+  (`systemctl reload openlitespeed`, DirectAdmin's own path, so systemd
+  follows the new master), `lswsctrl restart` only without one. The edge
+  installers run `cfm realip fix`, so on such a node they now reload
+  OpenLiteSpeed too, as they reload Apache. OpenLiteSpeed has no config test:
   unless a new master comes up (the old one still running means the config
   was not taken), the files are restored and it is restarted again. A trust
   only in a live file (the rewrite_confs warning) is kept by writing its

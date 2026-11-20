@@ -573,3 +573,87 @@ func TestApplyOLSWaitsForASlowRestart(t *testing.T) {
 		t.Fatalf("a slow restart read as a failure: %v", err)
 	}
 }
+
+// systemdStub fakes systemctl for DirectAdmin's openlitespeed.service.
+// after: "new" (a new MainPID after the reload) or "same".
+func systemdStub(t *testing.T, after string) *[]string {
+	t.Helper()
+	oldPolls, oldSleep := olsRestartPolls, olsSleep
+	olsRestartPolls, olsSleep = 2, func(time.Duration) {}
+	var calls []string
+	reloads := 0
+	oldRun := runCmd
+	runCmd = func(_ time.Duration, name string, args ...string) (string, error) {
+		k := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		calls = append(calls, k)
+		switch {
+		case name != "systemctl":
+			return "", errors.New("unexpected " + k)
+		case k == "systemctl show -p LoadState --value openlitespeed":
+			return "loaded\n", nil
+		case k == "systemctl is-active --quiet openlitespeed":
+			return "", nil
+		case k == "systemctl show -p MainPID --value openlitespeed":
+			if reloads == 0 || after == "same" {
+				return "1280735\n", nil
+			}
+			return strconv.Itoa(1482300+reloads) + "\n", nil
+		case k == "systemctl reload openlitespeed":
+			reloads++
+			return "", nil
+		}
+		return "", errors.New("unexpected " + k)
+	}
+	t.Cleanup(func() { runCmd, olsRestartPolls, olsSleep = oldRun, oldPolls, oldSleep })
+	return &calls
+}
+
+// Re-review: on DirectAdmin the reload goes through openlitespeed.service
+// (systemd follows the new master), never lswsctrl behind systemd's back.
+func TestApplyOLSReloadsThroughSystemd(t *testing.T) {
+	l, _ := olsDAHost(t)
+	calls := systemdStub(t, "new")
+	if err := Apply(l.plan(l.probe("")), &strings.Builder{}); err != nil {
+		t.Fatalf("apply: %v (%v)", err, *calls)
+	}
+	all := strings.Join(*calls, "|")
+	if !strings.Contains(all, "systemctl reload openlitespeed") || strings.Contains(all, olsCtl) {
+		t.Fatalf("calls = %v", *calls)
+	}
+	if p := l.probe(""); !p.Trusted {
+		t.Fatalf("after: %+v", p)
+	}
+}
+
+func TestApplyOLSSystemdSameMainPIDRollsBack(t *testing.T) {
+	l, r := olsDAHost(t)
+	systemdStub(t, "same")
+	err := Apply(l.plan(l.probe("")), &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "still runs as pid 1280735") {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := read(t, filepath.Join(r, "etc/openlitespeed/httpd-accesscontrol.conf")); got != server3OLSACL {
+		t.Fatalf("not restored: %q", got)
+	}
+}
+
+// Re-review: a master PID that cannot be read is refused before anything is
+// written (it made the restart check pass unchecked).
+func TestApplyOLSRefusesAnUnreadablePID(t *testing.T) {
+	l, r := olsDAHost(t)
+	oldRun := runCmd
+	runCmd = func(_ time.Duration, name string, args ...string) (string, error) {
+		if name == olsCtl && args[0] == "status" {
+			return "litespeed is running.", nil
+		}
+		return "", errors.New("no")
+	}
+	t.Cleanup(func() { runCmd = oldRun })
+	err := Apply(l.plan(l.probe("")), &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be read") {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := read(t, filepath.Join(r, "etc/openlitespeed/httpd-accesscontrol.conf")); got != server3OLSACL {
+		t.Fatalf("written anyway: %q", got)
+	}
+}

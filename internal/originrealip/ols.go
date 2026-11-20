@@ -1,6 +1,7 @@
 package originrealip
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -748,9 +749,25 @@ func applyOLS(pl Plan, w io.Writer) error {
 		}
 	}
 	// The master's PID, "" when it does not run: a graceful restart (SIGUSR1)
-	// that took the new config starts a new master; the old one still
-	// running is the config NOT taken (review).
+	// that took the new config starts a new master (server3, 2026-11-20: the
+	// reload at 00:12 moved MainPID 1280735 -> 1482302); the old one still
+	// running is the config NOT taken (review). Under systemd (DirectAdmin's
+	// openlitespeed.service: Type=forking, PIDFile, ExecReload=kill -USR1
+	// $MAINPID) the reload goes through the unit, as DirectAdmin's own does,
+	// so systemd follows the new master; a USR1 from outside can leave the unit
+	// failed with the server running unsupervised (re-review).
+	unit := olsSystemdUnit()
 	pid := func() string {
+		if unit != "" {
+			if _, err := runCmd(fixTimeout, "systemctl", "is-active", "--quiet", unit); err != nil {
+				return ""
+			}
+			out, err := runCmd(fixTimeout, "systemctl", "show", "-p", "MainPID", "--value", unit)
+			if p := strings.TrimSpace(out); err == nil && p != "" && p != "0" {
+				return p
+			}
+			return "?"
+		}
 		out, err := runCmd(fixTimeout, olsCtl, "status")
 		if err != nil || !strings.Contains(out, "is running") {
 			return ""
@@ -760,7 +777,18 @@ func applyOLS(pl Plan, w io.Writer) error {
 		}
 		return "?"
 	}
+	reload := func() (string, error) {
+		if unit != "" {
+			return runCmd(fixTimeout, "systemctl", "reload", unit)
+		}
+		return runCmd(fixTimeout, olsCtl, "restart")
+	}
 	before := pid()
+	if before == "?" {
+		// Running, but its master PID cannot be read: whether a restart took
+		// the new config could not be told (re-review).
+		return errors.New("OpenLiteSpeed runs but its master PID cannot be read (systemctl show MainPID / lswsctrl status); nothing written")
+	}
 	live := false
 	for _, fw := range pl.Writes {
 		path := fw.Path
@@ -804,15 +832,15 @@ func applyOLS(pl Plan, w io.Writer) error {
 		fmt.Fprintln(w, "  OpenLiteSpeed is not running: the change applies when it starts")
 		return nil
 	}
-	out, err := runCmd(fixTimeout, olsCtl, "restart")
+	out, err := reload()
 	after := pid()
 	// lswsctrl waits ~15 s for a new master and returns either way: give a
 	// slow one a bounded while longer before reading it as not taken.
-	for i := 0; err == nil && after != "" && after == before && before != "?" && i < olsRestartPolls; i++ {
+	for i := 0; err == nil && after != "" && after == before && i < olsRestartPolls; i++ {
 		olsSleep(time.Second)
 		after = pid()
 	}
-	if err == nil && after != "" && (after != before || before == "?") {
+	if err == nil && after != "" && after != "?" && after != before {
 		fmt.Fprintln(w, "  OpenLiteSpeed restarted gracefully (pid "+before+" -> "+after+")")
 		return nil
 	}
@@ -821,15 +849,36 @@ func applyOLS(pl Plan, w io.Writer) error {
 		why = "its master still runs as pid " + after + ", so the new config was not taken"
 	}
 	rollback()
-	_, rerr := runCmd(fixTimeout, olsCtl, "restart")
+	_, rerr := reload()
+	if rerr == nil && pid() == "" && unit != "" {
+		_, rerr = runCmd(fixTimeout, "systemctl", "start", unit) // a reload does not start a stopped unit
+	}
 	state := "it was restarted on the restored files and runs"
 	if rerr != nil || pid() == "" {
 		state = "and it is NOT running now: start it with " + olsCtl + " start"
+		if unit != "" {
+			state = "and it is NOT running now: start it with systemctl start " + unit
+		}
 	}
 	return fmt.Errorf("OpenLiteSpeed did not take the new config (%s; restart: %v); the files were restored, %s\n%s", why, err, state, strings.TrimSpace(out))
 }
 
 var olsPIDRe = regexp.MustCompile(`with PID (\d+)`)
+
+// olsUnits: the systemd units OpenLiteSpeed runs as (DirectAdmin installs
+// openlitespeed.service with the aliases lsws / lshttpd / litespeed).
+var olsUnits = []string{"openlitespeed", "lsws"}
+
+// olsSystemdUnit: the loaded systemd unit OpenLiteSpeed runs as, or "".
+func olsSystemdUnit() string {
+	for _, u := range olsUnits {
+		out, err := runCmd(probeTimeout, "systemctl", "show", "-p", "LoadState", "--value", u)
+		if err == nil && strings.TrimSpace(out) == "loaded" {
+			return u
+		}
+	}
+	return ""
+}
 
 // olsRestartPolls / olsSleep: the extra wait for a new master (vars for tests).
 var (
