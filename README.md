@@ -111,7 +111,8 @@ modules (`configs/lua/`, delivered to `/var/lib/cfm/lua/`) and talk to the
 same daemon; they can all be installed, but only one may run (`:9080` /
 `:9043`). Pick Angie on EL10 / Debian 13 or for faster nginx CVE fixes; stay
 on OpenResty if it already works; cfm-edge is being adopted across the fleet
-(canary first). `cfm dnat on` then redirects 80/443 to the edge. Design: [`docs/edge-unification-plan.md`](docs/edge-unification-plan.md).
+(canary first). `cfm edge on` (or its older name `cfm dnat on`) then redirects
+80/443 to the edge, and a bare `cfm edge` shows the whole picture ([`docs/cli.md`](docs/cli.md#cfm-edge)). Design: [`docs/edge-unification-plan.md`](docs/edge-unification-plan.md).
 
 ### From source
 

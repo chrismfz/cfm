@@ -45,6 +45,7 @@ import (
 	"cfm/internal/detectors/mysql"
 	edgediag "cfm/internal/diagnostics/edge"
 	"cfm/internal/dnat"
+	"cfm/internal/edgecli"
 	"cfm/internal/hostsecrets"
 	"cfm/internal/sslcollector"
 	webdet "cfm/internal/webdetector"
@@ -320,6 +321,22 @@ func main() {
 		// and always applied the -99 default.
 		dnat.SetConfigDir(cfgDir())
 		os.Exit(dnat.RunCLI(os.Args[2:], mustBackend()))
+	case "edge":
+		// The same setup as `cfm dnat`: `cfm edge` routes to it.
+		dnat.SetAPIBase(apiBaseURL())
+		clihttp.SetToken(apiAuthToken())
+		dnat.SetConfigDir(cfgDir())
+		os.Exit(edgecli.Run(os.Args[2:], func() firewall.Backend {
+			// Not mustBackend: the summary prints UNKNOWN DNAT and the rest of
+			// the picture without one; the dnat routes refuse a nil backend.
+			_, engine, _ := cliFirewallEngine()
+			be, err := getBackend(engine)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "edge:", err)
+				return nil
+			}
+			return be
+		}))
 	case "firewall":
 		be := mustBackend()
 		_, engine, source := cliFirewallEngine()
@@ -466,7 +483,9 @@ Usage:
   cfm ssl dump <host> [--json]
   cfm ssl refresh [--json]
 
-  cfm dnat
+  cfm edge                        -- the edge at a glance: engine, web + panel DNAT, IPv6 listen, origin real-IP
+  cfm edge on|off                 -- put the edge in / take it out of the path (80/443); "cfm edge help" for the rest
+  cfm dnat                        -- the same commands under their older name (cfm dnat on|off|cpanel|bypass)
   cfm firewall status [--verbose] [--json] [--strict]
   cfm firewall path [--hook prerouting] [--family inet] [--proto tcp] [--dport 443] [--json] [--strict]
 

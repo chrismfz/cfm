@@ -20,7 +20,28 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`cfm edge`: one command for the edge proxy.** A bare `cfm edge` shows
+  the edge at a glance: the engine that runs (a warning when more than one
+  does), web DNAT (priority, ports, bypass count, last health probe), panel
+  DNAT, the running engine's IPv6 listen decision and the origin real-IP
+  verdict, and what needs a look (DNAT on with no edge running, DNAT off with
+  its intent on). The subcommands are the existing ones under one name:
+  `cfm edge on|off|bypass` (= `cfm dnat …`), `cfm edge web` (the full
+  `cfm dnat` report), `cfm edge panel …` (= `cfm dnat cpanel …`),
+  `cfm edge realip …` (= `cfm realip …`), `cfm edge ipv6` (the IPv6 listen
+  status of every engine). `cfm dnat` and `cfm realip` keep working
+  unchanged. Docs: `docs/cli.md`.
+
+### Fixed
+- **`cfm dnat cpanel --priority -99 on` turned panel DNAT on at its default
+  priority**: a flag before the subcommand was taken by the web DNAT flags.
+  The panel and bypass commands now get their arguments untouched, and a word
+  left after the flags (`cfm dnat --priority -99 on`, which printed the
+  report and changed nothing) is refused with "flags go after the
+  subcommand" (a word after `on` / `off`, `cfm dnat on extra`, is refused
+  as an unexpected argument). The deprecated `--challenge <value>` is still
+  accepted and ignored.
 
 ## 2026.11.20
 

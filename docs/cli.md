@@ -4,7 +4,7 @@ Every command prints its own help (`cfm <command> help`, `cfm webtop help`).
 This page covers the ones no topic doc owns; the others live with their
 subsystem: `cfm clam` → `docs/clamav.md`, `cfm mysqltop` →
 `docs/mysql-governor.md`, `cfm kernsec` → `docs/kernsec.md`, `cfm lsm` →
-`docs/cfm-lsm.md`, `cfm dnat` → `docs/panel-dnat.md` / `docs/dnat-bypass.md`,
+`docs/cfm-lsm.md`, `cfm dnat` (also `cfm edge`, below) → `docs/panel-dnat.md` / `docs/dnat-bypass.md`,
 `cfm webtop site-cache` → `docs/site-cache-runbook.md`, `cfm webtop rules` →
 `docs/traffic-rules.md`, `cfm webtop waf` → `docs/waf.md`.
 
@@ -203,6 +203,42 @@ Expected output semantics:
 - `cfm health json` is stable machine-readable output for scripts/integration.
 - `cfm health watch` emits a banner with effective interval, then one line per sample.
 - `cfm health live` requires a TTY; otherwise it safely degrades to watch output.
+
+## `cfm edge`
+
+One command for the in-path edge proxy (OpenResty, Angie or cfm-edge). It
+adds no logic: each subcommand is an existing one under a name that says what
+it is about, and `cfm dnat` / `cfm realip` keep working as before.
+
+```bash
+cfm edge [status]                # the edge at a glance (read-only)
+cfm edge on | off                # = cfm dnat on | off: 80/443 through the edge, or straight to the origin
+cfm edge web                     # = cfm dnat: the full web DNAT report
+cfm edge bypass list|add|remove  # = cfm dnat bypass …
+cfm edge panel [status|on|off|bypass …]   # = cfm dnat cpanel … (alias: cfm edge cpanel)
+cfm edge realip [status|fix]     # = cfm realip …
+cfm edge ipv6 [status]           # the IPv6 listen decision of every installed engine
+```
+
+`on` and `off` move traffic; they never start or stop the edge service.
+
+The bare `cfm edge` prints the engine (`running`, or `enabled, NOT running`
+for an enabled one that stopped; a warning when more than one is active), web
+DNAT (priority, target ports, bypass count, last health
+probe), panel DNAT (priority), the running engine's IPv6 listen decision and
+the origin real-IP verdict, then what needs a look:
+
+- web or panel DNAT on with no edge engine running (that traffic goes to
+  nothing);
+- DNAT off while its saved intent is on (the daemon's failsafe puts it back
+  once the edge answers; `cfm edge off` / `cfm edge panel off` clear it).
+
+A state it cannot read prints `UNKNOWN (…)` (an unreadable bypass list: "bypass
+list unreadable") and exits 1, never `OFF`; the panel priority is the live
+chain's, the saved one only when the rules do not parse (and it says so). The
+routes that need no firewall (`realip`, `ipv6`, `help`) also work where the
+nft backend cannot start. Flags go after the subcommand (`cfm edge panel on
+--priority -99`); one before it is refused.
 
 ## `cfm realip`
 
