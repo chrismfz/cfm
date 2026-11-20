@@ -120,7 +120,7 @@ type layout struct {
 	// must then write the ::1 trust instead of answering "already trusted" on
 	// a 127.0.0.1-only origin, which would leave the edge on IPv4 for good.
 	// cfmConf: EDGE_LISTEN_V6 there allows or forbids IPv6 (edgeIPv6Wanted;
-	// absent = edgeIPv6Default, off until IPv6 /64 grouping).
+	// absent = edgeIPv6Default, on since IPv6 /64 grouping).
 	cfmConf, procIfInet6, procTCP6 string
 
 	cpanelMarkers, daMarkers, ngmMarkers []string // panel install markers (dirs or files)
@@ -178,11 +178,11 @@ var system = layout{
 	procTCP6:                  "/proc/net/tcp6",
 }
 
-// edgeIPv6Default is the decision with no EDGE_LISTEN_V6 in cfm.conf: false
-// until per-IP defences group IPv6 by /64 (docs/ROADMAP.md §9c), then true.
-// scripts/cfm-edge-listen-v6.sh V6_DEFAULT is the same switch;
-// check_edge_listen_v6.sh pins them equal.
-const edgeIPv6Default = false
+// edgeIPv6Default is the decision with no EDGE_LISTEN_V6 in cfm.conf: true
+// since the per-IP defences group an IPv6 client by its /64 (docs/edge-ipv6.md
+// "IPv6 /64 grouping"). scripts/cfm-edge-listen-v6.sh V6_DEFAULT is the same
+// switch; check_edge_listen_v6.sh pins them equal.
+const edgeIPv6Default = true
 
 // edgeIPv6: the edge listens on IPv6 (its listen files exist, or the kernel
 // shows a root IPv6 listener on its ports: a `listen [::]` added by hand), or

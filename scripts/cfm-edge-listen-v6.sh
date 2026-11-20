@@ -21,13 +21,11 @@
 #
 # Whether a node may listen on IPv6 at all is EDGE_LISTEN_V6 in cfm.conf: on
 # (yes / true / 1 / auto) or off (no / false / 0 / disabled); absent, it is
-# V6_DEFAULT below. V6_DEFAULT is off until per-IP defences group IPv6 by /64
-# (docs/ROADMAP.md §9c): today bans, rate limits and scoring key on the full
-# address, so a direct IPv6 client rotating inside its /64 evades them, while
-# an edge without IPv6 refuses it and the browser falls back to IPv4, where
-# they hold. Then V6_DEFAULT becomes auto and no node needs the key. Where it
-# is allowed, the edge listens on IPv6 by itself where ALL of these hold, and
-# stays on IPv4 otherwise:
+# V6_DEFAULT below: auto, since the per-IP defences group an IPv6 client by
+# its /64 (bans, counters, rate limits, scoring and the edge's counters;
+# docs/edge-ipv6.md "IPv6 /64 grouping"), so a direct IPv6 client rotating
+# inside its /64 no longer evades them. Where it is allowed, the edge listens
+# on IPv6 by itself where ALL of these hold, and stays on IPv4 otherwise:
 #   - the host has a global IPv6 address (/proc/net/if_inet6, scope 00);
 #   - nothing but the edge holds [::]:9080 / [::]:9043 (tcp) or [::]:9043
 #     (udp) — `nginx -t` ignores a port in use (EADDRINUSE), so a taken port would pass the test
@@ -42,7 +40,7 @@
 #     for all of them). `cfm realip fix` writes it (Apache / nginx).
 #
 # The reference cfm.conf carries the key commented out (`# EDGE_LISTEN_V6 =
-# on`, the opt-in while V6_DEFAULT is off).
+# off`, the kill switch).
 #
 # After a change it runs the engine's own config test and, if that fails with
 # the IPv6 files in place, removes them again. Files are removed too when the
@@ -52,15 +50,23 @@
 # exit status is always 0 (the edge must start, on IPv4, whatever happens
 # here). A `render` that writes the files reloads a running edge at once and
 # confirms the IPv6 listen (reload_and_confirm); a `render` that removes files
-# a running edge listens with reloads it too (reload_after_remove). prestart
-# and deploy never reload.
+# a running edge listens with reloads it too (reload_after_remove). prepare,
+# prestart and deploy never reload.
 #
-# Usage: cfm-edge-listen-v6.sh [render|prestart|deploy|status]
+# Usage: cfm-edge-listen-v6.sh [render|prepare|prestart|deploy|status] [engine]
+#   engine    (optional: OpenResty, Angie or cfm-edge, case-insensitive) act on
+#             that engine alone, never the others (install-edge.sh runs
+#             `prepare cfm-edge`; the OpenResty / Angie installers render
+#             every engine found)
 #   render    (default; by hand, the installers) decide and write/remove the
 #             files for every engine found; the ONLY action that turns IPv6 on
 #             for a running edge (it reloads it and confirms the listen)
-#   prestart  (cfm-edge-listen-v6.service, before every edge start) the same,
-#             except that files a render already approved are KEPT when the
+#   prestart  (cfm-edge-listen-v6.service, before every edge start) render's
+#             decision, except that with no (or an empty) EDGE_LISTEN_V6 in
+#             cfm.conf (the default; an explicit on / auto lets it write) it
+#             never writes files that are not there (only a render turns IPv6
+#             on: it reloads and confirms), and that files a render already
+#             approved are KEPT when the
 #             only reasons against them are about readiness, which at boot are
 #             often not there yet: no global IPv6 address yet (SLAAC / the
 #             network still coming up), the origin not seen on IPv6 (it can
@@ -77,6 +83,12 @@
 #   deploy    (the package deploy, package-proxy-config-deploy.sh) prestart's
 #             keep / remove rules, but it never writes files that are not
 #             there (it tells the operator to run render) and never reloads
+#   prepare   (an engine's own installer, scoped: `prepare cfm-edge`) render's
+#             decision and writes, the default included (it is an explicit
+#             step like render), but it NEVER reloads: the files apply at the
+#             edge's next start, which the installer leaves to the operator.
+#             On a RUNNING edge it writes no new files (they would go live at
+#             some unrelated reload, unconfirmed): that is render's job
 #   status    print the decision per engine, change nothing
 #
 # Test seams (scripts/tests/check_edge_listen_v6.sh): CFM_CONF,
@@ -102,10 +114,10 @@ CFM_V6_CONFIRM_TRIES=${CFM_V6_CONFIRM_TRIES:-10}
 V6_HTTP_PORT=9080
 V6_HTTPS_PORT=9043
 
-# The decision with no EDGE_LISTEN_V6 in cfm.conf: off until IPv6 /64
-# grouping lands (see the header), then auto. internal/originrealip
-# edgeIPv6Default is the same switch; check_edge_listen_v6.sh pins them equal.
-V6_DEFAULT=off
+# The decision with no EDGE_LISTEN_V6 in cfm.conf: auto since IPv6 /64
+# grouping (see the header). internal/originrealip edgeIPv6Default is the
+# same switch; check_edge_listen_v6.sh pins them equal.
+V6_DEFAULT=auto
 
 V6_HTTP_FILE=cfm-listen-v6-http.conf
 V6_HTTPS_FILE=cfm-listen-v6-https.conf
@@ -118,7 +130,9 @@ log() { echo "CFM edge IPv6 listen: $*"; }
 # disable / disabled, V6_DEFAULT when absent; anything else reads as off (an
 # unknown never turns a listen on). Same reading as internal/originrealip
 # edgeIPv6Wanted.
-mode() {
+# mode_raw: the EDGE_LISTEN_V6 value as written (lower case; "" when cfm.conf
+# sets none, or sets it empty: the default).
+mode_raw() {
     m_val=""
     if [ -r "$CFM_CONF" ]; then
         # Value: cut at the first ; or #, trim whitespace (CR included), then
@@ -130,6 +144,11 @@ mode() {
             sed -e 's/^"\(.*\)"$/\1/' -e t -e 's/^'"'"'\(.*\)'"'"'$/\1/' |
             tail -n 1 | tr 'A-Z' 'a-z')
     fi
+    printf '%s' "$m_val"
+}
+
+mode() {
+    m_val=$(mode_raw)
     case $m_val in
         "") echo "$V6_DEFAULT" ;;
         on | yes | true | 1 | auto | enable | enabled) echo auto ;;
@@ -476,7 +495,7 @@ render_engine() {
         return 0
     fi
     re_kept=0
-    [ "$re_action" != render ] && [ -f "$re_dir/$V6_HTTP_FILE" ] && [ -f "$re_dir/$V6_HTTPS_FILE" ] && re_kept=1
+    [ "$re_action" != render ] && [ "$re_action" != prepare ] && [ -f "$re_dir/$V6_HTTP_FILE" ] && [ -f "$re_dir/$V6_HTTPS_FILE" ] && re_kept=1
     re_reason=$(want_v6 "$re_mode")
     re_want=$?
     if [ "$re_want" -eq 3 ] && [ "$re_kept" -eq 1 ]; then
@@ -487,6 +506,22 @@ render_engine() {
     fi
     if [ "$re_want" -ne 0 ]; then
         drop "$re_name" "$re_dir" "$re_reason"
+        return 0
+    fi
+
+    if [ "$re_action" = prestart ] && [ "$re_kept" -eq 0 ] && [ -z "$(mode_raw)" ]; then
+        # The default (no EDGE_LISTEN_V6) allows IPv6, but an edge start
+        # (a reboot, a restart, the edge's own package upgrade) never turns it
+        # on: only a render does, which reloads the edge and confirms the
+        # listen, at a time someone chose. Files a render approved are kept
+        # (above). An explicit EDGE_LISTEN_V6 = on lets prestart write them.
+        if [ -f "$re_dir/$V6_HTTP_FILE" ] || [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
+            # One of the pair (a crash between the writes, a hand delete):
+            # never start with an unconfirmed half.
+            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: sh $0 render"
+            return 0
+        fi
+        log "$re_name: IPv4 only for now: IPv6 is allowed by default; turn it on with: sh $0 render (it reloads the edge and confirms the listen)"
         return 0
     fi
 
@@ -517,6 +552,10 @@ render_engine() {
         # The package deploy never turns IPv6 on: it must not reload the edge,
         # and files written without a reload leave a window for another
         # process to take the port (render reloads and confirms at once).
+        if [ -f "$re_dir/$V6_HTTP_FILE" ] || [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
+            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: sh $0 render"
+            return 0
+        fi
         log "$re_name: IPv4 only for now: IPv6 is allowed and the host is ready; turn it on with: sh $0 render (it reloads the edge)"
         return 0
     fi
@@ -536,6 +575,19 @@ render_engine() {
         fi
         remove_files "$re_dir"
         log "WARNING: $re_name: the config test fails with the kept IPv6 listens; removed them (applies at the next reload)"
+        return 0
+    fi
+
+    if [ "$re_action" = prepare ] && { [ ! -f "$re_dir/$V6_HTTP_FILE" ] || [ ! -f "$re_dir/$V6_HTTPS_FILE" ]; } &&
+        "$CFM_SYSTEMCTL" is-active --quiet "$(unit_of "$re_name")" 2>/dev/null; then
+        # A running edge: files written without a reload would go live at
+        # the next unrelated reload (the sslcollector nudge, an operator's),
+        # unconfirmed. Only a render turns IPv6 on for a running edge.
+        if [ -f "$re_dir/$V6_HTTP_FILE" ] || [ -f "$re_dir/$V6_HTTPS_FILE" ]; then
+            drop "$re_name" "$re_dir" "only one of the IPv6 listen files is there; turn it on with: sh $0 render $re_name"
+            return 0
+        fi
+        log "$re_name: IPv4 only for now: it is running, and prepare never reloads; turn IPv6 on with: sh $0 render $re_name (it reloads the edge and confirms the listen)"
         return 0
     fi
 
@@ -582,7 +634,9 @@ status_engine() {
     fi
     se_reason=$(want_v6 "$5")
     se_want=$?
-    if [ "$se_want" -eq 0 ]; then
+    if [ "$se_want" -eq 0 ] && [ "$se_live" = no ] && [ -z "$(mode_raw)" ]; then
+        log "$1: IPv6 allowed by default and the host is ready ($se_reason), but an edge start never turns it on: run: sh $0 render $1 (the ::1 trust and the config test are checked then); files present: $se_live"
+    elif [ "$se_want" -eq 0 ]; then
         log "$1: wants IPv6 ($se_reason; the ::1 trust and the config test are checked when it renders); files present: $se_live"
     else
         log "$1: IPv4 only ($se_reason); files present: $se_live"
@@ -625,21 +679,32 @@ engines() {
 
 main() {
     action=${1:-render}
+    # An optional engine name (OpenResty | Angie | cfm-edge, case-insensitive):
+    # act on that engine alone, never the others (install-edge.sh's
+    # `prepare cfm-edge`).
+    only=$(printf '%s' "${2:-}" | tr 'A-Z' 'a-z')
     case $action in
-        render | prestart | deploy | status) ;;
+        render | prepare | prestart | deploy | status) ;;
         mode)
             # Test seam: the EDGE_LISTEN_V6 reading alone (check_edge_listen_v6.sh).
             mode
             return 0
             ;;
         *)
-            echo "usage: $0 [render|prestart|deploy|status]" >&2
+            echo "usage: $0 [render|prepare|prestart|deploy|status] [engine]" >&2
             return 0
             ;;
     esac
+    if [ -n "$only" ] && ! engines | awk -F'|' -v want="$only" 'tolower($1) == want { f = 1 } END { exit f ? 0 : 1 }'; then
+        log "no edge engine named \"$only\" here (OpenResty, Angie or cfm-edge, as found); nothing done"
+        return 0
+    fi
     m=$(mode)
     engines | while IFS='|' read -r e_name e_bin e_dir e_main; do
         [ -n "$e_name" ] || continue
+        if [ -n "$only" ] && [ "$(printf '%s' "$e_name" | tr 'A-Z' 'a-z')" != "$only" ]; then
+            continue
+        fi
         if [ "$action" = status ]; then
             status_engine "$e_name" "$e_bin" "$e_dir" "$e_main" "$m"
         else
@@ -650,7 +715,7 @@ main() {
             if [ "$e_had" -eq 1 ] && [ ! -f "$e_dir/$V6_HTTP_FILE" ]; then
                 if [ "$action" = render ] && [ "$re_reloaded" -eq 0 ]; then
                     reload_after_remove "$e_name"
-                elif [ "$action" = deploy ]; then
+                elif [ "$action" = deploy ] || [ "$action" = prepare ]; then
                     log "$e_name: removed IPv6 listen files a running edge may still listen with: reload it to apply (systemctl reload $(unit_of "$e_name"))"
                 fi
             fi

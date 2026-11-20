@@ -13,7 +13,7 @@
 #    (a drift would leave an adopted cfm-edge un-updated on every upgrade).
 # 3. Sidecars + main config are tested together from a stage dir before
 #    anything moves into /etc/cfm-edge; the live copy is tested again.
-#    The IPv6 listen script runs only as a cfm-edge-scoped prestart.
+#    The IPv6 listen script runs only as a cfm-edge-scoped `prepare cfm-edge`.
 # 4. It parses (bash -n).
 # shellcheck disable=SC2016,SC2015  # literal $VAR patterns; fail-on-either tests
 set -euo pipefail
@@ -81,22 +81,33 @@ if bad="$(grep -E '(^|[^A-Za-z_.-])(service|nft|initctl)[[:space:]]+[A-Za-z]' <<
   fail "$SCRIPT runs service / nft (the unit swap and the DNAT are the operator's):
 $bad"
 fi
-# The IPv6 listen script: `render` (also its default, with no argument) walks
-# every engine and reloads the live one, `deploy` is the package's. Only a
-# cfm-edge-scoped `prestart` (writes and tests, never reloads) may run, with
-# the scope on the SAME command; any other use of "$script" is a file test.
+# The IPv6 listen script: `render` (also its default, with no argument)
+# reloads a running edge, `deploy` is the package's, and `prestart` writes
+# nothing new under the default. Only a cfm-edge-scoped `prepare cfm-edge`
+# (render's decision, never a reload) may run, with the scope on the SAME
+# command; any other use of "$script" is a file test or the feature check.
 if bad="$(grep -F '"$script"' <<<"$ex" | grep -vE '\[ !? ?-f "\$script" \]' \
-           | grep -vE '^[0-9]+: +CFM_EDGE_ENGINES="cfm-edge\|[^";]*" sh "\$script" prestart \|\| true$')"; then
-  fail "$SCRIPT runs the IPv6 listen script other than as the cfm-edge-scoped prestart:
+           | grep -vE "^[0-9]+: +if ! grep -q '\\|prepare\\|' \"\\\$script\"; then\$" \
+           | grep -vE '^[0-9]+: +CFM_EDGE_ENGINES="cfm-edge\|[^";]*" sh "\$script" prepare cfm-edge \|\| true$')"; then
+  fail "$SCRIPT runs the IPv6 listen script other than as the cfm-edge-scoped prepare:
 $bad"
 fi
-if bad="$(grep -E '(listen-v6\.sh|"\$script")[^#]*[[:space:]](render|deploy)\b' <<<"$ex")"; then
-  fail "$SCRIPT runs cfm-edge-listen-v6.sh render/deploy (it reloads the live edge):
+if bad="$(grep -E '(listen-v6\.sh|"\$script")[^#]*[[:space:]](render|deploy|prestart)\b' <<<"$ex")"; then
+  fail "$SCRIPT runs cfm-edge-listen-v6.sh render/deploy/prestart (a reload of the live edge, the package's run, or no write under the default):
 $bad"
 fi
-if bad="$(grep -E '(listen-v6\.sh|"\$script")[^#]*[[:space:]]prestart\b' <<<"$ex" | grep -v 'CFM_EDGE_ENGINES="cfm-edge|')"; then
-  fail "$SCRIPT runs cfm-edge-listen-v6.sh prestart for every engine (scope it with CFM_EDGE_ENGINES to cfm-edge):
+# By its literal path: `status` only (no action at all is a render).
+if bad="$(grep -E 'listen-v6\.sh' <<<"$ex" | grep -E '(^|[[:space:]])sh[[:space:]]' | grep -vE 'listen-v6\.sh status([[:space:]]|$)')"; then
+  fail "$SCRIPT runs cfm-edge-listen-v6.sh by its path other than as \`status\`:
 $bad"
+fi
+# The feature check must still recognise the shipped script, or install-edge.sh
+# silently leaves cfm-edge on IPv4 (the check reads its usage line).
+if ! grep -q '|prepare|' scripts/cfm-edge-listen-v6.sh; then
+  fail "scripts/cfm-edge-listen-v6.sh no longer matches install-edge.sh's feature check grep -q '|prepare|' (keep the usage line, or change both)"
+fi
+if ! grep -qE '^[0-9]+: +CFM_EDGE_ENGINES="cfm-edge\|[^";]*" sh "\$script" prepare cfm-edge \|\| true$' <<<"$ex"; then
+  fail "$SCRIPT no longer runs the cfm-edge-scoped 'prepare cfm-edge' (cfm-edge would start IPv4 only)"
 fi
 
 # 2. Adoption marker parity.

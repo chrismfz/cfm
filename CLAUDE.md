@@ -529,15 +529,18 @@ family/rule arming table and the decision records:
   without an IPv6 stack it fails the config test and the edge does not
   start. The IPv6 listens live only in the generated
   `cfm-listen-v6-{http,https}.conf`, included through a glob (absent = IPv4
-  only) and decided before every edge start by `cfm-edge-listen-v6.sh`
+  only), written by `cfm-edge-listen-v6.sh render` (it reloads and confirms;
+  under the default an edge start keeps or removes them, never writes them)
   (`docs/edge-ipv6.md`; `check_edge_listen_v6.sh` pins the includes). An
   IPv6 origin hop binds `::1`, so the origin must trust `::1` too: without it
   every IPv6 visitor is localhost to the origin, which is why the script asks
   `cfm realip` (which requires ::1 as soon as the host can do IPv6) before it
-  writes the files. Off by default (`V6_DEFAULT` in the script =
-  `edgeIPv6Default` in Go, pinned equal) until per-IP defences group IPv6 by
-  /64: keyed on the full address, a direct IPv6 client rotating in its /64
-  evades bans and limits. Do not flip the default before that lands.
+  writes the files. On by default (`V6_DEFAULT=auto` in the script =
+  `edgeIPv6Default = true` in Go, pinned equal) since the per-IP defences
+  group IPv6 by /64; `EDGE_LISTEN_V6 = off` is the per-node kill switch. A
+  new per-client control must group by /64 too (§5 "A per-client key"):
+  keyed on the full address, a direct IPv6 client rotating in its /64 evades
+  it.
 - **A connection is NAT'd once, by the first nat chain that rewrites it.**
   Imunify360 DNATs its sets (Cloudflare's ranges among them) to WebShield at
   -100, ahead of CFM's -99 default web redirect, so Cloudflare visitors
@@ -797,7 +800,7 @@ cPanel — every rule here exists because of that. Design + as-built:
 | Packaging: verifying an rpm change in an EL container | `docs/packaging.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
 | Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
-| Edge IPv6 listen (`EDGE_LISTEN_V6 = on`, off by default until IPv6 /64 grouping; generated listen files decided before every edge start) | `docs/edge-ipv6.md` |
+| Edge IPv6 listen (on by default since IPv6 /64 grouping, `EDGE_LISTEN_V6 = off` the kill switch; generated listen files turned on by `render`, re-checked before every edge start) | `docs/edge-ipv6.md` |
 | ClamAV upload scanning (scope, inline mode, signature excludes) | `docs/clamav.md` |
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |
 | Mail abuse findings (hacked site / contact form, mailbox spike, hijacked mailbox → detection_history) | `docs/mail-abuse.md` |
