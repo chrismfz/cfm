@@ -15,6 +15,8 @@
 #    anything moves into /etc/cfm-edge; the live copy is tested again.
 #    The IPv6 listen script runs only as a cfm-edge-scoped prestart.
 # 4. It parses (bash -n).
+# 5. The empty cfm-edge logs its config tests create are dropped again, never
+#    while cfm-edge may run, a symlinked log dir included.
 # shellcheck disable=SC2016,SC2015  # literal $VAR patterns; fail-on-either tests
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -124,4 +126,107 @@ if bad="$(awk -F': ' -v t="$t1" '$1+0 < t' <<<"$ex" | grep -E '(install|cp|mv|te
 $bad"
 fi
 
-echo "OK: install-edge.sh is prepare-only, adoption line matches the deploy, config tested before install"
+# 5. The logs its config tests create (nginx -t opens every access_log /
+#    error_log it names): only the EMPTY regular files that were not there
+#    before go again, never while cfm-edge may run (a unit that is not
+#    inactive/failed/unknown, `activating` and `reloading` included, or a
+#    cfm-edge process), and a symlinked log dir is followed (trailing /).
+#    The functions run as the installer runs them (bash, set -euo pipefail),
+#    with systemctl / pgrep shims: the host's own units and processes never
+#    decide a case.
+for tool in find mktemp; do
+  command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
+done
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+fns="$tmp/fns.sh"
+{
+  printf 'readonly EDGE_LOG_DIR="${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}"\n'
+  printf 'LOG_SNAPSHOT=""\nLOG_SNAPSHOT_TAKEN=0\n'
+  for fn in log command_exists snapshot_edge_logs cfm_edge_may_run drop_test_created_logs; do
+    body="$(awk -v fn="$fn" '$0 ~ "^"fn"\\(\\) *\\{" {p=1} p {print} p && /^}/ {exit}' "$SCRIPT")"
+    [ -n "$body" ] || fail "$SCRIPT: function $fn not found"
+    printf '%s\n' "$body"
+  done
+} >"$fns"
+grep -qxF 'readonly EDGE_LOG_DIR="${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}"' "$SCRIPT" \
+  || fail "$SCRIPT: EDGE_LOG_DIR must default to /var/log/cfm-edge with the CFM_CFMEDGE_LOG_DIR seam"
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/systemctl" <<'EOF_SYSTEMCTL'
+#!/bin/sh
+case "$*" in
+  "is-active cfm-edge.service") st=${FAKE_CFMEDGE_STATE:-inactive}; echo "$st"; [ "$st" = active ] ;;
+  "is-active --quiet cfm-edge.service") [ "${FAKE_CFMEDGE_STATE:-inactive}" = active ] ;;
+  *) exit 1 ;;
+esac
+EOF_SYSTEMCTL
+cat >"$tmp/bin/pgrep" <<'EOF_PGREP'
+#!/bin/sh
+[ "$*" = "-x cfm-edge" ] && [ "${FAKE_CFMEDGE_PROC:-0}" = "1" ] && exit 0
+exit 1
+EOF_PGREP
+chmod 0755 "$tmp/bin/systemctl" "$tmp/bin/pgrep"
+el="$tmp/logs"
+el_reset() {
+  rm -rf "$el" "$el.real"; mkdir -p "$el"
+  : >"$el/old-empty.log"; printf 'old\n' >"$el/old-full.log"
+}
+el_list() { (cd "$el" && find . -maxdepth 1 -type f | sort | tr '\n' ' '); }
+# el_run BODY [VAR=VALUE...]: snapshot, BODY (the "config test"), drop.
+el_run() {
+  local body="$1"; shift
+  env PATH="$tmp/bin:$PATH" CFM_CFMEDGE_LOG_DIR="$el" "$@" bash -c \
+    'set -euo pipefail; . "$1"; snapshot_edge_logs; eval "$2"; drop_test_created_logs; echo rc=$?' sh "$fns" "$body" 2>&1
+}
+mk=': >"$CFM_CFMEDGE_LOG_DIR/error.log"; : >"$CFM_CFMEDGE_LOG_DIR/access.log"; printf x >"$CFM_CFMEDGE_LOG_DIR/written.log"'
+
+el_reset
+out="$(el_run "$mk")"
+[ "$(el_list)" = "./old-empty.log ./old-full.log ./written.log " ] \
+  || fail "cfm-edge inactive: only the test-created EMPTY logs must go; left: $(el_list) ($out)"
+grep -qF "Removed $el/error.log (empty, created by the cfm-edge config test" <<<"$out" || fail "the removal is not reported: $out"
+grep -qx 'rc=0' <<<"$out" || fail "drop_test_created_logs did not return 0 under set -e: $out"
+for st in failed unknown; do
+  el_reset; el_run "$mk" FAKE_CFMEDGE_STATE="$st" >/dev/null
+  [ ! -e "$el/error.log" ] || fail "cfm-edge.service $st: the test-created log was kept"
+done
+for c in FAKE_CFMEDGE_STATE=active FAKE_CFMEDGE_STATE=activating FAKE_CFMEDGE_STATE=reloading FAKE_CFMEDGE_STATE=deactivating FAKE_CFMEDGE_PROC=1; do
+  el_reset; el_run "$mk" "$c" >/dev/null
+  [ -f "$el/error.log" ] && [ -f "$el/access.log" ] || fail "$c: a cfm-edge that may run lost its new empty logs (left: $(el_list))"
+done
+# A symlinked log dir (moved to a bigger disk) is cleaned like a plain one,
+# and its old empty file is never mistaken for a new one.
+el_reset; mv "$el" "$el.real"; ln -s "$el.real" "$el"
+el_run "$mk" >/dev/null
+[ ! -e "$el.real/error.log" ] && [ -f "$el.real/old-empty.log" ] \
+  || fail "a symlinked cfm-edge log dir: left $(ls -A "$el.real" | tr '\n' ' ')"
+rm -f "$el"; rm -rf "$el.real"
+# A symlink created in the dir is not a log the test created.
+el_reset; ln -s "$el/old-full.log" "$el/link.log"
+el_run ': >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
+[ -L "$el/link.log" ] && [ ! -e "$el/error.log" ] || fail "a symlink in the log dir was removed (or the new log kept)"
+# Without a snapshot (a run that never tested), and a second drop: no-ops.
+el_reset; : >"$el/error.log"
+env PATH="$tmp/bin:$PATH" CFM_CFMEDGE_LOG_DIR="$el" bash -c 'set -euo pipefail; . "$1"; drop_test_created_logs' sh "$fns" >/dev/null 2>&1 \
+  || fail "drop_test_created_logs without a snapshot failed"
+[ -f "$el/error.log" ] || fail "a drop without a snapshot removed a log"
+el_reset
+el_run 'drop_test_created_logs; : >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
+[ -f "$el/error.log" ] || fail "a second drop on one snapshot must be a no-op"
+# A missing log dir: no snapshot, no error, nothing created.
+rm -rf "$el"
+out="$(el_run ':')"
+grep -qx 'rc=0' <<<"$out" && [ ! -e "$el" ] || fail "a missing cfm-edge log dir: $out"
+
+# Every config test in the installer is followed by a drop on a snapshot
+# taken before it (the report's own test included).
+for fn in adopt_cfm_edge ensure_edge_listen_v6 print_next_steps; do
+  body="$(awk -v fn="$fn" '$0 ~ "^"fn"\\(\\) *\\{" {p=1} p {print} p && /^}/ {exit}' "$SCRIPT")"
+  sn="$(grep -n 'snapshot_edge_logs' <<<"$body" | head -1 | cut -d: -f1 || true)"
+  ts="$(grep -nE '"\$EDGE_BIN" -t|"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1 || true)"
+  dr="$(grep -n 'drop_test_created_logs' <<<"$body" | tail -1 | cut -d: -f1 || true)"
+  [ -n "$sn" ] && [ -n "$ts" ] && [ -n "$dr" ] && [ "$sn" -lt "$ts" ] && [ "$ts" -lt "$dr" ] \
+    || fail "$SCRIPT $fn: the cfm-edge config test must sit between snapshot_edge_logs and drop_test_created_logs"
+done
+
+echo "OK: install-edge.sh is prepare-only, adoption line matches the deploy, config tested before install, test-created empty logs dropped (never while cfm-edge may run)"

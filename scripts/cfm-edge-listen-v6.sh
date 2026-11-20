@@ -74,6 +74,14 @@
 #             origin does not trust ::1" from cfm realip. An origin that stops
 #             listening on IPv6 for good keeps the edge's IPv6 until the next
 #             render (by hand).
+#             It walks EVERY engine, whichever edge unit is starting: the
+#             oneshot is pulled in by the drop-in on each edge unit, and
+#             systemd tells it nothing about which one (no argument, no
+#             environment; only a template unit per edge could), and the walk
+#             is also what removes a stopped or removed engine's stale files.
+#             So the start of openresty / angie config-tests an idle cfm-edge
+#             that has IPv6 files, and that test creates cfm-edge's logs: the
+#             empty ones it created are removed again (engine_test).
 #   deploy    (the package deploy, package-proxy-config-deploy.sh) prestart's
 #             keep / remove rules, but it never writes files that are not
 #             there (it tells the operator to run render) and never reloads
@@ -81,8 +89,9 @@
 #
 # Test seams (scripts/tests/check_edge_listen_v6.sh): CFM_CONF,
 # CFM_V6_PROC_FILE, CFM_SS, CFM_BIN, CFM_PROC_ROOT, CFM_SYSTEMCTL,
-# CFM_V6_CONFIRM_TRIES, CFM_EDGE_ENGINES
-# ("Name|binary|confdir|mainconf" per line).
+# CFM_V6_CONFIRM_TRIES, CFM_CFMEDGE_LOG_DIR, CFM_EDGE_ENGINES
+# ("Name|binary|confdir|mainconf" per line; the name cfm-edge gets the log
+# cleanup of engine_test).
 
 # C locale: [[:space:]] is ASCII whitespace only, as Go's edgeIPv6Wanted
 # reads it (a UTF-8 locale's sed would also trim U+2000.. and U+3000).
@@ -375,8 +384,98 @@ drop() {
 }
 
 # engine_test NAME BIN: the engine's own config test of its live config.
+# cfm-edge's is wrapped (cfmedge_test_logs_snapshot / _drop): `nginx -t`
+# creates every access_log/error_log file its config names.
 engine_test() {
+    if [ "$1" != cfm-edge ]; then
+        "$2" -t -q >/dev/null 2>&1
+        return
+    fi
+    cfmedge_test_logs_snapshot
     "$2" -t -q >/dev/null 2>&1
+    et_rc=$?
+    cfmedge_test_logs_drop
+    return $et_rc
+}
+
+# The cfm-edge config test and its logs. On a node prepared with
+# install-edge.sh whose live edge is still OpenResty or Angie, every edge start
+# runs this script (prestart walks every engine, see the header), and with
+# cfm-edge's IPv6 files in place it config-tests the idle cfm-edge: without
+# this, each openresty/angie start left fresh EMPTY files in /var/log/cfm-edge,
+# and internal/edgelog (the newest mtime wins) then read cfm-edge's empty logs
+# instead of the live edge's (edge_error_tail, ip_forensics, whats_wrong).
+# The rule is the package deploy's (package-proxy-config-deploy.sh
+# snapshot_cfmedge_logs / cfm_edge_may_run / drop_test_created_cfmedge_logs)
+# and install-edge.sh's: remember what was there before the test, then remove
+# only the EMPTY regular files that were not, and nothing while cfm-edge may
+# be running (its own new empty log is then the live one). A file that was
+# already there, or one with content, is never touched. Test seam:
+# CFM_CFMEDGE_LOG_DIR (the deploy's name).
+CFM_CFMEDGE_LOG_DIR=${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}
+ctl_taken=0
+cfmedge_test_logs_snapshot() {
+    # The trailing / makes find list a symlinked log dir's files. No snapshot
+    # (the dir missing or unreadable) means nothing is dropped afterwards.
+    ctl_taken=0
+    ctl_before=$(find "$CFM_CFMEDGE_LOG_DIR/" -maxdepth 1 -type f 2>/dev/null) && ctl_taken=1
+}
+
+# cfm_edge_may_run: true unless cfm-edge.service is plainly down and no
+# cfm-edge process exists. `is-active --quiet` alone reads a unit that is
+# still `activating` (or `reloading`, `deactivating`) as down, and a cfm-edge
+# started after the snapshot holds its new, still-empty logs open: removing
+# them would send its log lines to deleted files. A process outside systemd
+# is found by its comm (as `pgrep -x cfm-edge` matches it; nginx's process
+# title rewrites argv, never comm), read with the shell's own `read`, no fork
+# per process.
+cfm_edge_may_run() {
+    case $("$CFM_SYSTEMCTL" is-active cfm-edge.service 2>/dev/null) in
+        inactive | failed | unknown | "") ;;
+        *) return 0 ;;
+    esac
+    for cmr_f in "$CFM_PROC_ROOT"/[0-9]*/comm; do
+        [ -r "$cmr_f" ] || continue
+        cmr_comm=""
+        read -r cmr_comm <"$cmr_f" 2>/dev/null || true
+        [ "$cmr_comm" = cfm-edge ] && return 0
+    done
+    return 1
+}
+
+cfmedge_test_logs_drop() {
+    [ "$ctl_taken" -eq 1 ] || return 0
+    ctl_taken=0
+    ctl_new=""
+    ctl_list=$(find "$CFM_CFMEDGE_LOG_DIR/" -maxdepth 1 -type f 2>/dev/null) || true
+    # A name with a newline in it splits into pieces: only a piece that is a
+    # direct entry of the log dir (and an empty regular file, no symlink) is
+    # ever a candidate.
+    ctl_nl='
+'
+    while IFS= read -r ctl_f; do
+        case $ctl_f in
+            "$CFM_CFMEDGE_LOG_DIR"/*/* | "") continue ;;
+            "$CFM_CFMEDGE_LOG_DIR"/*) ;;
+            *) continue ;;
+        esac
+        printf '%s\n' "$ctl_before" | grep -qxF -- "$ctl_f" && continue
+        [ -f "$ctl_f" ] && [ ! -L "$ctl_f" ] && [ ! -s "$ctl_f" ] || continue
+        ctl_new="$ctl_new$ctl_f$ctl_nl"
+    done <<EOF_CTL
+$ctl_list
+EOF_CTL
+    [ -n "$ctl_new" ] || return 0
+    cfm_edge_may_run && return 0
+    while IFS= read -r ctl_f; do
+        [ -n "$ctl_f" ] || continue
+        if rm -f -- "$ctl_f"; then
+            log "cfm-edge: removed $ctl_f (empty, created by its config test; cfm-edge.service not active, no cfm-edge process)"
+        fi
+    done <<EOF_CTL
+$ctl_new
+EOF_CTL
+    return 0
 }
 
 # main_includes MAINCONF: the live main config includes the IPv6 http file.

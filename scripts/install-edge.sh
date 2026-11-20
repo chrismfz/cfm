@@ -54,6 +54,9 @@ readonly CFM_LUA_MANIFEST=(
 
 readonly EDGE_BIN="/usr/sbin/cfm-edge"
 readonly EDGE_CONF_DIR="/etc/cfm-edge"
+# Its log dir (CFM_CFMEDGE_LOG_DIR, the package deploy's name, is the test
+# seam of scripts/tests/check_install_edge.sh).
+readonly EDGE_LOG_DIR="${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}"
 readonly EDGE_MAIN_CONF="$EDGE_CONF_DIR/nginx.conf"
 readonly CFM_CONFIGS="/usr/share/cfm/configs"
 readonly EDGE_SRC_CONF="$CFM_CONFIGS/cfm-edge.conf"
@@ -205,6 +208,7 @@ readonly EDGE_SIDECARS=(trusted_proxies.conf challenge_waf_bypass.conf cfm-panel
 readonly CFM_DEPLOY_LOCK="/run/cfm-proxy-config-deploy.lock"
 STAGE=""
 LOG_SNAPSHOT=""
+LOG_SNAPSHOT_TAKEN=0
 
 cleanup() {
     if [ -n "$STAGE" ] && [ -d "$STAGE" ]; then
@@ -236,20 +240,51 @@ release_deploy_lock() {
 
 # nginx -t creates every log file it names. On a node whose edge is still
 # openresty/angie, fresh empty files in /var/log/cfm-edge would become the
-# newest edge logs the daemon's log tools read. Remember what was there, and
-# remove only the EMPTY files the tests created (never while cfm-edge runs).
+# newest edge logs the daemon's log tools read (internal/edgelog: the newest
+# mtime wins). Remember what was there, and remove only the EMPTY regular
+# files the tests created, never while cfm-edge may run (cfm_edge_may_run).
+# The same rule as the package deploy (package-proxy-config-deploy.sh
+# snapshot_cfmedge_logs / cfm_edge_may_run / drop_test_created_cfmedge_logs)
+# and cfm-edge-listen-v6.sh's engine_test.
 snapshot_edge_logs() {
-    LOG_SNAPSHOT="$(find /var/log/cfm-edge -maxdepth 1 -type f 2>/dev/null | sort)"
+    # The trailing / makes find list a symlinked log dir's files (without it
+    # find lists the symlink alone, and -type f nothing).
+    # find failing (the dir missing or unreadable) takes no snapshot, and
+    # nothing is dropped afterwards (pipefail carries find's status).
+    LOG_SNAPSHOT_TAKEN=0
+    LOG_SNAPSHOT="$(find "$EDGE_LOG_DIR/" -maxdepth 1 -type f 2>/dev/null | sort)" && LOG_SNAPSHOT_TAKEN=1
+    return 0
 }
 
+# cfm_edge_may_run: true unless cfm-edge.service is plainly down and no
+# cfm-edge process exists. `is-active --quiet` alone reads a unit that is
+# still `activating` (or `reloading`) as down, and a cfm-edge started after
+# the snapshot holds its new, still-empty logs open: removing them would
+# send its log lines to deleted files.
+cfm_edge_may_run() {
+    if command_exists systemctl; then
+        case "$(systemctl is-active cfm-edge.service 2>/dev/null)" in
+            inactive | failed | unknown | "") ;;
+            *) return 0 ;;
+        esac
+    fi
+    command_exists pgrep && pgrep -x cfm-edge >/dev/null 2>&1 && return 0
+    return 1
+}
+
+# A no-op without a snapshot; each snapshot is used once.
 drop_test_created_logs() {
-    systemctl is-active --quiet cfm-edge.service 2>/dev/null && return 0
+    [ "$LOG_SNAPSHOT_TAKEN" -eq 1 ] || return 0
+    LOG_SNAPSHOT_TAKEN=0
+    cfm_edge_may_run && return 0
     local f
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         grep -qxF -- "$f" <<<"$LOG_SNAPSHOT" && continue
-        [ -s "$f" ] || rm -f -- "$f"
-    done < <(find /var/log/cfm-edge -maxdepth 1 -type f 2>/dev/null)
+        if [ -f "$f" ] && [ ! -L "$f" ] && [ ! -s "$f" ] && rm -f -- "$f"; then
+            log "Removed $f (empty, created by the cfm-edge config test; cfm-edge is not running)"
+        fi
+    done < <(find "$EDGE_LOG_DIR/" -maxdepth 1 -type f 2>/dev/null)
     return 0
 }
 
@@ -388,6 +423,8 @@ print_next_steps() {
     edges="$(tr '\n' ' ' <<<"$edges" | sed 's/ *$//')"
     old="$(active_edges | grep -vx 'cfm-edge' | head -1 || true)"
 
+    # The report's own config test (below) creates logs too.
+    snapshot_edge_logs
     cat <<EOF
 
 ===========================================================================
