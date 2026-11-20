@@ -264,7 +264,10 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   a filename (enumerated lists drifted). The OpenResty logs under `/usr/local`
   also need the `logrotate.service.d/cfm-openresty.conf` drop-in
   (`ProtectSystem=full`). `--host` checks a live server; details in
-  `docs/log-rotation.md`.
+  `docs/log-rotation.md`. Every `logrotate-cfm` block sets `dateext` +
+  `dateformat -%Y%m%d-%H%M%S` itself, never globally (the hourly pass runs it
+  without `/etc/logrotate.conf`, alongside cfm-edge's file in one invocation);
+  the same check pins it.
 - **Lua has exactly ONE delivery path: `/var/lib/cfm/lua/`, owned by the
   package.** The Makefile stages `configs/lua/` there with `rsync --delete`
   (that flag, not a PKGROOT wipe, is what drops a retired module —

@@ -202,6 +202,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   whats_wrong titles it "origin does not trust the edge's loopback"), `edge_ipv6` / `edge_ipv6_listening` in `--json`.
 
 ### Fixed
+- **CFM's log rotation names every generation by date and time, on every
+  run.** On EL the distro's daily logrotate applies `/etc/logrotate.conf`'s
+  global `dateext` (`access.log-YYYYMMDD`), while CFM's hourly pass runs
+  `logrotate-cfm` alone and numbered them (`access.log.1`, `.2`, …). `rotate
+  7` counts per naming scheme, so an edge kept up to 14 generations of a 2G
+  cap, and a second dated rotation on one day failed with `destination …
+  already exists, skipping rotation` (logrotate exit 1). Every block now sets
+  `dateext` + `dateformat -%Y%m%d-%H%M%S` itself (not globally: the hourly
+  pass reads `/etc/logrotate.d/cfm-edge` in the same invocation), so both runs
+  name generations alike and never collide. Generations already on a node
+  (numbered `.N`, and on EL the date-only `-YYYYMMDD`) no longer match and are
+  never expired: remove them once by hand (`docs/log-rotation.md`).
 - **Removing a CIDR a set does not hold no longer fails on the exec engine.**
   nft (1.0.4 on EL8, 1.0.9 on EL9) answers a delete from an interval set with
   `element does not exist`, which `RemoveBlockNet` / `RemoveAllowNet` /
