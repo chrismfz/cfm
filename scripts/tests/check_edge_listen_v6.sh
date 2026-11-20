@@ -758,6 +758,11 @@ rm -f "$tmp/cfmedge.warn"
 rm -rf "$cel"
 cel_run prestart
 [ ! -e "$cel" ] && ok "a missing cfm-edge log dir: no error, nothing created" || fail "a missing cfm-edge log dir was created"
+# dash applies redirections in order: 2>/dev/null must come before the <,
+# or a process exiting mid-scan prints "cannot open" into the journal.
+grep -qF 'read -r cmr_comm 2>/dev/null <"$cmr_f"' "$SCRIPT" \
+  && ok "the /proc comm read silences its own open error (dash order)" \
+  || fail "$SCRIPT: the comm read must be: read -r cmr_comm 2>/dev/null <\"\$cmr_f\""
 # Another engine's test is not wrapped: an empty file appearing in the
 # cfm-edge log dir meanwhile is not its to remove.
 cel_reset

@@ -110,14 +110,14 @@ theirs="$(sed -n "s/^CFMEDGE_ADOPT_MARKER='\(.*\)'$/\1/p" "$DEPLOY")"
 
 # 3. The staged set is tested (a failure dies), then committed (the main
 #    config last), then the live copy is tested.
-grep -qE '^[0-9]+: +if ! "\$EDGE_BIN" -t -c "\$STAGE/nginx.conf.test"; then$' <<<"$ex" \
-  || fail "$SCRIPT must act on the staged test's result (if ! \"\$EDGE_BIN\" -t -c \"\$STAGE/nginx.conf.test\"; then)"
-grep -qE '^[0-9]+: +if ! "\$EDGE_BIN" -t -q; then$' <<<"$ex" \
-  || fail "$SCRIPT must act on the live copy's test result (if ! \"\$EDGE_BIN\" -t -q; then)"
-t1="$(grep -nE '"\$EDGE_BIN" -t -c "\$STAGE/nginx.conf.test"' <<<"$ex" | head -1 | cut -d: -f2)"
+grep -qE '^[0-9]+: +if ! edge_test -c "\$STAGE/nginx.conf.test"; then$' <<<"$ex" \
+  || fail "$SCRIPT must act on the staged test's result (if ! edge_test -c \"\$STAGE/nginx.conf.test\"; then)"
+grep -qE '^[0-9]+: +if ! edge_test -q; then$' <<<"$ex" \
+  || fail "$SCRIPT must act on the live copy's test result (if ! edge_test -q; then)"
+t1="$(grep -nE 'edge_test -c "\$STAGE/nginx.conf.test"' <<<"$ex" | head -1 | cut -d: -f2)"
 side="$(grep -nE 'mv -f "\$STAGE/\$f" "\$EDGE_CONF_DIR/\$f"' <<<"$ex" | head -1 | cut -d: -f2)"
 inst="$(grep -nE 'mv -f "\$STAGE/nginx.conf" "\$EDGE_MAIN_CONF"' <<<"$ex" | head -1 | cut -d: -f2)"
-t2="$(grep -nE 'if ! "\$EDGE_BIN" -t -q;' <<<"$ex" | head -1 | cut -d: -f2)"
+t2="$(grep -nE 'if ! edge_test -q;' <<<"$ex" | head -1 | cut -d: -f2)"
 [ -n "$t1" ] && [ -n "$side" ] && [ -n "$inst" ] && [ -n "$t2" ] || fail "$SCRIPT must test the staged set (-t -c \$STAGE/nginx.conf.test), move the sidecars and the main config in, then test the live copy"
 [ "$t1" -lt "$side" ] && [ "$side" -lt "$inst" ] && [ "$inst" -lt "$t2" ] || fail "$SCRIPT must config-test before it moves anything into $EDGE_CONF_DIR (lines $t1 / $side / $inst / $t2)"
 # Nothing writes into the live conf dir before the staged test.
@@ -206,6 +206,31 @@ rm -f "$el"; rm -rf "$el.real"
 el_reset; ln -s "$el/old-full.log" "$el/link.log"
 el_run ': >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
 [ -L "$el/link.log" ] && [ ! -e "$el/error.log" ] || fail "a symlink in the log dir was removed (or the new log kept)"
+# Every config test goes through edge_test (-e /dev/null where the binary
+# offers it: a test warning never fills a file startup log), and edge_test
+# passes -e only where -h lists it (an unknown -e would fail every test).
+if bad="$(grep -E '"\$EDGE_BIN"[^|]* -t( |$|\))' <<<"$ex" | grep -vE '^[0-9]*: *"\$EDGE_BIN" -(e /dev/null -)?t "\$@"$')"; then
+  fail "$SCRIPT runs a cfm-edge config test outside edge_test:
+$bad"
+fi
+cat >"$tmp/bin/fake-edge" <<'EOF_FAKE'
+#!/bin/sh
+case "$1" in
+  -h) [ "${FAKE_HAS_E:-0}" = 1 ] && echo '  -e filename   : set error log file' >&2; exit 0 ;;
+esac
+echo "$*" >>"$FAKE_CALLS"
+exit 0
+EOF_FAKE
+chmod 0755 "$tmp/bin/fake-edge"
+efn="$(awk '/^edge_test\(\) *\{/,/^}/' "$SCRIPT")"
+[ -n "$efn" ] || fail "$SCRIPT: edge_test not found"
+for has in 1 0; do
+  : >"$tmp/calls"
+  FAKE_HAS_E="$has" FAKE_CALLS="$tmp/calls" bash -c 'set -euo pipefail; EDGE_BIN="$1"; eval "$2"; edge_test -q' sh "$tmp/bin/fake-edge" "$efn" \
+    || fail "edge_test failed (has -e: $has)"
+  want="-t -q"; [ "$has" = 1 ] && want="-e /dev/null -t -q"
+  [ "$(cat "$tmp/calls")" = "$want" ] || fail "edge_test with -e offered=$has ran '$(cat "$tmp/calls")', want '$want'"
+done
 # The EXIT trap drops too (a run interrupted during a test).
 awk '/^cleanup\(\) *\{/,/^}/' "$SCRIPT" | grep -qE '^ +drop_test_created_logs$' \
   || fail "$SCRIPT: cleanup (the EXIT trap) must call drop_test_created_logs"
@@ -227,8 +252,8 @@ grep -qx 'rc=0' <<<"$out" && [ ! -e "$el" ] || fail "a missing cfm-edge log dir:
 for fn in adopt_cfm_edge ensure_edge_listen_v6 print_next_steps; do
   body="$(awk -v fn="$fn" '$0 ~ "^"fn"\\(\\) *\\{" {p=1} p {print} p && /^}/ {exit}' "$SCRIPT")"
   sn="$(grep -n 'snapshot_edge_logs' <<<"$body" | head -1 | cut -d: -f1 || true)"
-  ts="$(grep -nE '"\$EDGE_BIN" -t|"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1 || true)"
-  tl="$(grep -nE '"\$EDGE_BIN" -t|"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | tail -1 | cut -d: -f1 || true)"
+  ts="$(grep -nE 'edge_test |"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | head -1 | cut -d: -f1 || true)"
+  tl="$(grep -nE 'edge_test |"\$script" prestart' <<<"$body" | grep -v '^[0-9]*: *#' | tail -1 | cut -d: -f1 || true)"
   dr="$(grep -n 'drop_test_created_logs' <<<"$body" | tail -1 | cut -d: -f1 || true)"
   [ -n "$sn" ] && [ -n "$ts" ] && [ -n "$dr" ] && [ "$sn" -lt "$ts" ] && [ "$tl" -lt "$dr" ] \
     || fail "$SCRIPT $fn: the cfm-edge config test must sit between snapshot_edge_logs and drop_test_created_logs"

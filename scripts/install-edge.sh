@@ -289,6 +289,23 @@ drop_test_created_logs() {
     return 0
 }
 
+# edge_test ARGS: `cfm-edge -t ARGS`, with -e /dev/null where the binary
+# offers it (nginx >= 1.19.5; `-h` lists it). A build whose startup error log
+# is a file (nginx.org's --error-log-path, /var/log/cfm-edge/error.log) would
+# otherwise append the test's [warn] / [emerg] to it, and a file with content
+# is never dropped: it would be read as the newest edge error log. The
+# messages still reach the operator on stderr. -h is captured first: under
+# pipefail an early `grep -q` exit could SIGPIPE the binary and read as "no -e".
+edge_test() {
+    local help
+    help="$("$EDGE_BIN" -h 2>&1 || true)"
+    if grep -q '^[[:space:]]*-e filename' <<<"$help"; then
+        "$EDGE_BIN" -e /dev/null -t "$@"
+    else
+        "$EDGE_BIN" -t "$@"
+    fi
+}
+
 adopt_cfm_edge() {
     [ -x "$EDGE_BIN" ] || die "$EDGE_BIN not found"
     mkdir -p "$EDGE_CONF_DIR"
@@ -329,7 +346,7 @@ adopt_cfm_edge() {
 
     snapshot_edge_logs
     log "Testing CFM's cfm-edge config with the new sidecars (staged)"
-    if ! "$EDGE_BIN" -t -c "$STAGE/nginx.conf.test"; then
+    if ! edge_test -c "$STAGE/nginx.conf.test"; then
         drop_test_created_logs
         die "config test FAILED (above): nothing in $EDGE_CONF_DIR was changed"
     fi
@@ -355,7 +372,7 @@ adopt_cfm_edge() {
     mv -f "$STAGE/nginx.conf" "$EDGE_MAIN_CONF"
     release_deploy_lock
 
-    if ! "$EDGE_BIN" -t -q; then
+    if ! edge_test -q; then
         drop_test_created_logs
         die "the installed $EDGE_MAIN_CONF fails its config test (it passed staged): do not reload or restart cfm-edge until 'cfm-edge -t' passes"
     fi
@@ -433,7 +450,7 @@ print_next_steps() {
 ===========================================================================
   Package:      $(rpm -q cfm-edge 2>/dev/null || echo "?")
   Config:       $EDGE_MAIN_CONF (CFM's; the package's copy: $EDGE_MAIN_CONF.pre-cfm)
-  Config test:  $("$EDGE_BIN" -t -q >/dev/null 2>&1 && echo passed || echo "FAILED: run $EDGE_BIN -t")
+  Config test:  $(edge_test -q >/dev/null 2>&1 && echo passed || echo "FAILED: run $EDGE_BIN -t")
   Active units: ${edges:-none}
 EOF
     drop_test_created_logs

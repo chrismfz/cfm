@@ -234,8 +234,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   which read the newest edge log, read those instead. The check now removes
   the empty files its cfm-edge test created (never one that was there before
   or has content, and nothing while cfm-edge may be running), and runs that
-  test with `-e /dev/null` where cfm-edge offers it, so a test warning never
-  fills `/var/log/cfm-edge/error.log` either.
+  test with `-e /dev/null` where cfm-edge offers it (nginx >= 1.19.5), so a
+  test warning does not fill `/var/log/cfm-edge/error.log` either; so do
+  `install-edge.sh`'s own config tests (their messages still print).
   `install-edge.sh`'s own cleanup now also keeps the logs of a cfm-edge whose
   unit is still starting or reloading or that runs outside systemd, and
   follows a symlinked `/var/log/cfm-edge`.
