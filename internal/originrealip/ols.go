@@ -846,10 +846,14 @@ func applyOLS(pl Plan, w io.Writer) error {
 		return nil
 	}
 	out, err := reload()
+	// Until a new master shows, for a bounded while: lswsctrl waits ~15 s and
+	// returns either way, and right after a reload systemd can show MainPID 0
+	// ("?") or not-yet-active (""), lswsctrl a missing PID file. Only a
+	// settled reading decides (medium review: a transient one rolled back a
+	// reload that was being taken).
+	settled := func(p string) bool { return p != "" && p != "?" && p != before }
 	after := pid()
-	// lswsctrl waits ~15 s for a new master and returns either way: give a
-	// slow one a bounded while longer before reading it as not taken.
-	for i := 0; err == nil && after != "" && after == before && i < olsRestartPolls; i++ {
+	for i := 0; err == nil && !settled(after) && i < olsRestartPolls; i++ {
 		olsSleep(time.Second)
 		after = pid()
 	}
@@ -858,23 +862,37 @@ func applyOLS(pl Plan, w io.Writer) error {
 		return nil
 	}
 	why := "it is not running"
-	if after != "" {
+	switch {
+	case after == "?":
+		why = "its master PID could not be read after the reload"
+	case after != "":
 		why = "its master still runs as pid " + after + ", so the new config was not taken"
 	}
 	rollback()
 	_, rerr := reload()
-	if pid() == "" && unit != "" {
+	up := func() bool { // running again, after a bounded wait
+		for i := 0; ; i++ {
+			if p := pid(); p != "" {
+				return true
+			}
+			if i >= olsRestartPolls {
+				return false
+			}
+			olsSleep(time.Second)
+		}
+	}
+	if !up() && unit != "" {
 		// A reload does not start a stopped unit (and fails on an inactive one).
 		_, rerr = runCmd(fixTimeout, "systemctl", "start", unit)
 	}
 	state := "it was restarted on the restored files and runs"
-	if rerr != nil || pid() == "" {
+	if !up() {
 		state = "and it is NOT running now: start it with " + olsCtl + " start"
 		if unit != "" {
 			state = "and it is NOT running now: start it with systemctl start " + unit
 		}
 	}
-	return fmt.Errorf("OpenLiteSpeed did not take the new config (%s; restart: %v); the files were restored, %s\n%s", why, err, state, strings.TrimSpace(out))
+	return fmt.Errorf("OpenLiteSpeed did not take the new config (%s; reload: %v); the files were restored, %s (rollback reload/start: %v)\n%s", why, err, state, rerr, strings.TrimSpace(out))
 }
 
 var olsPIDRe = regexp.MustCompile(`with PID (\d+)`)

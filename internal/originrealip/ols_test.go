@@ -749,3 +749,32 @@ func TestOLSKeepWithAnUnreadablePID(t *testing.T) {
 		t.Fatalf("after: %+v", p)
 	}
 }
+
+// Medium review: right after the reload systemd shows MainPID 0 for a moment;
+// that transient reading must not roll back a reload that is being taken.
+func TestApplyOLSRidesOutATransientMainPID(t *testing.T) {
+	l, _ := olsDAHost(t)
+	calls := systemdStub(t, "new")
+	inner := runCmd
+	shows := 0
+	reloaded := false
+	runCmd = func(d time.Duration, name string, args ...string) (string, error) {
+		k := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		if k == "systemctl reload openlitespeed" {
+			reloaded = true
+		}
+		if reloaded && k == "systemctl show -p MainPID --value openlitespeed" {
+			shows++
+			if shows == 1 {
+				return "0\n", nil
+			}
+		}
+		return inner(d, name, args...)
+	}
+	if err := Apply(l.plan(l.probe("")), &strings.Builder{}); err != nil {
+		t.Fatalf("a transient MainPID 0 rolled back: %v (%v)", err, *calls)
+	}
+	if n := strings.Count(strings.Join(*calls, "|"), "systemctl reload openlitespeed"); n != 1 {
+		t.Fatalf("want one reload, got %d: %v", n, *calls)
+	}
+}
