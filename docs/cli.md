@@ -218,6 +218,8 @@ cfm edge bypass list|add|remove  # = cfm dnat bypass …
 cfm edge panel [status|on|off|bypass …]   # = cfm dnat cpanel … (alias: cfm edge cpanel)
 cfm edge realip [status|fix]     # = cfm realip …
 cfm edge ipv6 [status]           # the IPv6 listen decision of every installed engine
+cfm edge ipv6 on [engine] | off  # lift / set the EDGE_LISTEN_V6 kill switch in /etc/cfm/cfm.conf, then render (reloads a running edge; off renders every engine; docs/edge-ipv6.md)
+cfm edge check [--json] [--window N]      # the edge_health checks (docs/edge-health.md); exit 0 only when all ok
 ```
 
 `on` and `off` move traffic; they never start or stop the edge service.

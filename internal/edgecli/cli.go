@@ -43,6 +43,8 @@ type deps struct {
 	realip  func(args []string) int
 	verdict func(edgeInFront bool) (ok bool, text string)
 	ipv6    func() ([]string, error)
+	check   func(window int) ([]byte, error)
+	setIPv6 func(value string, renderArgs []string) int
 }
 
 // Run is `cfm edge`. The firewall backend is built only for the routes that
@@ -50,7 +52,7 @@ type deps struct {
 // (no nft binary), as `cfm realip` does. A nil backend gives the summary
 // UNKNOWN DNAT lines and the rest of the picture.
 func Run(args []string, backend func() firewall.Backend) int {
-	return run(args, deps{
+	d := deps{
 		out:     os.Stdout,
 		errOut:  os.Stderr,
 		summary: func() dnat.Summary { return dnat.CollectSummary(backend()) },
@@ -59,8 +61,11 @@ func Run(args []string, backend func() firewall.Backend) int {
 		verdict: func(edgeInFront bool) (bool, string) {
 			return originrealip.Verdict(originrealip.ProbeSystem(""), edgeInFront)
 		},
-		ipv6: ipv6Status,
-	})
+		ipv6:  ipv6Status,
+		check: fetchEdgeHealth,
+	}
+	d.setIPv6 = func(value string, renderArgs []string) int { return setIPv6(d, value, renderArgs) }
+	return run(args, d)
 }
 
 func run(args []string, d deps) int {
@@ -89,19 +94,9 @@ func run(args []string, d deps) int {
 	case "realip":
 		return d.realip(rest)
 	case "ipv6":
-		if len(rest) > 1 || (len(rest) == 1 && rest[0] != "status") {
-			fmt.Fprintln(d.errOut, "edge: ipv6 supports only `status` so far (turning it on/off: EDGE_LISTEN_V6 in cfm.conf, then sh "+ListenV6Script+" render; docs/edge-ipv6.md)")
-			return 2
-		}
-		lines, err := d.ipv6()
-		for _, l := range lines {
-			fmt.Fprintln(d.out, l)
-		}
-		if err != nil {
-			fmt.Fprintln(d.errOut, "edge: ipv6 status:", err)
-			return 1
-		}
-		return 0
+		return runIPv6(rest, d)
+	case "check":
+		return runCheck(rest, d)
 	case "help", "-h", "--help":
 		fmt.Fprint(d.out, usage)
 		return 0
@@ -121,6 +116,9 @@ const usage = `Usage:
                                    the panel ports through the edge (= cfm dnat cpanel …; alias: cfm edge cpanel)
   cfm edge realip [status|fix]     does the origin log the visitor, not 127.0.0.1 (= cfm realip …)
   cfm edge ipv6 [status]           the IPv6 listen decision of every installed engine (docs/edge-ipv6.md)
+  cfm edge ipv6 on [engine] | off  lift / set the EDGE_LISTEN_V6 kill switch, then render (RELOADS a running edge)
+  cfm edge check [--json] [--window N]
+                                   the edge's health checks, as the MCP edge_health tool (docs/edge-health.md)
 
 "on" and "off" move traffic, they never start or stop the edge service.
 `
@@ -239,7 +237,7 @@ func printSummary(d deps) int {
 		}
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "More: cfm edge web | cfm edge panel | cfm edge ipv6 | cfm edge realip | cfm edge help")
+	fmt.Fprintln(w, "More: cfm edge check | cfm edge web | cfm edge panel | cfm edge ipv6 | cfm edge realip | cfm edge help")
 	return rc
 }
 
@@ -303,6 +301,8 @@ func ipv6Status() ([]string, error) {
 	defer cancel()
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, "sh", ListenV6Script, "status") // #nosec G204 -- fixed packaged script path
+	cmd.Env = scriptEnv()
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
