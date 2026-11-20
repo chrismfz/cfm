@@ -43,6 +43,7 @@ type deps struct {
 	realip  func(args []string) int
 	verdict func(edgeInFront bool) (ok bool, text string)
 	ipv6    func() ([]string, error)
+	check   func(window int) ([]byte, error)
 }
 
 // Run is `cfm edge`. The firewall backend is built only for the routes that
@@ -59,7 +60,8 @@ func Run(args []string, backend func() firewall.Backend) int {
 		verdict: func(edgeInFront bool) (bool, string) {
 			return originrealip.Verdict(originrealip.ProbeSystem(""), edgeInFront)
 		},
-		ipv6: ipv6Status,
+		ipv6:  ipv6Status,
+		check: fetchEdgeHealth,
 	})
 }
 
@@ -102,6 +104,8 @@ func run(args []string, d deps) int {
 			return 1
 		}
 		return 0
+	case "check":
+		return runCheck(rest, d)
 	case "help", "-h", "--help":
 		fmt.Fprint(d.out, usage)
 		return 0
@@ -121,6 +125,8 @@ const usage = `Usage:
                                    the panel ports through the edge (= cfm dnat cpanel …; alias: cfm edge cpanel)
   cfm edge realip [status|fix]     does the origin log the visitor, not 127.0.0.1 (= cfm realip …)
   cfm edge ipv6 [status]           the IPv6 listen decision of every installed engine (docs/edge-ipv6.md)
+  cfm edge check [--json] [--window N]
+                                   the edge's health checks, as the MCP edge_health tool (docs/edge-health.md)
 
 "on" and "off" move traffic, they never start or stop the edge service.
 `
@@ -239,7 +245,7 @@ func printSummary(d deps) int {
 		}
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "More: cfm edge web | cfm edge panel | cfm edge ipv6 | cfm edge realip | cfm edge help")
+	fmt.Fprintln(w, "More: cfm edge check | cfm edge web | cfm edge panel | cfm edge ipv6 | cfm edge realip | cfm edge help")
 	return rc
 }
 
