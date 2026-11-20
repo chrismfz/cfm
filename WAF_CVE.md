@@ -36,7 +36,7 @@ keeps the rest.)
 - **Grouping:** `Group = id / 100`, and `wafRuleGroupNames[100] = "cve"`.
   `TestWAFRuleIDs_GroupingDigits` accepts ids in `10000–99999` **but also
   requires the group to be in `wafRuleGroupNames`, which only has `100`** — so
-  as the code stands only `10000–10099` pass. The next free id is `10031`; an
+  as the code stands only `10000–10099` pass. The next free id is `10034`; an
   id `>= 10100` needs a `wafRuleGroupNames` change first.
 - **`rule_log4shell` (id `328`)** predates the band, keeps its legacy id and
   also reports the `WAF_CVE` family (default `challenge_v2`, so its hits never
@@ -147,13 +147,44 @@ Every rule below ships at edge default **`block`** (Lua `CFG` and Go
 | 10028 | `rule_cve_magento_polyshell_unseen` | CVE-2026-48356 | Magento / Adobe Commerce | a cart-save request 10027 could not read (`OVERSIZE` / `XML_ENTITY` / `UNREADABLE`); `FILE_INFO_ELSEWHERE` logonly | **held** |
 | 10029 | `rule_cve_fabrik_listfilter_eval` | CVE-2026-67282 | Fabrik (Joomla) | an `[eval]` index set on a Fabrik request field (`EVAL_ZERO` logonly) | armed (block since 2026-11-17) |
 | 10030 | `rule_cve_drupal_render_callback` | CVE-2026-108097 (`#region_callback`), CVE-2018-7600 (the other keys) | Drupal core | a render-array callback key as a field NAME / JSON KEY | armed |
+| 10031 | `rule_cve_php_fpm_smuggle` | CVE-2026-129289 | PHP core (FPM / LSAPI) | a FastCGI record header (`FCGI_BEGIN_REQUEST`) or length-prefixed FastCGI parameter name (`FCGI_PARAMS`) in a POST body | **logonly** (burn-in from 2026-11-21) |
+| 10032 | `rule_cve_php_oversized_auth` | CVE-2026-129496 | PHP core (ext/date) | an Authorization header over nginx's default 8 KB line (`BASIC_OVERSIZE` / `OVERSIZE`) | **logonly** (burn-in from 2026-11-21) |
+| 10033 | `rule_cve_php_multipart_desync` | CVE-2026-129289 (first leg) | PHP core | a multipart POST PHP stops reading early (`GARBLED_STOP` / `NO_BOUNDARY` / `NO_PART`) | **logonly** (burn-in from 2026-11-21) |
 
 Lua tests: `scripts/tests/cfm_waf_cve_<slug>_test.lua` per product (plus
 `*_e2e_test.lua` for 10021/10022, 10024, 10027/10028, 10030). 10023 is
 tested in the `php_upload_progress` files, 10029 in
-`cfm_waf_tier_review_2026_11_17_test.lua`.
+`cfm_waf_tier_review_2026_11_17_test.lua`. 10031–10033 share
+`cfm_waf_cve_php_2611_test.lua`.
 
 ### 2.1 Rule notes (sources, residuals, decisions)
+
+- **10031–10033, the php-src advisories of 2026-11-19** (eight, fixed in
+  8.2.36 / 8.3.37 / 8.4.28 / 8.5.13; no fix commit or PoC was published with
+  them). Only three have a request shape a front proxy sees; the others are
+  use-after-frees, a session TOCTOU and a local FPM escalation, triggered by
+  configuration or by the application's own code. 115560 is the session
+  upload-progress field again: 10024 already blocks it. The three new rules
+  are logonly telemetry, run late in `check()` and are not in
+  `BURNIN_ENFORCE_IDS`: 10031 for CVE-2026-129289 (PHP-FPM request smuggling
+  through an unread body on a kept-open backend connection; its FastCGI
+  record and parameter-name layout is the FastCGI 1.0 specification's),
+  10032 for CVE-2026-129496 (an Authorization header past nginx's default
+  8 KB line, which this edge's 64 KB `large_client_header_buffers` admits),
+  10033 for the first leg of 129289 and the whole class of multipart parser
+  desyncs (`GARBLED_STOP`, checked against PHP 8.3.6: a part with a
+  Content-Disposition but neither name nor filename ends PHP's parse; a part
+  with none, or bytes after the closing boundary, do not). The fleet runs the
+  fixed PHP (CloudLinux backported the EOL branches on 2026-11-19), mostly
+  under LSAPI, with no `enablereuse` or `fastcgi_keep_conn` and
+  `session.upload_progress.enabled = 0`. A promotion of any of them decides
+  the autoblock intent in the same change, and moves an armed one early in
+  `check()`. Reading the burn-in: a hit shows its tag in `reason` only
+  when it is the request's headline; behind another rule's hit it is only an
+  id in `also_rule_ids` (count both), and a request an earlier block ends is
+  not measured. Expected noise to rule out before a promotion: 10031's
+  `FCGI_BEGIN_REQUEST` inside binary file uploads, 10032 on unusually large
+  bearer tokens, 10033 on clients that send broken multipart.
 
 - **10001 Simple File List** (unauth upload → rename → RCE). One detector for
   both CVEs (same plugin, endpoints, exploit). Rename leg: extension match

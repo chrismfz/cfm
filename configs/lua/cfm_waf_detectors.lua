@@ -454,7 +454,12 @@ end
 
 -- Returns the non-empty file parts seen and whether a kept file may have been
 -- cut short by an earlier MAX_FILE_SIZE field (see each_multipart_field).
-local function multipart_parse(b, ct_raw, fn, on_file, max_uploads)
+-- stat, when given, is filled with how the parse ended (rule 10033): parts =
+-- the boundary lines PHP opened a part at; stop = "garbled" (a part with a
+-- Content-Disposition but neither name nor filename: PHP stops there, "Mime
+-- headers garbled", and leaves the rest of the body unread; checked against
+-- PHP 8.3.6) or "end"; at = the index just past that garbled part's headers.
+local function multipart_parse(b, ct_raw, fn, on_file, max_uploads, stat)
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return 0, false end -- an EMPTY boundary is valid to PHP: parts split on `--` lines
   local B, nextb = "--" .. bnd, "\n--" .. bnd
@@ -464,12 +469,19 @@ local function multipart_parse(b, ct_raw, fn, on_file, max_uploads)
     local line
     repeat
       line, p = mp_get_line(b, p, n)
-      if not line then return uploads, cut_short end
+      if not line then
+        if stat then stat.stop = "end" end
+        return uploads, cut_short
+      end
     until line == B
+    if stat then stat.parts = (stat.parts or 0) + 1 end
     local has_cd, name, filename
     p, has_cd, name, filename = mp_part_head(b, p, n)
     if has_cd then
-      if not name and not filename then return uploads, cut_short end
+      if not name and not filename then
+        if stat then stat.stop, stat.at = "garbled", p end
+        return uploads, cut_short
+      end
       local bound = b:find(nextb, p, true)
       -- The file's bytes are b[p .. (bound or n + 1) - 1], CR before the
       -- boundary included (a scanner over-reading one byte is harmless).
@@ -8486,6 +8498,102 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   end
   if ref or org then return "XSITE" end
   return "NO_REFERER"
+end
+
+-- Rules 10031 / 10032 / 10033 — the request shapes of the php-src advisories
+-- published 2026-11-19 (fixed in 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13), LOGONLY:
+-- telemetry for a burn-in, never a block until the fleet read says so. Source:
+-- the advisory texts (no fix commit or PoC was published with them); the
+-- FastCGI record layout is the FastCGI 1.0 specification's. None of them is a
+-- substitute for the PHP update, which the whole fleet already runs.
+--
+--   10031 CVE-2026-129289 (GHSA-qc49-hpvq-g2w6), "PHP-FPM request smuggling
+--         through an unread HTTP request body": on a backend connection the
+--         front end keeps open (nginx fastcgi_keep_conn, Apache enablereuse,
+--         LSAPI), a malformed multipart body stops PHP's parser and "a FastCGI
+--         message placed at the appropriate body offset" is read as the next
+--         request, which sets SCRIPT_FILENAME and PHP_ADMIN_VALUE
+--         (allow_url_include / auto_prepend_file=php://input). Read from the
+--         raw POST body, any content type: a FastCGI record header
+--         (FCGI_BEGIN_REQUEST) or a length-prefixed FastCGI parameter name
+--         (FCGI_PARAMS). Neither is text a form or an editor sends.
+--   10032 CVE-2026-129496 (GHSA-gr4f-wgx5-jpfv): its remote code execution
+--         chains need an Authorization header "larger than nginx's default
+--         per-header limit" (8 KB), which this edge's large_client_header_buffers
+--         (64 KB) lets through. BASIC_OVERSIZE for the advisory's HTTP Basic
+--         form, OVERSIZE for any other scheme.
+--   10033 CVE-2026-129289's first leg, for the whole class of parser
+--         desyncs: a multipart body PHP stops reading before its end.
+--         GARBLED_STOP = a part with a Content-Disposition but neither name
+--         nor filename, with more than whitespace after it; NO_BOUNDARY = no
+--         boundary parameter (PHP reads nothing); NO_PART = a non-blank body
+--         with no line equal to --<boundary> at all. The advisory does not
+--         name the exact malformation, so this measures the broad shape.
+
+-- 10031: FCGI_BEGIN_REQUEST = version 1, type 1, any request id, content
+-- length 8, any padding, reserved 0, then the body's role FCGI_RESPONDER (1).
+-- Seven fixed bytes, matched anywhere in the body, file parts included: a
+-- binary upload (structured formats are full of 0x00 / 0x01) can match now
+-- and then, which is the false positive to rule out before any promotion.
+-- (A field, not a local: this chunk is at LuaJIT's 200-local limit.)
+_M.PHP2611 = {}
+_M.PHP2611.FCGI_BEGIN = "\1\1..%z\8.%z%z\1"
+-- A FastCGI name-value pair is <name length><value length><name><value>, the
+-- value length one byte (< 128) or four (high bit set). Only the two names
+-- the advisory names, both 15 bytes long: their length byte 0x0F never occurs
+-- in text. PHP_VALUE is left out on purpose: its length byte, 9, is a TAB,
+-- so tab-indented config text ("\t\tPHP_VALUE") would match.
+_M.PHP2611.FCGI_PARAM_NAMES = { "SCRIPT_FILENAME", "PHP_ADMIN_VALUE" }
+function _M.PHP2611.fcgi_param(b)
+  for _, nm in ipairs(_M.PHP2611.FCGI_PARAM_NAMES) do
+    local len, pos = #nm, 1
+    while true do
+      local s = b:find(nm, pos, true)
+      if not s then break end
+      if (s > 2 and b:byte(s - 2) == len and b:byte(s - 1) < 128) or
+         (s > 5 and b:byte(s - 5) == len and b:byte(s - 4) >= 128) then
+        return true
+      end
+      pos = s + 1
+    end
+  end
+  return false
+end
+
+function _M.detect_cve_php_fpm_smuggle(body)
+  if not body or #body < 10 then return nil end
+  if body:find(_M.PHP2611.FCGI_BEGIN) then return "FCGI_BEGIN_REQUEST" end
+  if _M.PHP2611.fcgi_param(body) then return "FCGI_PARAMS" end
+  return nil
+end
+
+-- 10032: nginx's default large_client_header_buffers is 4 8k: a header line
+-- (name, ": ", value) longer than one 8 KB buffer is refused there.
+_M.PHP2611.NGINX_DEFAULT_HEADER_LINE = 8192
+function _M.detect_cve_php_oversized_auth(headers)
+  local raw = (headers or {})["authorization"] or (headers or {})["Authorization"]
+  -- A repeated header arrives as a table: every line is its own header line.
+  local vals = type(raw) == "table" and raw or { raw }
+  for _, v in ipairs(vals) do
+    if type(v) == "string" and #"Authorization: " + #v > _M.PHP2611.NGINX_DEFAULT_HEADER_LINE then
+      if lower(v):find("^%s*basic%s") then return "BASIC_OVERSIZE" end
+      return "OVERSIZE"
+    end
+  end
+  return nil
+end
+
+-- 10033: multipart_parse's own walk (one pass, PHP's default upload limit).
+function _M.detect_cve_php_multipart_desync(method, body, headers)
+  if method ~= "post" or not body or not body:find("%S") then return nil end
+  local ct_raw = php_content_type(headers or {})
+  if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
+  if not php_mp_boundary(ct_raw) then return "NO_BOUNDARY" end
+  local stat = {}
+  multipart_parse(body, ct_raw, nil, nil, MP_MAX_FILE_UPLOADS, stat)
+  if stat.stop == "garbled" and body:find("%S", stat.at) then return "GARBLED_STOP" end
+  if (stat.parts or 0) == 0 then return "NO_PART" end
+  return nil
 end
 
 -- Rule 503 — a WordPress privileged admin action that did not come from its own
