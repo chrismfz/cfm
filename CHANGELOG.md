@@ -20,6 +20,27 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **A host-scoped PATH exclude for the malpath checks.**
+  `cfm webtop challenge exclude add /images/.tmb/ --type path --scope example.gr`
+  stops the malpath challenge (`CHALLENGE_PATHS`) and the `MALPATH` ban from
+  counting that path on that site (and its `www.` alias) only; the same path
+  elsewhere, every other path on the site, and a traversal or encoded path
+  under the prefix (`/images/.tmb/../../.env`) still count. Before, the
+  command was accepted and stored but matched nothing, so the only remedy for
+  one site's tool tripping the list was deleting the entry for every site.
+  `--scope` is required (an old unscoped entry stays inert), the first path
+  segment must be a literal name (`/`, `/*`, `/*.php` are refused), and
+  match-all scope globs are refused. A cPanel tenant's scoped token may
+  manage these on its own vhosts, from the API or the cfm-admin excludes
+  card: admins and tenants both get `path` on the challenge card, with a
+  required scope field (a tenant's is prefilled with its first site in
+  alphabetical order, and checked against its own sites) and a Scope column
+  where an inert entry says so. WAF path excludes stay admin-only.
+  `tokens/me` now lists a token's vhosts sorted.
+  A skipped hit is logged once a minute per exclude
+  (`action=path_exclude_skip`). Details: `docs/DETECTORS.md`.
+
 ### Fixed
 - **The malpath list no longer challenges elFinder's thumbnails.** `/.tmb/`
   is the folder elFinder (Joomla JCE / K2, WP File Manager) keeps its

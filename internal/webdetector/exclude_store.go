@@ -37,13 +37,18 @@ type excludeStore struct {
 	// rebuildCompiledLocked, read atomically. Int64 so the len(int)->count store
 	// is a safe widening conversion (no gosec G115 narrowing); the count is tiny.
 	challengeCount atomic.Int64
+	// Lock-free count of the SCOPED path entries (MatchChallengePath's fast
+	// path: it runs for every malpath hit under the engine lock).
+	pathCount atomic.Int64
 }
 
 type compiledExcludeEntry struct {
 	Type    string
 	Scope   compiledScopeMatcher
 	Value   compiledValueMatcher
-	RuleIDs []int // nil/empty => whole-WAF skip
+	RuleIDs []int  // nil/empty => whole-WAF skip
+	Raw     string // the stored value, for log lines
+	Scoped  bool   // ScopeHosts non-empty
 }
 
 type compiledScopeMatcher struct {
@@ -210,6 +215,56 @@ func (s *excludeStore) removeHostAnyScopeLocked(t, v string, scope map[string]st
 		}
 	}
 	return removed
+}
+
+// RemovePathHosts takes the hosts in strip out of every path entry on value
+// that names at least one of them: an entry left with no host is deleted, the
+// others keep applying to their remaining hosts. A scoped caller's remove: it
+// acts on its own hosts only, so an entry shared with another tenant (or one a
+// domain move left behind) stops applying to the caller's sites without
+// touching anyone else's. An unscoped entry is never changed this way.
+// Returns whether anything changed.
+func (s *excludeStore) RemovePathHosts(v string, strip map[string]struct{}) bool {
+	t, v, ok := s.normalize("path", v)
+	if !ok || len(strip) == 0 {
+		return false
+	}
+	drop := make(map[string]struct{}, len(strip))
+	for h := range strip {
+		drop[strings.ToLower(strings.TrimSpace(h))] = struct{}{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for k, e := range s.entries {
+		if e.Type != t || e.Value != v || len(e.ScopeHosts) == 0 {
+			continue
+		}
+		keep := make([]string, 0, len(e.ScopeHosts))
+		for _, h := range e.ScopeHosts {
+			if _, gone := drop[h]; !gone {
+				keep = append(keep, h)
+			}
+		}
+		if len(keep) == len(e.ScopeHosts) {
+			continue
+		}
+		delete(s.entries, k)
+		changed = true
+		if len(keep) == 0 {
+			continue
+		}
+		e.ScopeHosts = keep
+		nk := s.key(e.Type, e.Value, e.ScopeHosts, e.RuleIDs)
+		if _, dup := s.entries[nk]; !dup {
+			s.entries[nk] = e
+		}
+	}
+	if changed {
+		s.rebuildCompiledLocked()
+		_ = s.saveLocked()
+	}
+	return changed
 }
 
 func (s *excludeStore) List() []excludeEntry {
@@ -419,29 +474,47 @@ func (s *excludeStore) MatchWAFRules(host, path string) (skipAll bool, skipIDs m
 	return false, skipIDs
 }
 
-// MatchHost is retained for backwards compatibility with existing call-sites.
-func (s *excludeStore) MatchHost(host string) bool {
-	return s.MatchChallenge(host)
-}
-
-// MatchPath is retained for backwards compatibility with existing call-sites.
-func (s *excludeStore) MatchPath(host, path string) bool {
+// MatchChallengePath reports whether a request on host under path is carved
+// out of the log-driven malpath checks (CHALLENGE_PATHS and the MALPATH flood
+// counter) by a path entry of this store, and returns the entry's value for
+// the log line. Only SCOPED path entries count: a path entry without
+// scope_hosts would exempt that path on every site, which is the same as
+// deleting the malpath list entry silently, so the API refuses to write one
+// and an unscoped entry left in an older store stays inert here (the WAF
+// store's own path entries are a different store and keep their meaning).
+// path is the ingest-normalised path (query cut); both sides are lower-cased.
+func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
+	if s == nil || s.pathCount.Load() == 0 {
+		return "", false
+	}
 	host = strings.ToLower(strings.TrimSpace(host))
 	path = strings.ToLower(strings.TrimSpace(path))
 	if host == "" || path == "" {
-		return false
+		return "", false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// A literal scope host also covers its www. alias: cPanel lists a domain
+	// without it (a tenant's token cannot name it), and nginx serves both.
+	apex := ""
+	if strings.HasPrefix(host, "www.") {
+		apex = host[len("www."):]
+	}
 	for _, e := range s.pathEntries {
-		if !e.Scope.Match(host) {
+		if !e.Scoped || !(e.Scope.Match(host) || (apex != "" && e.Scope.matchExact(apex))) {
 			continue
 		}
 		if e.Value.Match(path) {
-			return true
+			return e.Raw, true
 		}
 	}
-	return false
+	return "", false
+}
+
+// matchExact reports host among the literal (non-glob) scope hosts.
+func (m compiledScopeMatcher) matchExact(host string) bool {
+	_, ok := m.exact[host]
+	return ok
 }
 
 func (s *excludeStore) load() {
@@ -484,6 +557,8 @@ func (s *excludeStore) rebuildCompiledLocked() {
 			Scope:   compileScopeMatcher(e.ScopeHosts),
 			Value:   compileValueMatcher(e.Type, e.Value),
 			RuleIDs: append([]int(nil), e.RuleIDs...),
+			Raw:     e.Value,
+			Scoped:  len(e.ScopeHosts) > 0,
 		}
 		switch e.Type {
 		case "host":
@@ -498,6 +573,13 @@ func (s *excludeStore) rebuildCompiledLocked() {
 	s.wafEntries = waf
 	s.pathEntries = pathEntries
 	s.challengeCount.Store(int64(len(challenge)))
+	scoped := int64(0)
+	for _, e := range pathEntries {
+		if e.Scoped {
+			scoped++
+		}
+	}
+	s.pathCount.Store(scoped)
 }
 
 func compileGlob(pattern string) *regexp.Regexp {

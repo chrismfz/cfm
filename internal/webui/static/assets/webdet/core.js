@@ -59,7 +59,6 @@ export function createWebdetApp(config) {
         tokenRole: "viewer",
         allowedVhosts: [],
         scopedExcludeManagementAllowed: true,
-        scopedPathExcludeAllowed: false,
         meLoaded: false,
         // Known vhost names for the host-input datalists (vhost live,
         // forensics, controls). Loaded lazily by pages that render one.
@@ -379,16 +378,6 @@ export function createWebdetApp(config) {
       },
 
       // ── Identity / auth boot ──────────────────────────────────────────
-      isScopedPathExcludeAllowedFromIdentity(me = {}) {
-        const direct = me?.allow_scoped_path_excludes ?? me?.allowScopedPathExcludes ?? me?.scoped_path_excludes_allowed ?? me?.scopedPathExcludesAllowed;
-        if (typeof direct === "boolean") return direct;
-        const perms = me?.permissions || me?.caps || me?.capabilities;
-        if (perms && typeof perms === "object") {
-          const nested = perms.allow_scoped_path_excludes ?? perms.allowScopedPathExcludes ?? perms.scoped_path_excludes_allowed ?? perms.scopedPathExcludesAllowed;
-          if (typeof nested === "boolean") return nested;
-        }
-        return false;
-      },
       isScopedExcludeManagementAllowedFromIdentity(me = {}) {
         const direct = me?.allow_scoped_exclude_management ?? me?.allowScopedExcludeManagement ?? me?.scoped_exclude_management_allowed ?? me?.scopedExcludeManagementAllowed;
         if (typeof direct === "boolean") return direct;
@@ -462,7 +451,6 @@ export function createWebdetApp(config) {
         this.tokenRole = String(resolvedMe?.role || (this.isAdmin ? "admin" : "viewer")).toLowerCase();
         this.allowedVhosts = Array.isArray(resolvedMe?.vhosts) ? resolvedMe.vhosts.map((v) => String(v || "").trim().toLowerCase()).filter(Boolean) : [];
         this.scopedExcludeManagementAllowed = !this.isScopedMode || this.isScopedExcludeManagementAllowedFromIdentity(resolvedMe);
-        this.scopedPathExcludeAllowed = !this.isScopedMode || this.isScopedPathExcludeAllowedFromIdentity(resolvedMe);
         this.applyScopedDefaults();
         this.enforceScopedExcludeControls?.();
         this.meLoaded = true;
@@ -581,7 +569,6 @@ export function createWebdetApp(config) {
             // excludes disabled until a real identity loads. Admin fallback
             // (no token) is unaffected — canWrite is already true via isAdmin.
             this.scopedExcludeManagementAllowed = !fallbackScoped;
-            this.scopedPathExcludeAllowed = false;
             this.applyScopedChrome();
             this.setAuthState("ready");
             controller.noteInitialModeResolved({ isScopedMode: this.isScopedMode });
