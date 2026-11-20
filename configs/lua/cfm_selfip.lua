@@ -187,18 +187,30 @@ local function is_self_origin(ip)
   return false
 end
 
+-- net64s: the /64s (first 16 hex digits) the IPv6 addresses keyed in tbl
+-- (an address -> true map: the self IPs, IGNORE_IPS) fall in, worked out once
+-- per table: cfm_filecache hands back the same table until it reloads the
+-- file, so a reload makes a new entry and the old one is collected. fe80::/10
+-- addresses are left out (they never fall in a grouped /64).
+local _net64s = setmetatable({}, { __mode = "k" })
+local function net64s(tbl)
+  local s = _net64s[tbl]
+  if s then return s end
+  s = {}
+  for a in pairs(tbl) do
+    local h = ipv6_to_hex32(a)
+    if h and not h:match("^fe[89ab]") then s[h:sub(1, 16)] = true end
+  end
+  _net64s[tbl] = s
+  return s
+end
+
 -- slash64_guarded: does the IPv6 /64 whose first 16 hex digits are net64
 -- hold this node's own address or an IGNORE_IPS / IGNORE_NETS entry?
 local function slash64_guarded(net64)
-  for a in pairs(load_self_ip_cache()) do
-    local h = ipv6_to_hex32(a)
-    if h and h:sub(1, 16) == net64 then return true end
-  end
+  if net64s(load_self_ip_cache())[net64] then return true end
   local cache = load_ignore_cache()
-  for a in pairs(cache.ips) do
-    local h = ipv6_to_hex32(a)
-    if h and h:sub(1, 16) == net64 then return true end
-  end
+  if net64s(cache.ips)[net64] then return true end
   local lo = net64 .. "0000000000000000"
   for i = 1, #cache.v6_ranges do
     local r = cache.v6_ranges[i]
@@ -221,6 +233,7 @@ end
 -- applies the daemon's own.) Never an allow, an exact match, a clearance
 -- binding or a log line: those take the address.
 local function count_key(ip)
+  if type(ip) ~= "string" then return ip end
   local k = ipkey.client(ip)
   if not k:find("/", 1, true) then return k end
   local h = ipv6_to_hex32(ip)

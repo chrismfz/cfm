@@ -54,7 +54,8 @@ end
 --
 -- Lock-free fixed-window counter (audit F21): ONE atomic SH:incr per request
 -- (a window's first hit also an add, via cfm_shdict),
--- keyed on (profile, host, ip, window). The previous implementation took a
+-- keyed on (profile, host, window, client: an IPv6 client's /64). The
+-- previous implementation took a
 -- per-(profile,host,ip) spin-lock (SH:add + up to 10x ngx.sleep(1ms)) around a
 -- read-modify-write token bucket, and on lock-acquisition TIMEOUT returned a 429
 -- regardless of token availability. Under carrier-grade NAT / a shared proxy,
@@ -68,8 +69,9 @@ end
 -- WINDOW = burst/rate, LIMIT = burst (soft_bot 20/10s = 2/s burst 20; medium
 -- 10/10s; hard 5/10s). A fixed window can admit up to ~2x LIMIT across a window
 -- boundary — acceptable for a coarse bot throttle. (Deliberately NOT changed:
--- keying purely on IP still shares one budget across a NAT/proxy's users; that
--- is a deeper design question the finding raises separately.)
+-- keying on the client, an address or an IPv6 /64, still shares one budget
+-- across a NAT/proxy's or a /64's users; that is a deeper design question the
+-- finding raises separately.)
 local function throttle_hit(profileName, host, ip)
   if not SH then
     -- Intentional degraded mode: fail open and allow requests when cfm_decisions SHM is unavailable.

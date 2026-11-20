@@ -2277,7 +2277,7 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
   local win = tonumber(CFG.auth_window_sec or 20) or 20
   local thr = tonumber(CFG.auth_burst_threshold or 8) or 8
 
-  -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
+  -- Per client across vhosts, whatever `host` says (cfm_waf.lua step 25).
   local host_key = "-"
 
   -- One atomic counter per window (window_count): the get-then-set pair it
@@ -2312,7 +2312,7 @@ function _M.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
     if shdict and ip and ip ~= "" then
       local win = tonumber(CFG.auth_wp_login_head_window_sec or 20) or 20
       local thr = tonumber(CFG.auth_wp_login_head_threshold or 3) or 3
-      -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
+      -- Per client across vhosts, whatever `host` says (cfm_waf.lua step 25).
       local host_key = "-"
 
       -- Per client: an IPv6 client's /64 (client_key).
@@ -2680,7 +2680,7 @@ function _M.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, header
   local win = tonumber(CFG.xmlrpc_post_window_sec or 60) or 60
   local thr = tonumber(CFG.xmlrpc_post_threshold or 6) or 6
 
-  -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
+  -- Per client across vhosts, whatever `host` says (cfm_waf.lua step 25).
   local host_key = "-"
 
   -- Per client: an IPv6 client's /64 (client_key); the legit-caller check

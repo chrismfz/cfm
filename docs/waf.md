@@ -1280,8 +1280,8 @@ block rule is planned, so `waf_security` never arms the family.
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
 Family `WAF_AUTH_BURST`, all `block`: 510 `system.multicall`, 511
-`pingback.ping`, 512 a POST rate (6 a minute per IP across the server's
-vhosts).
+`pingback.ping`, 512 a POST rate (6 a minute per client across the server's
+vhosts; an IPv6 client is its /64, `docs/edge-ipv6.md`).
 
 **510 / 511 read method names as WordPress's IXR_Message does**
 (`det.xmlrpc_method_names`, one linear pass over IXR's parser events, after

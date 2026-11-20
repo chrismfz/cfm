@@ -362,8 +362,12 @@ on its address), always the whole /64 for a ban, with no per-node switch.
   `IGNORE_NETS` entry (the daemon's `firewall.CountKey`, with the guards the
   edge has: its gateway, the nft allow sets and the trusted proxies are not
   on the edge; these counters end in a 429, a challenge or a WAF hit, and
-  the daemon's ban applies its own). A force unblock of any address of the
-  /64, or of its network address, frees its throttle (`cfm_purge`).
+  the daemon's ban applies its own: an nft-allowed address now shares a
+  /64's counters with its neighbours, as it shares an IPv4 NAT address's).
+  The guarded /64s are worked out once per reload of the self / IGNORE
+  files, so a counted request costs a lookup. A force unblock of any address
+  of a grouped /64, or of its network address, frees its throttle
+  (`cfm_purge`); in a guarded /64 the address's own.
 - **Still per address:**
   - the kernel nft meters (`pps_v6`, `syn_v6`, `new_v6`, `icmp6`, port flood,
     connlimit `ct count`): they count packets whose source can be spoofed,
