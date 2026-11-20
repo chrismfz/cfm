@@ -74,7 +74,7 @@ grep -q 'is already the live edge' <<<"$ex" && fail "matcher kept a quoted hered
 grep -q 'cfm edge off            # (and' <<<"$ex" && fail "matcher kept a heredoc body line without a command substitution (the printed steps)"
 # And the other way: an unquoted heredoc line WITH a command substitution
 # (the report's "Config test:" line runs the edge's config test) is kept.
-grep -q 'edge_test -q' <<<"$ex" || fail "matcher dropped an unquoted heredoc line with a command substitution"
+grep -qF 'Config test:  $(edge_test' <<<"$ex" || fail "matcher dropped an unquoted heredoc line with a command substitution"
 
 if bad="$(grep -E 'systemctl[[:space:]]+(-[^[:space:]]+[[:space:]]+)*(start|stop|restart|try-restart|reload|reload-or-restart|try-reload-or-restart|enable|disable|reenable|mask|unmask|kill|isolate)\b' <<<"$ex")"; then
   fail "$SCRIPT runs a unit-changing systemctl (it must only print the switch):
