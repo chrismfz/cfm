@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.20
+
 ### Changed
 - **The edge may listen on IPv6 by default.** It stayed IPv4-only unless
   `EDGE_LISTEN_V6 = on` until the per-IP defences grouped an IPv6 client by
