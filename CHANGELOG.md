@@ -21,6 +21,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Security
+- **The edge counts an IPv6 client by its /64.** The traffic-rule throttle
+  (429), the login burst (rule 501, and its one resumed login a window), the
+  `wp-login.php` HEAD probe and the XML-RPC POST burst (rule 512) counted the
+  full address, so a client rotating inside its /64 never reached them. They
+  now count the /64, except where it holds this node's own address or an
+  `IGNORE_IPS` / `IGNORE_NETS` entry (counted per address, as the daemon
+  does). A force unblock of any address of the /64 frees its throttle. The
+  clearance cookie, the daemon's decisions and every allow or exact check
+  stay per address. `docs/edge-ipv6.md` "IPv6 /64 grouping".
 - **The web detector and the challenge server count an IPv6 client by its
   /64.** A client rotating its address inside its /64 stayed under every
   per-IP threshold: the 404 / 403 / WAF-403 / bot / malpath floods, the 40x

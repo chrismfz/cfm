@@ -103,6 +103,7 @@ function H.run(req)
   package.loaded["cfm_selfip"] = req.selfip or {
     normalize_ip = function(s) return s end,
     is_self_origin = function() return false end,
+    count_key = function(s) return require("cfm_ipkey").client(s) end,
   }
   package.loaded["cfm_clamav"] = nil
   package.preload["cfm_clamav"] = function() error("no clamav in harness") end

@@ -2134,6 +2134,18 @@ end
 end
 _M.auth_endpoint_tag = auth_endpoint_tag
 
+-- client_key: the per-client counter key for ip (cfm_selfip.count_key: an
+-- IPv6 client's /64, docs/edge-ipv6.md "IPv6 /64 grouping"); the address
+-- itself when cfm_selfip cannot load (the client key then, cfm_ipkey).
+function _M.client_key(ip) -- not a local: the chunk is at LuaJIT's 200-local cap
+  local ok, sip = pcall(require, "cfm_selfip")
+  if ok and type(sip) == "table" and sip.count_key then return sip.count_key(ip) end
+  local ok2, ik = pcall(require, "cfm_ipkey")
+  if ok2 and type(ik) == "table" and ik.client then return ik.client(ip) end
+  return ip
+end
+
+
 -- A fixed-window hit counter: the count of hits on key in the window its
 -- first hit opened (`win` seconds). cfm_shdict.incr: one atomic incr, the
 -- key's TTL set at creation and left alone, so the window closes `win` after
@@ -2270,7 +2282,8 @@ function _M.detect_auth_burst(ip, host, uri, method, shdict, args, body, headers
 
   -- One atomic counter per window (window_count): the get-then-set pair it
   -- replaces lost increments between workers and could restart a window.
-  local cnt = window_count(shdict, "auth|w|" .. ip .. "|" .. host_key .. "|" .. tag, win)
+  -- Per client: an IPv6 client's /64 (client_key).
+  local cnt = window_count(shdict, "auth|w|" .. _M.client_key(ip) .. "|" .. host_key .. "|" .. tag, win)
   if cnt and cnt >= thr then
     return tag
   end
@@ -2302,7 +2315,8 @@ function _M.detect_wp_login_probe(uri, method, headers, ip, host, shdict)
       -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
       local host_key = "-"
 
-      local cnt = window_count(shdict, "authwph|w|" .. ip .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD", win)
+      -- Per client: an IPv6 client's /64 (client_key).
+      local cnt = window_count(shdict, "authwph|w|" .. _M.client_key(ip) .. "|" .. host_key .. "|AUTH_WP_LOGIN_HEAD", win)
       if cnt and cnt >= thr then
         repeated_head = true
       end
@@ -2669,7 +2683,9 @@ function _M.detect_xmlrpc_post_burst(ip, host, uri, method, shdict, args, header
   -- Per IP across vhosts, whatever `host` says (cfm_waf.lua step 25).
   local host_key = "-"
 
-  local cnt = window_count(shdict, "xmlrpc|w|" .. ip .. "|" .. host_key, win)
+  -- Per client: an IPv6 client's /64 (client_key); the legit-caller check
+  -- above stays on the address.
+  local cnt = window_count(shdict, "xmlrpc|w|" .. _M.client_key(ip) .. "|" .. host_key, win)
   if cnt and cnt >= thr then
     return "AUTH_WP_XMLRPC_POST_BURST"
   end

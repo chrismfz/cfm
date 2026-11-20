@@ -353,6 +353,17 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     behind NAT already is.
   - Not grouped: the cPanel plugin's auth-failure deny (the plugin calls
     the API from loopback, so it never sees the client's address).
+- **Counters (edge Lua: done):** the traffic-rule throttle (`tr|`, the
+  429), the auth-endpoint burst (rule 501, `auth|w|`, and its one
+  resumed-login pass a window, `abrs|`), the `wp-login.php` HEAD probe
+  (`authwph|w|`) and the XML-RPC POST burst (rule 512, `xmlrpc|w|`) key on
+  `cfm_selfip.count_key`: an IPv6 client's /64 (`cfm_ipkey.client`), the
+  address where the /64 holds this node's own address or an `IGNORE_IPS` /
+  `IGNORE_NETS` entry (the daemon's `firewall.CountKey`, with the guards the
+  edge has: its gateway, the nft allow sets and the trusted proxies are not
+  on the edge; these counters end in a 429, a challenge or a WAF hit, and
+  the daemon's ban applies its own). A force unblock of any address of the
+  /64, or of its network address, frees its throttle (`cfm_purge`).
 - **Still per address:**
   - the kernel nft meters (`pps_v6`, `syn_v6`, `new_v6`, `icmp6`, port flood,
     connlimit `ct count`): they count packets whose source can be spoofed,
@@ -363,8 +374,15 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     signals, the challenge score, the under-attack solver count, the hot-IP
     EMA), and the malpath rung-1 reject ban (keyed on the per-address v2
     marks);
-  - the edge's shared dicts (next), then `EDGE_LISTEN_V6` defaults to on
-    (`docs/ROADMAP.md` §9c).
+  - at the edge: the clearance cookie and its revocation list, the
+    daemon's per-address decisions (`ip_action`, the decision cache), the
+    WAF push de-dup (`wafpush|`, the daemon marks per address), the
+    solved-state touches, the post-clearance-burst log counter (`cfm_pcw`,
+    at the clearance's grain), the one-a-minute log de-dups, every allow /
+    exact check (Jetpack, the direct-client cap, self / ignore) and every log
+    line; and the native nginx Meta crawler limit (`meta_host_ip_rps`, a
+    `limit_req` zone on `$binary_remote_addr`, no Lua);
+  - then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
 
 ## Verified
 

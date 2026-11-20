@@ -26,6 +26,7 @@ local rawByPath = {
       { "2a0c0000000000000000000000000000", 129 },  -- bad prefix: dropped
       { "00000000000000000000000000000000", 80 },   -- ::/80 covers ::ffff:0:0/96
       { "fe800000000000000000000000000000", 10 },   -- IGNORE_NETS fe80::/10: ignored by design
+      { "2a050000000000000000000000010000", 112 },  -- 2a05::1:0/112: inside one /64
     },
   },
 }
@@ -132,5 +133,23 @@ assert_true(selfip.is_self_origin("::abcd"), "::/80 still matches a plain v6 ins
 assert_true(not selfip.is_self_origin("10.0.1.1"), "10.0.1.1 outside range")
 assert_true(not selfip.is_self_origin("8.8.8.8"), "8.8.8.8 public")
 assert_true(not selfip.is_self_origin(""), "empty is not self-origin")
+
+-- count_key: an IPv6 client's /64, but the address where the /64 holds this
+-- node's own address or an IGNORE entry (as the daemon's firewall.CountKey).
+for ip, want in pairs({
+  ["2001:db9:1:2::5"]  = "2001:db9:1:2::/64", -- an unguarded /64
+  ["2001:db8::99"]     = "2001:db8::99",      -- holds the node's 2001:db8::1
+  ["2a01:45f8:1:2::5"] = "2a01:45f8:1:2::5",  -- inside an ignored /32
+  ["2a14:4280:1:1::9"] = "2a14:4280:1:1::9",  -- an ignored /64 itself
+  ["2a05::2:9"]        = "2a05::2:9",         -- holds an ignored /112
+  ["2a14:4280:1:2::9"] = "2a14:4280:1:2::/64", -- the ignored /64's neighbour
+  ["203.0.113.7"]      = "203.0.113.7",
+  ["fe80::1"]          = "fe80::1",           -- ungrouped (cfm_ipkey)
+  ["-"]                = "-",
+}) do
+  local got = selfip.count_key(ip)
+  assert_true(got == want, "count_key(" .. ip .. ") = " .. tostring(got) .. ", want " .. want)
+end
+assert_true(selfip.is_self_origin("2a05::1:5"), "ignore v6 /112 inside")
 
 print("ok: cfm_selfip self-origin / IGNORE_NETS bypass (loopback + self-IP + ignore ips + v4/v6 ranges)")

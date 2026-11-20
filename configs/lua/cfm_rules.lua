@@ -38,6 +38,18 @@ local function profile_for(name)
   return PROFILES[k] or PROFILES.soft_bot
 end
 
+-- client_key: the per-client counter key for ip (cfm_selfip.count_key: an
+-- IPv6 client's /64, docs/edge-ipv6.md "IPv6 /64 grouping"); the address
+-- itself when cfm_selfip cannot load (the client key then, cfm_ipkey).
+local function client_key(ip)
+  local ok, sip = pcall(require, "cfm_selfip")
+  if ok and type(sip) == "table" and sip.count_key then return sip.count_key(ip) end
+  local ok2, ik = pcall(require, "cfm_ipkey")
+  if ok2 and type(ik) == "table" and ik.client then return ik.client(ip) end
+  return ip
+end
+
+
 -- throttle_hit returns (hit, retry_after). hit==true means reject (429).
 --
 -- Lock-free fixed-window counter (audit F21): ONE atomic SH:incr per request
@@ -74,11 +86,13 @@ local function throttle_hit(profileName, host, ip)
   local limit  = p.burst
   local now = ngx.now()
   local win = math.floor(now / window)
-  -- IP is the LAST field on purpose: cfm_purge.purge_ip finds throttle keys by
-  -- matching the trailing IP on a force-unblock, so the window index goes BEFORE
-  -- it. (Format: tr|<profile>|<host>|<window>|<ip>.)
+  -- The client is the LAST field on purpose: cfm_purge.purge_ip finds throttle
+  -- keys by matching the trailing client on a force-unblock, so the window index
+  -- goes BEFORE it. (Format: tr|<profile>|<host>|<window>|<client>; the client
+  -- is an IPv6 client's /64, client_key, so rotating the address inside it
+  -- does not refill the budget.)
   local key = "tr|" .. tostring(profileName or "soft_bot") .. "|" ..
-              tostring(host or "-") .. "|" .. win .. "|" .. tostring(ip or "-")
+              tostring(host or "-") .. "|" .. win .. "|" .. client_key(tostring(ip or "-"))
 
   -- A fresh window key starts at 1; its TTL (2x the window) is applied on
   -- CREATE only, so the key ages out on its own after the window.

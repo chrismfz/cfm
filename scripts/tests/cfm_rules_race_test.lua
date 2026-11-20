@@ -161,4 +161,21 @@ do
   rules.init({})
 end
 
+-- ── an IPv6 client is throttled as its /64 ───────────────────────────────────
+-- Rotating the address inside the /64 does not refill the budget
+-- (cfm_selfip.count_key); another /64 has its own.
+do
+  now = 5000
+  for i = 1, LIMIT do
+    assert_eq(throttle(string.format("2001:db8:1:2::%x", i)).action, "allow", "v6 request " .. i .. " within the /64's budget")
+  end
+  assert_eq(throttle("2001:db8:1:2::ffff").action, "throttle", "a fresh address of the same /64 must be throttled")
+  assert_eq(throttle("2001:db8:1:3::1").action, "allow", "another /64 has its own budget")
+  local keyed = false
+  for k in pairs(dict:_dump()) do
+    if k:find("|2001:db8:1:2::/64$") then keyed = true end
+  end
+  assert(keyed, "the throttle key must end in the client's /64 (cfm_purge matches it)")
+end
+
 print("ok: cfm_rules lock-free fixed-window throttle — " .. LIMIT .. "/" .. WINDOW .. "s, fails open, ip-last key (F21)")
