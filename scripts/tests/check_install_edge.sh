@@ -2,13 +2,14 @@
 # check_install_edge.sh — scripts/install-edge.sh stays prepare-only.
 #
 # The installer adopts cfm-edge and PRINTS the switch; the operator runs it.
-# Taking the edge out of the path (`cfm dnat off`), swapping the units and
-# putting it back (`cfm dnat on`) are the operator's calls, so this pins:
+# Taking the edge out of the path (`cfm edge off`, `cfm dnat off` on an older
+# cfm), swapping the units and putting it back (`cfm edge on`) are the
+# operator's calls, so this pins:
 #
 # 1. No executed line (comments and heredoc bodies, i.e. the printed steps,
 #    removed) runs systemctl start/stop/restart/reload/enable/disable/…, a
-#    `cfm dnat …`, or signals an edge (`-s stop|quit|reload`). Read-only
-#    systemctl (is-active, status) is fine.
+#    `cfm dnat …` / `cfm edge on|off|panel|…`, or signals an edge
+#    (`-s stop|quit|reload`). Read-only systemctl (is-active, status) is fine.
 # 2. Its adoption line is the one package-proxy-config-deploy.sh looks for
 #    (a drift would leave an adopted cfm-edge un-updated on every upgrade).
 # 3. Sidecars + main config are tested together from a stage dir before
@@ -65,7 +66,15 @@ executed() {
 ex="$(executed "$SCRIPT")"
 [ -n "$ex" ] || fail "no executed lines found in $SCRIPT (matcher broken?)"
 grep -q 'print_next_steps' <<<"$ex" || fail "matcher lost the executed body of $SCRIPT"
-grep -q 'cfm dnat off' <<<"$ex" && fail "matcher kept a quoted heredoc body (the printed steps)"
+grep -q 'is already the live edge' <<<"$ex" && fail "matcher kept a quoted heredoc body (the printed steps)"
+# 'cfm edge off' sits in steps_edge's UNQUOTED rollback heredoc (it carries
+# ${old}): keep a line of it unquoted, or this sentinel proves nothing.
+# Anchored on the printed rollback line, so an EXECUTED `cfm edge off` is
+# reported by the switch check below, not here.
+grep -q 'cfm edge off            # (and' <<<"$ex" && fail "matcher kept a heredoc body line without a command substitution (the printed steps)"
+# And the other way: an unquoted heredoc line WITH a command substitution
+# (the report's "Config test:" line runs the edge's config test) is kept.
+grep -qF 'Config test:  $(edge_test' <<<"$ex" || fail "matcher dropped an unquoted heredoc line with a command substitution"
 
 if bad="$(grep -E 'systemctl[[:space:]]+(-[^[:space:]]+[[:space:]]+)*(start|stop|restart|try-restart|reload|reload-or-restart|try-reload-or-restart|enable|disable|reenable|mask|unmask|kill|isolate)\b' <<<"$ex")"; then
   fail "$SCRIPT runs a unit-changing systemctl (it must only print the switch):
@@ -73,6 +82,18 @@ $bad"
 fi
 if bad="$(grep -E '(^|[^A-Za-z_-])cfm["'\'']?[[:space:]]+["'\'']?dnat\b' <<<"$ex")"; then
   fail "$SCRIPT runs \`cfm dnat\` (taking the edge out of / into the path is the operator's call):
+$bad"
+fi
+# `cfm edge` is the same commands under one name: its switches are refused
+# too, strictly (web / panel / bypass / ipv6 on|off, even their read-only
+# forms such as `panel status`, are not the installer's to run). `cfm edge
+# help`, a bare `cfm edge`, `check` and `ipv6 [status]` pass; so does
+# `realip`, which the installer runs on purpose (`cfm realip fix`). Like the
+# `cfm dnat` check it reads the literal command: an indirect call
+# (C=cfm; $C edge on) is not seen, so keep the installer's calls literal.
+Q='["'"'"']?'
+if bad="$(grep -E "(^|[^A-Za-z_-])cfm${Q}[[:space:]]+${Q}edge${Q}[[:space:]]+${Q}(on|off|panel|cpanel|bypass|web|ipv6${Q}[[:space:]]+${Q}(on|off))\\b" <<<"$ex")"; then
+  fail "$SCRIPT runs a \`cfm edge\` switch (the switch is the operator's call):
 $bad"
 fi
 if bad="$(grep -E '[[:space:]]-s[[:space:]]+(stop|quit|reload|reopen)\b|(^|[^A-Za-z_])(kill|pkill|killall)[[:space:]]|(^|[^A-Za-z_])eval[[:space:]]' <<<"$ex")"; then

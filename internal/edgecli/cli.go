@@ -10,8 +10,8 @@
 //	cfm edge ipv6 [status]     = cfm-edge-listen-v6.sh status
 //
 // and a bare `cfm edge` prints one summary of all of them, read-only. `cfm
-// dnat` and `cfm realip` stay as they are: scripts, docs and remediation
-// hints call them.
+// dnat` and `cfm realip` stay as they are (scripts and the installers call
+// them; the remediation hints say `cfm edge`).
 package edgecli
 
 import (
