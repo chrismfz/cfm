@@ -521,7 +521,7 @@ for v in off '"off" ; note' OFF no false 0 disabled; do
   expect absent "EDGE_LISTEN_V6 = $v (last line) -> IPv4 only"
   # The way back is to remove the off line (cfm edge ipv6 on), never to
   # write = on (that lets every edge start turn IPv6 on, unconfirmed).
-  says "remove the EDGE_LISTEN_V6 = off line"
+  says "remove the EDGE_LISTEN_V6 line that turns it off"
   grep -q "set EDGE_LISTEN_V6 = on" "$tmp/out" && fail "the off hint must not say to set EDGE_LISTEN_V6 = on"
   run render
 done

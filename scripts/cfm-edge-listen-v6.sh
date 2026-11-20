@@ -325,7 +325,7 @@ realip_v6_trusted() {
 want_v6() {
     case $1 in
         off)
-            echo "EDGE_LISTEN_V6 is off (remove the EDGE_LISTEN_V6 = off line from $CFM_CONF, or: cfm edge ipv6 on; docs/edge-ipv6.md)"
+            echo "EDGE_LISTEN_V6 is off (remove the EDGE_LISTEN_V6 line that turns it off from $CFM_CONF, or: cfm edge ipv6 on; docs/edge-ipv6.md)"
             return 1
             ;;
     esac
