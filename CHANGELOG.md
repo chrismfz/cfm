@@ -41,7 +41,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   edge's IPv6 listen stayed off. It now reads `httpd_config.conf` and the files
   it includes (server level only), and names the files to edit
   (`/etc/openlitespeed/httpd-defaults.conf`, `httpd-accesscontrol.conf` on
-  DirectAdmin). CFM still does not edit the OpenLiteSpeed config.
+  DirectAdmin). On DirectAdmin it gives the DirectAdmin way (a copy in
+  `custombuild/custom/openlitespeed/conf/`, then `da build rewrite_confs`),
+  and warns when the trust is only in a live file the next `rewrite_confs`
+  overwrites. CFM still does not edit the OpenLiteSpeed config.
 - **`cfm dnat cpanel --priority -99 on` turned panel DNAT on at its default
   priority**: a flag before the subcommand was taken by the web DNAT flags.
   The panel and bypass commands now get their arguments untouched, and a word

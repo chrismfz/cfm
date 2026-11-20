@@ -52,7 +52,8 @@ func TestOpenLiteSpeedDirectAdminServer3(t *testing.T) {
 		t.Fatalf("note = %q", p.Note)
 	}
 	pl := l.plan(p)
-	for _, want := range []string{"OpenLiteSpeed", "/etc/openlitespeed/httpd-defaults.conf", "/etc/openlitespeed/httpd-accesscontrol.conf", "127.0.0.1T", "lswsctrl restart", "CustomBuild"} {
+	for _, want := range []string{"OpenLiteSpeed", "/etc/openlitespeed/httpd-defaults.conf", "/etc/openlitespeed/httpd-accesscontrol.conf",
+		"/usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf", "da build rewrite_confs", "127.0.0.1T", "lswsctrl restart"} {
 		if pl.Action != ActionManual || !strings.Contains(pl.Reason, want) {
 			t.Fatalf("plan lacks %q: %+v", want, pl)
 		}
@@ -61,10 +62,31 @@ func TestOpenLiteSpeedDirectAdminServer3(t *testing.T) {
 		t.Fatalf("plan names LiteSpeed Enterprise's file, or ::1T on an IPv4-only edge: %q", pl.Reason)
 	}
 
-	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", strings.Replace(server3OLSACL, "ALL,", "ALL, 127.0.0.1T,", 1))
+	acl := strings.Replace(server3OLSACL, "ALL,", "ALL, 127.0.0.1T,", 1)
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", acl)
 	p = l.probe("")
 	if !p.Trusted || p.Source != "/etc/openlitespeed/httpd-accesscontrol.conf" || !strings.Contains(p.Directive, "OpenLiteSpeed") {
 		t.Fatalf("127.0.0.1T added: %+v", p)
+	}
+	// Only in the live files: rewrite_confs would put the templates back.
+	for _, f := range []string{"httpd-accesscontrol.conf", "httpd-defaults.conf"} {
+		if !strings.Contains(p.Warning, "custombuild/custom/openlitespeed/conf/"+f) {
+			t.Fatalf("no rewrite_confs warning for %s: %q", f, p.Warning)
+		}
+	}
+	custom := "usr/local/directadmin/custombuild/custom/openlitespeed/conf/"
+	put(t, r, custom+"httpd-accesscontrol.conf", server3OLSACL) // a stale custom copy, without the trust
+	put(t, r, custom+"httpd-defaults.conf", server3OLSDefaults)
+	if p := l.probe(""); !strings.Contains(p.Warning, "custom/openlitespeed/conf/httpd-accesscontrol.conf") || strings.Contains(p.Warning, "conf/httpd-defaults.conf") {
+		t.Fatalf("a custom copy that differs from the live file: %q", p.Warning)
+	}
+	if ok, text := Verdict(l.probe(""), true); !ok || !strings.Contains(text, "rewrite_confs") {
+		t.Fatalf("verdict = %v %q", ok, text)
+	}
+	put(t, r, custom+"httpd-accesscontrol.conf", acl)
+	p = l.probe("")
+	if !p.Trusted || p.Warning != "" {
+		t.Fatalf("custom copies kept: %+v", p)
 	}
 	if pl := l.plan(p); pl.Action != ActionNone {
 		t.Fatalf("plan = %+v", pl)

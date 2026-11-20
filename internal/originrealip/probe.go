@@ -62,6 +62,7 @@ type Probe struct {
 	Source    string `json:"source,omitempty"`    // file holding the loopback trust
 	Header    string `json:"header,omitempty"`    // the effective header the origin reads the client from, when known
 	Note      string `json:"note,omitempty"`      // why it is not trusted, or other context
+	Warning   string `json:"warning,omitempty"`   // trusted now, but something will undo it (OpenLiteSpeed on DirectAdmin: rewrite_confs)
 
 	// nginx: the site server{} blocks read, and how many of them do not trust
 	// the edge (0 and 0 when the http-level settings decided).

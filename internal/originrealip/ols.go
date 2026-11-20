@@ -221,8 +221,18 @@ func (l layout) probeOLS() Probe {
 	if v.trusted(l) {
 		p.Trusted, p.Directive = true, "useIpInProxyHeader "+v.mode+" (OpenLiteSpeed)"
 		p.Source = v.modeSource
+		srcs := []string{v.modeSource}
 		if v.mode == "2" {
 			p.Source = v.aclSource
+			srcs = append(srcs, v.aclSource)
+		}
+		// Trusted now, but on DirectAdmin `da build rewrite_confs` rewrites the
+		// file from CustomBuild's template unless a custom copy holds it.
+		for _, src := range srcs {
+			if custom, kept := l.olsDACustom(src); custom != "" && !kept {
+				p.Warning = joinNote(p.Warning, "trusted now, but `da build rewrite_confs` rewrites "+src+
+					" from CustomBuild's template: copy it to "+custom+" to keep the trust")
+			}
 		}
 		return p
 	}
@@ -239,6 +249,30 @@ func (l layout) probeOLS() Probe {
 		p.Note = "OpenLiteSpeed: useIpInProxyHeader " + v.mode + " (" + v.modeSource + ") does not take the client from the edge's header (1, or 2 with 127.0.0.1T)"
 	}
 	return p
+}
+
+// olsDACustomDir: DirectAdmin's CustomBuild rewrites every global
+// OpenLiteSpeed file under /etc/openlitespeed from its template
+// (custombuild/configure/openlitespeed/conf) on `da build rewrite_confs`,
+// except httpd-includes.conf, and always uses a copy under this directory
+// instead (DirectAdmin FAQ, "templating system for
+// nginx/openlitespeed/apache configurations").
+const (
+	olsDALiveDir   = "/etc/openlitespeed"
+	olsDACustomDir = "/usr/local/directadmin/custombuild/custom/openlitespeed/conf"
+)
+
+// olsDACustom: for a DirectAdmin-managed file (directly under
+// /etc/openlitespeed, not httpd-includes.conf), the custom copy that keeps it
+// across `da build rewrite_confs`, and whether that copy exists and matches
+// the live file. "" when CustomBuild does not rewrite the file.
+func (l layout) olsDACustom(src string) (string, bool) {
+	if !l.anyExists(l.daMarkers) || filepath.Dir(src) != olsDALiveDir || filepath.Base(src) == "httpd-includes.conf" {
+		return "", false
+	}
+	custom := filepath.Join(olsDACustomDir, filepath.Base(src))
+	c, live := readConfFile(l.fs(custom)), readConfFile(l.fs(src))
+	return custom, c.ok && live.ok && string(c.b) == string(live.b)
 }
 
 // olsReason is the manual step for OpenLiteSpeed: CFM does not edit its config.
@@ -259,12 +293,16 @@ func olsReason(p Probe) string {
 			acl = p.ols.aclSource
 		}
 	}
-	r := "OpenLiteSpeed: set the server-level useIpInProxyHeader 2 (\"Trusted IP Only\"; " + mode + ") and add " +
+	if p.Panel == PanelDirectAdmin && filepath.Dir(acl) == olsDALiveDir {
+		// The DirectAdmin way: a custom copy CustomBuild installs and keeps.
+		return "OpenLiteSpeed on DirectAdmin: copy " + acl + " to " + filepath.Join(olsDACustomDir, filepath.Base(acl)) +
+			" and add " + trusted + " to its allow line there (and, if " + mode + " does not have useIpInProxyHeader 2, " +
+			"the same with a custom copy of it), then run `da build rewrite_confs` and restart OpenLiteSpeed " +
+			"(/usr/local/lsws/bin/lswsctrl restart). An edit of the live file alone is lost on the next rewrite_confs. " +
+			"CFM does not edit the OpenLiteSpeed config"
+	}
+	return "OpenLiteSpeed: set the server-level useIpInProxyHeader 2 (\"Trusted IP Only\"; " + mode + ") and add " +
 		trusted + " to the server-level accessControl allow list (" + acl + "), then restart it " +
 		"(/usr/local/lsws/bin/lswsctrl restart); in WebAdmin (:7080): Server Configuration > General > Use Client IP in Header, " +
 		"and Security > Access Control > Allowed List. CFM does not edit the OpenLiteSpeed config"
-	if p.Panel == PanelDirectAdmin {
-		r += "; DirectAdmin's CustomBuild can rewrite those files on a rebuild, so run `cfm realip` again after one"
-	}
-	return r
 }
