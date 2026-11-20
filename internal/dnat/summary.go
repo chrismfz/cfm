@@ -42,6 +42,7 @@ type Summary struct {
 	// PanelFromSaved: the live chain's priority could not be parsed, so
 	// PanelPriority is the saved one `panel on` / the failsafe install.
 	PanelFromSaved bool
+	PanelMode      string // the mode it was last turned on with ("" when not saved)
 	PanelIntent    string
 	PanelBypass    int
 }
@@ -100,6 +101,9 @@ func CollectSummary(backend firewall.Backend) Summary {
 		}
 	}
 
+	if m, ok := LoadPanelMode(); ok {
+		s.PanelMode = m
+	}
 	s.WebIntent = intentWord(ScopeWeb)
 	s.PanelIntent = intentWord(ScopeCPanel)
 	s.WebBypass = bypassCount(firewall.DNATBypassScopeWeb)

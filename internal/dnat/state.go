@@ -133,6 +133,54 @@ func PanelStartupPriority() int {
 	return defaultPanelDNATPriority
 }
 
+// panelDNATModePath records the --mode the panel DNAT was last turned on
+// with (auto, chain-imunify, direct-cpsrvd, fallback), next to its priority:
+// a bare `panel on` re-uses both, and `panel status` reports it (the mode is
+// not visible in the installed chain).
+var panelDNATModePath = "/var/lib/cfm/dnat_panel_mode"
+
+// panelModes are the --mode values `panel on` accepts.
+var panelModes = map[string]bool{"auto": true, "chain-imunify": true, "direct-cpsrvd": true, "fallback": true}
+
+// PersistPanelMode writes the mode panel DNAT was turned on with.
+func PersistPanelMode(mode string) error {
+	if err := os.MkdirAll(filepath.Dir(panelDNATModePath), cfmStateDirMode); err != nil {
+		return err
+	}
+	return os.WriteFile(panelDNATModePath, []byte(mode+"\n"), 0o644)
+}
+
+// LoadPanelMode returns (mode, true) when a known mode was persisted.
+func LoadPanelMode() (string, bool) {
+	b, err := os.ReadFile(panelDNATModePath)
+	if err != nil {
+		return "", false
+	}
+	m := strings.TrimSpace(string(b))
+	if !panelModes[m] {
+		return "", false
+	}
+	return m, true
+}
+
+// savedPriorityOK / savedModeOK: the file is absent, or present with a value
+// LoadPanelPriority / LoadPanelMode accept (false = present but unusable).
+func savedPriorityOK() bool {
+	if _, err := os.Stat(panelDNATPriorityPath); os.IsNotExist(err) {
+		return true
+	}
+	_, ok := LoadPanelPriority()
+	return ok
+}
+
+func savedModeOK() bool {
+	if _, err := os.Stat(panelDNATModePath); os.IsNotExist(err) {
+		return true
+	}
+	_, ok := LoadPanelMode()
+	return ok
+}
+
 // LoadIntent returns the persisted intent for the given scope. `present`
 // is false when the file does not exist; callers should treat that as
 // "no intent recorded yet" and default to OFF.

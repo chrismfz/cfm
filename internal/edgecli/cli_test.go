@@ -149,6 +149,8 @@ func TestSummaryFlagsWhatNeedsALook(t *testing.T) {
 		{"failed probe", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebOn: true, LastProbe: dnat.ProbeResult{At: time.Unix(1, 0), Reason: "timeout"}},
 			nil, []string{"last health probe FAILED", "timeout"}, 0},
 		{"unreadable bypass", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebBypass: -1}, nil, []string{"bypass list unreadable"}, 1},
+		{"panel mode shown", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, PanelOn: true, PanelPriority: -99, PanelMode: "fallback"},
+			nil, []string{"Panel DNAT:  ON   priority -99, mode fallback\n"}, 0},
 		{"panel priority from the saved file", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, PanelOn: true, PanelPriority: -101, PanelFromSaved: true},
 			nil, []string{"priority -101 (saved value: the live chain could not be parsed)"}, 0},
 	}

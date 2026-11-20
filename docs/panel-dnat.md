@@ -28,13 +28,18 @@ on|off` are deprecated: accepted with a warning, ignored.
 
 **Modes**
 
-- `auto`: `chain-imunify` when Imunify360 / WebShield mappings are found,
-  else `direct-cpsrvd`.
-- `chain-imunify`: CFM takes the panel ports first and proxies to Imunify's
-  WebShield `522xx` targets.
-- `direct-cpsrvd`: CFM takes them first and proxies to local `cpsrvd` `208x`.
-- `fallback`: Imunify first (priority -99). Not a complete panel mitigation
-  when Imunify already redirects the ports.
+The mode sets the default priority and the label `on`, `status` and
+`cfm edge` print;
+nothing else reads it (the listeners and the upstream are the same in every
+mode):
+
+- `auto`: labelled `chain-imunify` when Imunify360 / WebShield mappings are
+  found, else `direct-cpsrvd`; priority -101.
+- `chain-imunify` / `direct-cpsrvd`: priority -101 (CFM first).
+- `fallback`: priority -99 (Imunify first). Not a complete panel mitigation
+  when Imunify already redirects the ports (`status` warns while it is on).
+
+An unknown `--mode` is refused, nothing changed.
 
 **Priority:** `-101` = CFM first (the default), `-99` = Imunify first.
 `cfm dnat cpanel on --priority …` persists the choice, and the daemon reuses
@@ -42,6 +47,20 @@ it on restart and reboot (`PanelStartupPriority`: the saved value, else the
 `NFT_PANEL_DNAT_PRIORITY` env var, else -101). `cfm.conf`'s
 `NFT_DNAT_PRIORITY` is the WEB redirect's priority and does not touch the
 panel chain.
+
+**A bare `on` re-uses the last choice.** `on` saves the mode and the
+priority it applied (`/var/lib/cfm/dnat_panel_mode`,
+`/var/lib/cfm/dnat_panel_priority`), and an `on` with neither flag applies
+them again, so `off` then `on` keeps a fallback / -99 setup (before, it went
+back to auto / -101 and overwrote the saved priority). An explicit `--mode`
+takes its own default priority again (`fallback` -99, else -101), and
+`--priority` always wins (alone, it records the mode as `auto`). With nothing
+saved, a bare `on` takes the daemon's default (`NFT_PANEL_DNAT_PRIORITY` when
+set, else -101); a saved -99 without a saved mode (an older cfm) is labelled
+`fallback`; a saved file that does not parse makes a bare `on` refuse,
+nothing changed. `status`
+prints the saved mode as `Enabled with mode:` (the mode is not visible in the
+installed chain).
 
 ## DirectAdmin
 

@@ -53,3 +53,22 @@ func TestPanelStatusReportsInstalledPriority(t *testing.T) {
 		t.Fatalf("status must not report the -101 flag default as the installed priority:\n%s", out)
 	}
 }
+
+// status reports the mode panel DNAT was turned on with (saved), not the
+// --mode flag's default.
+func TestPanelStatusReportsSavedMode(t *testing.T) {
+	stubNoEdgeDetected(t)
+	stubNoExternalTools(t)
+	isolatePanelChoice(t, "fallback", "-99")
+	be := panelStatusStub{on: true, rules: "table inet cfm_panel_redirect {\n  chain prerouting {\n    type nat hook prerouting priority dstnat + 1; policy accept;\n  }\n}\n"}
+	out, _ := captureStreams(t, func() {
+		if code := runPanelCLI([]string{"status"}, be); code != 0 {
+			t.Fatalf("expected code 0, got %d", code)
+		}
+	})
+	for _, want := range []string{"Selected mode: fallback", "Enabled with mode: fallback (saved"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+}
