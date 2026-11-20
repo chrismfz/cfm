@@ -44,7 +44,14 @@
 /wp_filemanager.php
 
 # hidden stash
-/.tmb/
+# NOT /.tmb/: it is elFinder's thumbnail folder (Joomla JCE / K2, WP File
+# Manager, ...). An admin browsing the file manager loads every thumbnail
+# from it (immaroniaskomotinis.gr on earth, 2026-11-19/20: 140 .png from one
+# GR address), so the first one challenged the IP and revoked its cookie, and
+# elFinder's next AJAX calls got the challenge page instead of JSON. What it
+# caught was one campaign, /.tmb/worksec.php (~110 a day over the fleet, from
+# Azure): /worksec.php keeps that, in any folder.
+/worksec.php
 /.well-known/header.php
 
 # root-level webshell names (IMPORTANT: keep leading slash to avoid substring hits)

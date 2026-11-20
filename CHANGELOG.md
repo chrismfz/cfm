@@ -20,7 +20,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The malpath list no longer challenges elFinder's thumbnails.** `/.tmb/`
+  is the folder elFinder (Joomla JCE / K2, WP File Manager) keeps its
+  thumbnails in: an admin browsing the file manager was challenged on the
+  first one and had the clearance cookie revoked, so the file manager's
+  next AJAX calls got the challenge page and it stopped working. The entry
+  becomes `/worksec.php`, which keeps the one campaign it caught
+  (`/.tmb/worksec.php`, ~110 a day over the fleet) in any folder.
 
 ## 2026.11.20
 
