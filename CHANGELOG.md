@@ -90,13 +90,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ### Changed
 - **The hints say `cfm edge`.** The edge health checks (`cfm edge check`, the
-  MCP `edge_health`, `whats_wrong`) and `cfm realip` now name
+  MCP `edge_health`, `whats_wrong`), `cfm realip` and `cfm health` now name
   `cfm edge realip fix`, `cfm edge on --priority …` and `cfm edge ipv6 on`
   (instead of the IPv6 listen script's path) as the next step, and
-  `install-edge.sh` prints the switch and the rollback with `cfm edge`: a
-  bare `cfm edge panel on` re-uses the mode and priority panel DNAT had, so
-  nothing needs noting beforehand. `cfm dnat` and `cfm realip` work as
-  before, and their own help is unchanged.
+  `install-edge.sh` prints the switch and the rollback with `cfm edge` where
+  the cfm has it (a bare `cfm edge panel on` re-uses the mode and priority
+  panel DNAT had, so nothing needs noting beforehand), and the old
+  `cfm dnat` steps on an older cfm (run from a checkout). `cfm dnat` and
+  `cfm realip` work as before, and their own help is unchanged.
 
 ## 2026.11.20
 

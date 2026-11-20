@@ -258,8 +258,8 @@ apps that trust localhost, and one bucket for every login limiter. So:
   and whenever the edge does listen on IPv6: the files exist, or the kernel
   shows a root listener on a global IPv6 address on 9080 / 9043 (a
   `listen [::]` added by hand). Until
-  then it warns "the edge does not listen on IPv6 (run: cfm realip fix, then
-  then run the script with render)"; once the edge listens, a gap reads "logs ::1 for every
+  then it warns "the edge does not listen on IPv6 (run: cfm edge realip fix,
+  then cfm edge ipv6 on)"; once the edge listens, a gap reads "logs ::1 for every
   IPv6 visitor".
 - `cfm realip fix` then writes the `::1` trust for Apache and nginx, also on
   an origin whose 127.0.0.1 trust comes from a file CFM did not write

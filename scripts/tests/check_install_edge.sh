@@ -76,10 +76,14 @@ if bad="$(grep -E '(^|[^A-Za-z_-])cfm["'\'']?[[:space:]]+["'\'']?dnat\b' <<<"$ex
   fail "$SCRIPT runs \`cfm dnat\` (taking the edge out of / into the path is the operator's call):
 $bad"
 fi
-# `cfm edge` is the same commands under one name: its writers are refused too
-# (only `cfm edge help` / a bare `cfm edge` / `check` / `ipv6 status` read).
-if bad="$(grep -E '(^|[^A-Za-z_-])cfm["'\'']?[[:space:]]+["'\'']?edge["'\'']?[[:space:]]+["'\'']?(on|off|panel|cpanel|bypass|realip|web|ipv6[[:space:]]+(on|off))\b' <<<"$ex")"; then
-  fail "$SCRIPT runs a \`cfm edge\` writer (the switch is the operator's call):
+# `cfm edge` is the same commands under one name: its switches are refused
+# too, strictly (web / panel / bypass / ipv6 on|off, even their read-only
+# forms such as `panel status`, are not the installer's to run). `cfm edge
+# help`, a bare `cfm edge`, `check` and `ipv6 [status]` pass; so does
+# `realip`, which the installer runs on purpose (`cfm realip fix`).
+Q='["'"'"']?'
+if bad="$(grep -E "(^|[^A-Za-z_-])cfm${Q}[[:space:]]+${Q}edge${Q}[[:space:]]+${Q}(on|off|panel|cpanel|bypass|web|ipv6${Q}[[:space:]]+${Q}(on|off))\\b" <<<"$ex")"; then
+  fail "$SCRIPT runs a \`cfm edge\` switch (the switch is the operator's call):
 $bad"
 fi
 if bad="$(grep -E '[[:space:]]-s[[:space:]]+(stop|quit|reload|reopen)\b|(^|[^A-Za-z_])(kill|pkill|killall)[[:space:]]|(^|[^A-Za-z_])eval[[:space:]]' <<<"$ex")"; then
