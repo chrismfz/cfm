@@ -43,13 +43,15 @@ func TestNormalizePanelArgs_AcceptsFlagAndKeyValue(t *testing.T) {
 	}
 }
 
+// The deprecated `--challenge <value>` is ignored, its value included: left in
+// place, the value read as a stray word after the flags.
 func TestChallengeShortcuts(t *testing.T) {
 	gotOn, err := normalizePanelArgs([]string{"on", "--challenge", "forced"})
-	if err != nil || strings.Join(gotOn, " ") != "on forced" {
+	if err != nil || strings.Join(gotOn, " ") != "on" {
 		t.Fatalf("unexpected normalize for forced: %v %v", gotOn, err)
 	}
-	gotOff, err := normalizePanelArgs([]string{"on", "--challenge", "off"})
-	if err != nil || strings.Join(gotOff, " ") != "on off" {
+	gotOff, err := normalizePanelArgs([]string{"on", "--challenge", "off", "--priority", "-99"})
+	if err != nil || strings.Join(gotOff, " ") != "on --priority -99" {
 		t.Fatalf("unexpected normalize for off: %v %v", gotOff, err)
 	}
 }

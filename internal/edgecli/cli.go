@@ -45,13 +45,15 @@ type deps struct {
 	ipv6    func() ([]string, error)
 }
 
-// Run is `cfm edge`.
-func Run(args []string, backend firewall.Backend) int {
+// Run is `cfm edge`. The firewall backend is built only for the routes that
+// read or change DNAT: `cfm edge realip|ipv6|help` work where it cannot be
+// (no nft binary), as `cfm realip` does.
+func Run(args []string, backend func() firewall.Backend) int {
 	return run(args, deps{
 		out:     os.Stdout,
 		errOut:  os.Stderr,
-		summary: func() dnat.Summary { return dnat.CollectSummary(backend) },
-		dnat:    func(a []string) int { return dnat.RunCLI(a, backend) },
+		summary: func() dnat.Summary { return dnat.CollectSummary(backend()) },
+		dnat:    func(a []string) int { return dnat.RunCLI(a, backend()) },
 		realip:  originrealip.RunCLI,
 		verdict: func() (bool, string) {
 			return originrealip.Verdict(originrealip.ProbeSystem(""), originrealip.EdgeActive())
@@ -133,8 +135,10 @@ func printSummary(d deps) int {
 		fmt.Fprintf(w, "  Engine:      WARNING: more than one of %s is active; exactly one should be active and enabled\n", edgeengine.NameList())
 	case s.ActiveEdge == "":
 		fmt.Fprintln(w, "  Engine:      none active")
+	case !s.EdgeRunning:
+		fmt.Fprintf(w, "  Engine:      %s (enabled, NOT running)\n", s.ActiveEdge)
 	default:
-		fmt.Fprintf(w, "  Engine:      %s (active)\n", s.ActiveEdge)
+		fmt.Fprintf(w, "  Engine:      %s (running)\n", s.ActiveEdge)
 	}
 
 	switch {
@@ -169,6 +173,7 @@ func printSummary(d deps) int {
 	switch {
 	case err != nil:
 		fmt.Fprintf(w, "  IPv6 listen: UNKNOWN (%v)\n", err)
+		rc = 1
 	case len(lines) == 0:
 		fmt.Fprintln(w, "  IPv6 listen: no edge engine found")
 	default:
@@ -191,15 +196,20 @@ func printSummary(d deps) int {
 	// What needs a look.
 	var notes []string
 	if s.WebErr == nil {
-		if s.WebOn && s.ActiveEdge == "" && !s.Ambiguous {
-			notes = append(notes, "web DNAT is ON but no edge engine is active: 80/443 go to an edge that is not running")
+		if s.WebOn && !s.EdgeRunning && !s.Ambiguous {
+			notes = append(notes, "web DNAT is ON but no edge engine runs: 80/443 go to an edge that is not there")
 		}
 		if !s.WebOn && s.WebIntent == "on" {
-			notes = append(notes, "web DNAT is OFF but its saved intent is ON: the failsafe puts it back once the edge answers (cfm edge off clears the intent)")
+			notes = append(notes, "web DNAT is OFF but its saved intent is ON: the daemon's failsafe puts it back once the edge answers (cfm edge off clears the intent)")
 		}
 	}
-	if s.PanelErr == nil && !s.PanelOn && s.PanelIntent == "on" {
-		notes = append(notes, "panel DNAT is OFF but its saved intent is ON (cfm edge panel off clears the intent)")
+	if s.PanelErr == nil {
+		if s.PanelOn && !s.EdgeRunning && !s.Ambiguous {
+			notes = append(notes, "panel DNAT is ON but no edge engine runs: the panel ports go to an edge that is not there")
+		}
+		if !s.PanelOn && s.PanelIntent == "on" {
+			notes = append(notes, "panel DNAT is OFF but its saved intent is ON: the daemon's failsafe puts it back (cfm edge panel off clears the intent)")
+		}
 	}
 	if len(notes) > 0 {
 		fmt.Fprintln(w)
@@ -221,15 +231,34 @@ func activeEngineLines(lines []string, active string) []string {
 		return lines
 	}
 	var mine []string
+	found := false
 	for _, l := range lines {
-		if strings.HasPrefix(strings.ToLower(l), strings.ToLower(active)+":") {
+		switch engineOfLine(l) {
+		case strings.ToLower(active):
+			mine = append(mine, l)
+			found = true
+		case "":
+			// Not an engine's line (a WARNING about EDGE_LISTEN_V6, say): keep it.
 			mine = append(mine, l)
 		}
 	}
-	if len(mine) == 0 {
+	if !found {
 		return lines
 	}
 	return mine
+}
+
+// engineOfLine is the engine a status line is about ("openresty", "angie",
+// "cfm-edge"), or "" when it names none.
+func engineOfLine(l string) string {
+	name, _, ok := strings.Cut(l, ":")
+	if !ok {
+		return ""
+	}
+	if p, ok := edgeengine.Lookup(strings.ToLower(name)); ok {
+		return p.Name
+	}
+	return ""
 }
 
 func bypassNote(n int) string {

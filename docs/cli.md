@@ -222,16 +222,21 @@ cfm edge ipv6 [status]           # the IPv6 listen decision of every installed e
 
 `on` and `off` move traffic; they never start or stop the edge service.
 
-The bare `cfm edge` prints the engine that runs (a warning when more than one
-is active), web DNAT (priority, target ports, bypass count, last health
+The bare `cfm edge` prints the engine (`running`, or `enabled, NOT running`
+for an enabled one that stopped; a warning when more than one is active), web
+DNAT (priority, target ports, bypass count, last health
 probe), panel DNAT (priority), the running engine's IPv6 listen decision and
 the origin real-IP verdict, then what needs a look:
 
-- web DNAT on with no edge engine active (80/443 go to nothing);
-- DNAT off while its saved intent is on (the failsafe puts it back once the
-  edge answers; `cfm edge off` clears the intent).
+- web or panel DNAT on with no edge engine running (that traffic goes to
+  nothing);
+- DNAT off while its saved intent is on (the daemon's failsafe puts it back
+  once the edge answers; `cfm edge off` / `cfm edge panel off` clear it).
 
-A state it cannot read prints `UNKNOWN (…)` and exits 1, never `OFF`.
+A state it cannot read prints `UNKNOWN (…)` and exits 1, never `OFF`. The
+routes that need no firewall (`realip`, `ipv6`, `help`) also work where the
+nft backend cannot start. Flags go after the subcommand (`cfm edge panel on
+--priority -99`); one before it is refused.
 
 ## `cfm realip`
 

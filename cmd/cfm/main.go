@@ -326,7 +326,7 @@ func main() {
 		dnat.SetAPIBase(apiBaseURL())
 		clihttp.SetToken(apiAuthToken())
 		dnat.SetConfigDir(cfgDir())
-		os.Exit(edgecli.Run(os.Args[2:], mustBackend()))
+		os.Exit(edgecli.Run(os.Args[2:], mustBackend))
 	case "firewall":
 		be := mustBackend()
 		_, engine, source := cliFirewallEngine()

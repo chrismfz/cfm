@@ -4,9 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cfm/internal/firewall"
+	"cfm/internal/systemdunit"
 )
 
 type summaryBackend struct {
@@ -93,5 +95,48 @@ func TestCollectSummaryUnreadableBypassIsUnknown(t *testing.T) {
 	firewall.DNATBypassWebPath = dir // a directory: the read fails
 	if s := CollectSummary(summaryBackend{}); s.WebBypass != -1 {
 		t.Fatalf("unreadable bypass list must read -1, got %d", s.WebBypass)
+	}
+}
+
+// A flag before the subcommand used to be taken by the wrong flag set (the
+// panel went on at its default priority) or the word after it was dropped
+// (the report printed instead). Both are refused now, before anything runs.
+func TestFlagsBeforeTheSubcommandAreRefused(t *testing.T) {
+	isolateSummaryFiles(t)
+	stubNoExternalTools(t)
+	b := &redirectBackend{}
+	for _, args := range [][]string{
+		{"cpanel", "--priority", "-99", "on"},
+		{"panel", "--mode", "fallback", "off"},
+		{"--priority", "-99", "on"},
+		{"--http-port", "9080", "off"},
+	} {
+		var rc int
+		_, errOut := captureStreams(t, func() { rc = RunCLI(args, b) })
+		if rc != 2 || !strings.Contains(errOut, "flags go after the subcommand") {
+			t.Errorf("%v: rc=%d stderr=%q", args, rc, errOut)
+		}
+	}
+	if b.onCalls != 0 || b.offCalls != 0 {
+		t.Fatalf("a refused command changed DNAT: on=%d off=%d", b.onCalls, b.offCalls)
+	}
+}
+
+// The resolver names the one ENABLED engine when none is active (a crashed
+// edge); the summary must say it does not run, not call it active.
+func TestCollectSummaryEnabledButStoppedEngine(t *testing.T) {
+	isolateSummaryFiles(t)
+	panelSystemdUnitProbe = func(unit string) (systemdunit.Status, bool) {
+		return systemdunit.Status{Enabled: strings.HasPrefix(unit, "angie")}, true
+	}
+	s := CollectSummary(summaryBackend{webOn: true})
+	if s.ActiveEdge != "angie" || s.EdgeRunning || s.Ambiguous {
+		t.Fatalf("got edge=%q running=%v ambiguous=%v", s.ActiveEdge, s.EdgeRunning, s.Ambiguous)
+	}
+	panelSystemdUnitProbe = func(unit string) (systemdunit.Status, bool) {
+		return systemdunit.Status{Enabled: true, Active: strings.HasPrefix(unit, "cfm-edge")}, true
+	}
+	if s := CollectSummary(summaryBackend{}); s.ActiveEdge != "cfm-edge" || !s.EdgeRunning {
+		t.Fatalf("got edge=%q running=%v", s.ActiveEdge, s.EdgeRunning)
 	}
 }

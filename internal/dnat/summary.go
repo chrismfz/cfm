@@ -6,13 +6,19 @@ import (
 
 // Summary is the read-only DNAT picture `cfm edge` prints: which edge engine
 // runs, whether web and panel traffic is redirected to it, and how. It is
-// built from the same sources as `cfm dnat` / `cfm dnat cpanel status`, so
-// the two never disagree. Nothing here changes state.
+// built from the same sources as `cfm dnat` / `cfm dnat cpanel status`, but a
+// state it cannot read stays an error here (`cfm dnat cpanel status` prints
+// OFF for one), and the web ports are the installed redirect's (the `cfm dnat`
+// report prints its flag defaults). Nothing here changes state.
 type Summary struct {
-	// ActiveEdge is the edge engine the redirect points at: its canonical
-	// name, "" when none is active, or Ambiguous when more than one is.
-	ActiveEdge string
-	Ambiguous  bool
+	// ActiveEdge is the edge engine the redirect points at, as the DNAT
+	// resolver picks it: the one active unit, else the one ENABLED unit (so
+	// a crashed engine is still named), "" when neither; Ambiguous when more
+	// than one is active. EdgeRunning says whether it actually runs (unit
+	// active, or its process seen).
+	ActiveEdge  string
+	EdgeRunning bool
+	Ambiguous   bool
 
 	WebOn       bool
 	WebErr      error
@@ -39,6 +45,7 @@ func CollectSummary(backend firewall.Backend) Summary {
 		s.Ambiguous = true
 	default:
 		s.ActiveEdge = svc
+		s.EdgeRunning = svc != "" && panelListenerServiceIsConfirmedActive(svc)
 	}
 
 	if backend == nil {

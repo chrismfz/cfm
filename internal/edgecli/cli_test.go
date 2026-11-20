@@ -95,7 +95,7 @@ func TestSummaryAndRefusalsNeverCallTheWriters(t *testing.T) {
 func TestSummaryOutput(t *testing.T) {
 	at := time.Date(2026, 11, 20, 12, 32, 0, 0, time.UTC)
 	s := dnat.Summary{
-		ActiveEdge: "cfm-edge", WebOn: true, WebPriority: -101, HTTPPort: 9080, HTTPSPort: 9043, WebBypass: 2,
+		ActiveEdge: "cfm-edge", EdgeRunning: true, WebOn: true, WebPriority: -101, HTTPPort: 9080, HTTPSPort: 9043, WebBypass: 2,
 		LastProbe: dnat.ProbeResult{At: at, OK: true},
 		PanelOn:   true, PanelPriority: -101,
 	}
@@ -104,7 +104,7 @@ func TestSummaryOutput(t *testing.T) {
 		t.Fatalf("rc=%d", rc)
 	}
 	for _, want := range []string{
-		"Engine:      cfm-edge (active)",
+		"Engine:      cfm-edge (running)",
 		"Web DNAT:    ON   priority -101, tcp/80 -> :9080, tcp+udp/443 -> :9043; 2 bypass source(s)",
 		"last health probe ok at 2026-11-20T12:32:00Z",
 		"Panel DNAT:  ON   priority -101\n",
@@ -132,15 +132,19 @@ func TestSummaryFlagsWhatNeedsALook(t *testing.T) {
 		rc   int
 	}{
 		{"redirect to nothing", dnat.Summary{WebOn: true, WebPriority: -99, HTTPPort: 9080, HTTPSPort: 9043},
-			nil, []string{"Engine:      none active", "web DNAT is ON but no edge engine is active"}, 0},
+			nil, []string{"Engine:      none active", "web DNAT is ON but no edge engine runs"}, 0},
+		{"enabled but crashed", dnat.Summary{ActiveEdge: "angie", WebOn: true, PanelOn: true},
+			nil, []string{"Engine:      angie (enabled, NOT running)", "web DNAT is ON but no edge engine runs", "panel DNAT is ON but no edge engine runs"}, 0},
 		{"ambiguous", dnat.Summary{Ambiguous: true}, nil, []string{"WARNING: more than one of"}, 0},
-		{"intent on, dnat off", dnat.Summary{ActiveEdge: "angie", WebIntent: "on", PanelIntent: "on"},
-			nil, []string{"Web DNAT:    OFF", "saved intent is ON: the failsafe", "panel DNAT is OFF but its saved intent is ON"}, 0},
+		{"ipv6 unknown alone", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true}, errors.New("script missing"),
+			[]string{"IPv6 listen: UNKNOWN (script missing)"}, 1},
+		{"intent on, dnat off", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebIntent: "on", PanelIntent: "on"},
+			nil, []string{"Web DNAT:    OFF", "saved intent is ON: the daemon's failsafe", "panel DNAT is OFF but its saved intent is ON"}, 0},
 		{"unknown state", dnat.Summary{WebErr: errors.New("nft: boom"), PanelErr: errors.New("nft: bang")},
 			errors.New("script missing"), []string{"Web DNAT:    UNKNOWN (nft: boom)", "Panel DNAT:  UNKNOWN (nft: bang)", "IPv6 listen: UNKNOWN (script missing)"}, 1},
-		{"failed probe", dnat.Summary{ActiveEdge: "angie", WebOn: true, LastProbe: dnat.ProbeResult{At: time.Unix(1, 0), Reason: "timeout"}},
+		{"failed probe", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebOn: true, LastProbe: dnat.ProbeResult{At: time.Unix(1, 0), Reason: "timeout"}},
 			nil, []string{"last health probe FAILED", "timeout"}, 0},
-		{"unreadable bypass", dnat.Summary{ActiveEdge: "angie", WebBypass: -1}, nil, []string{"bypass list unreadable"}, 0},
+		{"unreadable bypass", dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebBypass: -1}, nil, []string{"bypass list unreadable"}, 0},
 	}
 	for _, c := range cases {
 		d, out, _ := testDeps(&recorder{}, c.s, nil, c.v6)
@@ -152,6 +156,9 @@ func TestSummaryFlagsWhatNeedsALook(t *testing.T) {
 				t.Errorf("%s: missing %q in:\n%s", c.name, w, out.String())
 			}
 		}
+		if c.rc == 0 && c.name != "redirect to nothing" && c.name != "enabled but crashed" && strings.Contains(out.String(), "no edge engine runs") {
+			t.Errorf("%s: a running engine was reported as not running:\n%s", c.name, out.String())
+		}
 		if c.name == "unknown state" && strings.Contains(out.String(), "OFF") {
 			t.Errorf("%s: an unknown state read as OFF:\n%s", c.name, out.String())
 		}
@@ -159,10 +166,10 @@ func TestSummaryFlagsWhatNeedsALook(t *testing.T) {
 }
 
 func TestActiveEngineLines(t *testing.T) {
-	all := []string{"OpenResty: IPv4 only", "Angie: ready", "cfm-edge: listening"}
+	all := []string{"OpenResty: IPv4 only", "Angie: ready", "cfm-edge: listening", `WARNING: EDGE_LISTEN_V6 = "x" is not a value; treating it as off`}
 	for active, want := range map[string][]string{
-		"cfm-edge":  {"cfm-edge: listening"},
-		"openresty": {"OpenResty: IPv4 only"},
+		"cfm-edge":  {"cfm-edge: listening", all[3]},
+		"openresty": {"OpenResty: IPv4 only", all[3]},
 		"":          all,
 		"unknown":   all,
 	} {
@@ -172,7 +179,7 @@ func TestActiveEngineLines(t *testing.T) {
 	}
 	// `cfm edge ipv6` prints every engine, whichever runs.
 	d, out, _ := testDeps(&recorder{}, dnat.Summary{ActiveEdge: "cfm-edge"}, all, nil)
-	if rc := run([]string{"ipv6"}, d); rc != 0 || strings.Count(out.String(), "\n") != 3 {
+	if rc := run([]string{"ipv6"}, d); rc != 0 || strings.Count(out.String(), "\n") != 4 {
 		t.Fatalf("rc=%d out=%q", rc, out.String())
 	}
 }
