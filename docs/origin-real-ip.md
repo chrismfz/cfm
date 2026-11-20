@@ -21,13 +21,13 @@ because of that.
 
 | Where | What |
 |---|---|
-| `cfm realip` | One-line verdict; `--json` for the probe. Exit 1 = an edge is in front and the origin logs 127.0.0.1. |
+| `cfm edge realip` (also `cfm realip`, which scripts call) | One-line verdict; `--json` for the probe. Exit 1 = an edge is in front and the origin logs 127.0.0.1. |
 | `cfm health` | The `Origin real-IP` line under the edge diagnostics. |
 | `edge_health` (MCP / `/api/v1/system/edge-health`) | Check G, `origin-real-ip`; a `warn` reaches `whats_wrong`. |
 
 The verdict is **trusted** when the origin trusts 127.0.0.1 (or
 `127.0.0.1/32`, `127.0.0.0/8`) *and* the client header in effect is one of the
-edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. When the edge listens on IPv6, or may and can (`EDGE_LISTEN_V6` allows it, a global IPv6 address and the origin on IPv6 on 80 and 443: [edge-ipv6.md](edge-ipv6.md)), an IPv6 visitor's hop comes from `::1`, so the same trust must hold for `::1` too, and the verdict is trusted only when both do (`edge_ipv6` / `edge_ipv6_listening` in `--json`; a gap reads "the edge does not listen on IPv6", or "logs ::1 for every IPv6 visitor" once it listens). The `cfm realip fix` files trust both; LiteSpeed needs `::1T` as well. It is **n/a (OK)** when no edge engine runs: then the origin faces
+edge's three. `::1` alone does not count: the edge proxies from 127.0.0.1. When the edge listens on IPv6, or may and can (`EDGE_LISTEN_V6` allows it, a global IPv6 address and the origin on IPv6 on 80 and 443: [edge-ipv6.md](edge-ipv6.md)), an IPv6 visitor's hop comes from `::1`, so the same trust must hold for `::1` too, and the verdict is trusted only when both do (`edge_ipv6` / `edge_ipv6_listening` in `--json`; a gap reads "the edge does not listen on IPv6", or "logs ::1 for every IPv6 visitor" once it listens). The `cfm edge realip fix` files trust both; LiteSpeed needs `::1T` as well. It is **n/a (OK)** when no edge engine runs: then the origin faces
 the internet itself (avgerinos, a DirectAdmin nginx).
 
 It reads configuration only (`internal/originrealip`), the way the server loads
@@ -90,7 +90,7 @@ What counts, per stack:
     include `conf.d/server-includes/*.conf`, and a `set_real_ip_from 127.0.0.1`
     there adds to the block's list: Imunify360's
     `imunify360-webshield.conf` does that, and so does the file
-    `cfm realip fix` writes. earth (2026-11-17) logged real IPs that way while
+    `cfm edge realip fix` writes. earth (2026-11-17) logged real IPs that way while
     the http-level-only reading of this check warned.
   - The cPanel **proxy-subdomain** blocks (every name `cpanel.`, `webmail.`,
     `whm.`, `webdisk.`, `cpcalendars.`, `cpcontacts.`, `autoconfig.`,
@@ -98,7 +98,7 @@ What counts, per stack:
     only ea-nginx's own log reads 127.0.0.1 for them, so they are reported in
     the note and not counted.
 
-## Fix: `cfm realip fix`
+## Fix: `cfm edge realip fix`
 
 It writes only where the trust is missing. It checks that the module is loaded
 (`apachectl -M` shows `remoteip_module`, on cPanel the
@@ -122,7 +122,7 @@ has a deadline.
 | nginx, every untrusted block with its own list | nothing: an http-level trust would not reach them; the blocks are named, add `set_real_ip_from 127.0.0.1;` to their lists |
 | LiteSpeed | nothing: WebAdmin → Server → General → *Use Client IP in Header* = "Trusted IP Only", add `127.0.0.1T` (and `::1T` when the edge listens on IPv6) to Security → Access Control → Allowed List, restart |
 | OpenLiteSpeed | nothing: set the server-level `useIpInProxyHeader 2` and add `127.0.0.1T` (and `::1T`) to the server-level `accessControl` allow list, in the files the probe names, then `/usr/local/lsws/bin/lswsctrl restart` |
-| OpenLiteSpeed on DirectAdmin | the server-level allow list file (`/etc/openlitespeed/httpd-accesscontrol.conf` on server3) gets `127.0.0.1T, ::1T` appended to its allow line, and `useIpInProxyHeader 2` is set where it is not 1-4; each edited file is written live AND as its copy in `/usr/local/directadmin/custombuild/custom/openlitespeed/conf/`, the DirectAdmin way: `da build rewrite_confs` rewrites every global file under `/etc/openlitespeed` from CustomBuild's templates except `httpd-includes.conf`, and always uses a custom copy instead (DirectAdmin FAQ, "templating system for nginx/openlitespeed/apache configurations"), so the live file already is what a rebuild installs and no rebuild is run. OpenLiteSpeed has no config test: the fix reloads it gracefully through its systemd unit (`systemctl reload openlitespeed`, DirectAdmin's own path: `ExecReload=kill -USR1 $MAINPID`, and systemd then follows the new master; a USR1 from outside can leave the unit failed with the server running unsupervised), or `lswsctrl restart` where there is no unit, and requires a new master PID (`systemctl show -p MainPID`, else `lswsctrl status`; the old master still running is the config not taken, and a PID it cannot read refuses the fix before anything is written). The edge installers run `cfm realip fix`, so on such a node they reload OpenLiteSpeed too; if not, it restores the files and restarts again, and says if OpenLiteSpeed is then down. A trust held only in a live file (the warning below) is kept by `fix` writing its custom copy, with no restart. A planned fix that the next `rewrite_confs` would undo (another custom copy or template sets it otherwise), or a file changed since the plan, is refused. Several server-level lists or values, a custom copy that differs from the live file, or a file outside `/etc/openlitespeed` leave it to the operator (the manual step names the files). A trust that would not survive a rebuild is reported as trusted with a warning (`warning` in `--json`, a `warn` in edge_health and `cfm health`) |
+| OpenLiteSpeed on DirectAdmin | the server-level allow list file (`/etc/openlitespeed/httpd-accesscontrol.conf` on server3) gets `127.0.0.1T, ::1T` appended to its allow line, and `useIpInProxyHeader 2` is set where it is not 1-4; each edited file is written live AND as its copy in `/usr/local/directadmin/custombuild/custom/openlitespeed/conf/`, the DirectAdmin way: `da build rewrite_confs` rewrites every global file under `/etc/openlitespeed` from CustomBuild's templates except `httpd-includes.conf`, and always uses a custom copy instead (DirectAdmin FAQ, "templating system for nginx/openlitespeed/apache configurations"), so the live file already is what a rebuild installs and no rebuild is run. OpenLiteSpeed has no config test: the fix reloads it gracefully through its systemd unit (`systemctl reload openlitespeed`, DirectAdmin's own path: `ExecReload=kill -USR1 $MAINPID`, and systemd then follows the new master; a USR1 from outside can leave the unit failed with the server running unsupervised), or `lswsctrl restart` where there is no unit, and requires a new master PID (`systemctl show -p MainPID`, else `lswsctrl status`; the old master still running is the config not taken, and a PID it cannot read refuses the fix before anything is written). The edge installers run `cfm edge realip fix`, so on such a node they reload OpenLiteSpeed too; if not, it restores the files and restarts again, and says if OpenLiteSpeed is then down. A trust held only in a live file (the warning below) is kept by `fix` writing its custom copy, with no restart. A planned fix that the next `rewrite_confs` would undo (another custom copy or template sets it otherwise), or a file changed since the plan, is refused. Several server-level lists or values, a custom copy that differs from the live file, or a file outside `/etc/openlitespeed` leave it to the operator (the manual step names the files). A trust that would not survive a rebuild is reported as trusted with a warning (`warning` in `--json`, a `warn` in edge_health and `cfm health`) |
 | NGM | nothing: NGM renders nginx itself, and a hand-written file is overwritten on apply. The trust has to come from NGM's templates (NGM `docs/cfm-integration-map.md`, "real_ip gap") |
 
 The Apache file is
@@ -143,7 +143,7 @@ loads before `httpd-cloudflare.conf`, whose `X-Forwarded-For` stays in effect.
 
 The edge installers (`scripts/install-angie.sh`, `scripts/install-openresty.sh`,
 `scripts/install-edge.sh`)
-run `cfm realip fix` after deploying the edge conf. It is never fatal: the edge
+run `cfm edge realip fix` after deploying the edge conf. It is never fatal: the edge
 works either way. `CFM_SKIP_REALIP=1` skips it, and a `cfm` without the command
 prints the upgrade hint.
 

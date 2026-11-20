@@ -20,7 +20,7 @@ IPv6 client by its /64 ("IPv6 /64 grouping" below: the automatic bans, the
 detectors', the admin API's, the web detector's and the edge's counters):
 keyed on the full address, a direct IPv6 client rotating inside its /64 (any
 VPS has one) evaded them. The edge listens on IPv6 wherever the host can and
-the origin is ready for it (trusting `::1`: `cfm realip fix`), from the first
+the origin is ready for it (trusting `::1`: `cfm edge realip fix`), from the first
 `render` (the edge installers run one): with no `EDGE_LISTEN_V6`, an edge
 start (a reboot, a restart, the edge's own package upgrade) keeps what a
 render approved but never turns IPv6 on by itself, so a node turns on at a
@@ -34,22 +34,23 @@ A cfm upgrade does not turn IPv6 on. A reboot and an edge restart do not
 either. On each node it takes two commands, in this order:
 
 ```bash
-cfm realip fix
-sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render
+cfm edge realip fix
+cfm edge ipv6 on
 ```
 
-`cfm edge ipv6 on` does the second step too. It removes an
-`EDGE_LISTEN_V6 = off` from `/etc/cfm/cfm.conf` if there is one, then runs
-`render`. It never writes `EDGE_LISTEN_V6 = on`, which would let every edge
-start turn IPv6 on unconfirmed. It exits 0 when the render ran, not when IPv6
-came on: the render's lines say why a node stays on IPv4, and it prints the
-`status` below afterwards ("Now:"). `cfm edge ipv6` alone prints that status.
+`cfm edge ipv6 on` removes an `EDGE_LISTEN_V6 = off` from `/etc/cfm/cfm.conf`
+if there is one, then runs the listen script's `render` (by hand: `sh
+/usr/share/cfm/scripts/cfm-edge-listen-v6.sh render`). It never writes
+`EDGE_LISTEN_V6 = on`, which would let every edge start turn IPv6 on
+unconfirmed. It exits 0 when the render ran, not when IPv6 came on: the
+render's lines say why a node stays on IPv4, and it prints the status
+afterwards ("Now:").
 
 Then check the result:
 
 ```bash
-sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
-cfm realip
+cfm edge ipv6
+cfm edge realip
 ```
 
 `status` prints each engine's decision and the reason for it. `render` logs
@@ -57,11 +58,11 @@ the same reason when it leaves a node on IPv4.
 
 **Why these two steps:**
 
-- **`cfm realip fix` comes first** because an IPv6 visitor reaches the origin
+- **`cfm edge realip fix` comes first** because an IPv6 visitor reaches the origin
   from `::1`. An origin that trusts only `127.0.0.1` would see every IPv6
   visitor as localhost. That passes `Require local`, passes apps that trust
   localhost, and puts every IPv6 visitor in one login-limiter bucket. `render`
-  asks `cfm realip` before it writes anything, and stays on IPv4 while the
+  asks `cfm edge realip` before it writes anything, and stays on IPv4 while the
   trust is missing. Details: "The origin's `::1` trust" below.
 - **`render` is the one action that turns IPv6 on**, so it happens at a time
   someone chose. It writes the two listen files and runs the config test. It
@@ -81,11 +82,12 @@ the same reason when it leaves a node on IPv4.
 
 **Gotchas:**
 
-1. **Wrong order.** If you run `render` before `realip fix`, `render` logs
-   "the origin does not trust the edge's IPv6 hop from ::1" and stays on IPv4.
-   Run `cfm realip fix`, then `render` again.
+1. **Wrong order.** If you run `cfm edge ipv6 on` (or `render`) before
+   `cfm edge realip fix`, the render logs "the origin does not trust the
+   edge's IPv6 hop from ::1" and stays on IPv4. Run `cfm edge realip fix`,
+   then `cfm edge ipv6 on` again.
 2. **LiteSpeed and OpenLiteSpeed.** On LiteSpeed Enterprise and a plain
-   OpenLiteSpeed, `cfm realip fix` only prints the step: add `::1T` (and
+   OpenLiteSpeed, `cfm edge realip fix` only prints the step: add `::1T` (and
    `127.0.0.1T`) to the Access Control allow list by hand. On rigel and titan
    the Apache RemoteIP trust that LiteSpeed loads already covers `::1`.
    OpenLiteSpeed on DirectAdmin is written by the fix (the allow list, live
@@ -130,7 +132,7 @@ the same reason when it leaves a node on IPv4.
 | `scripts/cfm-edge-listen-v6.sh` | decides, writes or removes the two files (`listen [::]:9080;` and `listen [::]:9043 ssl;` + `quic reuseport`), runs the engine's own config test after a change and removes them again if it fails. Always exits 0. A `render` that writes the files reloads a running edge at once and checks (`/proc/net/tcp6`) that it listens on `[::]:9080` and `[::]:9043`; if not, it removes them and reloads back. A `render` that removes files a running edge listens with reloads it too. `prepare`, `prestart` and `deploy` never reload. |
 | `cfm-edge-listen-v6.service` (`configs/`, installed to `/etc/systemd/system/`) | oneshot running the script (`prestart`) before every edge start; `TimeoutStartSec=60`. |
 | drop-in `openresty.service.d/cfm-listen-v6.conf`, `angie.service.d/cfm-listen-v6.conf`, `cfm-edge.service.d/cfm-listen-v6.conf` | `Wants=` + `After=` that unit, so it runs **before** the edge unit's own `ExecStartPre` config test (a drop-in `ExecStartPre` would run after it, too late). `Wants=`, not `Requires=`: the edge starts if the unit fails. |
-| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`deploy`) after the new edge configs are deployed: it keeps or removes files (prestart's rules) but never writes new ones and never reloads, so an upgrade never turns IPv6 on. It never rewrites a kept file either (a changed body is `render`'s to apply), and when it removes files a running edge listens with it says to reload. The installers `install-openresty.sh` and `install-angie.sh` run `render`, after `cfm realip fix`; `install-edge.sh` runs `prepare cfm-edge` (scoped with `CFM_EDGE_ENGINES` too): render's decision, the default included, so it writes and tests cfm-edge's files, but it never reloads (that installer must not touch the live edge; the files apply when the operator starts cfm-edge). |
+| `package-proxy-config-deploy.sh` (`deploy_edge_listen_v6`) | on every package install/upgrade: installs the unit and drop-ins, then runs the script (`deploy`) after the new edge configs are deployed: it keeps or removes files (prestart's rules) but never writes new ones and never reloads, so an upgrade never turns IPv6 on. It never rewrites a kept file either (a changed body is `render`'s to apply), and when it removes files a running edge listens with it says to reload. The installers `install-openresty.sh` and `install-angie.sh` run `render`, after `cfm edge realip fix`; `install-edge.sh` runs `prepare cfm-edge` (scoped with `CFM_EDGE_ENGINES` too): render's decision, the default included, so it writes and tests cfm-edge's files, but it never reloads (that installer must not touch the live edge; the files apply when the operator starts cfm-edge). |
 
 ## The decision
 
@@ -141,7 +143,7 @@ otherwise (the script logs which one failed):
    `no` / `false` / `0` / `disabled` and any unknown value forbid it; absent,
    the default (`auto`, on where the host is ready). Last uncommented line wins; an inline `;` / `#`
    comment and one pair of matching quotes are stripped. The script and
-   `cfm realip` read it the same way: both run
+   `cfm edge realip` read it the same way: both run
    `scripts/tests/fixtures/edge_listen_v6_mode.txt`;
 1. the host has a global IPv6 address (`/proc/net/if_inet6`, scope `00`;
    the stack alone is not enough: earth has it, empty, and no IPv6 visitor
@@ -168,7 +170,7 @@ otherwise (the script logs which one failed):
 3. the origin listens on IPv6 on both 80 and 443 (`ss`: `[::]`, a specific
    IPv6 address, or a dual-stack `*`; not `::1`, not v4-mapped), because an
    IPv6 visitor's hop goes to the IPv6 address it came to;
-4. `cfm realip` says the origin trusts the edge's IPv6 hop from `::1` (below).
+4. `cfm edge realip` says the origin trusts the edge's IPv6 hop from `::1` (below).
    It is asked **before** the files are written, so no reload can catch the
    edge on IPv6 with an untrusting origin, and its JSON must carry
    `"edge_ipv6":true` (an older `cfm` gives no verdict, which counts as no);
@@ -184,12 +186,12 @@ default (no or an empty `EDGE_LISTEN_V6`; an explicit `on` / `auto` lets it
 write) it never writes files that are not there, and that files a `render` already approved
 are **kept** when only readiness is missing, which at boot is common: no
 global IPv6 address yet (SLAAC, the network still coming up), the origin not
-seen on IPv6 yet (it can start after the edge), `cfm realip` giving no
+seen on IPv6 yet (it can start after the edge), `cfm edge realip` giving no
 verdict. Otherwise a reboot would silently put the edge back on IPv4. The
 reasons that would break the start, or that the operator chose, always remove
 them: `EDGE_LISTEN_V6` not allowing it, no IPv6 stack at all, a taken port,
 `ss` failing, a main config without the include, a failed config test, and a
-definite "the origin does not trust `::1`" from `cfm realip` (every IPv6
+definite "the origin does not trust `::1`" from `cfm edge realip` (every IPv6
 visitor would be localhost to the origin). An origin that stops listening on
 IPv6 for good keeps the edge's IPv6 until the next `render` (by hand). The
 package deploy (`deploy`) applies the same keep / remove rules, and never
@@ -221,7 +223,7 @@ Removing the `cfm` package (not upgrading it) removes the unit, the drop-ins
 and the files.
 
 **Turning it on and off on a node:** it is on by default where the host is
-ready (run `cfm realip fix` first, so the origin trusts `::1`);
+ready (run `cfm edge realip fix` first, so the origin trusts `::1`);
 `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` turns it off. After a change,
 run the script with `render` (`cfm edge ipv6 on [engine]` / `cfm edge ipv6
 off` edit the line and render in one step; `off` is node-wide and renders
@@ -253,7 +255,7 @@ The origin hop of an IPv6 visitor binds `::1` (`$cfm_pass_bind` /
 reaches it as `::1`: localhost to `Require local` (cPanel's server-status), to
 apps that trust localhost, and one bucket for every login limiter. So:
 
-- `cfm realip` requires both as soon as the host **can** do IPv6 (kernel IPv6
+- `cfm edge realip` requires both as soon as the host **can** do IPv6 (kernel IPv6
   + the origin on a global IPv6 address on 80 and 443, read from
   `/proc/net/tcp6`) and `EDGE_LISTEN_V6` allows IPv6, before the edge listens,
   and whenever the edge does listen on IPv6: the files exist, or the kernel
@@ -262,7 +264,7 @@ apps that trust localhost, and one bucket for every login limiter. So:
   then it warns "the edge does not listen on IPv6 (run: cfm edge realip fix,
   then cfm edge ipv6 on)"; once the edge listens, a gap reads "logs ::1 for every
   IPv6 visitor".
-- `cfm realip fix` then writes the `::1` trust for Apache and nginx, also on
+- `cfm edge realip fix` then writes the `::1` trust for Apache and nginx, also on
   an origin whose 127.0.0.1 trust comes from a file CFM did not write
   (Imunify's `i360.remoteip.conf`, a hand-written one). The script never runs
   `fix` itself (it edits and reloads the origin), and `fix` does not render:
@@ -522,7 +524,7 @@ removed after), with the exact maps and Lua of the confs:
 |---|---|---|
 | speedhost (CloudLinux 9, Apache) | OpenResty 1.31.8.1 | direct URL, keepalive balancer `set_current_peer("[v6]")`, static literal line and plain HTTP: 200 from Apache at `[v6]:443` / `:80`, bound to `::1`. The old server-level `proxy_bind 127.0.0.1`: `bind(127.0.0.1) failed (22: Invalid argument)`. |
 | qualityweb (AlmaLinux 10, Apache) | Angie 1.12.4 | the same, the same results. |
-| rigel (LiteSpeed, `useIpInProxyHeader` 2 with only `127.0.0.1T`, Apache RemoteIP trusting `::1`) | (curl from `::1`) | LiteSpeed took the client from `X-Forwarded-For` for a `::1` peer (`[::1]:49796 ... >192.0.2.66` in its error_log): the Apache RemoteIP trust it loads covers `::1`, as `cfm realip` reads it. |
+| rigel (LiteSpeed, `useIpInProxyHeader` 2 with only `127.0.0.1T`, Apache RemoteIP trusting `::1`) | (curl from `::1`) | LiteSpeed took the client from `X-Forwarded-For` for a `::1` peer (`[::1]:49796 ... >192.0.2.66` in its error_log): the Apache RemoteIP trust it loads covers `::1`, as `cfm edge realip` reads it. |
 
 Not yet seen: an external IPv6 client through the DNAT into the live edge with
 the files rendered (the first node where the script turns IPv6 on).
@@ -533,5 +535,5 @@ the files rendered (the first node where the script turns IPv6 on).
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh status
 ss -ltnp | grep -E ':(9080|9043)\b'
 curl -6 -sv https://<a site with an AAAA record to the node>/ -o /dev/null
-cfm realip
+cfm edge realip
 ```

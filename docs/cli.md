@@ -242,7 +242,7 @@ routes that need no firewall (`realip`, `ipv6`, `help`) also work where the
 nft backend cannot start. Flags go after the subcommand (`cfm edge panel on
 --priority -99`); one before it is refused.
 
-## `cfm realip`
+## `cfm edge realip` (also `cfm realip`)
 
 Does the origin see visitors or `127.0.0.1`, and the fix: `docs/origin-real-ip.md`.
 

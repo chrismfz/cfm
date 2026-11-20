@@ -799,7 +799,7 @@ cPanel — every rule here exists because of that. Design + as-built:
 | Outbound Abuse Sentinel (per-uid outbound SMTP / scan / HTTP abuse) | `docs/outbound-sentinel.md` |
 | Packaging: verifying an rpm change in an EL container | `docs/packaging.md` |
 | Log rotation (who rotates what) | `docs/log-rotation.md` |
-| Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm realip`) | `docs/origin-real-ip.md` |
+| Origin real IP (the origin sees the visitor, not the edge's 127.0.0.1; `cfm edge realip`) | `docs/origin-real-ip.md` |
 | Edge IPv6 listen (on by default since IPv6 /64 grouping, `EDGE_LISTEN_V6 = off` the kill switch; generated listen files turned on by `render`, re-checked before every edge start) | `docs/edge-ipv6.md` (operator runbook, why and gotchas at the top) |
 | ClamAV upload scanning (scope, inline mode, signature excludes) | `docs/clamav.md` |
 | Backup check (JetBackup / Virtualmin / Proxmox → detection_history) | `docs/backup-check.md` |

@@ -676,20 +676,20 @@ ensure_edge_listen_v6() {
 # works either way, only the origin's logs are wrong. docs/origin-real-ip.md.
 ensure_origin_realip() {
     if [ "${CFM_SKIP_REALIP:-0}" = "1" ]; then
-        log "Origin real-IP: skipped (CFM_SKIP_REALIP=1); run 'cfm realip fix' later"
+        log "Origin real-IP: skipped (CFM_SKIP_REALIP=1); run 'cfm edge realip fix' later"
         return 0
     fi
     if ! command -v cfm >/dev/null 2>&1; then
-        warn "Origin real-IP: cfm is not installed yet; after installing it run 'cfm realip fix'"
+        warn "Origin real-IP: cfm is not installed yet; after installing it run 'cfm edge realip fix'"
         return 0
     fi
-    log "Origin real-IP: making the origin trust the edge's 127.0.0.1 (cfm realip fix)"
+    log "Origin real-IP: making the origin trust the edge's 127.0.0.1 (cfm edge realip fix)"
     local rc=0
     cfm realip fix || rc=$?
     case "$rc" in
         0) ;;
-        2) warn "Origin real-IP: this cfm has no 'realip' command; upgrade cfm, then run 'cfm realip fix'" ;;
-        *) warn "Origin real-IP: not set automatically (see above); the origin logs 127.0.0.1 until it is. Check with 'cfm realip'" ;;
+        2) warn "Origin real-IP: this cfm has no 'realip' command; upgrade cfm, then run 'cfm edge realip fix'" ;;
+        *) warn "Origin real-IP: not set automatically (see above); the origin logs 127.0.0.1 until it is. Check with 'cfm edge realip'" ;;
     esac
     return 0
 }

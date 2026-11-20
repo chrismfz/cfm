@@ -201,7 +201,7 @@ Honest limits:
 The edge proxies to the origin from 127.0.0.1; an origin that does not trust
 the loopback with a header the edge sets logs 127.0.0.1 for every visitor and
 hands PHP `REMOTE_ADDR=127.0.0.1`. Reads the origin's configuration with the
-same probe as `cfm health` and `cfm realip` (`internal/originrealip`):
+same probe as `cfm health` and `cfm edge realip` (`internal/originrealip`):
 
 - `ok` when the origin trusts the edge, or when no edge engine runs;
 - `unknown` when an edge runs and no origin stack is found;

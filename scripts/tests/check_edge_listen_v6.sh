@@ -312,7 +312,7 @@ ok "render: unchanged files are left alone (the edge's own [::]:9043 does not co
 printf 'untrusted' >"$tmp/realip"
 run render
 expect absent "on: the origin does not trust ::1 -> removed (IPv6 visitors would be localhost)"
-says "cfm realip fix"
+says "cfm edge realip fix"
 printf 'garbage' >"$tmp/realip"
 run render
 expect absent "on: cfm realip gives no verdict -> IPv4 only"
@@ -519,6 +519,10 @@ for v in off '"off" ; note' OFF no false 0 disabled; do
   printf 'EDGE_LISTEN_V6 = auto\nEDGE_LISTEN_V6 = %s\n' "$v" >"$cfm_conf"
   run render
   expect absent "EDGE_LISTEN_V6 = $v (last line) -> IPv4 only"
+  # The way back is to remove the off line (cfm edge ipv6 on), never to
+  # write = on (that lets every edge start turn IPv6 on, unconfirmed).
+  says "remove the EDGE_LISTEN_V6 = off line"
+  grep -q "set EDGE_LISTEN_V6 = on" "$tmp/out" && fail "the off hint must not say to set EDGE_LISTEN_V6 = on"
   run render
 done
 printf 'EDGE_LISTEN_V6 = off\nEDGE_LISTEN_V6 = auto\n' >"$cfm_conf"

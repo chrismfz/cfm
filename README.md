@@ -267,7 +267,7 @@ edge health checks ([`docs/edge-health.md`](docs/edge-health.md)), and the
 | `cfm webtop …` | live web traffic, challenges, WAF, rules, Site Cache, history | [`docs/cli.md`](docs/cli.md) |
 | `cfm bots …` | box-wide User-Agent throttle / block | [`docs/cli.md`](docs/cli.md) |
 | `cfm mysqltop …`, `cfm mailtop`, `cfm lve` | MySQL, mail queue, CloudLinux per-tenant CPU | |
-| `cfm health`, `cfm realip`, `cfm debug` | node health, origin real-IP check, diagnostic bundle | [`docs/cli.md`](docs/cli.md) |
+| `cfm health`, `cfm edge realip`, `cfm debug` | node health, origin real-IP check, diagnostic bundle | [`docs/cli.md`](docs/cli.md) |
 | `cfm clam …`, `cfm ssl …` | ClamAV, SSLCollector | |
 | `cfm kernsec …`, `cfm lsm …` | kernel hardening, BPF LSM | |
 | `cfm auth …` | admin users, sessions, MFA | |
