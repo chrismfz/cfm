@@ -40,6 +40,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `--window N` sets the access lines to scan. It exits 0 only when the overall
   verdict and every check are ok; a daemon that does not answer, a report it cannot read or an
   unknown verdict exit 1. Docs: `docs/edge-health.md`, `docs/cli.md`.
+- **`cfm edge ipv6 on [engine]` / `cfm edge ipv6 off`: the IPv6 listen
+  without the hand edit and the script path.** `off` sets
+  `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` (the kill switch, node-wide)
+  and runs the listen script's `render` for every engine, which removes the
+  IPv6 listen files and reloads the edge. `on` removes a kill switch if there
+  is one, then renders (only the named engine, if one is given): it never
+  writes `EDGE_LISTEN_V6 = on`, which would let every edge start turn IPv6 on
+  unconfirmed. It then prints the decision ("Now:"): exit 0 means the render
+  ran, not that IPv6 came on. cfm.conf is rewritten in place (mode, owner and
+  a symlink kept, comments and every other line untouched), read the way the
+  script reads it (one reader, pinned to the script by the shared fixture),
+  and the script gets that same file, never an exported `CFM_*` variable. A
+  named engine the script does not find on the host is refused, nothing
+  changed. The running daemon applies the edited cfm.conf, as after any edit.
 
 ### Fixed
 - **`cfm realip` reads OpenLiteSpeed.** It read only LiteSpeed Enterprise's

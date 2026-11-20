@@ -251,28 +251,46 @@ func globalV6Hex(addr string) bool {
 const asciiSpace = " \t\r\n\v\f"
 
 func (l layout) edgeIPv6Wanted() bool {
-	mode := ""
+	conf := ""
 	if l.cfmConf != "" {
 		if b, err := os.ReadFile(l.fs(l.cfmConf)); err == nil {
-			for _, line := range strings.Split(string(b), "\n") {
-				// ASCII whitespace only, as the script's [[:space:]] (it runs LC_ALL=C):
-				// strings.TrimSpace would also take a NBSP / NEL the script keeps.
-				k, v, ok := strings.Cut(strings.TrimLeft(line, asciiSpace), "=")
-				if !ok || strings.TrimRight(k, asciiSpace) != "EDGE_LISTEN_V6" {
-					continue
-				}
-				// Cut at the first ; or #, trim whitespace (CR included), then
-				// strip ONE matching pair of quotes: the script's mode() reading
-				// (both run scripts/tests/fixtures/edge_listen_v6_mode.txt).
-				if i := strings.IndexAny(v, ";#"); i >= 0 {
-					v = v[:i]
-				}
-				v = strings.Trim(v, asciiSpace)
-				if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
-					v = v[1 : len(v)-1]
-				}
-				mode = strings.ToLower(v)
-			}
+			conf = string(b)
+		}
+	}
+	return EdgeListenV6Allowed(conf)
+}
+
+// EdgeListenV6Line reports whether line is an active EDGE_LISTEN_V6
+// assignment and its value as the script reads it: an inline ; or # comment
+// cut, ASCII whitespace trimmed (CR included), ONE matching pair of quotes
+// stripped, lowercased. The one reader in Go (`cfm edge ipv6` edits the
+// lines it matches); scripts/tests/fixtures/edge_listen_v6_mode.txt pins it
+// to the script's mode().
+func EdgeListenV6Line(line string) (value string, ok bool) {
+	// ASCII whitespace only, as the script's [[:space:]] (it runs LC_ALL=C):
+	// strings.TrimSpace would also take a NBSP / NEL the script keeps.
+	k, v, found := strings.Cut(strings.TrimLeft(line, asciiSpace), "=")
+	if !found || strings.TrimRight(k, asciiSpace) != "EDGE_LISTEN_V6" {
+		return "", false
+	}
+	if i := strings.IndexAny(v, ";#"); i >= 0 {
+		v = v[:i]
+	}
+	v = strings.Trim(v, asciiSpace)
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		v = v[1 : len(v)-1]
+	}
+	return strings.ToLower(v), true
+}
+
+// EdgeListenV6Allowed is the decision cfm.conf's text makes: the last active
+// line wins; on / yes / true / 1 / auto / enable / enabled = yes, absent or
+// empty = edgeIPv6Default, anything else = no (the script's mode()).
+func EdgeListenV6Allowed(conf string) bool {
+	mode := ""
+	for _, line := range strings.Split(conf, "\n") {
+		if v, ok := EdgeListenV6Line(line); ok {
+			mode = v
 		}
 	}
 	switch mode {

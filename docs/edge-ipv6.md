@@ -38,6 +38,13 @@ cfm realip fix
 sh /usr/share/cfm/scripts/cfm-edge-listen-v6.sh render
 ```
 
+`cfm edge ipv6 on` does the second step too. It removes an
+`EDGE_LISTEN_V6 = off` from `/etc/cfm/cfm.conf` if there is one, then runs
+`render`. It never writes `EDGE_LISTEN_V6 = on`, which would let every edge
+start turn IPv6 on unconfirmed. It exits 0 when the render ran, not when IPv6
+came on: the render's lines say why a node stays on IPv4, and it prints the
+`status` below afterwards ("Now:"). `cfm edge ipv6` alone prints that status.
+
 Then check the result:
 
 ```bash
@@ -110,7 +117,8 @@ the same reason when it leaves a node on IPv4.
 8. **Panel ports stay IPv4.** 2083/2087/2096 and the rest: cpsrvd does not
    listen on IPv6 on the fleet.
 9. **Turning it off.** Set `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf`, then
-   run `render`. It removes the files and reloads the edge. Do the same
+   run `render` (`cfm edge ipv6 off` does both). It removes the files and
+   reloads the edge. Do the same
    before downgrading to a cfm without this script.
 
 ## How it works
@@ -214,7 +222,9 @@ and the files.
 **Turning it on and off on a node:** it is on by default where the host is
 ready (run `cfm realip fix` first, so the origin trusts `::1`);
 `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` turns it off. After a change,
-run the script with `render`. An engine name after the action
+run the script with `render` (`cfm edge ipv6 on [engine]` / `cfm edge ipv6
+off` edit the line and render in one step; `off` is node-wide and renders
+every engine). An engine name after the action
 (`render cfm-edge`, `render OpenResty`, `render Angie`) acts on that engine
 alone, never the others (`install-edge.sh` runs `prepare cfm-edge`; the
 OpenResty and Angie installers render every engine found). An older script ignores the name and

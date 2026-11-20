@@ -15,6 +15,7 @@ type recorder struct {
 	dnatArgs    [][]string
 	realipArgs  [][]string
 	edgeInFront []bool
+	ipv6Set     [][]string // value, then the render args
 }
 
 func testDeps(r *recorder, s dnat.Summary, v6 []string, v6err error) (deps, *bytes.Buffer, *bytes.Buffer) {
@@ -29,7 +30,8 @@ func testDeps(r *recorder, s dnat.Summary, v6 []string, v6err error) (deps, *byt
 			r.edgeInFront = append(r.edgeInFront, front)
 			return true, "Origin real-IP: cpanel/apache trusts the edge"
 		},
-		ipv6: func() ([]string, error) { return v6, v6err },
+		ipv6:    func() ([]string, error) { return v6, v6err },
+		setIPv6: func(v string, a []string) int { r.ipv6Set = append(r.ipv6Set, append([]string{v}, a...)); return 0 },
 	}, &out, &errOut
 }
 
@@ -82,12 +84,13 @@ func TestRouting(t *testing.T) {
 // Nothing reachable from the summary or from a bad argument changes state.
 func TestSummaryAndRefusalsNeverCallTheWriters(t *testing.T) {
 	for _, args := range [][]string{nil, {"status"}, {"help"}, {"ipv6"}, {"ipv6", "status"},
-		{"ipv6", "on"}, {"ipv6", "off"}, {"bogus"}, {"status", "on"}, {"web", "on"}} {
+		{"ipv6", "status", "x"}, {"ipv6", "bogus"}, {"ipv6", "on", "nginx"}, {"ipv6", "on", "angie", "x"},
+		{"bogus"}, {"status", "on"}, {"web", "on"}} {
 		r := &recorder{}
 		d, _, _ := testDeps(r, dnat.Summary{}, []string{"cfm-edge: IPv4 only"}, nil)
 		rc := run(args, d)
-		if len(r.dnatArgs) != 0 || len(r.realipArgs) != 0 {
-			t.Errorf("%v reached a writer: dnat %v realip %v", args, r.dnatArgs, r.realipArgs)
+		if len(r.dnatArgs) != 0 || len(r.realipArgs) != 0 || len(r.ipv6Set) != 0 {
+			t.Errorf("%v reached a writer: dnat %v realip %v ipv6 %v", args, r.dnatArgs, r.realipArgs, r.ipv6Set)
 		}
 		refused := len(args) > 0 && (args[0] == "bogus" || len(args) > 1 && args[1] != "status")
 		if refused && rc != 2 {
