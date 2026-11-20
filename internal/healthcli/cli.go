@@ -661,8 +661,8 @@ func printTSVLogHealth(p edgediag.TSVLogProbe, ingestStatus string, opts cliOpti
 func printOriginRealIP(p originrealip.Probe, edgeActive bool, opts cliOptions) {
 	ok, text := originrealip.Verdict(p, edgeActive)
 	label := okLabel
-	if !ok {
-		label = warnLabel
+	if !ok || (edgeActive && p.Trusted && p.Warning != "") {
+		label = warnLabel // trusted now, but something will undo it (Probe.Warning)
 	}
 	fmt.Printf("  %s  %s\n", badge(label, opts), text)
 }

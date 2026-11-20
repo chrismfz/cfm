@@ -2,6 +2,7 @@ package apiserver
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -404,6 +405,21 @@ func TestEdgeHealthReport_OriginRealIP(t *testing.T) {
 	rep = buildEdgeHealthReport(context.Background(), 1000)
 	if f := findFinding(t, rep, "origin-real-ip"); f["severity"] != "ok" {
 		t.Fatalf("no edge in front: %v", f)
+	}
+
+	// Trusted now, but the next DirectAdmin rewrite_confs undoes it (OpenLiteSpeed).
+	doomed := originrealip.Probe{Panel: "directadmin", Stack: "litespeed", Trusted: true,
+		Directive: "useIpInProxyHeader 2 (OpenLiteSpeed)", Source: "/etc/openlitespeed/httpd-accesscontrol.conf",
+		Warning: "trusted now, but not after `da build rewrite_confs`"}
+	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) { return doomed, true }
+	rep = buildEdgeHealthReport(context.Background(), 1000)
+	if f := findFinding(t, rep, "origin-real-ip"); f["severity"] != "warn" || !strings.Contains(fmt.Sprint(f), "rewrite_confs") {
+		t.Fatalf("trusted with a warning: %v", f)
+	}
+	doomed.Warning = ""
+	rep = buildEdgeHealthReport(context.Background(), 1000)
+	if f := findFinding(t, rep, "origin-real-ip"); f["severity"] != "ok" {
+		t.Fatalf("trusted: %v", f)
 	}
 
 	edgeHealthOriginRealIP = func() (originrealip.Probe, bool) {

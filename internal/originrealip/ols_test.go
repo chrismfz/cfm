@@ -52,7 +52,10 @@ func TestOpenLiteSpeedDirectAdminServer3(t *testing.T) {
 		t.Fatalf("note = %q", p.Note)
 	}
 	pl := l.plan(p)
-	for _, want := range []string{"OpenLiteSpeed", "/etc/openlitespeed/httpd-defaults.conf", "/etc/openlitespeed/httpd-accesscontrol.conf",
+	if strings.Contains(pl.Reason, "httpd-defaults.conf") {
+		t.Fatalf("the mode is fine, yet the step names the defaults file: %q", pl.Reason)
+	}
+	for _, want := range []string{"OpenLiteSpeed", "/etc/openlitespeed/httpd-accesscontrol.conf",
 		"/usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf", "da build rewrite_confs", "127.0.0.1T", "lswsctrl restart"} {
 		if pl.Action != ActionManual || !strings.Contains(pl.Reason, want) {
 			t.Fatalf("plan lacks %q: %+v", want, pl)
@@ -68,11 +71,25 @@ func TestOpenLiteSpeedDirectAdminServer3(t *testing.T) {
 	if !p.Trusted || p.Source != "/etc/openlitespeed/httpd-accesscontrol.conf" || !strings.Contains(p.Directive, "OpenLiteSpeed") {
 		t.Fatalf("127.0.0.1T added: %+v", p)
 	}
-	// Only in the live files: rewrite_confs would put the templates back.
-	for _, f := range []string{"httpd-accesscontrol.conf", "httpd-defaults.conf"} {
-		if !strings.Contains(p.Warning, "custombuild/custom/openlitespeed/conf/"+f) {
-			t.Fatalf("no rewrite_confs warning for %s: %q", f, p.Warning)
-		}
+	// No CustomBuild templates on disk: nothing says what rewrite_confs
+	// would install, so no warning.
+	if p.Warning != "" {
+		t.Fatalf("no templates, yet a warning: %q", p.Warning)
+	}
+	// With server3's templates (the live files as CustomBuild wrote them):
+	// rewrite_confs would put the ACL back without the loopback. The
+	// defaults file equals its template and is not named (review: it was).
+	tmpl := "usr/local/directadmin/custombuild/configure/openlitespeed/conf/"
+	put(t, r, tmpl+"httpd-accesscontrol.conf", server3OLSACL)
+	put(t, r, tmpl+"httpd-defaults.conf", server3OLSDefaults)
+	put(t, r, tmpl+"httpd_config.conf", server3OLSMain)
+	p = l.probe("")
+	if !p.Trusted || !strings.Contains(p.Warning, "/etc/openlitespeed/httpd-accesscontrol.conf (keep it in /usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf)") ||
+		strings.Contains(p.Warning, "httpd-defaults.conf") {
+		t.Fatalf("live edit only: %q", p.Warning)
+	}
+	if ok, text := Verdict(p, true); !ok || !strings.Contains(text, "WARNING") {
+		t.Fatalf("verdict = %v %q", ok, text)
 	}
 	custom := "usr/local/directadmin/custombuild/custom/openlitespeed/conf/"
 	put(t, r, custom+"httpd-accesscontrol.conf", server3OLSACL) // a stale custom copy, without the trust
@@ -82,6 +99,10 @@ func TestOpenLiteSpeedDirectAdminServer3(t *testing.T) {
 	}
 	if ok, text := Verdict(l.probe(""), true); !ok || !strings.Contains(text, "rewrite_confs") {
 		t.Fatalf("verdict = %v %q", ok, text)
+	}
+	put(t, r, custom+"httpd-accesscontrol.conf", server3OLSACL) // a stale custom copy, without the trust
+	if p := l.probe(""); !strings.Contains(p.Warning, "httpd-accesscontrol.conf") {
+		t.Fatalf("a stale custom copy: %q", p.Warning)
 	}
 	put(t, r, custom+"httpd-accesscontrol.conf", acl)
 	p = l.probe("")
@@ -218,5 +239,25 @@ func TestOpenLiteSpeedHeredoc(t *testing.T) {
 	l.activeStack = running(StackLiteSpeed, true)
 	if p := l.probe(""); p.Trusted {
 		t.Fatalf("an allow inside a heredoc counted: %+v", p)
+	}
+}
+
+// The DirectAdmin step names only what is missing (review): a trusted list
+// with useIpInProxyHeader 0 asks for the defaults file, not the ACL.
+func TestOpenLiteSpeedDAStepNamesWhatIsMissing(t *testing.T) {
+	l, r := olsDAHost(t)
+	put(t, r, "etc/openlitespeed/httpd-defaults.conf", strings.Replace(server3OLSDefaults, "\t\t 2", " 0", 1))
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", "accessControl{\n  allow ALL, 127.0.0.1T\n}\n")
+	p := l.probe("")
+	pl := l.plan(p)
+	if p.Trusted || !strings.Contains(pl.Reason, "custom/openlitespeed/conf/httpd-defaults.conf and set useIpInProxyHeader 2") ||
+		strings.Contains(pl.Reason, "httpd-accesscontrol.conf") {
+		t.Fatalf("mode 0, list fine: %+v / %q", p, pl.Reason)
+	}
+	// An earlier 0 and a later 2: the note names the 0, not the list.
+	put(t, r, "etc/openlitespeed/conf.d/late.conf", "useIpInProxyHeader 2\n")
+	p = l.probe("")
+	if p.Trusted || !strings.Contains(p.Note, "useIpInProxyHeader 0 (/etc/openlitespeed/httpd-defaults.conf)") || !strings.Contains(p.Note, "disagree") {
+		t.Fatalf("0 then 2: %q", p.Note)
 	}
 }

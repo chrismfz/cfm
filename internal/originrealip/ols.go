@@ -3,6 +3,7 @@ package originrealip
 import (
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -37,8 +38,11 @@ type olsVerdict struct {
 	// a setting appears twice is not measured, so the verdict asks all of
 	// them: a wrong "trusted" would let the edge listen on IPv6 while the
 	// origin sees ::1 for every IPv6 visitor.
-	modes  []string
-	allows [][]string
+	modes       []string
+	modeSources []string
+	allows      [][]string
+
+	files []string // every file read, in order
 }
 
 // olsMaxFiles bounds the include walk (a glob loop, a huge vhost tree).
@@ -48,7 +52,11 @@ const olsMaxFiles = 512
 // against.
 const olsServerRoot = "/usr/local/lsws"
 
-func (l layout) readOLS() olsVerdict {
+func (l layout) readOLS() olsVerdict { return l.readOLSWith(nil) }
+
+// readOLSWith reads the config with some files' content replaced (overlay,
+// by logical path; nil = the disk as it is): what CustomBuild would install.
+func (l layout) readOLSWith(overlay func(logical string) ([]byte, bool)) olsVerdict {
 	var v olsVerdict
 	seen := map[string]bool{}
 	depth := 0
@@ -61,9 +69,15 @@ func (l layout) readOLS() olsVerdict {
 		}
 		seen[logical] = true
 		cf := readConfFile(l.fs(logical))
+		if overlay != nil {
+			if b, ok := overlay(logical); ok {
+				cf = confFile{b: b, ok: true}
+			}
+		}
 		if !cf.ok {
 			return
 		}
+		v.files = append(v.files, logical)
 		heredoc := "" // the end marker of a multi-line value (rules <<<END_rules)
 		for _, raw := range strings.Split(string(cf.b), "\n") {
 			if heredoc != "" {
@@ -108,7 +122,7 @@ func (l layout) readOLS() olsVerdict {
 			case "useipinproxyheader":
 				if depth == 0 {
 					v.mode, v.modeSource = val, logical
-					v.modes = append(v.modes, val)
+					v.modes, v.modeSources = append(v.modes, val), append(v.modeSources, logical)
 				}
 			case "allow":
 				if inACL >= 0 && depth == inACL {
@@ -182,22 +196,38 @@ func olsList(val string) []string {
 // every server-level useIpInProxyHeader is 1, or each is 1 or 2 and every
 // server-level allow list marks the address trusted.
 func (v olsVerdict) trusted(l layout) bool {
-	if len(v.modes) == 0 {
-		return false
-	}
-	needACL := false
-	for _, m := range v.modes {
-		switch m {
-		case "1":
-		case "2":
-			needACL = true
-		default:
-			return false
+	return v.modeOK() && (!v.needACL() || v.aclOK(l))
+}
+
+// modeOK: there is a server-level useIpInProxyHeader and every one is 1 or 2.
+func (v olsVerdict) modeOK() bool {
+	return len(v.modes) > 0 && v.badMode() < 0
+}
+
+// badMode: the index of the first server-level value that is neither 1 nor
+// 2, or -1.
+func (v olsVerdict) badMode() int {
+	for i, m := range v.modes {
+		if m != "1" && m != "2" {
+			return i
 		}
 	}
-	if !needACL {
-		return true
+	return -1
+}
+
+// needACL: a value is 2 ("Trusted IP Only"), so the allow list decides.
+func (v olsVerdict) needACL() bool {
+	for _, m := range v.modes {
+		if m == "2" {
+			return true
+		}
 	}
+	return false
+}
+
+// aclOK: there is a server-level allow list and every one marks the address
+// this pass checks trusted.
+func (v olsVerdict) aclOK(l layout) bool {
 	if len(v.allows) == 0 {
 		return false
 	}
@@ -221,34 +251,77 @@ func (l layout) probeOLS() Probe {
 	if v.trusted(l) {
 		p.Trusted, p.Directive = true, "useIpInProxyHeader "+v.mode+" (OpenLiteSpeed)"
 		p.Source = v.modeSource
-		srcs := []string{v.modeSource}
-		if v.mode == "2" {
+		if v.needACL() {
+			p.Directive = "useIpInProxyHeader 2 (OpenLiteSpeed)"
 			p.Source = v.aclSource
-			srcs = append(srcs, v.aclSource)
 		}
-		// Trusted now, but on DirectAdmin `da build rewrite_confs` rewrites the
-		// file from CustomBuild's template unless a custom copy holds it.
-		for _, src := range srcs {
-			if custom, kept := l.olsDACustom(src); custom != "" && !kept {
-				p.Warning = joinNote(p.Warning, "trusted now, but `da build rewrite_confs` rewrites "+src+
-					" from CustomBuild's template: copy it to "+custom+" to keep the trust")
-			}
-		}
+		p.Warning = l.olsRewriteWarning()
 		return p
 	}
-	switch v.mode {
-	case "":
+	switch {
+	case len(v.modes) == 0:
 		p.Note = "OpenLiteSpeed: no server-level useIpInProxyHeader in " + l.olsConfig + " or the files it includes"
-	case "1", "2":
+	case v.badMode() >= 0:
+		i := v.badMode()
+		p.Note = "OpenLiteSpeed: useIpInProxyHeader " + v.modes[i] + " (" + v.modeSources[i] + ") does not take the client from the edge's header (1, or 2 with 127.0.0.1T)"
+		if len(v.modes) > 1 {
+			p.Note += "; the server-level values disagree (" + strings.Join(v.modes, ", ") + "), and every one must be 1 or 2"
+		}
+	default:
 		where := "no server-level accessControl block"
 		if v.aclSource != "" {
 			where = "the server-level accessControl allow list in " + v.aclSource
 		}
-		p.Note = "OpenLiteSpeed: useIpInProxyHeader 2 (" + v.modeSource + ") but 127.0.0.1T is not in " + where
-	default:
-		p.Note = "OpenLiteSpeed: useIpInProxyHeader " + v.mode + " (" + v.modeSource + ") does not take the client from the edge's header (1, or 2 with 127.0.0.1T)"
+		if len(v.allows) > 1 {
+			where = "every one of the " + strconv.Itoa(len(v.allows)) + " server-level accessControl allow lists (the last in " + v.aclSource + ")"
+		}
+		p.Note = "OpenLiteSpeed: useIpInProxyHeader 2 but 127.0.0.1T is not in " + where
 	}
 	return p
+}
+
+// olsRewriteWarning: on DirectAdmin, whether the trust survives `da build
+// rewrite_confs`. The config is read again with each DirectAdmin-managed file
+// replaced by what CustomBuild would install (its custom copy, else its
+// template); if that reading is not trusted, the warning names the live
+// files that differ from what would be installed.
+func (l layout) olsRewriteWarning() string {
+	if !l.anyExists(l.daMarkers) {
+		return ""
+	}
+	installed := func(logical string) ([]byte, bool) {
+		src, ok := l.olsDAInstalled(logical)
+		if !ok {
+			return nil, false
+		}
+		cf := readConfFile(l.fs(src))
+		return cf.b, cf.ok
+	}
+	after := l.readOLSWith(installed)
+	ok := after.trusted(l)
+	if ok && l.loopIP == "" && l.edgeIPv6() {
+		l6 := l
+		l6.loopIP = "::1"
+		ok = after.trusted(l6)
+	}
+	if ok {
+		return ""
+	}
+	var changed []string
+	for _, f := range l.readOLS().files {
+		b, ok := installed(f)
+		if !ok {
+			continue
+		}
+		if live := readConfFile(l.fs(f)); !live.ok || string(live.b) != string(b) {
+			changed = append(changed, f+" (keep it in "+filepath.Join(olsDACustomDir, filepath.Base(f))+")")
+		}
+	}
+	w := "trusted now, but not after `da build rewrite_confs`, which rewrites the files under " + olsDALiveDir + " from CustomBuild's templates"
+	if len(changed) > 0 {
+		w += ": " + strings.Join(changed, ", ")
+	}
+	return w
 }
 
 // olsDACustomDir: DirectAdmin's CustomBuild rewrites every global
@@ -258,28 +331,48 @@ func (l layout) probeOLS() Probe {
 // instead (DirectAdmin FAQ, "templating system for
 // nginx/openlitespeed/apache configurations").
 const (
-	olsDALiveDir   = "/etc/openlitespeed"
-	olsDACustomDir = "/usr/local/directadmin/custombuild/custom/openlitespeed/conf"
+	olsDALiveDir     = "/etc/openlitespeed"
+	olsDACustomDir   = "/usr/local/directadmin/custombuild/custom/openlitespeed/conf"
+	olsDATemplateDir = "/usr/local/directadmin/custombuild/configure/openlitespeed/conf"
 )
 
-// olsDACustom: for a DirectAdmin-managed file (directly under
-// /etc/openlitespeed, not httpd-includes.conf), the custom copy that keeps it
-// across `da build rewrite_confs`, and whether that copy exists and matches
-// the live file. "" when CustomBuild does not rewrite the file.
-func (l layout) olsDACustom(src string) (string, bool) {
-	if !l.anyExists(l.daMarkers) || filepath.Dir(src) != olsDALiveDir || filepath.Base(src) == "httpd-includes.conf" {
+// olsDAInstalled: for a DirectAdmin-managed file (directly under
+// /etc/openlitespeed, not httpd-includes.conf, or the main config that links
+// there), the file `da build rewrite_confs` would install in its place: the
+// custom copy when there is one, else CustomBuild's template. false when
+// CustomBuild does not rewrite the file or has no template for it.
+func (l layout) olsDAInstalled(logical string) (string, bool) {
+	if logical == l.olsConfig {
+		logical = filepath.Join(olsDALiveDir, "httpd_config.conf")
+	}
+	if filepath.Dir(logical) != olsDALiveDir || filepath.Base(logical) == "httpd-includes.conf" {
 		return "", false
 	}
-	custom := filepath.Join(olsDACustomDir, filepath.Base(src))
-	c, live := readConfFile(l.fs(custom)), readConfFile(l.fs(src))
-	return custom, c.ok && live.ok && string(c.b) == string(live.b)
+	for _, dir := range []string{olsDACustomDir, olsDATemplateDir} {
+		p := filepath.Join(dir, filepath.Base(logical))
+		if isFile(l.fs(p)) {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // olsReason is the manual step for OpenLiteSpeed: CFM does not edit its config.
-func olsReason(p Probe) string {
+func (l layout) olsReason(p Probe) string {
 	trusted := "127.0.0.1T"
 	if p.EdgeIPv6 {
 		trusted = "127.0.0.1T, ::1T"
+	}
+	// What is missing: the mode, the allow list entries, or both.
+	needMode, needACL := true, true
+	if p.ols != nil {
+		needMode = !p.ols.modeOK()
+		l4, l6 := l, l
+		l4.loopIP, l6.loopIP = "", "::1"
+		needACL = !p.ols.aclOK(l4) || (p.EdgeIPv6 && !p.ols.aclOK(l6))
+		if !needMode && !needACL {
+			needMode, needACL = true, true // the step as a whole (a disagreement the parts do not show)
+		}
 	}
 	mode, acl := "/usr/local/lsws/conf/httpd_config.conf", "/usr/local/lsws/conf/httpd_config.conf"
 	if p.Panel == PanelDirectAdmin {
@@ -293,11 +386,16 @@ func olsReason(p Probe) string {
 			acl = p.ols.aclSource
 		}
 	}
-	if p.Panel == PanelDirectAdmin && filepath.Dir(acl) == olsDALiveDir {
+	if p.Panel == PanelDirectAdmin && filepath.Dir(acl) == olsDALiveDir && filepath.Dir(mode) == olsDALiveDir {
 		// The DirectAdmin way: a custom copy CustomBuild installs and keeps.
-		return "OpenLiteSpeed on DirectAdmin: copy " + acl + " to " + filepath.Join(olsDACustomDir, filepath.Base(acl)) +
-			" and add " + trusted + " to its allow line there (and, if " + mode + " does not have useIpInProxyHeader 2, " +
-			"the same with a custom copy of it), then run `da build rewrite_confs` and restart OpenLiteSpeed " +
+		var steps []string
+		if needACL {
+			steps = append(steps, "copy "+acl+" to "+filepath.Join(olsDACustomDir, filepath.Base(acl))+" and add "+trusted+" to its allow line there")
+		}
+		if needMode {
+			steps = append(steps, "copy "+mode+" to "+filepath.Join(olsDACustomDir, filepath.Base(mode))+" and set useIpInProxyHeader 2 there (every server-level one)")
+		}
+		return "OpenLiteSpeed on DirectAdmin: " + strings.Join(steps, "; ") + "; then run `da build rewrite_confs` and restart OpenLiteSpeed " +
 			"(/usr/local/lsws/bin/lswsctrl restart). An edit of the live file alone is lost on the next rewrite_confs. " +
 			"CFM does not edit the OpenLiteSpeed config"
 	}

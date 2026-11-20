@@ -90,7 +90,7 @@ func (l layout) plan(p Probe) Plan {
 		l.planNginx(&pl)
 	case StackLiteSpeed:
 		if p.ols != nil {
-			pl.Reason = olsReason(p)
+			pl.Reason = l.olsReason(p)
 			break
 		}
 		trusted := "127.0.0.1T"
