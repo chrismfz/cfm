@@ -19,9 +19,14 @@ in `internal/originrealip`, one switch each, pinned equal by
 IPv6 client by its /64 ("IPv6 /64 grouping" below: the automatic bans, the
 detectors', the admin API's, the web detector's and the edge's counters):
 keyed on the full address, a direct IPv6 client rotating inside its /64 (any
-VPS has one) evaded them. The edge listens on IPv6 by itself wherever the
-host can and the origin is ready for it (trusting `::1`: `cfm realip fix`);
-`EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` keeps a node on IPv4.
+VPS has one) evaded them. The edge listens on IPv6 wherever the host can and
+the origin is ready for it (trusting `::1`: `cfm realip fix`), from the first
+`render` (the edge installers run one): with no `EDGE_LISTEN_V6`, an edge
+start (a reboot, a restart, the edge's own package upgrade) keeps what a
+render approved but never turns IPv6 on by itself, so a node turns on at a
+time someone chose, with the reload-and-confirm. `EDGE_LISTEN_V6 = on` lets
+an edge start turn it on too (the opt-in as before); `EDGE_LISTEN_V6 = off`
+in `/etc/cfm/cfm.conf` keeps a node on IPv4.
 
 ## How it works
 
@@ -103,12 +108,18 @@ and the files.
 **Turning it on and off on a node:** it is on by default where the host is
 ready (run `cfm realip fix` first, so the origin trusts `::1`);
 `EDGE_LISTEN_V6 = off` in `/etc/cfm/cfm.conf` turns it off. After a change,
-run the script with `render`. When it writes the files it reloads a running edge and
+run the script with `render`. An engine name after the action
+(`render cfm-edge`, `render OpenResty`, `render Angie`) acts on that engine
+alone: an engine's own installer renders its edge (reloading it only if it
+runs) without reloading the others. An older script ignores the name and
+renders every engine, so an installer that may meet one checks for the
+argument first (`grep -q '\[engine\]' <script>`). When it writes the files it reloads a running edge and
 checks (`/proc/net/tcp6`) that it listens on IPv6, else removes them and
 reloads back: a failed reload leaves nginx on its old config, never down.
 When it removes files a running edge listens with, it reloads it too. A
-restart re-decides as well (`prestart`), but a plain `systemctl reload` does
-not. A package upgrade (`deploy`) never turns IPv6 on.
+restart re-decides as well (`prestart`: it keeps or removes, and writes new
+files only under an explicit `EDGE_LISTEN_V6 = on`), but a plain `systemctl
+reload` does not. A package upgrade (`deploy`) never turns IPv6 on.
 
 **Limits.** A hand-written `listen [::]` with `ipv6only=off` is not
 supported: IPv4 visitors then arrive as `::ffff:a.b.c.d`, and the origin hop
@@ -162,9 +173,8 @@ apps that trust localhost, and one bucket for every login limiter. So:
   IPv6).
 - The panel ports (2083/2087/2096 …) stay IPv4 only: cpsrvd does not listen
   on IPv6 on the fleet, and opening the panel to IPv6 is a separate decision.
-- Per-IP counters and bans see each IPv6 address on its own. That was already
-  true for visitors behind Cloudflare, which reach the edge with their own
-  IPv6 address; aggregation by /64 is in progress (below).
+- Per-IP counters and bans group an IPv6 client by its /64 ("IPv6 /64
+  grouping" below), behind Cloudflare and direct alike.
 
 ## IPv6 /64 grouping
 
@@ -384,8 +394,7 @@ on its address), always the whole /64 for a ban, with no per-node switch.
     at the clearance's grain), the one-a-minute log de-dups, every allow /
     exact check (Jetpack, the direct-client cap, self / ignore) and every log
     line; and the native nginx Meta crawler limit (`meta_host_ip_rps`, a
-    `limit_req` zone on `$binary_remote_addr`, no Lua);
-  - then `EDGE_LISTEN_V6` defaults to on (`docs/ROADMAP.md` §9c).
+    `limit_req` zone on `$binary_remote_addr`, no Lua).
 
 ## Verified
 

@@ -80,9 +80,9 @@ done
 
 # The default (no EDGE_LISTEN_V6 in cfm.conf) is ONE switch on each side:
 # the script's V6_DEFAULT and Go's edgeIPv6Default (internal/originrealip),
-# off/false until IPv6 /64 grouping lands, then auto/true together. The
-# reference cfm.conf sets no active key and carries the opposite of the
-# default commented out (the opt-in now, the kill switch later).
+# auto/true since IPv6 /64 grouping (off/false before it), always together.
+# The reference cfm.conf sets no active key and carries the opposite of the
+# default commented out (the kill switch for auto, the opt-in for off).
 sdef=$(sed -n 's/^V6_DEFAULT=\([a-z]*\)$/\1/p' "$SCRIPT")
 gdef=$(sed -n 's/^const edgeIPv6Default = \([a-z]*\)$/\1/p' internal/originrealip/probe.go)
 case "$sdef/$gdef" in
@@ -555,6 +555,28 @@ rm -f "$cfm_conf"
 ss_v6
 run render
 expect_default "no cfm.conf at all -> the default"
+# The default never turns IPv6 on at an edge start (a reboot, a restart, the
+# edge's own package upgrade): only a render does, which reloads and confirms.
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run prestart
+expect absent "default (no key), prestart with no files: an edge start does not turn IPv6 on"
+[ "$sdef" != auto ] || says "turn it on with"
+run render
+expect_default "default (no key), render turns it on"
+run prestart
+expect_default "default (no key), prestart keeps the files a render approved"
+printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run prestart
+expect present "EDGE_LISTEN_V6 = on: prestart writes them (the opt-in as before)"
+rm -f "$cfm_conf"
+# An engine argument limits the run to that engine (an engine's own installer
+# renders its edge without reloading the others).
+rm -f "$conf_dir"/cfm-listen-v6-*.conf
+run render cfm-edge
+expect absent "render <another engine>: this engine is left alone"
+run render TEST
+expect_default "render <this engine> (case-insensitive) renders it"
 printf 'EDGE_LISTEN_V6 = on\n' >"$cfm_conf"
 rm -f "$conf_dir"/cfm-listen-v6-*.conf
 printf 'with-v6' >"$tmp/engine.fail"

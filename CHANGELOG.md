@@ -21,18 +21,24 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Changed
-- **The edge listens on IPv6 by default.** It stayed IPv4-only unless
+- **The edge may listen on IPv6 by default.** It stayed IPv4-only unless
   `EDGE_LISTEN_V6 = on` until the per-IP defences grouped an IPv6 client by
   its /64 (now done: bans, the detectors', admin API's, web detector's and
-  edge's counters). With no `EDGE_LISTEN_V6` in `cfm.conf`, a node now listens
-  on `[::]:9080` / `[::]:9043` at its next edge start (or
-  `cfm-edge-listen-v6.sh render`) wherever the host can (a global IPv6
+  edge's counters). With no `EDGE_LISTEN_V6` in `cfm.conf`, a
+  `cfm-edge-listen-v6.sh render` (by hand, or the edge installers' re-run)
+  turns on `[::]:9080` / `[::]:9043` wherever the host can (a global IPv6
   address, free ports, the origin on IPv6) and the origin trusts the edge's
-  IPv6 hop from `::1`; otherwise it stays on IPv4 as before. A package
-  upgrade never turns it on by itself. `cfm realip` (and its whats_wrong
-  finding) asks for the `::1` trust on every IPv6-capable host now: run
-  `cfm realip fix` (Apache / nginx; LiteSpeed needs `::1T` by hand) where it
-  says so. `EDGE_LISTEN_V6 = off` keeps a node on IPv4. `docs/edge-ipv6.md`.
+  IPv6 hop from `::1`, reloading the edge and confirming the listen;
+  otherwise it stays on IPv4 as before. An edge start (a reboot, a restart,
+  the edge's own package upgrade) and a cfm package upgrade never turn it on
+  by themselves: they keep what a render approved. `cfm realip` (and its
+  whats_wrong / edge_health finding) now asks for the `::1` trust on every
+  IPv6-capable host, and exits 1 until it is there: run `cfm realip fix`
+  (Apache / nginx; LiteSpeed needs `::1T` by hand) where it says so, then
+  render. `EDGE_LISTEN_V6 = off` keeps a node on IPv4 and silences that
+  finding. An existing `/etc/cfm/cfm.conf` keeps its old comment ("Off by
+  default … `# EDGE_LISTEN_V6 = on`"): the default is now on, `off` the kill
+  switch. `docs/edge-ipv6.md`.
 
 ### Security
 - **The edge counts an IPv6 client by its /64.** The traffic-rule throttle

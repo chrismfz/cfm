@@ -53,12 +53,18 @@
 # a running edge listens with reloads it too (reload_after_remove). prestart
 # and deploy never reload.
 #
-# Usage: cfm-edge-listen-v6.sh [render|prestart|deploy|status]
+# Usage: cfm-edge-listen-v6.sh [render|prestart|deploy|status] [engine]
+#   engine    (optional: OpenResty, Angie or cfm-edge, case-insensitive) act on
+#             that engine alone: an engine's own installer renders (and
+#             reloads, if running) only its edge, never the others
 #   render    (default; by hand, the installers) decide and write/remove the
 #             files for every engine found; the ONLY action that turns IPv6 on
 #             for a running edge (it reloads it and confirms the listen)
 #   prestart  (cfm-edge-listen-v6.service, before every edge start) the same,
-#             except that files a render already approved are KEPT when the
+#             except that with no EDGE_LISTEN_V6 in cfm.conf (the default) it
+#             never writes files that are not there (only a render turns IPv6
+#             on: it reloads and confirms), and that files a render already
+#             approved are KEPT when the
 #             only reasons against them are about readiness, which at boot are
 #             often not there yet: no global IPv6 address yet (SLAAC / the
 #             network still coming up), the origin not seen on IPv6 (it can
@@ -116,7 +122,9 @@ log() { echo "CFM edge IPv6 listen: $*"; }
 # disable / disabled, V6_DEFAULT when absent; anything else reads as off (an
 # unknown never turns a listen on). Same reading as internal/originrealip
 # edgeIPv6Wanted.
-mode() {
+# mode_raw: the EDGE_LISTEN_V6 value as written (lower case; "" when cfm.conf
+# sets none, or sets it empty: the default).
+mode_raw() {
     m_val=""
     if [ -r "$CFM_CONF" ]; then
         # Value: cut at the first ; or #, trim whitespace (CR included), then
@@ -128,6 +136,11 @@ mode() {
             sed -e 's/^"\(.*\)"$/\1/' -e t -e 's/^'"'"'\(.*\)'"'"'$/\1/' |
             tail -n 1 | tr 'A-Z' 'a-z')
     fi
+    printf '%s' "$m_val"
+}
+
+mode() {
+    m_val=$(mode_raw)
     case $m_val in
         "") echo "$V6_DEFAULT" ;;
         on | yes | true | 1 | auto | enable | enabled) echo auto ;;
@@ -488,6 +501,16 @@ render_engine() {
         return 0
     fi
 
+    if [ "$re_action" = prestart ] && [ "$re_kept" -eq 0 ] && [ -z "$(mode_raw)" ]; then
+        # The default (no EDGE_LISTEN_V6) allows IPv6, but an edge start
+        # (a reboot, a restart, the edge's own package upgrade) never turns it
+        # on: only a render does, which reloads the edge and confirms the
+        # listen, at a time someone chose. Files a render approved are kept
+        # (above). An explicit EDGE_LISTEN_V6 = on lets prestart write them.
+        log "$re_name: IPv4 only for now: IPv6 is allowed by default; turn it on with: sh $0 render (it reloads the edge and confirms the listen)"
+        return 0
+    fi
+
     # The ::1 trust, asked before anything is written (see realip_v6_trusted).
     realip_v6_trusted
     re_trust=$?
@@ -623,6 +646,10 @@ engines() {
 
 main() {
     action=${1:-render}
+    # An optional engine name (OpenResty | Angie | cfm-edge, case-insensitive):
+    # act on that engine alone, so an engine's own installer renders it without
+    # reloading the others.
+    only=$(printf '%s' "${2:-}" | tr 'A-Z' 'a-z')
     case $action in
         render | prestart | deploy | status) ;;
         mode)
@@ -631,13 +658,16 @@ main() {
             return 0
             ;;
         *)
-            echo "usage: $0 [render|prestart|deploy|status]" >&2
+            echo "usage: $0 [render|prestart|deploy|status] [engine]" >&2
             return 0
             ;;
     esac
     m=$(mode)
     engines | while IFS='|' read -r e_name e_bin e_dir e_main; do
         [ -n "$e_name" ] || continue
+        if [ -n "$only" ] && [ "$(printf '%s' "$e_name" | tr 'A-Z' 'a-z')" != "$only" ]; then
+            continue
+        fi
         if [ "$action" = status ]; then
             status_engine "$e_name" "$e_bin" "$e_dir" "$e_main" "$m"
         else
