@@ -140,3 +140,62 @@ func TestCollectSummaryEnabledButStoppedEngine(t *testing.T) {
 		t.Fatalf("got edge=%q running=%v", s.ActiveEdge, s.EdgeRunning)
 	}
 }
+
+// systemd's answer wins: a `tail -f …/openresty/…/error.log` that the loose
+// process match takes for the edge must not make a stopped unit "running".
+func TestEdgeRunningTrustsSystemdOverTheProcessMatch(t *testing.T) {
+	isolateSummaryFiles(t)
+	panelSystemdUnitProbe = func(unit string) (systemdunit.Status, bool) {
+		return systemdunit.Status{Enabled: strings.HasPrefix(unit, "openresty")}, true
+	}
+	panelListenerProcessDetector = func() string { return "openresty" } // e.g. tail -f its log
+	if s := CollectSummary(summaryBackend{webOn: true}); s.ActiveEdge != "openresty" || s.EdgeRunning {
+		t.Fatalf("got edge=%q running=%v", s.ActiveEdge, s.EdgeRunning)
+	}
+	// Without systemd the process is all there is.
+	panelSystemdUnitProbe = func(string) (systemdunit.Status, bool) { return systemdunit.Status{}, false }
+	if s := CollectSummary(summaryBackend{}); s.ActiveEdge != "openresty" || !s.EdgeRunning {
+		t.Fatalf("no systemd: got edge=%q running=%v", s.ActiveEdge, s.EdgeRunning)
+	}
+}
+
+func TestCollectSummaryUnparsedChainIsFromConfig(t *testing.T) {
+	isolateSummaryFiles(t)
+	if s := CollectSummary(summaryBackend{webOn: true, show: "garbage"}); !s.WebFromConfig {
+		t.Fatalf("an unparsed chain must be flagged: %+v", s)
+	}
+	show := "table inet cfm_redirect {\n\tchain prerouting {\n\t\ttype nat hook prerouting priority dstnat - 1; policy accept;\n" +
+		"\t\ttcp dport 80 dnat to :9080\n\t\ttcp dport 443 dnat to :9043\n\t}\n}\n"
+	if s := CollectSummary(summaryBackend{webOn: true, show: show}); s.WebFromConfig {
+		t.Fatalf("a parsed chain flagged as configured: %+v", s)
+	}
+}
+
+func TestStrayWordsAndDeprecatedChallenge(t *testing.T) {
+	isolateSummaryFiles(t)
+	stubNoExternalTools(t)
+	b := &redirectBackend{}
+	for args, want := range map[string]string{
+		"on extra":              `dnat on: unexpected argument "extra"`,
+		"cpanel off now":        `dnat cpanel off: unexpected argument "now"`,
+		"foo bar":               "unknown subcommand",
+		"cpanel --challenge on": "",
+	} {
+		var rc int
+		_, errOut := captureStreams(t, func() { rc = RunCLI(strings.Fields(args), b) })
+		if want == "" {
+			continue
+		}
+		if rc != 2 || !strings.Contains(errOut, want) {
+			t.Errorf("%q: rc=%d stderr=%q, want %q", args, rc, errOut, want)
+		}
+	}
+	// `--challenge on`: "on" is the subcommand, not the deprecated flag's value.
+	got, err := normalizePanelArgs([]string{"--challenge", "on"})
+	if err != nil || strings.Join(got, " ") != "on" {
+		t.Fatalf("got %v %v", got, err)
+	}
+	if b.onCalls != 0 || b.offCalls != 0 {
+		t.Fatalf("a refused command changed web DNAT: on=%d off=%d", b.onCalls, b.offCalls)
+	}
+}

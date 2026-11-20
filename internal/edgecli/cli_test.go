@@ -12,8 +12,9 @@ import (
 )
 
 type recorder struct {
-	dnatArgs   [][]string
-	realipArgs [][]string
+	dnatArgs    [][]string
+	realipArgs  [][]string
+	edgeInFront []bool
 }
 
 func testDeps(r *recorder, s dnat.Summary, v6 []string, v6err error) (deps, *bytes.Buffer, *bytes.Buffer) {
@@ -24,8 +25,11 @@ func testDeps(r *recorder, s dnat.Summary, v6 []string, v6err error) (deps, *byt
 		summary: func() dnat.Summary { return s },
 		dnat:    func(a []string) int { r.dnatArgs = append(r.dnatArgs, a); return 7 },
 		realip:  func(a []string) int { r.realipArgs = append(r.realipArgs, a); return 5 },
-		verdict: func() (bool, string) { return true, "Origin real-IP: cpanel/apache trusts the edge" },
-		ipv6:    func() ([]string, error) { return v6, v6err },
+		verdict: func(front bool) (bool, string) {
+			r.edgeInFront = append(r.edgeInFront, front)
+			return true, "Origin real-IP: cpanel/apache trusts the edge"
+		},
+		ipv6: func() ([]string, error) { return v6, v6err },
 	}, &out, &errOut
 }
 
@@ -189,5 +193,35 @@ func TestIPv6Lines(t *testing.T) {
 	want := []string{"cfm-edge: IPv4 only (off)", "Angie: listening", "other line"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// With DNAT pointing at a stopped edge, the origin verdict must not say "no
+// edge in front": traffic is sent to an edge either way.
+func TestOriginVerdictSeesTheRedirectNotJustTheProcess(t *testing.T) {
+	for _, c := range []struct {
+		s    dnat.Summary
+		want bool
+	}{
+		{dnat.Summary{ActiveEdge: "angie", WebOn: true}, true},
+		{dnat.Summary{PanelOn: true}, true},
+		{dnat.Summary{ActiveEdge: "angie", EdgeRunning: true}, true},
+		{dnat.Summary{ActiveEdge: "angie"}, false},
+	} {
+		r := &recorder{}
+		d, _, _ := testDeps(r, c.s, nil, nil)
+		run(nil, d)
+		if len(r.edgeInFront) != 1 || r.edgeInFront[0] != c.want {
+			t.Errorf("%+v: edgeInFront=%v want %v", c.s, r.edgeInFront, c.want)
+		}
+	}
+}
+
+func TestSummaryMarksConfiguredValues(t *testing.T) {
+	s := dnat.Summary{ActiveEdge: "angie", EdgeRunning: true, WebOn: true, WebPriority: -99, HTTPPort: 9080, HTTPSPort: 9043, WebFromConfig: true}
+	d, out, _ := testDeps(&recorder{}, s, nil, nil)
+	run(nil, d)
+	if !strings.Contains(out.String(), "configured values: the live chain could not be read") {
+		t.Fatalf("configured values printed as live:\n%s", out.String())
 	}
 }

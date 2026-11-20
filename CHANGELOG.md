@@ -39,8 +39,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   The panel and bypass commands now get their arguments untouched, and a word
   left after the flags (`cfm dnat --priority -99 on`, which printed the
   report and changed nothing) is refused with "flags go after the
-  subcommand". The deprecated `--challenge <value>` is still accepted and
-  ignored.
+  subcommand" (a word after `on` / `off`, `cfm dnat on extra`, is refused
+  as an unexpected argument). The deprecated `--challenge <value>` is still
+  accepted and ignored.
 
 ## 2026.11.20
 

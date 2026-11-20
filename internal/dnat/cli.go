@@ -356,9 +356,15 @@ func RunCLI(args []string, backend firewall.Backend) int {
 		return 2
 	}
 	// A word left after the flags (`cfm dnat --priority -99 on`) was silently
-	// dropped and the report printed instead: say where flags go.
-	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "dnat: unexpected %q: flags go after the subcommand (cfm dnat on --priority -101)\n", fs.Arg(0))
+	// dropped and the report printed instead: say where flags go. A word after
+	// a known subcommand (`cfm dnat on extra`) is refused too; an unknown
+	// subcommand gets its own error below.
+	if fs.NArg() > 0 && (sub == "" || sub == "on" || sub == "off") {
+		if sub == "" {
+			fmt.Fprintf(os.Stderr, "dnat: unexpected %q: flags go after the subcommand (cfm dnat on --priority -101)\n", fs.Arg(0))
+		} else {
+			fmt.Fprintf(os.Stderr, "dnat %s: unexpected argument %q\n", sub, fs.Arg(0))
+		}
 		return 2
 	}
 
@@ -725,7 +731,8 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	mode := fs.String("mode", "auto", "mode")
 	priority := fs.Int("priority", -101, "priority")
 	sub := "status"
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+	flagFirst := len(args) > 0 && strings.HasPrefix(args[0], "-")
+	if len(args) > 0 && !flagFirst {
 		sub = args[0]
 		args = args[1:]
 	}
@@ -744,7 +751,11 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	// `cfm dnat cpanel --priority -99 on`: the word after the flags was
 	// dropped and the status printed. Say where flags go instead.
 	if fs.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "dnat cpanel: unexpected %q: flags go after the subcommand (cfm dnat cpanel on --priority -99)\n", fs.Arg(0))
+		if flagFirst {
+			fmt.Fprintf(os.Stderr, "dnat cpanel: unexpected %q: flags go after the subcommand (cfm dnat cpanel on --priority -99)\n", fs.Arg(0))
+		} else {
+			fmt.Fprintf(os.Stderr, "dnat cpanel %s: unexpected argument %q\n", sub, fs.Arg(0))
+		}
 		return 2
 	}
 	selected := *mode
@@ -981,10 +992,18 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 }
 
+// panelSubcommands are the words runPanelCLI dispatches on; a deprecated
+// `--challenge` never takes one of them as its value.
+var panelSubcommands = map[string]bool{"on": true, "off": true, "status": true, "bypass": true, "help": true}
+
 func normalizePanelArgs(args []string) ([]string, error) {
 	out := make([]string, 0, len(args))
+	subSeen := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if panelSubcommands[a] {
+			subSeen = true
+		}
 		if strings.HasPrefix(a, "mode=") {
 			out = append(out, "--mode", strings.TrimPrefix(a, "mode="))
 			continue
@@ -1001,7 +1020,11 @@ func normalizePanelArgs(args []string) ([]string, error) {
 			fmt.Fprintln(os.Stderr, "DEPRECATION: `--challenge` is deprecated and ignored; `cfm dnat cpanel on` now always enables challenge mode.")
 			// `--challenge <value>`: drop its value too, or it would read as a
 			// stray word after the flags.
-			if a == "--challenge" && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			// The word after it is its value unless it is the subcommand
+			// itself (`--challenge on`); once the subcommand has come
+			// (`on --challenge off`), any word is the value.
+			if a == "--challenge" && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") &&
+				(subSeen || !panelSubcommands[args[i+1]]) {
 				i++
 			}
 			continue

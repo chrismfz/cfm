@@ -14,8 +14,9 @@ type Summary struct {
 	// ActiveEdge is the edge engine the redirect points at, as the DNAT
 	// resolver picks it: the one active unit, else the one ENABLED unit (so
 	// a crashed engine is still named), "" when neither; Ambiguous when more
-	// than one is active. EdgeRunning says whether it actually runs (unit
-	// active, or its process seen).
+	// than one is active. EdgeRunning says whether it actually runs: systemd's
+	// answer whenever systemd answers; only without systemd its process (a
+	// loose match, `tail -f …/openresty/…` counts, so never over systemd).
 	ActiveEdge  string
 	EdgeRunning bool
 	Ambiguous   bool
@@ -25,6 +26,9 @@ type Summary struct {
 	WebPriority int // the live chain's priority (only when WebOn)
 	HTTPPort    int // the installed redirect's target ports (only when WebOn)
 	HTTPSPort   int
+	// WebFromConfig: the live chain could not be read or parsed, so the
+	// priority / ports above are the configured ones, not the installed.
+	WebFromConfig bool
 	WebIntent   string // "on", "off" or "" (no intent file)
 	WebBypass   int    // entries in the web bypass file
 	LastProbe   ProbeResult
@@ -45,7 +49,7 @@ func CollectSummary(backend firewall.Backend) Summary {
 		s.Ambiguous = true
 	default:
 		s.ActiveEdge = svc
-		s.EdgeRunning = svc != "" && panelListenerServiceIsConfirmedActive(svc)
+		s.EdgeRunning = svc != "" && edgeRunning(svc)
 	}
 
 	if backend == nil {
@@ -56,13 +60,17 @@ func CollectSummary(backend firewall.Backend) Summary {
 		if s.WebErr == nil && s.WebOn {
 			s.WebPriority = ConfiguredWebDNATPriority()
 			s.HTTPPort, s.HTTPSPort = EffectiveTargetPorts()
-			if show, err := backend.DNATShow(DefaultFamily, DefaultTable); err == nil {
-				if p, ok := parseDNATChainPriority(show); ok {
-					s.WebPriority = p
-				}
-				if h, hs, ok := firewall.ParseDNATListenerPorts(show); ok {
-					s.HTTPPort, s.HTTPSPort = h, hs
-				}
+			show, err := backend.DNATShow(DefaultFamily, DefaultTable)
+			p, pok := parseDNATChainPriority(show)
+			h, hs, hok := firewall.ParseDNATListenerPorts(show)
+			if err != nil || !pok || !hok {
+				s.WebFromConfig = true
+			}
+			if err == nil && pok {
+				s.WebPriority = p
+			}
+			if err == nil && hok {
+				s.HTTPPort, s.HTTPSPort = h, hs
 			}
 		}
 		s.PanelOn, _, s.PanelErr = panelStatusWithBackend(backend)
@@ -77,6 +85,15 @@ func CollectSummary(backend firewall.Backend) Summary {
 	s.PanelBypass = bypassCount(firewall.DNATBypassScopeCpanel)
 	s.LastProbe = daemonSnapshot(ScopeWeb).LastProbe
 	return s
+}
+
+// edgeRunning trusts systemd whenever it answers; the process fallback only
+// covers a host without it.
+func edgeRunning(svc string) bool {
+	if st, ok := panelSystemdUnitProbe(panelServiceUnit(svc)); ok {
+		return st.Active
+	}
+	return panelListenerProcessDetector() == svc
 }
 
 type summaryError string

@@ -41,13 +41,14 @@ type deps struct {
 	summary func() dnat.Summary
 	dnat    func(args []string) int
 	realip  func(args []string) int
-	verdict func() (ok bool, text string)
+	verdict func(edgeInFront bool) (ok bool, text string)
 	ipv6    func() ([]string, error)
 }
 
 // Run is `cfm edge`. The firewall backend is built only for the routes that
 // read or change DNAT: `cfm edge realip|ipv6|help` work where it cannot be
-// (no nft binary), as `cfm realip` does.
+// (no nft binary), as `cfm realip` does. A nil backend gives the summary
+// UNKNOWN DNAT lines and the rest of the picture.
 func Run(args []string, backend func() firewall.Backend) int {
 	return run(args, deps{
 		out:     os.Stdout,
@@ -55,8 +56,8 @@ func Run(args []string, backend func() firewall.Backend) int {
 		summary: func() dnat.Summary { return dnat.CollectSummary(backend()) },
 		dnat:    func(a []string) int { return dnat.RunCLI(a, backend()) },
 		realip:  originrealip.RunCLI,
-		verdict: func() (bool, string) {
-			return originrealip.Verdict(originrealip.ProbeSystem(""), originrealip.EdgeActive())
+		verdict: func(edgeInFront bool) (bool, string) {
+			return originrealip.Verdict(originrealip.ProbeSystem(""), edgeInFront)
 		},
 		ipv6: ipv6Status,
 	})
@@ -146,7 +147,11 @@ func printSummary(d deps) int {
 		fmt.Fprintf(w, "  Web DNAT:    UNKNOWN (%v)\n", s.WebErr)
 		rc = 1
 	case s.WebOn:
-		fmt.Fprintf(w, "  Web DNAT:    ON   priority %d, tcp/80 -> :%d, tcp+udp/443 -> :%d%s\n", s.WebPriority, s.HTTPPort, s.HTTPSPort, bypassNote(s.WebBypass))
+		fromConfig := ""
+		if s.WebFromConfig {
+			fromConfig = " (configured values: the live chain could not be read)"
+		}
+		fmt.Fprintf(w, "  Web DNAT:    ON   priority %d, tcp/80 -> :%d, tcp+udp/443 -> :%d%s%s\n", s.WebPriority, s.HTTPPort, s.HTTPSPort, fromConfig, bypassNote(s.WebBypass))
 	default:
 		fmt.Fprintf(w, "  Web DNAT:    OFF  (the origin serves 80/443 directly)%s\n", bypassNote(s.WebBypass))
 	}
@@ -186,7 +191,10 @@ func printSummary(d deps) int {
 		}
 	}
 
-	ok, text := d.verdict()
+	// The origin's trust matters as soon as traffic is sent to an edge, running
+	// or not: with DNAT on and the edge down, "n/a, no edge in front" would
+	// contradict the DNAT lines above.
+	ok, text := d.verdict(s.EdgeRunning || s.WebOn || s.PanelOn)
 	mark := "OK  "
 	if !ok {
 		mark = "WARN"
