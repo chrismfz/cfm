@@ -29,9 +29,23 @@ if ! diff -u configs/cfm-edge.conf "$tmpdir/cfm-edge.conf" >"$tmpdir/diff"; then
     fail "configs/cfm-edge.conf is stale or hand-edited; run: make cfm-edge-conf (and edit configs/openresty.conf, never cfm-edge.conf)"
 fi
 
-# The derivation is paths only, plus the generated header: anything else in the
-# diff would mean the map rewrote a directive it should not have.
-changed=$(diff configs/openresty.conf configs/cfm-edge.conf | grep -c '^>' || true)
-[ "$changed" -le 25 ] || fail "cfm-edge.conf differs from openresty.conf in $changed lines; the render is meant to change paths only"
+# The mappings that matter, named one by one (a render that went wrong in one
+# of them would still be "current"):
+#   - pid = the unit's PIDFile (Type=forking: a mismatch gets the edge killed);
+#   - mime.types / sidecars from /etc/cfm-edge (the cfm-edge package ships
+#     mime.types there; CFM's deploy puts the sidecars next to it);
+#   - logs in /var/log/cfm-edge (rotated by the cfm-edge package);
+#   - Lua only from the shared /var/lib/cfm/lua (no legacy edge Lua dir).
+want() { grep -qE "$1" configs/cfm-edge.conf || fail "configs/cfm-edge.conf lacks: $2"; }
+want '^pid[[:space:]]+/run/cfm-edge\.pid;' "pid /run/cfm-edge.pid (the unit's PIDFile)"
+want '^[[:space:]]*include[[:space:]]+/etc/cfm-edge/mime\.types;' "include /etc/cfm-edge/mime.types"
+want '^[[:space:]]*include[[:space:]]+/etc/cfm-edge/trusted_proxies\.conf;' "include /etc/cfm-edge/trusted_proxies.conf"
+want '^[[:space:]]*include[[:space:]]+/etc/cfm-edge/cfm-panel-listeners\.conf;' "include /etc/cfm-edge/cfm-panel-listeners.conf"
+want '^error_log[[:space:]]+/var/log/cfm-edge/error\.log' "error_log /var/log/cfm-edge/error.log"
+want "^[[:space:]]*lua_package_path[[:space:]]+'/var/lib/cfm/lua/\\?\\.lua;;';" "lua_package_path '/var/lib/cfm/lua/?.lua;;'"
+# Every log path stays under /var/log/cfm-edge (the vendor-rotated dir).
+if grep -nE '^[[:space:]]*(access_log|error_log)[[:space:]]+/' configs/cfm-edge.conf | grep -vE '[[:space:]]/var/log/cfm-edge/'; then
+    fail "configs/cfm-edge.conf logs outside /var/log/cfm-edge (lines above)"
+fi
 
-echo "[cfm-edge-conf] OK: configs/cfm-edge.conf is the current render of configs/openresty.conf ($changed lines differ)."
+echo "[cfm-edge-conf] OK: configs/cfm-edge.conf is the current render of configs/openresty.conf, with cfm-edge's pid, conf, log and Lua paths."

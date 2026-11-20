@@ -521,6 +521,25 @@ for want in 'Active edge: ambiguous' 'systemctl reload angie' \
 done
 rm -f "$configs/cfm-edge.conf"
 
+# Only an ADOPTED cfm-edge is deployed: its live nginx.conf must carry the
+# render's header. The package's placeholder (or a missing file) is left
+# alone, and the marker must be the render's exact text.
+marker=$(sed -n "s/^CFMEDGE_ADOPT_MARKER='\(.*\)'$/\1/p" scripts/package-proxy-config-deploy.sh)
+[ -n "$marker" ] || { echo "FAIL: CFMEDGE_ADOPT_MARKER not found in the deploy script" >&2; exit 1; }
+rg -qF "$marker" scripts/render-cfm-edge-conf.sh || { echo "FAIL: the adoption marker is not what render-cfm-edge-conf.sh writes" >&2; exit 1; }
+rg -qF "$marker" configs/cfm-edge.conf || { echo "FAIL: configs/cfm-edge.conf lacks the adoption marker" >&2; exit 1; }
+printf '# cfm-edge placeholder\nevents {}\n' >"$tmp/placeholder.conf"
+adopt_out=$(sh -c '. "$1"; cfmedge_adopted "$2" && echo adopted; cfmedge_adopted "$3" && echo adopted; cfmedge_adopted "$4" && echo adopted; echo done' sh \
+  "$tmp/functions.sh" "$tmp/placeholder.conf" "$tmp/no-such.conf" configs/cfm-edge.conf)
+[ "$adopt_out" = "$(printf 'adopted\ndone')" ] || { echo "FAIL: cfmedge_adopted: placeholder/missing must be no, the rendered conf yes; got: $adopt_out" >&2; exit 1; }
+# The top-level cfm-edge call (not run by these tests, which source only the
+# functions) must gate on adoption and deploy to cfm-edge's own paths.
+rg -qF 'if [ -n "$CFMEDGE_BIN" ] && ! cfmedge_adopted /etc/cfm-edge/nginx.conf; then' scripts/package-proxy-config-deploy.sh \
+  || { echo "FAIL: the cfm-edge deploy is not gated on adoption" >&2; exit 1; }
+for want in '"$CFM_CONFIG_DIR/cfm-edge.conf" \' '/etc/cfm-edge/nginx.conf \' '/etc/cfm-edge \' 'cfm-edge.service \'; do
+  rg -qF "        $want" scripts/package-proxy-config-deploy.sh || { echo "FAIL: the cfm-edge process_engine call lacks: $want" >&2; exit 1; }
+done
+
 failure_output=$(
   PATH="$bin_dir:$PATH" \
   CFM_CONFIG_DIR="$configs" \

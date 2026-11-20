@@ -38,7 +38,7 @@ trap 'rm -f "$tmp"' EXIT
 } | sed \
     -e 's|/usr/local/openresty/nginx/logs/nginx\.pid|/run/cfm-edge.pid|g' \
     -e 's|;/usr/local/openresty/nginx/lua/?\.lua;|;|g' \
-    -e 's|/usr/local/openresty/nginx/\*_temp|/var/lib/cfm-edge/*|g' \
+    -e 's|/usr/local/openresty/nginx/\*_temp|/var/lib/cfm-edge/{client_body,proxy}|g' \
     -e 's|^# the OpenResty package as root-owned|# the cfm-edge package as root-owned|' \
     -e 's|/usr/local/openresty/nginx/conf/|/etc/cfm-edge/|g' \
     -e 's|/usr/local/openresty/nginx/logs/|/var/log/cfm-edge/|g' \

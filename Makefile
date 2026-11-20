@@ -232,7 +232,7 @@ git: ## Commit + push με προσαρμοσμένο μήνυμα
 	git push
 
 
-deb: build
+deb: build cfm-edge-conf
 	@echo "PKGROOT=[$(PKGROOT)] OUTDIR=[$(OUTDIR)]"
 	@test -n "$(PKGROOT)" && test -n "$(OUTDIR)"
 	@rm -rf "$(PKGROOT)" && mkdir -p "$(PKGROOT)/DEBIAN" \
@@ -290,7 +290,7 @@ deb: build
 
 
 
-stage-pkgroot: build
+stage-pkgroot: build cfm-edge-conf
 	@echo "→ Staging into $(PKGROOT)"
 	# the .deb's license copy; the rpm ships its own under /usr/share/licenses
 	@rm -rf $(PKGROOT)/usr/share/doc/cfm
@@ -526,14 +526,16 @@ cfm-edge-conf: ## Re-render configs/cfm-edge.conf from configs/openresty.conf
 release: bypass-list trusted-proxies cfm-edge-conf bpf deb rpm
 	@scripts/stamp-changelog.sh $(REL_DATE)
 	@set -uo pipefail; \
-	REL_FILES="CHANGELOG.md configs/cfm-edge.conf"; \
+	REL_FILES="CHANGELOG.md"; \
+	if [ -z "$$(git status --porcelain -- configs/openresty.conf 2>/dev/null)" ]; then REL_FILES="$$REL_FILES configs/cfm-edge.conf"; \
+	else echo "⚠️  configs/openresty.conf has uncommitted changes: packaged as-is, but configs/cfm-edge.conf is NOT committed (it would not match the committed openresty.conf and fail CI). Commit both by hand."; fi; \
 	if [ "$(BYPASS_REFRESH)" != "0" ]; then REL_FILES="$$REL_FILES configs/challenge_waf_bypass.conf configs/trusted_proxies.conf"; fi; \
 	if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$$(git status --porcelain -- $$REL_FILES)" ]; then \
 	  echo "📝 Committing $$REL_FILES (only) for $(REL_DATE)..."; \
 	  MSG="changelog: stamp $(REL_DATE) release"; \
 	  if [ -n "$$(git status --porcelain -- configs/challenge_waf_bypass.conf)" ] && [ "$(BYPASS_REFRESH)" != "0" ]; then MSG="$$MSG + refresh bypass list"; fi; \
 	  if [ -n "$$(git status --porcelain -- configs/trusted_proxies.conf)" ] && [ "$(BYPASS_REFRESH)" != "0" ]; then MSG="$$MSG + refresh Cloudflare trusted_proxies"; fi; \
-	  if [ -n "$$(git status --porcelain -- configs/cfm-edge.conf)" ]; then MSG="$$MSG + re-render cfm-edge.conf"; fi; \
+	  case " $$REL_FILES " in *" configs/cfm-edge.conf "*) if [ -n "$$(git status --porcelain -- configs/cfm-edge.conf)" ]; then MSG="$$MSG + re-render cfm-edge.conf"; fi ;; esac; \
 	  if git commit -q -m "$$MSG" -- $$REL_FILES; then \
 	    branch="$$(git rev-parse --abbrev-ref HEAD)"; \
 	    if [ "$$branch" = "HEAD" ]; then \

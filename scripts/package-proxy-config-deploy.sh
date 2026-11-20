@@ -16,6 +16,15 @@ OPENRESTY_ACTIVE=0
 CFMEDGE_DETECTED=0
 CFMEDGE_DEPLOYED=0
 CFMEDGE_ACTIVE=0
+CFMEDGE_NOT_ADOPTED=0
+
+# cfmedge_adopted LIVE_CONF: true when cfm-edge's live config is CFM's (the
+# header scripts/render-cfm-edge-conf.sh writes; check_package_proxy_config_
+# deploy.sh pins the two texts equal), not the package's placeholder.
+CFMEDGE_ADOPT_MARKER='GENERATED from configs/openresty.conf by scripts/render-cfm-edge-conf.sh'
+cfmedge_adopted() {
+    grep -qF "$CFMEDGE_ADOPT_MARKER" "$1" 2>/dev/null
+}
 
 find_first_executable() {
     ffe_cmd_name=$1
@@ -132,7 +141,11 @@ print_proxy_config_summary() {
     echo "CFM proxy config summary:"
     print_engine_summary_line Angie "$ANGIE_DETECTED" "$ANGIE_ACTIVE" "$ANGIE_DEPLOYED"
     print_engine_summary_line OpenResty "$OPENRESTY_DETECTED" "$OPENRESTY_ACTIVE" "$OPENRESTY_DEPLOYED"
-    print_engine_summary_line cfm-edge "$CFMEDGE_DETECTED" "$CFMEDGE_ACTIVE" "$CFMEDGE_DEPLOYED"
+    if [ "$CFMEDGE_NOT_ADOPTED" -eq 1 ]; then
+        echo "  cfm-edge: installed, not adopted (left unchanged)"
+    else
+        print_engine_summary_line cfm-edge "$CFMEDGE_DETECTED" "$CFMEDGE_ACTIVE" "$CFMEDGE_DEPLOYED"
+    fi
 
     # Every active edge, as "Label unit" pairs. More than one is ambiguous
     # (count with > 1: three engines can be active, not just two).
@@ -951,8 +964,19 @@ fi
 # cfm-edge (chrismfz/cfm-edge): its main config is configs/cfm-edge.conf, a
 # render of openresty.conf with cfm-edge's paths (check_cfm_edge_conf.sh), and
 # its sidecars live in /etc/cfm-edge next to it.
+#
+# Only once ADOPTED: its live nginx.conf is CFM's (it carries the render's
+# header; install-edge.sh puts it there). A host that merely has the rpm keeps
+# the package's placeholder: deploying here would replace it with a config
+# that binds the edge ports (a stray `systemctl start cfm-edge` would then
+# fight the live edge for them), and the config test would create
+# /var/log/cfm-edge/*.log, whose fresh mtime makes edgelog read cfm-edge's
+# empty logs instead of the live edge's.
 CFMEDGE_BIN=$(find_first_executable cfm-edge /usr/sbin/cfm-edge || true)
-if [ -n "$CFMEDGE_BIN" ]; then
+if [ -n "$CFMEDGE_BIN" ] && ! cfmedge_adopted /etc/cfm-edge/nginx.conf; then
+    CFMEDGE_NOT_ADOPTED=1
+    echo "CFM proxy config: cfm-edge installed but not adopted (its nginx.conf is not CFM's; install-edge.sh adopts it); leaving it unchanged"
+elif [ -n "$CFMEDGE_BIN" ]; then
     process_engine \
         cfm-edge \
         "$CFMEDGE_BIN" \
