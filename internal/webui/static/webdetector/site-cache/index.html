@@ -36,7 +36,7 @@
             <code>private</code> by the origin.
           </div>
           <div class="callout" :class="{ warn: scMicroMode !== 'enforced' || scCacheOff }">
-            <strong>Micro tier (B).</strong> Anonymous GET/HEAD over HTTPS, for 1–120 s.
+            <strong>Micro tier (B).</strong> Anonymous GET/HEAD over HTTPS, for 5–300 s.
             <template v-if="scCacheOff">This node: <strong>off</strong>
               (<code>SITE_CACHE = 0</code>, below)<span v-if="scMicroMode === 'enforced'">; with
               <code>MICRO_CACHE_ENFORCE = 1</code>, an armed micro tier is live again once it is back on</span>.</template>

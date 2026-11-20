@@ -205,7 +205,7 @@ excludes and `make waf-corpus`. [`docs/waf.md`](docs/waf.md) ·
 
 ### Site Cache
 Per-vhost edge caching, off until a vhost is armed: static assets (Tier A)
-and a 1–120 s micro-cache of anonymous pages (Tier B), with absolute rails
+and a 5–300 s micro-cache of anonymous pages (Tier B), with absolute rails
 for cookies, credentials, panels and webmail.
 [`docs/site-cache-runbook.md`](docs/site-cache-runbook.md)
 

@@ -33,9 +33,9 @@ export const SC_RECIPES = Object.freeze([
   },
   {
     key: "burst_shield",
-    title: "Burst shield (micro-cache 1 s)",
+    title: "Burst shield (micro-cache 5 s)",
     description:
-      "Tier B at 1 s: absorbs a burst on heavy pages while every visitor still sees a page at most a second old. Anonymous GET/HEAD over HTTPS only; logged-in, cart and admin traffic is never micro-cached.",
+      "Tier B at 5 s: absorbs a burst on heavy pages while every visitor still sees a page at most five seconds old. Anonymous GET/HEAD over HTTPS only; logged-in, cart and admin traffic is never micro-cached.",
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, placeholder: "shop.example.com" },
     ],
@@ -43,16 +43,16 @@ export const SC_RECIPES = Object.freeze([
       "Where this node has MICRO_CACHE_ENFORCE = 1, pages are served from cache at once; at 0 it is a dry run and the debug stamp only reports what would be cached.",
       "Check that the app's session cookie is on the auth list (built in, or add it in the editor) before enforcing.",
     ],
-    build: (v) => hostsOf(v.vhosts).map((host) => ({ host, micro: { enabled: true, recipe: "micro_safe", ttl: "1s" } })),
+    build: (v) => hostsOf(v.vhosts).map((host) => ({ host, micro: { enabled: true, recipe: "micro_safe", ttl: "5s" } })),
   },
   {
     key: "near_static",
-    title: "Near-static pages (micro-cache 10–120 s)",
+    title: "Near-static pages (micro-cache 10–300 s)",
     description:
       "Tier B with a longer bucket for pages that rarely change (a landing page, a news front page). Visitors can see a page up to the TTL old; purge after an edit to show it at once.",
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, placeholder: "news.example.com" },
-      { key: "ttl", label: "TTL", type: "select", required: true, default: "10s", options: ["10s", "30s", "60s", "90s", "120s"] },
+      { key: "ttl", label: "TTL", type: "select", required: true, default: "10s", options: ["10s", "30s", "60s", "90s", "120s", "300s"] },
     ],
     warnings: [
       "Where this node has MICRO_CACHE_ENFORCE = 1, pages are served from cache at once; at 0 it is a dry run.",
@@ -63,7 +63,7 @@ export const SC_RECIPES = Object.freeze([
   {
     key: "static_and_burst",
     title: "Static assets + burst shield",
-    description: "Both tiers: static assets by the origin's headers, and anonymous pages micro-cached at 1 s.",
+    description: "Both tiers: static assets by the origin's headers, and anonymous pages micro-cached at 5 s.",
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, placeholder: "shop.example.com" },
     ],
@@ -71,7 +71,7 @@ export const SC_RECIPES = Object.freeze([
     build: (v) => hostsOf(v.vhosts).map((host) => ({
       host,
       static: { enabled: true, recipe: "static_lean" },
-      micro: { enabled: true, recipe: "micro_safe", ttl: "1s" },
+      micro: { enabled: true, recipe: "micro_safe", ttl: "5s" },
     })),
   },
   {

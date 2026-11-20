@@ -28,7 +28,7 @@ test("every recipe builds valid set patches", () => {
       if (p.static && p.static.enabled) assert.ok(STATIC_RECIPES.includes(p.static.recipe), rcp.key);
       if (p.micro && p.micro.enabled) {
         assert.ok(MICRO_RECIPES_OFFERED.includes(p.micro.recipe), rcp.key);
-        // A micro recipe always sends its TTL: without one the edge runs 1 s.
+        // A micro recipe always sends its TTL: without one the edge runs 5 s.
         assert.ok(isBucketTTL(p.micro.ttl), `${rcp.key}: ttl ${p.micro.ttl}`);
       }
       // A disabled tier sends no recipe (the stored one is kept for a re-enable).
@@ -39,7 +39,7 @@ test("every recipe builds valid set patches", () => {
 
 test("a recipe names only its own tier (the set API merges)", () => {
   const burst = scRecipeBuild(scRecipe("burst_shield"), { vhosts: "a.com" });
-  assert.deepEqual(burst, [{ host: "a.com", micro: { enabled: true, recipe: "micro_safe", ttl: "1s" } }]);
+  assert.deepEqual(burst, [{ host: "a.com", micro: { enabled: true, recipe: "micro_safe", ttl: "5s" } }]);
   const stat = scRecipeBuild(scRecipe("static_assets"), { vhosts: "a.com" });
   assert.deepEqual(stat, [{ host: "a.com", static: { enabled: true, recipe: "static_lean" } }]);
 });

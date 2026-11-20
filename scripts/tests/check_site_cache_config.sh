@@ -731,6 +731,18 @@ for f in "$ORT" "$ANG"; do
     fi
   done
 
+  # (b4) $cfm_micro_max is how a conf tells cfm_cache.lua its largest bucket
+  # (micro_gate clamps to it, for new Lua with an older conf): every server
+  # that sets it must say the largest MICRO_BUCKETS entry, or the Lua would
+  # never route to the top bucket (too low) or exec a missing one (too high).
+  want_max=$(tr ' ' '\n' <<< "$micro_ttls" | tr -d 's' | sort -n | tail -1)
+  got_max=$(sed -nE 's/^[[:space:]]*set[[:space:]]+\$cfm_micro_max[[:space:]]+"?([^";[:space:]]*)"?[[:space:]]*;.*$/\1/p' "$f" | sort -u)
+  if [ -z "$got_max" ]; then
+    err "$f: no 'set \$cfm_micro_max \"$want_max\";' — cfm_cache.lua would clamp every micro TTL to the 120s bucket of an older conf."
+  elif [ "$got_max" != "$want_max" ]; then
+    err "$f: \$cfm_micro_max is [$(tr '\n' ' ' <<< "$got_max")], not the largest cfm_cache.lua MICRO_BUCKETS entry ($want_max)."
+  fi
+
   # ...and nothing beyond them (from the parsed statements, so a commented-out
   # or wrapped declaration reads as nginx reads it).
   got_zones=$(sed -nE 's#.*/var/cache/nginx/cfm_micro_([0-9]+s)([[:space:]].*)?$#\1#p' <<< "${mzones_of[$f]:-}" | sort)

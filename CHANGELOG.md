@@ -51,6 +51,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (`/.tmb/worksec.php`, ~110 a day over the fleet) in any folder.
 
 ### Changed
+- **Site Cache micro buckets: 5 s to 300 s.** The 1 s and 2 s buckets are
+  gone and a 300 s one is new, so the micro TTLs are now 5, 10, 30, 60,
+  90, 120 and 300 s: one zone fewer, and a five-minute choice for pages
+  that rarely change. No fleet vhost used 1 s or 2 s. A policy that still
+  stores one runs as 5 s (the page shows "runs as 5 s"), as does an empty
+  TTL. The burst-shield recipe is 5 s. An edge conf from before this
+  release keeps working with the new Lua: a 300 s TTL runs as 120 s there
+  until the conf is updated. The retired `cfm_micro_1s` / `cfm_micro_2s`
+  cache dirs are left in place, unused.
 - **`cfm edge` names the IPv6 next step.** When the host can do IPv6 but
   the running edge listens on IPv4 only, the summary's "needs a look" says
   what to run: `cfm edge ipv6 on`, or `cfm edge realip fix` first when the

@@ -516,16 +516,21 @@ end
 -- TTL (recipe preset or operator custom) SNAPS to the nearest bucket — for herd
 -- protection the gap between 7s and 8s is operationally meaningless
 -- (design §5.4), so the snapped menu behaves as effectively continuous.
-local MICRO_BUCKETS = { 1, 2, 5, 10, 30, 60, 90, 120 } -- seconds; mirrors the declared cfm_micro_<n>s zones
--- The largest bucket a conf from before 2026-10-13 declares (see micro_gate).
-local LEGACY_MAX_BUCKET = 60
+local MICRO_BUCKETS = { 5, 10, 30, 60, 90, 120, 300 } -- seconds; mirrors the declared cfm_micro_<n>s zones
+-- The largest bucket an older conf declares (see micro_gate): a conf from
+-- before 2026-10-13 stops at 60s, one from before 2026-11-20 at 120s. A conf
+-- since says its own largest bucket in $cfm_micro_max. (Both older sets also
+-- declared 1s and 2s, which MICRO_BUCKETS no longer routes to; 5s..60s are in
+-- every set.)
+local LEGACY_MAX_BUCKET    = 60
+local PRE_300S_MAX_BUCKET  = 120
 
 -- micro_bucket_seconds: snap a stored TTL to the nearest bucket. Accepts a
 -- number of seconds or a string "[+]<n><unit>" with unit s/m/h/d, as the
 -- daemon's parseCacheTTL stores it ("5s", "+5s", "1m", "2h"; a bare number or
 -- inner spaces, which the daemon rejects, are read as seconds); nil/empty/
 -- unparseable or <=0 snaps to the smallest bucket (the safest, shortest TTL —
--- closest to not caching), anything above 120s clamps to 120s. Ties snap DOWN
+-- closest to not caching), anything above 300s clamps to 300s. Ties snap DOWN
 -- (the shorter, safer TTL) because the buckets ascend and the comparison keeps
 -- the first minimum. (It used to read only the digits, so "1m" became 1s.)
 local TTL_UNIT_SECONDS = { [""] = 1, s = 1, m = 60, h = 3600, d = 86400 }
@@ -1064,7 +1069,7 @@ end
 --   * a MISS that could not be stored: MICRO_UNCACHEABLE_TTL.
 --   * an EXPIRED refresh that could not be stored — the page changed (sets a
 --     cookie, went private, redirects, 404): MICRO_UNCACHEABLE_STALE_TTL,
---     longer than the largest micro zone's `inactive` (210s), so the stale copy
+--     longer than the largest micro zone's `inactive` (390s), so the stale copy
 --     is evicted before the next probe. Otherwise every probe would serve it
 --     to the requests arriving during its fetch, for as long as they kept it
 --     warm. check_site_cache_config.sh pins inactive + 30s <= this value.
@@ -1075,7 +1080,7 @@ end
 -- URL is then served as it would be without micro; nothing wrong is stored.
 local UNCACHEABLE_DICT            = "cfm_cache_uncacheable"
 local MICRO_UNCACHEABLE_TTL       = 60
-local MICRO_UNCACHEABLE_STALE_TTL = 240
+local MICRO_UNCACHEABLE_STALE_TTL = 420
 local MICRO_UNCACHEABLE_SHORT_TTL = 5    -- the micro proxy_cache_lock_timeout
 local NGX_CACHE_VARY_LEN          = 128  -- nginx does not store a longer Vary
 local REQUEST_INDUCED_4XX = {
@@ -1339,6 +1344,20 @@ function _M.note_skip(why)
     note_micro_why(why)
 end
 
+-- micro_conf_max_bucket: the largest MICRO_BUCKETS entry the running conf
+-- serves (see the version-skew note in micro_gate).
+local function micro_conf_max_bucket()
+    local max = tonumber(ngx.var.cfm_micro_max)
+    if not max then
+        max = (ngx.var.cfm_sc_unsafe ~= nil) and PRE_300S_MAX_BUCKET or LEGACY_MAX_BUCKET
+    end
+    local best = MICRO_BUCKETS[1]
+    for _, b in ipairs(MICRO_BUCKETS) do
+        if b <= max then best = b end
+    end
+    return best
+end
+
 -- micro_gate: ACCESS-phase hook for Tier B (micro-cache of anonymous
 -- HTML). Called from cfm.lua at the Step 4 plain-allow return, AFTER $cfm_pass is
 -- set. (The Step 2b clearance fast-path is deferred until the §5.5.1 clearance-
@@ -1399,10 +1418,12 @@ function _M.micro_gate()
     end
     -- Version skew: the package always installs this file, but the edge conf
     -- is deployed only when `-t` passes, so a node can run this Lua with an
-    -- older conf. That conf has no @cfm_micro_90s / @cfm_micro_120s (an exec
-    -- there would 500 every anonymous visitor) and no $cfm_sc_unsafe; the
-    -- variable's presence is how the conf says it is new enough.
-    if bucket > LEGACY_MAX_BUCKET and ngx.var.cfm_sc_unsafe == nil then bucket = LEGACY_MAX_BUCKET end
+    -- older conf, which lacks the larger buckets (an exec to a missing
+    -- @cfm_micro_<n>s would 500 every anonymous visitor). A conf says its
+    -- largest bucket in $cfm_micro_max; one without it stops at 120s if it
+    -- declares $cfm_sc_unsafe, else at 60s.
+    local max = micro_conf_max_bucket()
+    if bucket > max then bucket = max end
     ngx.var.cfm_cache_skip = "0"
     ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
     return "@cfm_micro_" .. bucket .. "s"

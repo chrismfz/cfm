@@ -71,7 +71,7 @@ check(cache.policy_for("myip.gr") == nil, "no policy when cache empty")
 cache._rebuild_cache({
   { host = "myip.gr", gen = 3,
     static = { on = true, recipe = "static_aggressive", ttl = "7d" },
-    micro  = { on = true, recipe = "micro_safe", ttl = "1s" } },
+    micro  = { on = true, recipe = "micro_safe", ttl = "5s" } },
   { host = "www.myip.gr", gen = 0,
     micro = { on = true, recipe = "micro_aggressive", ttl = "30s" } },
   { host = "*.cdn.example.com", gen = 1,
@@ -85,7 +85,7 @@ check(cache._has_any() == true, "has_any true after rebuild")
 local p = cache.policy_for("MyIP.gr")           -- case-insensitive via normalize
 check(p ~= nil and p.gen == 3, "exact host resolves (case-insensitive)")
 check(p and p.static and p.static.on and p.static.ttl == "7d", "static tier carried")
-check(p and p.micro and p.micro.ttl == "1s", "micro tier carried")
+check(p and p.micro and p.micro.ttl == "5s", "micro tier carried")
 
 check(cache.policy_for("www.myip.gr") ~= nil, "exact-host www is its OWN entry (not *.myip.gr)")
 check(cache.policy_for("sub.myip.gr") == nil, "no implicit wildcard for myip.gr")
@@ -120,8 +120,8 @@ check(stats_keys_str() == "*.cdn.example.com,myip.gr,www.myip.gr",
 -- ── label_for: compact, greppable, tiers omitted when off ─────────────────────
 check(cache._label_for({ gen = 3,
         static = { on = true, recipe = "static_aggressive", ttl = "7d" },
-        micro  = { on = true, recipe = "micro_safe", ttl = "1s" } })
-      == "static=static_aggressive/7d micro=micro_safe/1s gen=3", "full label")
+        micro  = { on = true, recipe = "micro_safe", ttl = "5s" } })
+      == "static=static_aggressive/7d micro=micro_safe/5s gen=3", "full label")
 check(cache._label_for({ gen = 0, micro = { on = true, recipe = "micro_safe" } })
       == "micro=micro_safe gen=0", "micro-only label, no ttl")
 check(cache._label_for({ gen = 2 }) == "gen=2", "no tiers → just gen")
@@ -226,40 +226,46 @@ _site_cache_on = true
 
 -- ── Tier B micro-cache: TTL-bucket snapping (Phase B1, pure helper) ────────────
 -- proxy_cache_valid is per-location + not variablizable, so a stored micro TTL
--- snaps to one of the eight declared cfm_micro_<n>s zones. Exact buckets pass
+-- snaps to one of the seven declared cfm_micro_<n>s zones. Exact buckets pass
 -- through; between-bucket values snap to the nearest; ties snap DOWN (shorter,
 -- safer); junk/<=0/absent → the smallest bucket (closest to not caching).
-for _, b in ipairs({ 1, 2, 5, 10, 30, 60, 90, 120 }) do
+for _, b in ipairs({ 5, 10, 30, 60, 90, 120, 300 }) do
   check(cache._micro_bucket(b) == b, "micro bucket exact " .. b .. "s passes through")
   check(cache._micro_bucket(b .. "s") == b, "micro bucket string \"" .. b .. "s\" parses")
 end
-check(cache._micro_bucket(3) == 2,  "3s snaps down to 2s (|3-2|<|3-5|)")
-check(cache._micro_bucket(4) == 5,  "4s snaps up to 5s (|4-5|<|4-2|)")
+-- 1s and 2s were buckets until 2026-11-20: a policy still storing one snaps to 5s
+check(cache._micro_bucket("1s") == 5, "a stored 1s (retired bucket) snaps to 5s")
+check(cache._micro_bucket("2s") == 5, "a stored 2s (retired bucket) snaps to 5s")
+check(cache._micro_bucket(3) == 5,  "3s snaps up to 5s (the smallest bucket)")
+check(cache._micro_bucket(7) == 5,  "7s snaps down to 5s (|7-5|<|7-10|)")
 check(cache._micro_bucket(8) == 10, "8s snaps to 10s")
 check(cache._micro_bucket(45) == 30, "45s snaps down to 30s (tie 30/60 → smaller)")
-check(cache._micro_bucket(1000) == 120, "huge TTL clamps to the largest bucket")
-check(cache._micro_bucket(0) == 1,  "0 → smallest bucket (no caching-adjacent)")
-check(cache._micro_bucket(-5) == 1, "negative → smallest bucket")
-check(cache._micro_bucket(nil) == 1, "nil → smallest bucket")
-check(cache._micro_bucket("") == 1, "empty string → smallest bucket")
-check(cache._micro_bucket("junk") == 1, "unparseable → smallest bucket")
+check(cache._micro_bucket(1000) == 300, "huge TTL clamps to the largest bucket")
+check(cache._micro_bucket(0) == 5,  "0 → smallest bucket (no caching-adjacent)")
+check(cache._micro_bucket(-5) == 5, "negative → smallest bucket")
+check(cache._micro_bucket(nil) == 5, "nil → smallest bucket")
+check(cache._micro_bucket("") == 5, "empty string → smallest bucket")
+check(cache._micro_bucket("junk") == 5, "unparseable → smallest bucket")
 check(cache._micro_bucket("30 s") == 30, "TTL with spaces parses")
 -- units, as the daemon's parseCacheTTL accepts them (s/m/h/d): "1m" used to read
 -- as 1s because only the digits were parsed
 check(cache._micro_bucket("1m") == 60, "1m → 60s (minutes, not 1s)")
-check(cache._micro_bucket("2h") == 120, "2h clamps to the largest bucket")
-check(cache._micro_bucket("1d") == 120, "1d clamps to the largest bucket")
+check(cache._micro_bucket("5m") == 300, "5m is the 300s bucket")
+check(cache._micro_bucket("2h") == 300, "2h clamps to the largest bucket")
+check(cache._micro_bucket("1d") == 300, "1d clamps to the largest bucket")
 check(cache._micro_bucket("90s") == 90, "90s is a bucket (2026-10-13)")
 check(cache._micro_bucket("2m") == 120, "2m is the 120s bucket")
 check(cache._micro_bucket("100s") == 90, "100s snaps to 90s (nearest)")
 check(cache._micro_bucket("105s") == 90, "105s ties between 90/120 and snaps DOWN")
 check(cache._micro_bucket("75s") == 60, "75s ties between 60/90 and snaps DOWN")
+check(cache._micro_bucket("210s") == 120, "210s ties between 120/300 and snaps DOWN")
+check(cache._micro_bucket("211s") == 300, "211s snaps up to 300s")
 check(cache._micro_bucket("5S") == 5, "upper-case unit parses")
-check(cache._micro_bucket("7x") == 1, "unknown unit → smallest bucket")
-check(cache._micro_bucket("1.5s") == 1, "fractional → unparseable → smallest bucket")
-check(cache._micro_bucket("10s5") == 1, "trailing junk → smallest bucket")
+check(cache._micro_bucket("7x") == 5, "unknown unit → smallest bucket")
+check(cache._micro_bucket("1.5s") == 5, "fractional → unparseable → smallest bucket")
+check(cache._micro_bucket("10s5") == 5, "trailing junk → smallest bucket")
 check(cache._micro_bucket("+5s") == 5, "a leading + (the daemon's Atoi accepts it) parses")
-check(cache._micro_zone_name(1) == "cfm_micro_1s", "zone name for 1s")
+check(cache._micro_zone_name(1) == "cfm_micro_5s", "zone name for a retired 1s → the 5s bucket")
 check(cache._micro_zone_name("7s") == "cfm_micro_5s", "zone name snaps 7s → 5s bucket")
 check(cache._micro_zone_name(60) == "cfm_micro_60s", "zone name for 60s")
 
@@ -433,8 +439,8 @@ ngx.var.cfm_micro_conf = "1"   -- a request in the HTTPS `location /`
 for k in pairs(_header) do _header[k] = nil end
 ngx.var.host = "myip.gr"
 cache.observe()
-check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=would/1s", 1, true),
-      "observe stamps microcache=would/1s for an anonymous request to a micro-armed vhost")
+check(_header["X-CFM-Cache"] and _header["X-CFM-Cache"]:find("microcache=would/5s", 1, true),
+      "observe stamps microcache=would/5s for an anonymous request to a micro-armed vhost")
 for k in pairs(_header) do _header[k] = nil end
 ngx.var.http_cookie = "PHPSESSID=abc"
 cache.observe()
@@ -473,7 +479,7 @@ check(ngx.var.cfm_cache_skip == "1", "dry-run leaves $cfm_cache_skip=1 (nothing 
 -- enforce ON: an armed+anonymous GET over HTTPS routes to its bucket
 _micro_enforce = true
 reset_gate_vars(); ngx.var.host = "myip.gr"
-check(cache.micro_gate() == "@cfm_micro_1s", "enforce: myip.gr (micro ttl 1s) → @cfm_micro_1s")
+check(cache.micro_gate() == "@cfm_micro_5s", "enforce: myip.gr (micro ttl 5s) → @cfm_micro_5s")
 check(ngx.var.cfm_cache_skip == "0", "enforce: micro_gate opens the bypass gate ($cfm_cache_skip=0)")
 check(ngx.var.cfm_cache_gen == "3", "enforce: micro_gate stamps the purge generation")
 reset_gate_vars(); ngx.var.host = "www.myip.gr"
@@ -492,7 +498,7 @@ reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.request_method = "POST"; ng
 check(cache.micro_gate() == nil, "enforce: POST → nil (GET/HEAD only)")
 check(ngx.var.cfm_micro_why == "method", "POST is logged as method: " .. tostring(ngx.var.cfm_micro_why))
 reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.cfm_micro_why = "-"
-check(cache.micro_gate() == "@cfm_micro_1s" and ngx.var.cfm_micro_why == "-", "a micro-cached request leaves mwhy at -")
+check(cache.micro_gate() == "@cfm_micro_5s" and ngx.var.cfm_micro_why == "-", "a micro-cached request leaves mwhy at -")
 reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_authorization = "Basic dXNlcjpwYXNz"
 check(cache.micro_gate() == nil, "enforce: Authorization header → nil (credentialed, never micro-cached)")
 check(ngx.var.cfm_cache_skip == "1", "credentialed miss leaves the bypass gate closed")
@@ -650,11 +656,11 @@ end
 do
   local T = cache._micro_mark_ttl
   check(T("MISS", "404") == 60, "MISS 404 → 60s")
-  check(T("EXPIRED", "404") == 240, "EXPIRED 404 → 240s (outlives the largest zone inactive)")
+  check(T("EXPIRED", "404") == 420, "EXPIRED 404 → 420s (outlives the largest zone inactive)")
   check(T("MISS", "200", "1") == 60, "MISS with an unsafe Set-Cookie → 60s")
-  check(T("EXPIRED", "200", nil, "1") == 240, "EXPIRED private → 240s")
+  check(T("EXPIRED", "200", nil, "1") == 420, "EXPIRED private → 420s")
   for _, code in ipairs({ "401", "403", "410", "301", "302" }) do
-    check(T("EXPIRED", code) == 240, "EXPIRED " .. code .. " (the page changed) marks")
+    check(T("EXPIRED", code) == 420, "EXPIRED " .. code .. " (the page changed) marks")
   end
   for _, code in ipairs({ "500", "502", "503", "504", "508" }) do
     check(T("EXPIRED", code) == nil, "EXPIRED " .. code .. " never marks (the stale copy absorbs it)")
@@ -794,7 +800,7 @@ check(_uncacheable.sets == 0, "EXPIRED 5xx and a 429 never mark")
 log_micro("MISS", "502")
 check(_uncacheable.sets == 1 and _uncacheable.last_ttl == 5, "a cold (MISS) 5xx marks for 5s")
 log_micro("EXPIRED", "404")
-check(_uncacheable.last_ttl == 240, "an EXPIRED page-changed refresh marks for the long TTL")
+check(_uncacheable.last_ttl == 420, "an EXPIRED page-changed refresh marks for the long TTL")
 
 -- an internal redirect never routes (the sentinel would survive it)
 micro_req("m.com", "/int"); _internal = true
@@ -1053,6 +1059,20 @@ do
   cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "30s" } } })
   micro_req("skew.com"); ngx.var.cfm_sc_unsafe = nil
   check(cache.micro_gate() == "@cfm_micro_30s", "old conf: buckets it has are untouched")
+  -- a conf that says its largest bucket ($cfm_micro_max, 2026-11-20)
+  cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "5m" } } })
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"; ngx.var.cfm_micro_max = "300"
+  check(cache.micro_gate() == "@cfm_micro_300s", "conf with $cfm_micro_max=300: a 5m TTL routes to the 300s bucket")
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"; ngx.var.cfm_micro_max = nil
+  check(cache.micro_gate() == "@cfm_micro_120s", "conf from before 300s ($cfm_sc_unsafe, no $cfm_micro_max): clamp to 120s")
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = nil; ngx.var.cfm_micro_max = nil
+  check(cache.micro_gate() == "@cfm_micro_60s", "conf from before 2026-10-13: clamp to 60s")
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"; ngx.var.cfm_micro_max = "100"
+  check(cache.micro_gate() == "@cfm_micro_90s", "an off-menu $cfm_micro_max clamps to the largest bucket at or below it")
+  micro_req("skew.com"); ngx.var.cfm_sc_unsafe = "1"; ngx.var.cfm_micro_max = "junk"
+  check(cache.micro_gate() == "@cfm_micro_120s", "an unreadable $cfm_micro_max falls back to the marker rule")
+  ngx.var.cfm_micro_max = nil
+  cache._rebuild_cache({ { host = "skew.com", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "30s" } } })
   -- micro_note on an old conf reads the origin's Set-Cookie as before
   local function note(sc)
     _uncacheable.data = {}; _uncacheable.sets = 0
@@ -1097,7 +1117,7 @@ do
   local saved = ngx.var
   _site_cache_on = true
   cache._rebuild_cache({
-    { host = "myip.gr", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "1s" } },
+    { host = "myip.gr", gen = 3, micro = { on = true, recipe = "micro_safe", ttl = "5s" } },
     { host = "assets.cdn.example.com", gen = 1, static = { on = true, recipe = "static_lean", ttl = "1h" } },
   })
   ngx.var = { host = "myip.gr", cfm_micro_why = "-" }
