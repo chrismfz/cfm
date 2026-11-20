@@ -1202,4 +1202,74 @@ cmp -s "$configs/cfm-logrotate-systemd.conf" "$dropin" && [ "$(wc -l <"$reloads"
 rg -q 'deploy_logrotate_dropin' "$tmp/functions.sh" && awk '/^deploy_logrotate_cron\(\)/,/^}/' "$tmp/functions.sh" | rg -q '^ *deploy_logrotate_dropin$' \
   || { echo "FAIL: the package deploy no longer installs the drop-in (deploy_logrotate_cron calls it)" >&2; exit 1; }
 
+# 16. The cfm-edge config tests create its log files (nginx -t opens every
+#     access_log/error_log it names). On a node whose live edge is still
+#     openresty/angie, the EMPTY files they created must go again, or edgelog
+#     (newest mtime wins) reads cfm-edge's empty logs instead of the live
+#     edge's. Files that were there before, files with content, and anything
+#     while cfm-edge.service is active are kept.
+el="$tmp/cfmedge-logs"
+el_reset() {
+  rm -rf "$el"; mkdir -p "$el"
+  : >"$el/old-empty.log"; printf 'old\n' >"$el/old-full.log"
+}
+el_run() { # FAKE_CFMEDGE_ACTIVE, then the shell body run between snapshot and drop
+  PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$configs" CFM_CFMEDGE_LOG_DIR="$el" FAKE_CFMEDGE_ACTIVE="$1" \
+    FAKE_OPENRESTY_ARGS="$tmp/el.args" \
+    sh -c '. "$1"; snapshot_cfmedge_logs; eval "$2"; drop_test_created_cfmedge_logs' sh "$tmp/functions.sh" "$2" 2>&1
+}
+el_list() { (cd "$el" && find . -maxdepth 1 -type f | sort | tr '\n' ' '); }
+el_reset
+el_out=$(el_run 0 ': >"$CFM_CFMEDGE_LOG_DIR/error.log"; : >"$CFM_CFMEDGE_LOG_DIR/access.log"; printf x >"$CFM_CFMEDGE_LOG_DIR/written.log"')
+[ "$(el_list)" = "./old-empty.log ./old-full.log ./written.log " ] \
+  || { echo "FAIL: cfm-edge inactive: expected only the test-created EMPTY logs removed; left: $(el_list)" >&2; printf '%s\n' "$el_out" >&2; exit 1; }
+printf '%s\n' "$el_out" | rg -qF "removed $el/error.log (empty, created by the cfm-edge config test" \
+  || { echo "FAIL: the removal is not reported" >&2; printf '%s\n' "$el_out" >&2; exit 1; }
+el_reset
+el_run 1 ': >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
+[ "$(el_list)" = "./error.log ./old-empty.log ./old-full.log " ] \
+  || { echo "FAIL: cfm-edge ACTIVE: its empty log is the live one and must be kept; left: $(el_list)" >&2; exit 1; }
+# No snapshot (a run that never reached the cfm-edge section): nothing goes;
+# and a second drop after the first (the EXIT trap) removes nothing new.
+el_reset; : >"$el/error.log"
+PATH="$bin_dir:$PATH" CFM_CFMEDGE_LOG_DIR="$el" FAKE_CFMEDGE_ACTIVE=0 \
+  sh -c '. "$1"; drop_test_created_cfmedge_logs' sh "$tmp/functions.sh" >/dev/null
+[ -f "$el/error.log" ] || { echo "FAIL: a drop without a snapshot removed a log" >&2; exit 1; }
+el_reset
+el_run 0 'drop_test_created_cfmedge_logs; : >"$CFM_CFMEDGE_LOG_DIR/error.log"' >/dev/null
+[ -f "$el/error.log" ] || { echo "FAIL: a second drop (the EXIT trap) must be a no-op" >&2; exit 1; }
+# A missing log dir: no error, nothing created.
+rm -rf "$el"
+el_out=$(PATH="$bin_dir:$PATH" CFM_CFMEDGE_LOG_DIR="$el" sh -c '. "$1"; snapshot_cfmedge_logs; drop_test_created_cfmedge_logs; echo rc=$?' sh "$tmp/functions.sh" 2>&1)
+[ "$el_out" = "rc=0" ] && [ ! -e "$el" ] || { echo "FAIL: a missing cfm-edge log dir: $el_out" >&2; exit 1; }
+# With a REAL nginx through process_engine: the premise (the test creates
+# the logs) and the cleanup, end to end.
+el_reset
+el_pkg="$tmp/el-pkg"; el_live="$tmp/el-live"; rm -rf "$el_pkg" "$el_live"; mkdir -p "$el_pkg" "$el_live"
+printf 'error_log %s/error.log;\nevents {}\nhttp {\naccess_log %s/access.log;\ninclude %s/trusted_proxies.conf;\n}\n' "$el" "$el" "$el_live" >"$el_pkg/cfm-edge.conf"
+printf '%s\n' '# trusted' >"$el_pkg/trusted_proxies.conf"
+printf '%s\n' '192.0.2.1/32 1;' >"$el_pkg/challenge_waf_bypass.conf"
+cp "$configs/cfm-panel-listeners.conf.in" "$el_pkg/"
+el_out=$(PATH="$bin_dir:$PATH" CFM_CONFIG_DIR="$el_pkg" CFM_CFMEDGE_LOG_DIR="$el" FAKE_CFMEDGE_ACTIVE=0 \
+  sh -c '. "$1"; snapshot_cfmedge_logs; process_engine cfm-edge "$2" "$3" "$4" "$5" cfm-edge.service x;
+    ls "$CFM_CFMEDGE_LOG_DIR" | tr "\n" " "; echo; drop_test_created_cfmedge_logs' sh \
+  "$tmp/functions.sh" "$bin_dir/real-nginx" "$el_pkg/cfm-edge.conf" "$el_live/nginx.conf" "$el_live" 2>&1)
+printf '%s\n' "$el_out" | rg -q 'config test passed' && printf '%s\n' "$el_out" | rg -q '^access.log error.log old-empty.log old-full.log $' \
+  || { echo "FAIL: real nginx: expected the cfm-edge config test to pass and to create access.log/error.log (the premise)" >&2; printf '%s\n' "$el_out" >&2; exit 1; }
+[ "$(el_list)" = "./old-empty.log ./old-full.log " ] \
+  || { echo "FAIL: real nginx: the test-created logs were not removed; left: $(el_list)" >&2; printf '%s\n' "$el_out" >&2; exit 1; }
+# The top level (not run here): snapshot before the first cfm-edge test (the
+# cfm-edge section), drop after the last (the IPv6 listen deploy also tests
+# cfm-edge), and again from the EXIT trap.
+el_main=$(awk '/^deploy_logrotate_config$/{f=1} f' scripts/package-proxy-config-deploy.sh)
+el_snap=$(printf '%s\n' "$el_main" | rg -n '^snapshot_cfmedge_logs$' | cut -d: -f1 || true)
+el_bin=$(printf '%s\n' "$el_main" | rg -n '^CFMEDGE_BIN=' | cut -d: -f1 || true)
+el_v6=$(printf '%s\n' "$el_main" | rg -n '^deploy_edge_listen_v6$' | cut -d: -f1 || true)
+el_drop=$(printf '%s\n' "$el_main" | rg -n '^drop_test_created_cfmedge_logs$' | cut -d: -f1 || true)
+[ -n "$el_snap" ] && [ -n "$el_bin" ] && [ -n "$el_v6" ] && [ -n "$el_drop" ] \
+  && [ "$el_snap" -lt "$el_bin" ] && [ "$el_v6" -lt "$el_drop" ] \
+  || { echo "FAIL: the deploy must snapshot the cfm-edge logs before its cfm-edge section and drop the test-created ones after deploy_edge_listen_v6" >&2; exit 1; }
+awk '/^cleanup_on_exit\(\)/,/^}/' "$tmp/functions.sh" | rg -q '^ *drop_test_created_cfmedge_logs$' \
+  || { echo "FAIL: cleanup_on_exit does not drop the test-created cfm-edge logs" >&2; exit 1; }
+
 echo "OK: package proxy deploy helper tests only the main engine configs, with the new sidecars staged; a failed run leaves the live dir untouched"

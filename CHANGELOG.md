@@ -224,6 +224,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   whats_wrong titles it "origin does not trust the edge's loopback"), `edge_ipv6` / `edge_ipv6_listening` in `--json`.
 
 ### Fixed
+- **A cfm upgrade no longer leaves empty cfm-edge logs that hide the live
+  edge's.** On a node prepared with `install-edge.sh` whose edge is still
+  OpenResty or Angie, the package deploy's cfm-edge config tests created
+  fresh empty files in `/var/log/cfm-edge/` on every upgrade (`nginx -t`
+  creates every log it names), and `edge_error_tail`, `ip_forensics` and
+  whats_wrong, which read the newest edge log, read those instead of the live
+  edge's. The deploy now removes the empty files its tests created (never one
+  that was there before or has content, and nothing while cfm-edge runs), as
+  `install-edge.sh` already did for its own tests.
 - **CFM's log rotation names every generation by date and time, on every
   run.** On EL the distro's daily logrotate applies `/etc/logrotate.conf`'s
   global `dateext` (`access.log-YYYYMMDD`), while CFM's hourly pass runs

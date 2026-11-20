@@ -536,6 +536,41 @@ acquire_deploy_lock() {
 cleanup_on_exit() {
     trap '' HUP INT TERM PIPE
     cleanup_proxy_deploy
+    drop_test_created_cfmedge_logs
+}
+
+# `nginx -t` creates every access_log/error_log file its config names. On a
+# node prepared with install-edge.sh whose live edge is still OpenResty or
+# Angie, the cfm-edge config tests below (process_engine's -T, the IPv6
+# listen script's -t) would leave fresh EMPTY files in /var/log/cfm-edge on
+# every upgrade, and edgelog (newest mtime wins) would then read those
+# instead of the live edge's logs (edge_error_tail, whats_wrong). Remember
+# what was there before the first test, and afterwards remove only the EMPTY
+# regular files that were not (the same rule as install-edge.sh's
+# snapshot_edge_logs / drop_test_created_logs), never while cfm-edge.service
+# is active: its own empty log is then the live one. A file that was already
+# there, or one with content, is never touched.
+CFMEDGE_LOG_DIR=${CFM_CFMEDGE_LOG_DIR:-/var/log/cfm-edge}
+CFMEDGE_LOG_SNAPSHOT_TAKEN=0
+CFMEDGE_LOG_SNAPSHOT=""
+snapshot_cfmedge_logs() {
+    CFMEDGE_LOG_SNAPSHOT=$(find "$CFMEDGE_LOG_DIR" -maxdepth 1 -type f 2>/dev/null | sort)
+    CFMEDGE_LOG_SNAPSHOT_TAKEN=1
+}
+
+# Idempotent (the EXIT trap runs it again); a no-op without a snapshot.
+drop_test_created_cfmedge_logs() {
+    [ "$CFMEDGE_LOG_SNAPSHOT_TAKEN" -eq 1 ] || return 0
+    CFMEDGE_LOG_SNAPSHOT_TAKEN=0
+    service_is_active cfm-edge.service && return 0
+    find "$CFMEDGE_LOG_DIR" -maxdepth 1 -type f 2>/dev/null | while IFS= read -r dtc_f; do
+        [ -n "$dtc_f" ] || continue
+        printf '%s\n' "$CFMEDGE_LOG_SNAPSHOT" | grep -qxF -- "$dtc_f" && continue
+        if [ ! -s "$dtc_f" ] && rm -f -- "$dtc_f"; then
+            echo "CFM proxy config: removed $dtc_f (empty, created by the cfm-edge config test; cfm-edge is not running)"
+        fi
+    done
+    return 0
 }
 
 ensure_fallback_cert_if_missing() {
@@ -976,7 +1011,11 @@ fi
 # that binds the edge ports (a stray `systemctl start cfm-edge` would then
 # fight the live edge for them), and the config test would create
 # /var/log/cfm-edge/*.log, whose fresh mtime makes edgelog read cfm-edge's
-# empty logs instead of the live edge's.
+# empty logs instead of the live edge's. An adopted cfm-edge that is not
+# running yet is tested all the same, so every file its tests create (here
+# and in deploy_edge_listen_v6 below, which tests an unadopted one too) is
+# dropped again by drop_test_created_cfmedge_logs.
+snapshot_cfmedge_logs
 CFMEDGE_BIN=$(find_first_executable cfm-edge /usr/sbin/cfm-edge || true)
 if [ -n "$CFMEDGE_BIN" ] && ! cfmedge_adopted /etc/cfm-edge/nginx.conf; then
     CFMEDGE_NOT_ADOPTED=1
@@ -995,6 +1034,7 @@ else
 fi
 
 deploy_edge_listen_v6
+drop_test_created_cfmedge_logs
 
 print_proxy_config_summary
 
