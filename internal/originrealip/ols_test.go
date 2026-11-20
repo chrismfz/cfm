@@ -377,6 +377,9 @@ func TestOLSAddTrustAndSetMode(t *testing.T) {
 // (a new master), "same" (the old master still runs), "down" (not running).
 func olsCtlStub(t *testing.T, after string) *[]string {
 	t.Helper()
+	oldPolls, oldSleep := olsRestartPolls, olsSleep
+	olsRestartPolls, olsSleep = 3, func(time.Duration) {}
+	t.Cleanup(func() { olsRestartPolls, olsSleep = oldPolls, oldSleep })
 	var calls []string
 	restarts := 0
 	oldRun := runCmd
@@ -516,5 +519,57 @@ func TestOLSFixKeepsALiveOnlyTrust(t *testing.T) {
 	}
 	if p := l.probe(""); !p.Trusted || p.Warning != "" {
 		t.Fatalf("after keep: %+v", p)
+	}
+}
+
+// Re-review: a custom copy that already equals the live file is written over
+// (it was refused as "changed since the plan").
+func TestApplyOLSWithAMatchingCustomCopy(t *testing.T) {
+	l, r := olsDAHost(t)
+	put(t, r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf", server3OLSACL)
+	olsCtlStub(t, "new")
+	pl := l.plan(l.probe(""))
+	if pl.Action != ActionWrite {
+		t.Fatalf("plan = %+v", pl)
+	}
+	if err := Apply(pl, &strings.Builder{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if p := l.probe(""); !p.Trusted {
+		t.Fatalf("after: %+v", p)
+	}
+}
+
+// Re-review: the keep plan does not overwrite a custom copy that differs.
+func TestOLSKeepRefusesADifferingCustomCopy(t *testing.T) {
+	l, r := olsDAHost(t)
+	tmpl := "usr/local/directadmin/custombuild/configure/openlitespeed/conf/"
+	put(t, r, tmpl+"httpd-accesscontrol.conf", server3OLSACL)
+	put(t, r, tmpl+"httpd-defaults.conf", server3OLSDefaults)
+	put(t, r, "etc/openlitespeed/httpd-accesscontrol.conf", strings.Replace(server3OLSACL, "ALL,", "ALL, 127.0.0.1T, ::1T,", 1))
+	put(t, r, "usr/local/directadmin/custombuild/custom/openlitespeed/conf/httpd-accesscontrol.conf", "accessControl{\n  allow ALL, 198.51.100.0/24T\n}\n")
+	pl := l.plan(l.probe(""))
+	if pl.Action != ActionNone || !strings.Contains(pl.Reason, "reconcile them by hand") {
+		t.Fatalf("plan = %+v", pl)
+	}
+}
+
+// Re-review: a new master after the extra wait counts (a slow restart).
+func TestApplyOLSWaitsForASlowRestart(t *testing.T) {
+	l, _ := olsDAHost(t)
+	olsCtlStub(t, "new")
+	statuses := 0
+	inner := runCmd
+	runCmd = func(d time.Duration, name string, args ...string) (string, error) {
+		if args[0] == "status" {
+			statuses++
+			if statuses == 2 { // the first status after the restart: the old master still
+				return "litespeed is running with PID 42.", nil
+			}
+		}
+		return inner(d, name, args...)
+	}
+	if err := Apply(l.plan(l.probe("")), &strings.Builder{}); err != nil {
+		t.Fatalf("a slow restart read as a failure: %v", err)
 	}
 }

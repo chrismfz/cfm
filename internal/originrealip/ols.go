@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // OpenLiteSpeed keeps its server config as plain text, not LiteSpeed
@@ -558,10 +559,10 @@ func (l layout) planOLS(pl *Plan) {
 		} else if isFile(l.fs(custom)) || isDir(l.fs(custom)) {
 			return
 		}
-		base := readConfFile(l.fs(src))
+		base, cbase := readConfFile(l.fs(src)), readConfFile(l.fs(custom))
 		writes = append(writes,
 			FileWrite{Path: l.fs(src), Content: string(edits[src]), Live: true, base: string(base.b), baseExists: base.ok, checkBase: true},
-			FileWrite{Path: l.fs(custom), Content: string(edits[src]), checkBase: true})
+			FileWrite{Path: l.fs(custom), Content: string(edits[src]), base: string(cbase.b), baseExists: cbase.ok, checkBase: true})
 	}
 	// And after the next rewrite_confs: the edited files are what it installs
 	// (their custom copies), every other file what CustomBuild has for it.
@@ -601,6 +602,12 @@ func (l layout) planOLSKeep(pl *Plan) {
 		}
 		custom := filepath.Join(olsDACustomDir, filepath.Base(f))
 		prev := readConfFile(l.fs(custom))
+		if prev.ok && string(prev.b) != string(live.b) {
+			// The custom copy may hold what the operator means a rebuild to
+			// install: as planOLS, the operator's call.
+			pl.Reason += "; " + custom + " differs from " + f + ": reconcile them by hand (a rebuild installs the custom copy)"
+			return
+		}
 		writes = append(writes, FileWrite{Path: l.fs(custom), Content: string(live.b), base: string(prev.b), baseExists: prev.ok, checkBase: true})
 	}
 	pl.Action, pl.Reason, pl.Writes, pl.Path = ActionWrite, "", writes, writes[0].Path
@@ -799,6 +806,12 @@ func applyOLS(pl Plan, w io.Writer) error {
 	}
 	out, err := runCmd(fixTimeout, olsCtl, "restart")
 	after := pid()
+	// lswsctrl waits ~15 s for a new master and returns either way: give a
+	// slow one a bounded while longer before reading it as not taken.
+	for i := 0; err == nil && after != "" && after == before && before != "?" && i < olsRestartPolls; i++ {
+		olsSleep(time.Second)
+		after = pid()
+	}
 	if err == nil && after != "" && (after != before || before == "?") {
 		fmt.Fprintln(w, "  OpenLiteSpeed restarted gracefully (pid "+before+" -> "+after+")")
 		return nil
@@ -817,3 +830,9 @@ func applyOLS(pl Plan, w io.Writer) error {
 }
 
 var olsPIDRe = regexp.MustCompile(`with PID (\d+)`)
+
+// olsRestartPolls / olsSleep: the extra wait for a new master (vars for tests).
+var (
+	olsRestartPolls = 30
+	olsSleep        = time.Sleep
+)
