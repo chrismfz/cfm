@@ -136,7 +136,7 @@ func NewHTTPWAFCleaner(baseURL, token string) WAFCleaner {
 	return &HTTPWAFCleaner{
 		baseURL: baseURL,
 		token:   strings.TrimSpace(token),
-		hc:      &http.Client{Timeout: 5 * time.Second},
+		hc:      &http.Client{Timeout: 5 * time.Second}, // clihttp-exception: sends the admin token it is given (cmd/cfm passes apiAuthToken(), as clihttp would) under its own 5s bound
 	}
 }
 
