@@ -43,6 +43,15 @@ it on restart and reboot (`PanelStartupPriority`: the saved value, else the
 `NFT_DNAT_PRIORITY` is the WEB redirect's priority and does not touch the
 panel chain.
 
+**A bare `on` re-uses the last choice.** `on` saves the mode and the
+priority it applied (`/var/lib/cfm/dnat_panel_mode`,
+`/var/lib/cfm/dnat_panel_priority`), and an `on` with neither flag applies
+them again, so `off` then `on` keeps a fallback / -99 setup (before, it went
+back to auto / -101 and overwrote the saved priority). An explicit `--mode`
+takes its own default priority again (`fallback` -99, else -101), and
+`--priority` always wins. `status` prints the saved mode as `Enabled with
+mode:` (the mode is not visible in the installed chain).
+
 ## DirectAdmin
 
 `2222 → 12222` is TLS-terminated at the CFM listener and proxied to

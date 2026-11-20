@@ -33,7 +33,7 @@ func isolateSummaryFiles(t *testing.T) string {
 	t.Helper()
 	stubNoEdgeDetected(t)
 	dir := t.TempDir()
-	saved := []*string{&webDNATIntentPath, &panelChallengeEnabledStatePath, &panelDNATPriorityPath,
+	saved := []*string{&webDNATIntentPath, &panelChallengeEnabledStatePath, &panelDNATPriorityPath, &panelDNATModePath,
 		&firewall.DNATBypassWebPath, &firewall.DNATBypassCpanelPath}
 	orig := make([]string, len(saved))
 	for i, p := range saved {
@@ -42,6 +42,7 @@ func isolateSummaryFiles(t *testing.T) string {
 	webDNATIntentPath = filepath.Join(dir, "dnat_enabled")
 	panelChallengeEnabledStatePath = filepath.Join(dir, "panel_challenge_enabled")
 	panelDNATPriorityPath = filepath.Join(dir, "dnat_panel_priority")
+	panelDNATModePath = filepath.Join(dir, "dnat_panel_mode")
 	firewall.DNATBypassWebPath = filepath.Join(dir, "cfm.dnat_bypass")
 	firewall.DNATBypassCpanelPath = filepath.Join(dir, "cfm.dnat_cpanel_bypass")
 	t.Cleanup(func() {

@@ -42,6 +42,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   subcommand" (a word after `on` / `off`, `cfm dnat on extra`, is refused
   as an unexpected argument). The deprecated `--challenge <value>` is still
   accepted and ignored.
+- **A bare `cfm dnat cpanel on` (or `cfm edge panel on`) went back to auto
+  / -101**, whatever panel DNAT had been turned on with before, and
+  overwrote the saved priority the daemon restores on restart: an `off` then
+  `on` silently switched a fallback / -99 node to -101. `on` now saves the
+  mode next to the priority and a bare `on` re-uses both; an explicit
+  `--mode` takes its own default priority, `--priority` always wins.
+  `cfm dnat cpanel status` and `cfm edge` show the mode it was turned on with.
 
 ## 2026.11.20
 
