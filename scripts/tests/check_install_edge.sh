@@ -18,12 +18,18 @@
 # 4. It parses (bash -n).
 # 5. The empty cfm-edge logs its config tests create are dropped again, never
 #    while cfm-edge may run, a symlinked log dir included.
+# 6. The three installers (edge, openresty, angie) re-run themselves under
+#    bash when started with `sh`, before any step: under sh they used to run
+#    their first steps and fail half-way (EL8: bash 4.4 in POSIX mode refuses
+#    `<(...)`; Debian: dash). The guard is run here for real, under dash,
+#    bash --posix, POSIXLY_CORRECT (no loop: one re-exec, then an error) and
+#    stdin (no file to re-run: an error).
 # shellcheck disable=SC2016,SC2015  # literal $VAR patterns; fail-on-either tests
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # A guardrail that cannot run its matcher must FAIL, never report OK.
-for tool in awk grep bash; do
+for tool in awk grep bash dash; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: $tool is not installed" >&2; exit 1; }
 done
 
@@ -312,4 +318,29 @@ for fn in adopt_cfm_edge ensure_edge_listen_v6 print_next_steps; do
     || fail "$SCRIPT $fn: the cfm-edge config test must sit between snapshot_edge_logs and drop_test_created_logs"
 done
 
-echo "OK: install-edge.sh is prepare-only, adoption line matches the deploy, config tested before install, test-created empty logs dropped (never while cfm-edge may run)"
+# 6. sh -> bash re-exec guard in each installer, before any step.
+guard_tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp:-}" "$guard_tmp"' EXIT   # keeps the earlier trap's cleanup
+for inst in scripts/install-edge.sh scripts/install-openresty.sh scripts/install-angie.sh; do
+  [ -f "$inst" ] || fail "$inst missing"
+  bash -n "$inst" || fail "$inst does not parse"
+  g_start="$(grep -n -m1 '^case "${BASH_VERSION:-}:${SHELLOPTS:-}" in$' "$inst" | cut -d: -f1 || true)"
+  [ -n "$g_start" ] || fail "$inst: no sh->bash re-exec guard (case \"\${BASH_VERSION:-}:\${SHELLOPTS:-}\" in)"
+  g_end="$(awk -v s="$g_start" 'NR > s && /^esac$/ {print NR; exit}' "$inst")"
+  [ -n "$g_end" ] || fail "$inst: the re-exec guard has no esac"
+  # Nothing but comments and blank lines before it: it must run first.
+  first_cmd="$(awk '!/^[[:space:]]*(#|$)/ {print NR; exit}' "$inst")"
+  [ "$first_cmd" = "$g_start" ] || fail "$inst: line $first_cmd runs before the re-exec guard (line $g_start)"
+  # Run the guard for real, followed by a bash-only line.
+  t="$guard_tmp/$(basename "$inst")"
+  { echo '#!/bin/sh'; sed -n "${g_start},${g_end}p" "$inst"; echo 'cat < <(echo "reexec-ok $CFM_BASH_REEXEC")'; } >"$t"
+  [ "$(dash "$t" 2>&1)" = "reexec-ok 1" ] || fail "$inst: under dash the guard does not re-run it under bash: $(dash "$t" 2>&1)"
+  [ "$(bash --posix "$t" 2>&1)" = "reexec-ok 1" ] || fail "$inst: under bash --posix (EL8 sh) the guard does not re-run it: $(bash --posix "$t" 2>&1)"
+  [ "$(bash "$t" 2>&1)" = "reexec-ok " ] || fail "$inst: under plain bash the guard must not re-exec: $(bash "$t" 2>&1)"
+  out="$(POSIXLY_CORRECT=1 timeout 10 bash "$t" 2>&1)" && fail "$inst: with POSIXLY_CORRECT the guard must stop with an error, got: $out"
+  grep -q 'needs bash' <<<"$out" || fail "$inst: with POSIXLY_CORRECT, expected the needs-bash error, got: $out"
+  out="$(timeout 10 dash <"$t" 2>&1)" && fail "$inst: run from stdin the guard must stop with an error, got: $out"
+  grep -q 'needs bash' <<<"$out" || fail "$inst: from stdin, expected the needs-bash error, got: $out"
+done
+
+echo "OK: install-edge.sh is prepare-only, adoption line matches the deploy, config tested before install, test-created empty logs dropped (never while cfm-edge may run), installers re-run under bash from sh"

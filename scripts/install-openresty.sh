@@ -1,4 +1,19 @@
 #!/usr/bin/env bash
+# bash only. Run as `sh install-*.sh`, this script would not stop at once: sh
+# (dash on Debian; bash 4.4 in POSIX mode on EL8, which refuses `<(...)`)
+# defines the functions as it reaches them, so it ran the first steps and
+# failed half-way (EL8, 2026-11-20: "syntax error near unexpected token `<'",
+# then "command not found"). Re-run under bash before any step; once only.
+case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
+    :* | *posix*)
+        if [ -n "${CFM_BASH_REEXEC:-}" ] || [ ! -f "$0" ]; then
+            echo "This script needs bash: run it as  bash $0" >&2
+            exit 1
+        fi
+        CFM_BASH_REEXEC=1 exec bash "$0" "$@"
+        ;;
+esac
+
 set -euo pipefail
 
 readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"
