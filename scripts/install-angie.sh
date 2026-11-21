@@ -33,7 +33,10 @@
 # after, so no child inherits it.
 case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
     :* | *posix*)
-        if [ ! -f "$0" ]; then
+        # From stdin or sh -c, $0 is the shell itself (sh, /bin/sh, dash),
+        # which is a file too: never re-run that.
+        case "${0##*/}" in sh | dash | bash | ash | ksh | mksh | zsh | -sh | -dash | -bash) cfm_no_file=1 ;; *) cfm_no_file= ;; esac
+        if [ -n "$cfm_no_file" ] || [ ! -f "$0" ]; then
             echo "This script needs bash: run the file with bash (bash scripts/install-*.sh), not from stdin or sh -c" >&2
             exit 1
         fi
@@ -41,7 +44,7 @@ case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
             echo "This script needs bash outside POSIX mode: run it as  bash '$0'" >&2
             exit 1
         fi
-        CFM_BASH_REEXEC="$0" exec env -u POSIXLY_CORRECT -u SHELLOPTS bash "$0" "$@"
+        CFM_BASH_REEXEC="$0" exec env -u POSIXLY_CORRECT -u SHELLOPTS bash -- "$0" "$@"
         ;;
 esac
 unset CFM_BASH_REEXEC

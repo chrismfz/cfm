@@ -344,15 +344,28 @@ for inst in scripts/install-edge.sh scripts/install-openresty.sh scripts/install
     echo 'printf "[%s]" "$@"; echo'; } >"$t"
   want='ok bash=y posix=n mark='
   want_args='[a b][][c*]'
-  run() { out="$(timeout 10 "$@" "a b" "" "c*" 2>&1)"; }
+  # A failing start must still reach the FAIL message below, with its output.
+  run() { out="$(timeout 10 "$@" "a b" "" "c*" 2>&1)" || true; }
   run dash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: under dash the guard does not re-run it under bash with its args: $out"
   run bash --posix "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: under bash --posix (EL8 sh) the guard does not re-run it: $out"
   run bash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: under plain bash it must run as is: $out"
   run env POSIXLY_CORRECT=1 bash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: with POSIXLY_CORRECT the re-run must drop it and run: $out"
+  run env SHELLOPTS=posix bash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: with an exported SHELLOPTS=posix the re-run must drop it and run: $out"
+  run env SHELLOPTS=braceexpand:hashall:posix dash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: sh with an exported posix SHELLOPTS: the re-run must drop it: $out"
   run env CFM_BASH_REEXEC=1 dash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: an inherited CFM_BASH_REEXEC must not block the re-run: $out"
   # Still POSIX after the re-run (BASH_ENV sets it): one re-run, then an error.
   out="$(BASH_ENV="$guard_tmp/posix.env" timeout 10 dash "$t" 2>&1)" && fail "$inst: forced POSIX after the re-run must stop with an error, got: $out"
   grep -q 'needs bash outside POSIX mode' <<<"$out" || fail "$inst: forced POSIX after the re-run: expected the needs-bash error, got: $out"
+  for sh_path in /bin/sh "$(command -v dash)"; do
+    out="$(timeout 10 "$sh_path" <"$t" 2>&1)" && fail "$inst: '$sh_path < script' must stop with an error, got: $out"
+    grep -q 'needs bash' <<<"$out" || fail "$inst: '$sh_path < script' ($sh_path is a file too): expected the needs-bash error, got: $out"
+  done
+  out="$(timeout 10 sh -c "$(cat "$t")" 2>&1)" && fail "$inst: sh -c must stop with an error, got: $out"
+  grep -q 'needs bash' <<<"$out" || fail "$inst: sh -c: expected the needs-bash error, got: $out"
+  # A script path starting with "-" is not an option to the re-run bash.
+  cp "$t" "$guard_tmp/-g.sh"
+  out="$(cd "$guard_tmp" && timeout 10 dash -- -g.sh "a b" "" "c*" 2>&1)" || true
+  [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: a script path starting with '-' must re-run as a path (bash -- \"\$0\"): $out"
   out="$(timeout 10 dash <"$t" 2>&1)" && fail "$inst: run from stdin the guard must stop with an error, got: $out"
   grep -q 'needs bash' <<<"$out" || fail "$inst: from stdin, expected the needs-bash error, got: $out"
 done
