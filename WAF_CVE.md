@@ -148,8 +148,8 @@ Every rule below ships at edge default **`block`** (Lua `CFG` and Go
 | 10029 | `rule_cve_fabrik_listfilter_eval` | CVE-2026-67282 | Fabrik (Joomla) | an `[eval]` index set on a Fabrik request field (`EVAL_ZERO` logonly) | armed (block since 2026-11-17) |
 | 10030 | `rule_cve_drupal_render_callback` | CVE-2026-108097 (`#region_callback`), CVE-2018-7600 (the other keys) | Drupal core | a render-array callback key as a field NAME / JSON KEY | armed |
 | 10031 | `rule_cve_php_fpm_smuggle` | CVE-2026-129289 | PHP core (FPM / LSAPI) | a FastCGI BEGIN_REQUEST + PARAMS record (`FCGI_BEGIN_REQUEST`) or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR (`FCGI_PARAMS`) in a POST body | **logonly** (burn-in from 2026-11-21) |
-| 10032 | `rule_cve_php_oversized_auth` | CVE-2026-129496 | PHP core (ext/date) | an Authorization header line over nginx's default 8 KB buffer (`BASIC_OVERSIZE` / `OVERSIZE`) | **logonly** (burn-in from 2026-11-21) |
-| 10033 | `rule_cve_php_multipart_desync` | CVE-2026-129289 (first leg) | PHP core | a multipart POST that leaves bytes PHP never reads (`GARBLED_STOP` / `NO_BOUNDARY` / `BOUNDARY_TOO_LARGE`) | **logonly** (burn-in from 2026-11-21) |
+| 10032 | `rule_cve_php_oversized_auth` | CVE-2026-129496 | PHP core (ext/date) | an Authorization header line over nginx's default 8 KB buffer (`BASIC_OVERSIZE` / `OVERSIZE`, `:len=N`) | **logonly** (burn-in from 2026-11-21) |
+| 10033 | `rule_cve_php_multipart_desync` | CVE-2026-129289 (first leg) | PHP core | a multipart POST that leaves bytes PHP never reads (`GARBLED_STOP` / `GARBLED_STOP_SMALL` / `NO_BOUNDARY` / `BOUNDARY_TOO_LARGE`) | **logonly** (burn-in from 2026-11-21) |
 
 Lua tests: `scripts/tests/cfm_waf_cve_<slug>_test.lua` per product (plus
 `*_e2e_test.lua` for 10021/10022, 10024, 10027/10028, 10030). 10023 is
@@ -176,35 +176,72 @@ tested in the `php_upload_progress` files, 10029 in
     shape a proxy sees (configuration, the application's own code, or a
     local foothold).
 
-  The three rules are logonly telemetry, run late in `check()` (after the
-  block rules and the logonly 503 / 417, before 612) and are not in
-  `BURNIN_ENFORCE_IDS`. 10031 reads the FastCGI records as php-src's
+  The three rules are logonly telemetry and are not in
+  `BURNIN_ENFORCE_IDS`. 10031 and 10033 run early, in step 0 right after
+  10024: the advisory's own request also trips 305 (the php://input
+  wrapper), a block that ends the check, and a late rule would not be
+  recorded at all; a logonly record never ends the check nor outranks a
+  challenge / block (it can take the headline from a later logonly rule).
+  10032 is header-only and runs late (after the block rules and the logonly
+  503 / 417, before 612). 10031 reads the FastCGI records as php-src's
   `fcgi_read_request` accepts them (any version >= 1, request id and
   reserved byte, role 1–3; a BEGIN_REQUEST counts only with a PARAMS record
-  right after it) and the parameter names `init_request_info` /
+  right after it; anchored on the plain `\0\8` of its content length, so a
+  text body costs one find) and the parameter names `init_request_info` /
   the advisory use (SCRIPT_FILENAME, its fallback PATH_TRANSLATED,
   PHP_ADMIN_VALUE, REMOTE_ADDR; not PHP_VALUE, whose length byte is a TAB).
   10032: the advisory's FPM code-execution proof used an oversized HTTP
   Basic header, which this edge's 64 KB `large_client_header_buffers`
-  admits. 10033, checked against PHP 8.3.6: a part with a
-  Content-Disposition but neither name nor filename ends the parse (a part
-  with none, or bytes after the closing boundary, do not), and only a rest
-  larger than PHP's 5120-byte read buffer is left unread (`GARBLED_STOP`);
-  no boundary parameter and a boundary over 5116 bytes make PHP parse
-  nothing. A body with no boundary line at all (an empty FormData, JSON
-  labelled multipart) is read to its end and not tagged. Fleet (2026-11-20):
-  fixed PHP everywhere (CloudLinux backported the EOL branches the day
-  before), mostly LSAPI, no `enablereuse` / `fastcgi_keep_conn`,
-  `session.upload_progress.enabled = 0`.
+  admits; the tag carries the value's length. 10033, checked against PHP
+  8.3.6: a part with a Content-Disposition but neither name nor filename
+  ends the parse (a part with none, or bytes after the closing boundary, do
+  not). What PHP then leaves unread depends on where its last 5120-byte
+  refill started, so a rest over 5120 bytes (closing delimiter and
+  whitespace ignored) is certainly unread (`GARBLED_STOP:rest=N`, or
+  `:rest=trunc` when Content-Length is larger than the body the edge holds)
+  and a smaller one may be (`GARBLED_STOP_SMALL:rest=N`). No boundary
+  parameter (`NO_BOUNDARY`) and a boundary over 5116 bytes
+  (`BOUNDARY_TOO_LARGE`) make PHP parse nothing. A body with no boundary line
+  at all (an empty FormData, JSON labelled multipart) is read to its end and
+  not tagged. Fleet (2026-11-20): fixed PHP everywhere (CloudLinux
+  backported the EOL branches the day before), mostly LSAPI, no
+  `enablereuse` / `fastcgi_keep_conn`, `session.upload_progress.enabled =
+  0`, so the burn-in measures attempts, not exposure.
 
-  Reading the burn-in: a hit shows its tag in `reason` only when it is the
-  request's headline; behind another rule's hit it is only an id in
-  `also_rule_ids` (count both), and a request an earlier block ends is not
-  measured. The cfm.waf.log push is de-duplicated per (ip, WAF_CVE,
-  logonly) within `push_cooldown`, so one client firing these hides its
-  other WAF_CVE logonly tags (10024 SAME_SITE, 10028, 10029 EVAL_ZERO) for
-  that window. Expected noise to rule out before a promotion: 10031 inside
-  binary uploads, 10032 on unusually large bearer tokens.
+  Reading the burn-in (three reads, all 8 nodes; count distinct IPs and
+  hosts, not lines — the push is de-duplicated per (ip, WAF_CVE, logonly)
+  for `push_cooldown`, so counts are IP-minutes and one client's tag hides
+  its other WAF_CVE logonly tags, 10024 SAME_SITE / 10028 / 10029 included):
+  - count both the headline `reason` (`WAF_CVE:CVE_2026_129289:…`,
+    `…129496:…`) and `also_rule_ids` holding 10031 / 10032 / 10033 (behind a
+    block or challenge hit only the id survives, not the tag);
+  - pull the 305 (`WAF_PHP_WRAPPER`) and 201 hits on multipart POSTs too: the
+    real exploit lands there with 10031 in `also_rule_ids`;
+  - grep the edge error.log for `waf_body_burnin` lines with
+    `CVE_2026_129289` (a body read in the burn-in second pass after a
+    body-free first-pass hit logs there only) and for `[cfm_panel_waf]`
+    lines with `CVE_2026_129496` (10032 on 2083 / 2087 / 2096; the panel gate
+    reads no body, so 10031 / 10033 do not run there);
+  - 10031: FP = a recurring upload endpoint (async-upload.php, media REST)
+    from residential IPs with browser UAs (a probe of ~18 000 32 KB windows
+    of real files found none; an uploaded pcap / core dump of FastCGI
+    traffic is the one plausible source); attack = one-shot POSTs to `/`,
+    `index.php` or random `.php` paths, tool UAs, hosting ASNs, many vhosts;
+  - 10032: check the access-log status (Apache's LimitRequestFieldSize,
+    8190, already refuses such a header with 400); FP = one stable
+    integration on one host / uri; attack = BASIC_OVERSIZE on many hosts;
+  - 10033: split by tag. NO_BOUNDARY mostly measures broken clients (a
+    hand-set multipart header on a JSON / string body): group by (host, uri,
+    ua) and treat it as a noise baseline, never a promotion case on its own.
+    BOUNDARY_TOO_LARGE has no legitimate source. GARBLED_STOP together with
+    10031 on one request is an attack; a single (host, uri) from a .NET or
+    UA-less client (a nameless `Content-Disposition: form-data`) is a
+    broken client.
+  - "0 hits" is not "no attacks": an earlier block that ends the check
+    before step 0's end, a garbled part or record past the 32 KB window,
+    PUT / PATCH bodies, bodies the edge never reads (off the read allowlist,
+    HTTP/3 without Content-Length), excluded vhosts / rules and bypass
+    prefixes, and the dedup window all hide hits.
 
   Known gaps for any promotion: only the first `waf_body_max_len` (32 KB)
   is read and the attacker chooses where PHP stops, so a garbled part or a

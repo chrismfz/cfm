@@ -8531,16 +8531,23 @@ end
 --         code-execution proof used an HTTP Basic Authorization header
 --         "larger than nginx's default per-header limit" (8 KB), which this
 --         edge's large_client_header_buffers (64 KB) lets through.
---         BASIC_OVERSIZE for HTTP Basic, OVERSIZE for any other scheme.
+--         BASIC_OVERSIZE for HTTP Basic, OVERSIZE for any other scheme,
+--         with the value's length (`:len=N`).
 --   10033 CVE-2026-129289's first leg, for the class of parser desyncs: a
 --         multipart body that leaves bytes PHP never reads.
 --           GARBLED_STOP        a part with a Content-Disposition but neither
---                               name nor filename ends the parse; tagged only
---                               with more than one read buffer (FILLUNIT,
---                               5120 bytes) of content after it, ignoring a
---                               closing delimiter and whitespace: a smaller
---                               rest is already in PHP's buffer;
---           NO_BOUNDARY         no boundary parameter: PHP parses nothing;
+--                               name nor filename ends the parse, and more
+--                               than one read buffer (FILLUNIT, 5120 bytes)
+--                               of content follows it (closing delimiter and
+--                               whitespace ignored): PHP certainly leaves it
+--                               unread. `:rest=trunc` when the edge holds
+--                               only part of the body;
+--           GARBLED_STOP_SMALL  the same with a smaller rest: PHP may still
+--                               leave part of it unread (it refills from
+--                               wherever its last read left off), so it is
+--                               recorded apart, never dropped;
+--           NO_BOUNDARY         no boundary parameter: PHP parses nothing
+--                               (mostly broken clients: a noise baseline);
 --           BOUNDARY_TOO_LARGE  a boundary PHP refuses ("Boundary too
 --                               large", over FILLUNIT - 4 bytes).
 --         A body with no boundary line at all is NOT tagged: PHP reads it to
@@ -8552,9 +8559,6 @@ end
 
 -- (Fields, not locals: this chunk is at LuaJIT's 200-local limit.)
 _M.PHP2611 = {}
--- BEGIN_REQUEST header: version (>= 1), type 1, request id (2), content
--- length 0x0008, padding, reserved; then its body's role (2 bytes, 1-3).
-_M.PHP2611.FCGI_BEGIN = "[\1-\255]\1..%z\8(.).%z[\1-\3]"
 -- A FastCGI name-value pair is <name length><value length><name><value>, the
 -- value length one byte (< 128) or four (high bit set).
 _M.PHP2611.FCGI_PARAM_NAMES = { "SCRIPT_FILENAME", "PATH_TRANSLATED", "PHP_ADMIN_VALUE", "REMOTE_ADDR" }
@@ -8573,17 +8577,28 @@ function _M.PHP2611.fcgi_param(b)
   end
   return false
 end
--- A BEGIN_REQUEST record whose next record (16 bytes + its padding on) is a
--- PARAMS record (type 4) of any version >= 1: what fcgi_read_request reads.
+-- A BEGIN_REQUEST record as fcgi_read_request reads it: header = version
+-- (>= 1), type 1, request id (2), content length 0x0008, padding, reserved;
+-- body = role (2 bytes: 0, then 1-3), flags, 5 reserved; and the next record,
+-- 16 bytes + padding on, a PARAMS record (type 4) of any version >= 1.
+-- Anchored on the plain "\0\8" of the content length (text, JSON and
+-- urlencoded bodies carry no NUL, so they cost one find); each candidate is
+-- checked by hand.
 function _M.PHP2611.fcgi_begin(b)
-  local pos = 1
+  local pos = 5
   while true do
-    local s, _, pad = b:find(_M.PHP2611.FCGI_BEGIN, pos)
-    if not s then return false end
-    local nx = s + 16 + pad:byte()
-    local v, t = b:byte(nx), b:byte(nx + 1)
-    if v and v >= 1 and t == 4 then return true end
-    pos = s + 1
+    local z = b:find("\0\8", pos, true)
+    if not z then return false end
+    local s = z - 4 -- the record's first byte
+    if s >= 1 and b:byte(s) >= 1 and b:byte(s + 1) == 1 and b:byte(s + 8) == 0 then
+      local role = b:byte(s + 9)
+      if role and role >= 1 and role <= 3 then
+        local nx = s + 16 + b:byte(s + 6)
+        local v, t = b:byte(nx), b:byte(nx + 1)
+        if v and v >= 1 and t == 4 then return true end
+      end
+    end
+    pos = z + 1
   end
 end
 
@@ -8603,8 +8618,8 @@ function _M.detect_cve_php_oversized_auth(headers)
   local vals = type(raw) == "table" and raw or { raw }
   for _, v in ipairs(vals) do
     if type(v) == "string" and #"Authorization: " + #v + 2 > _M.PHP2611.NGINX_DEFAULT_HEADER_LINE then
-      if lower(v):find("^%s*basic%s") then return "BASIC_OVERSIZE" end
-      return "OVERSIZE"
+      local tag = lower(v):find("^%s*basic%s") and "BASIC_OVERSIZE" or "OVERSIZE"
+      return tag .. ":len=" .. #v
     end
   end
   return nil
@@ -8613,7 +8628,8 @@ end
 -- 10033: multipart_parse's own walk (one pass, PHP's default upload limit).
 function _M.detect_cve_php_multipart_desync(method, body, headers)
   if method ~= "post" or not body or not body:find("%S") then return nil end
-  local ct_raw = php_content_type(headers or {})
+  headers = headers or {}
+  local ct_raw = php_content_type(headers)
   if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
   local bnd = php_mp_boundary(ct_raw)
   if not bnd then return "NO_BOUNDARY" end
@@ -8621,12 +8637,27 @@ function _M.detect_cve_php_multipart_desync(method, body, headers)
   local stat = {}
   multipart_parse(body, ct_raw, nil, nil, MP_MAX_FILE_UPLOADS, stat)
   if stat.stop ~= "garbled" then return nil end
-  -- The rest PHP never reads, less a trailing closing delimiter / whitespace.
-  local rest = body:sub(stat.at):gsub("%s+$", "")
+  -- The rest after the stop, less trailing whitespace and a closing
+  -- delimiter: by index, with a byte loop (a %s+$ gsub is quadratic on a long
+  -- whitespace run that does not end the body).
+  local e = #body
+  while e >= stat.at and body:byte(e) <= 32 do e = e - 1 end
   local close = "--" .. bnd .. "--"
-  if rest:sub(-#close) == close then rest = rest:sub(1, -#close - 1) end
-  if #rest > MP_FILLUNIT then return "GARBLED_STOP" end
-  return nil
+  if e - #close + 1 >= stat.at and body:sub(e - #close + 1, e) == close then
+    e = e - #close
+    while e >= stat.at and body:byte(e) <= 32 do e = e - 1 end
+  end
+  local rest = e - stat.at + 1
+  if rest <= 0 then return nil end
+  -- A body the edge holds only in part (cut at waf_body_max_len): the rest is
+  -- larger than what is seen here.
+  local cl = tonumber(header_string(headers["content-length"] or headers["Content-Length"]) or "")
+  if cl and cl > #body then return "GARBLED_STOP:rest=trunc" end
+  -- Past one FILLUNIT the rest is certainly left unread; under it, it may
+  -- be too (PHP refills its 5120-byte buffer from wherever its last read
+  -- left off), so the burn-in records it apart.
+  if rest > MP_FILLUNIT then return "GARBLED_STOP:rest=" .. rest end
+  return "GARBLED_STOP_SMALL:rest=" .. rest
 end
 
 -- Rule 503 — a WordPress privileged admin action that did not come from its own

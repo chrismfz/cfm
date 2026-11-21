@@ -15,6 +15,7 @@ _G.ngx = {
 
 package.path = "configs/lua/?.lua;" .. package.path
 local waf = require("cfm_waf")
+local DEFAULTS = waf.get_config() -- the shipped modes, before set_only
 
 local fails = 0
 local function check(cond, msg)
@@ -38,10 +39,11 @@ local function req(method, body, h)
   return { uri = "/index.php", args = "", method = method, ip = "203.0.113.95", host = "shop.example.gr",
            headers = headers, body = body or "" }
 end
+-- reason is matched as a prefix: tags may carry a size (":len=N", ":rest=N")
 local function fires(c, label, reason)
   local hit, got, _, act = waf.check(c)
   check(hit == true, label .. " — hit=true (got " .. tostring(hit) .. ")")
-  check(got == reason, label .. " — reason=" .. reason .. " (got " .. tostring(got) .. ")")
+  check(type(got) == "string" and got:sub(1, #reason) == reason, label .. " — reason=" .. reason .. "… (got " .. tostring(got) .. ")")
   check(act == "logonly", label .. " — action=logonly (got " .. tostring(act) .. ")")
 end
 local function clean(c, label)
@@ -107,7 +109,7 @@ clean(req("POST", field("content", "pool:\n\t\tPHP_VALUE=memory_limit=256M\nx\t 
 set_only({ rule_cve_php_oversized_auth = "logonly" })
 local limit = 8192 - #"Authorization: " - 2 -- + CRLF
 fires(req("GET", "", { Authorization = "Basic " .. string.rep("A", limit) }),
-      "Basic over 8 KB", "WAF_CVE:CVE_2026_129496:PHP:BASIC_OVERSIZE")
+      "Basic over 8 KB", "WAF_CVE:CVE_2026_129496:PHP:BASIC_OVERSIZE:len=" .. (limit + 6))
 fires(req("GET", "", { authorization = "Bearer " .. string.rep("A", limit) }),
       "Bearer over 8 KB", "WAF_CVE:CVE_2026_129496:PHP:OVERSIZE")
 clean(req("GET", "", { Authorization = string.rep("A", limit - 1) }), "a line that fits the 8 KB buffer")
@@ -129,8 +131,20 @@ fires(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form
 fires(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form-data; boundary=" .. string.rep("b", 5117) }),
       "boundary PHP refuses as too large", "WAF_CVE:CVE_2026_129289:PHP:BOUNDARY_TOO_LARGE")
 -- a small rest is already in PHP's buffer; a garbled LAST part leaves nothing
-clean(req("POST", field("a", "1") .. GARBLED .. "zz\r\n" .. field("b", "2") .. CLOSE), "garbled part, small rest")
+fires(req("POST", field("a", "1") .. GARBLED .. "zz\r\n" .. field("b", "2") .. CLOSE),
+      "garbled part, small rest (PHP may still leave some unread)", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP_SMALL:rest=")
+-- a body the edge holds only in part: the rest is larger than seen
+fires(req("POST", field("a", "1") .. GARBLED .. "zz\r\n", { ["Content-Length"] = "1048576" }),
+      "garbled part in a truncated body", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP:rest=trunc")
 clean(req("POST", field("a", "1") .. GARBLED .. CLOSE), "garbled last part")
+clean(req("POST", field("a", "1") .. GARBLED .. "\r\n  " .. CLOSE .. "  \r\n"), "garbled last part, whitespace around the close")
+-- no quadratic strip: a garbled part then ~32 KB of whitespace and a byte
+do
+  local t0 = os.clock()
+  waf.check(req("POST", GARBLED .. string.rep(" ", 32000) .. "x"))
+  local dt = os.clock() - t0
+  check(dt < 0.1, ("32 KB whitespace rest scanned in %.3fs (< 0.1s)"):format(dt))
+end
 -- PHP reads all of these to the end (8.3.6): no hit
 clean(req("POST", "hello world, no parts here\r\n"), "no boundary line at all (read to EOF)")
 clean(req("POST", CLOSE), "an empty FormData")
@@ -143,6 +157,22 @@ clean(req("POST", "   \r\n"), "a blank body")
 clean(req("POST", "a=1", { ["Content-Type"] = "application/x-www-form-urlencoded" }), "urlencoded")
 clean(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form-data; boundary=" .. string.rep("b", 5115) .. "x" }),
       "boundary at PHP's limit, no such line in the body (read to EOF)")
+
+-- ── the shipped modes, the advisory's own request ───────────────────────────
+-- A garbled multipart part, then a FastCGI request that turns on
+-- allow_url_include / auto_prepend_file=php://input: 305 (php wrapper) blocks
+-- it, and 10031 / 10033 must still be recorded behind it.
+do
+  for k, v in pairs(DEFAULTS) do
+    if k:sub(1, 5) == "rule_" and type(v) == "string" then waf.set_rule(k, v) end
+  end
+  local exploit = field("a", "1") .. GARBLED .. BEGIN .. PARAMS .. fcgi(5, "<?php system('id'); ?>")
+  local hit, _, _, _, hits = waf.check(req("POST", exploit, { ["User-Agent"] = "python-requests/2.31" }))
+  check(hit == true, "advisory request: a hit")
+  local ids = {}
+  for _, h in ipairs(hits or {}) do ids[tostring(h.waf_rule_id)] = true end
+  check(ids["10031"], "advisory request: 10031 recorded with the shipped modes")
+end
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
