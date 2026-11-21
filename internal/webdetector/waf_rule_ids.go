@@ -322,6 +322,17 @@ var wafRuleIDs = []WAFRule{
 	// #access_callback). Drupal builds those keys server-side; a 7-day read of
 	// all 8 edge nodes found them only in attacks. Armed.
 	{ID: 10030, Name: "rule_cve_drupal_render_callback", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10031 / 10032 / 10033: the request shapes of the php-src advisories of
+	// 2026-11-19, logonly burn-in (a promotion decides the autoblock intent
+	// in the same change). 10031 = CVE-2026-129289, a FastCGI request or
+	// length-prefixed FastCGI parameter name in a POST body (PHP-FPM request
+	// smuggling through an unread body). 10032 = CVE-2026-129496, an
+	// Authorization header over nginx's default 8 KB per-header limit.
+	// 10033 = CVE-2026-129289's first leg: a multipart body that leaves bytes
+	// PHP never reads (a garbled part, no boundary, a boundary too large).
+	{ID: 10031, Name: "rule_cve_php_fpm_smuggle", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	{ID: 10032, Name: "rule_cve_php_oversized_auth", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	{ID: 10033, Name: "rule_cve_php_multipart_desync", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.
