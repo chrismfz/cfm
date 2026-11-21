@@ -8541,7 +8541,8 @@ end
 --                               of content follows it (closing delimiter and
 --                               whitespace ignored): PHP certainly leaves it
 --                               unread. `:rest=trunc` when the edge holds
---                               only part of the body;
+--                               only part of the body (body_was_cut: the
+--                               32 KB cap reached, or Content-Length past it);
 --           GARBLED_STOP_SMALL  the same with a smaller rest: PHP may still
 --                               leave part of it unread (it refills from
 --                               wherever its last read left off), so it is
@@ -8552,6 +8553,10 @@ end
 --                               large", over FILLUNIT - 4 bytes).
 --         A body with no boundary line at all is NOT tagged: PHP reads it to
 --         its end (an empty FormData, JSON labelled multipart).
+-- LSAPI (most of this fleet) frames its requests in its own packets, not
+-- FastCGI records: 10031 sees only the FastCGI form, so on an LSAPI node an
+-- LSAPI-shaped attempt leaves only 10033's trace. An LSAPI leg needs its
+-- format from lsapidef.h / lsapilib, never from memory.
 -- Known gaps (for any promotion): only the first waf_body_max_len bytes
 -- (32 KB) are read, and the attacker chooses where PHP stops, so a garbled
 -- part or a FastCGI record past the window is not seen; POST only, while an
@@ -8647,12 +8652,13 @@ function _M.detect_cve_php_multipart_desync(method, body, headers)
     e = e - #close
     while e >= stat.at and body:byte(e) <= 32 do e = e - 1 end
   end
+  -- A body the edge holds only in part (cut at waf_body_max_len, or a
+  -- Content-Length past what it holds): the rest is larger than what is seen
+  -- here. Checked BEFORE the empty-rest return: whitespace or a closing
+  -- delimiter filling the window must not hide a payload past it.
+  if body_was_cut(body, headers) then return "GARBLED_STOP:rest=trunc" end
   local rest = e - stat.at + 1
   if rest <= 0 then return nil end
-  -- A body the edge holds only in part (cut at waf_body_max_len): the rest is
-  -- larger than what is seen here.
-  local cl = tonumber(header_string(headers["content-length"] or headers["Content-Length"]) or "")
-  if cl and cl > #body then return "GARBLED_STOP:rest=trunc" end
   -- Past one FILLUNIT the rest is certainly left unread; under it, it may
   -- be too (PHP refills its 5120-byte buffer from wherever its last read
   -- left off), so the burn-in records it apart.

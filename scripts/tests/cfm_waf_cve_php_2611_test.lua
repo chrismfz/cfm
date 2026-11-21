@@ -137,11 +137,22 @@ fires(req("POST", field("a", "1") .. GARBLED .. "zz\r\n" .. field("b", "2") .. C
 fires(req("POST", field("a", "1") .. GARBLED .. "zz\r\n", { ["Content-Length"] = "1048576" }),
       "garbled part in a truncated body", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP:rest=trunc")
 clean(req("POST", field("a", "1") .. GARBLED .. CLOSE), "garbled last part")
+-- whitespace or a closing delimiter filling the window must not hide a
+-- payload past it (Content-Length larger than what the edge holds)
+fires(req("POST", GARBLED .. string.rep(" ", 32000), { ["Content-Length"] = "100000" }),
+      "garbled part, window of whitespace, more body past it", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP:rest=trunc")
+fires(req("POST", GARBLED .. "\r\n" .. CLOSE, { ["Content-Length"] = "100000" }),
+      "garbled part, close at the window edge, more body past it", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP:rest=trunc")
+-- a body cut at the 32 KB cap with no Content-Length (chunked / HTTP/2)
+fires(req("POST", field("a", "1") .. GARBLED .. string.rep("A", 32768)),
+      "garbled part in a body cut at the cap", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP:rest=trunc")
 clean(req("POST", field("a", "1") .. GARBLED .. "\r\n  " .. CLOSE .. "  \r\n"), "garbled last part, whitespace around the close")
 -- no quadratic strip: a garbled part then ~32 KB of whitespace and a byte
 do
+  local slow = req("POST", GARBLED .. string.rep(" ", 32000) .. "x")
+  waf.check(slow) -- warm up, then time the second call
   local t0 = os.clock()
-  waf.check(req("POST", GARBLED .. string.rep(" ", 32000) .. "x"))
+  waf.check(slow)
   local dt = os.clock() - t0
   check(dt < 0.1, ("32 KB whitespace rest scanned in %.3fs (< 0.1s)"):format(dt))
 end
@@ -172,6 +183,7 @@ do
   local ids = {}
   for _, h in ipairs(hits or {}) do ids[tostring(h.waf_rule_id)] = true end
   check(ids["10031"], "advisory request: 10031 recorded with the shipped modes")
+  check(ids["10033"], "advisory request: 10033 recorded with the shipped modes")
 end
 
 if fails > 0 then

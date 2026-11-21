@@ -198,7 +198,8 @@ tested in the `php_upload_progress` files, 10029 in
   not). What PHP then leaves unread depends on where its last 5120-byte
   refill started, so a rest over 5120 bytes (closing delimiter and
   whitespace ignored) is certainly unread (`GARBLED_STOP:rest=N`, or
-  `:rest=trunc` when Content-Length is larger than the body the edge holds)
+  `:rest=trunc` when the edge holds only part of the body: the 32 KB cap
+  reached, or Content-Length past it)
   and a smaller one may be (`GARBLED_STOP_SMALL:rest=N`). No boundary
   parameter (`NO_BOUNDARY`) and a boundary over 5116 bytes
   (`BOUNDARY_TOO_LARGE`) make PHP parse nothing. A body with no boundary line
@@ -237,6 +238,13 @@ tested in the `php_upload_progress` files, 10029 in
     10031 on one request is an attack; a single (host, uri) from a .NET or
     UA-less client (a nameless `Content-Disposition: form-data`) is a
     broken client.
+  - 10031 reads the FastCGI form only. LSAPI, the handler on most of the
+    fleet, frames requests in its own packets, so on an LSAPI node an
+    LSAPI-shaped attempt leaves only 10033's trace (an LSAPI leg needs its
+    format from lsapidef.h / lsapilib, never from memory).
+  - The body burn-in second pass (a chunked or large body on `location /`)
+    logs only its best hit, once per IP a minute, as a `waf_body_burnin`
+    error-log line: a 10031 behind another body hit there leaves no record.
   - "0 hits" is not "no attacks": an earlier block that ends the check
     before step 0's end, a garbled part or record past the 32 KB window,
     PUT / PATCH bodies, bodies the edge never reads (off the read allowlist,
