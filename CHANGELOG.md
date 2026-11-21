@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.21
+
 ### Added
 - **Three logonly WAF rules for the PHP advisories of 2026-11-19.** They
   measure, for a burn-in, the request shapes three of those php-src
