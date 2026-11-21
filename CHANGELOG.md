@@ -28,9 +28,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
     Debian) ran the first steps, then stopped on a line only bash parses
     (EL8: `syntax error near unexpected token '<'`, then `command not found`).
     The script had stopped part-way through.
-  - **Now:** each one re-runs itself under bash before its first step. If it
-    cannot re-run (it was read from stdin, or `POSIXLY_CORRECT` keeps bash in
-    POSIX mode), it stops at once with "This script needs bash".
+  - **Now:** each one re-runs itself under bash, outside POSIX mode, before
+    its first step (it drops `POSIXLY_CORRECT` / `SHELLOPTS` for that). Read
+    from stdin or `sh -c`, there is no file to re-run, so it stops at once
+    with "This script needs bash".
   - `bash scripts/install-edge.sh` is still the documented way to run them.
 
 ## 2026.11.21
