@@ -22,17 +22,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ### Added
 - **Three logonly WAF rules for the PHP advisories of 2026-11-19.** They
-  measure, for a burn-in, the request shapes three of the eight php-src
-  advisories describe: 10031 (CVE-2026-129289) a FastCGI record or
-  FastCGI parameter name inside a POST body, the PHP-FPM request smuggling
+  measure, for a burn-in, the request shapes three of those php-src
+  advisories describe: 10031 (CVE-2026-129289) a FastCGI request or
+  FastCGI parameter inside a POST body, the PHP-FPM request smuggling
   payload; 10032 (CVE-2026-129496) an Authorization header past nginx's
   default 8 KB line, which this edge's 64 KB header buffers let through;
   10033 (the first leg of CVE-2026-129289, and the class of PHP multipart
-  parser desyncs) a multipart body PHP stops reading before its end. They
+  parser desyncs) a multipart body that leaves bytes PHP never reads. They
   log only (`cfm.waf.log`, reason `WAF_CVE:CVE_2026_…`), block nothing and
-  feed no ban; the fleet read decides any promotion. The other five
-  advisories have no request shape a proxy can see, and the session
-  upload-progress one is already blocked by 10024. Not a substitute for the
+  feed no ban; the fleet read decides any promotion. Of the other advisories
+  triaged, the session upload-progress one is already blocked by 10024 and
+  the rest have no request shape a proxy can see. Not a substitute for the
   PHP update. Details: `WAF_CVE.md`.
 - **A host-scoped PATH exclude for the malpath checks.**
   `cfm webtop challenge exclude add /images/.tmb/ --type path --scope example.gr`

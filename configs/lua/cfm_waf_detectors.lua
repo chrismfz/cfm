@@ -8500,50 +8500,64 @@ function _M.detect_cve_php_upload_progress(method, body, headers, req_host)
   return "NO_REFERER"
 end
 
--- Rules 10031 / 10032 / 10033 — the request shapes of the php-src advisories
--- published 2026-11-19 (fixed in 8.2.36 / 8.3.37 / 8.4.28 / 8.5.13), LOGONLY:
--- telemetry for a burn-in, never a block until the fleet read says so. Source:
--- the advisory texts (no fix commit or PoC was published with them); the
--- FastCGI record layout is the FastCGI 1.0 specification's. None of them is a
--- substitute for the PHP update, which the whole fleet already runs.
+-- Rules 10031 / 10032 / 10033 — the request shapes of three php-src
+-- advisories published 2026-11-19 (fixed in 8.2.36 / 8.3.37 / 8.4.28 /
+-- 8.5.13), LOGONLY: telemetry for a burn-in, never a block until the fleet
+-- read says so. Sources: the advisory texts (no fix commit or PoC was
+-- published with them) and, for what PHP accepts, php-src PHP-8.3
+-- main/fastcgi.c (fcgi_read_request), main/rfc1867.c and
+-- sapi/fpm/fpm/fpm_main.c. None of them is a substitute for the PHP update.
 --
 --   10031 CVE-2026-129289 (GHSA-qc49-hpvq-g2w6), "PHP-FPM request smuggling
 --         through an unread HTTP request body": on a backend connection the
 --         front end keeps open (nginx fastcgi_keep_conn, Apache enablereuse,
 --         LSAPI), a malformed multipart body stops PHP's parser and "a FastCGI
 --         message placed at the appropriate body offset" is read as the next
---         request, which sets SCRIPT_FILENAME and PHP_ADMIN_VALUE
---         (allow_url_include / auto_prepend_file=php://input). Read from the
---         raw POST body, any content type: a FastCGI record header
---         (FCGI_BEGIN_REQUEST) or a length-prefixed FastCGI parameter name
---         (FCGI_PARAMS). Neither is text a form or an editor sends.
---   10032 CVE-2026-129496 (GHSA-gr4f-wgx5-jpfv): its remote code execution
---         chains need an Authorization header "larger than nginx's default
---         per-header limit" (8 KB), which this edge's large_client_header_buffers
---         (64 KB) lets through. BASIC_OVERSIZE for the advisory's HTTP Basic
---         form, OVERSIZE for any other scheme.
---   10033 CVE-2026-129289's first leg, for the whole class of parser
---         desyncs: a multipart body PHP stops reading before its end.
---         GARBLED_STOP = a part with a Content-Disposition but neither name
---         nor filename, with more than whitespace after it; NO_BOUNDARY = no
---         boundary parameter (PHP reads nothing); NO_PART = a non-blank body
---         with no line equal to --<boundary> at all. The advisory does not
---         name the exact malformation, so this measures the broad shape.
+--         request, which sets SCRIPT_FILENAME, REMOTE_ADDR and
+--         PHP_ADMIN_VALUE (allow_url_include / auto_prepend_file=php://input).
+--         Read from the raw POST body, any content type:
+--           FCGI_BEGIN_REQUEST  a BEGIN_REQUEST record as fcgi_read_request
+--                               accepts it (any version >= 1, request id and
+--                               reserved byte; content length 8; role 1-3)
+--                               followed by a PARAMS record header;
+--           FCGI_PARAMS         a length-prefixed SCRIPT_FILENAME /
+--                               PATH_TRANSLATED (its fallback in
+--                               init_request_info) / PHP_ADMIN_VALUE (15
+--                               bytes: length byte 0x0F) or REMOTE_ADDR (0x0B).
+--         Not PHP_VALUE on its own: its length byte (9) is a TAB, so
+--         tab-indented text would match; a working payload names a script
+--         (SCRIPT_FILENAME or PATH_TRANSLATED), which is keyed on.
+--   10032 CVE-2026-129496 (GHSA-gr4f-wgx5-jpfv): the advisory's FPM
+--         code-execution proof used an HTTP Basic Authorization header
+--         "larger than nginx's default per-header limit" (8 KB), which this
+--         edge's large_client_header_buffers (64 KB) lets through.
+--         BASIC_OVERSIZE for HTTP Basic, OVERSIZE for any other scheme.
+--   10033 CVE-2026-129289's first leg, for the class of parser desyncs: a
+--         multipart body that leaves bytes PHP never reads.
+--           GARBLED_STOP        a part with a Content-Disposition but neither
+--                               name nor filename ends the parse; tagged only
+--                               with more than one read buffer (FILLUNIT,
+--                               5120 bytes) of content after it, ignoring a
+--                               closing delimiter and whitespace: a smaller
+--                               rest is already in PHP's buffer;
+--           NO_BOUNDARY         no boundary parameter: PHP parses nothing;
+--           BOUNDARY_TOO_LARGE  a boundary PHP refuses ("Boundary too
+--                               large", over FILLUNIT - 4 bytes).
+--         A body with no boundary line at all is NOT tagged: PHP reads it to
+--         its end (an empty FormData, JSON labelled multipart).
+-- Known gaps (for any promotion): only the first waf_body_max_len bytes
+-- (32 KB) are read, and the attacker chooses where PHP stops, so a garbled
+-- part or a FastCGI record past the window is not seen; POST only, while an
+-- app that half-reads php://input exposes PUT / PATCH bodies the same way.
 
--- 10031: FCGI_BEGIN_REQUEST = version 1, type 1, any request id, content
--- length 8, any padding, reserved 0, then the body's role FCGI_RESPONDER (1).
--- Seven fixed bytes, matched anywhere in the body, file parts included: a
--- binary upload (structured formats are full of 0x00 / 0x01) can match now
--- and then, which is the false positive to rule out before any promotion.
--- (A field, not a local: this chunk is at LuaJIT's 200-local limit.)
+-- (Fields, not locals: this chunk is at LuaJIT's 200-local limit.)
 _M.PHP2611 = {}
-_M.PHP2611.FCGI_BEGIN = "\1\1..%z\8.%z%z\1"
+-- BEGIN_REQUEST header: version (>= 1), type 1, request id (2), content
+-- length 0x0008, padding, reserved; then its body's role (2 bytes, 1-3).
+_M.PHP2611.FCGI_BEGIN = "[\1-\255]\1..%z\8(.).%z[\1-\3]"
 -- A FastCGI name-value pair is <name length><value length><name><value>, the
--- value length one byte (< 128) or four (high bit set). Only the two names
--- the advisory names, both 15 bytes long: their length byte 0x0F never occurs
--- in text. PHP_VALUE is left out on purpose: its length byte, 9, is a TAB,
--- so tab-indented config text ("\t\tPHP_VALUE") would match.
-_M.PHP2611.FCGI_PARAM_NAMES = { "SCRIPT_FILENAME", "PHP_ADMIN_VALUE" }
+-- value length one byte (< 128) or four (high bit set).
+_M.PHP2611.FCGI_PARAM_NAMES = { "SCRIPT_FILENAME", "PATH_TRANSLATED", "PHP_ADMIN_VALUE", "REMOTE_ADDR" }
 function _M.PHP2611.fcgi_param(b)
   for _, nm in ipairs(_M.PHP2611.FCGI_PARAM_NAMES) do
     local len, pos = #nm, 1
@@ -8559,23 +8573,36 @@ function _M.PHP2611.fcgi_param(b)
   end
   return false
 end
+-- A BEGIN_REQUEST record whose next record (16 bytes + its padding on) is a
+-- PARAMS record (type 4) of any version >= 1: what fcgi_read_request reads.
+function _M.PHP2611.fcgi_begin(b)
+  local pos = 1
+  while true do
+    local s, _, pad = b:find(_M.PHP2611.FCGI_BEGIN, pos)
+    if not s then return false end
+    local nx = s + 16 + pad:byte()
+    local v, t = b:byte(nx), b:byte(nx + 1)
+    if v and v >= 1 and t == 4 then return true end
+    pos = s + 1
+  end
+end
 
 function _M.detect_cve_php_fpm_smuggle(body)
   if not body or #body < 10 then return nil end
-  if body:find(_M.PHP2611.FCGI_BEGIN) then return "FCGI_BEGIN_REQUEST" end
+  if _M.PHP2611.fcgi_begin(body) then return "FCGI_BEGIN_REQUEST" end
   if _M.PHP2611.fcgi_param(body) then return "FCGI_PARAMS" end
   return nil
 end
 
 -- 10032: nginx's default large_client_header_buffers is 4 8k: a header line
--- (name, ": ", value) longer than one 8 KB buffer is refused there.
+-- (name, ": ", value, CRLF) that does not fit one 8 KB buffer is refused.
 _M.PHP2611.NGINX_DEFAULT_HEADER_LINE = 8192
 function _M.detect_cve_php_oversized_auth(headers)
   local raw = (headers or {})["authorization"] or (headers or {})["Authorization"]
   -- A repeated header arrives as a table: every line is its own header line.
   local vals = type(raw) == "table" and raw or { raw }
   for _, v in ipairs(vals) do
-    if type(v) == "string" and #"Authorization: " + #v > _M.PHP2611.NGINX_DEFAULT_HEADER_LINE then
+    if type(v) == "string" and #"Authorization: " + #v + 2 > _M.PHP2611.NGINX_DEFAULT_HEADER_LINE then
       if lower(v):find("^%s*basic%s") then return "BASIC_OVERSIZE" end
       return "OVERSIZE"
     end
@@ -8588,11 +8615,17 @@ function _M.detect_cve_php_multipart_desync(method, body, headers)
   if method ~= "post" or not body or not body:find("%S") then return nil end
   local ct_raw = php_content_type(headers or {})
   if php_media_type(ct_raw) ~= "multipart/form-data" then return nil end
-  if not php_mp_boundary(ct_raw) then return "NO_BOUNDARY" end
+  local bnd = php_mp_boundary(ct_raw)
+  if not bnd then return "NO_BOUNDARY" end
+  if #bnd > MP_FILLUNIT - 4 then return "BOUNDARY_TOO_LARGE" end
   local stat = {}
   multipart_parse(body, ct_raw, nil, nil, MP_MAX_FILE_UPLOADS, stat)
-  if stat.stop == "garbled" and body:find("%S", stat.at) then return "GARBLED_STOP" end
-  if (stat.parts or 0) == 0 then return "NO_PART" end
+  if stat.stop ~= "garbled" then return nil end
+  -- The rest PHP never reads, less a trailing closing delimiter / whitespace.
+  local rest = body:sub(stat.at):gsub("%s+$", "")
+  local close = "--" .. bnd .. "--"
+  if rest:sub(-#close) == close then rest = rest:sub(1, -#close - 1) end
+  if #rest > MP_FILLUNIT then return "GARBLED_STOP" end
   return nil
 end
 

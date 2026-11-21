@@ -113,7 +113,7 @@ enforced or not). That is why 10021, 10024, 10027 and 10030 run first in
 ## 2. Rules in code
 
 Every rule below ships at edge default **`block`** (Lua `CFG` and Go
-`DefaultMode` agree). "Armed" = the `WAF_CVE` default applies (6 h nft ban +
+`DefaultMode` agree), except the logonly burn-in rules 10031–10033. "Armed" = the `WAF_CVE` default applies (6 h nft ban +
 `WAF/CVE-…` alert); "held" = `HoldAutoblock` (403 only).
 
 | Id | `CFG` name | CVE(s) in the reason | Product | Keyed on | Autoblock |
@@ -147,9 +147,9 @@ Every rule below ships at edge default **`block`** (Lua `CFG` and Go
 | 10028 | `rule_cve_magento_polyshell_unseen` | CVE-2026-48356 | Magento / Adobe Commerce | a cart-save request 10027 could not read (`OVERSIZE` / `XML_ENTITY` / `UNREADABLE`); `FILE_INFO_ELSEWHERE` logonly | **held** |
 | 10029 | `rule_cve_fabrik_listfilter_eval` | CVE-2026-67282 | Fabrik (Joomla) | an `[eval]` index set on a Fabrik request field (`EVAL_ZERO` logonly) | armed (block since 2026-11-17) |
 | 10030 | `rule_cve_drupal_render_callback` | CVE-2026-108097 (`#region_callback`), CVE-2018-7600 (the other keys) | Drupal core | a render-array callback key as a field NAME / JSON KEY | armed |
-| 10031 | `rule_cve_php_fpm_smuggle` | CVE-2026-129289 | PHP core (FPM / LSAPI) | a FastCGI record header (`FCGI_BEGIN_REQUEST`) or length-prefixed FastCGI parameter name (`FCGI_PARAMS`) in a POST body | **logonly** (burn-in from 2026-11-21) |
-| 10032 | `rule_cve_php_oversized_auth` | CVE-2026-129496 | PHP core (ext/date) | an Authorization header over nginx's default 8 KB line (`BASIC_OVERSIZE` / `OVERSIZE`) | **logonly** (burn-in from 2026-11-21) |
-| 10033 | `rule_cve_php_multipart_desync` | CVE-2026-129289 (first leg) | PHP core | a multipart POST PHP stops reading early (`GARBLED_STOP` / `NO_BOUNDARY` / `NO_PART`) | **logonly** (burn-in from 2026-11-21) |
+| 10031 | `rule_cve_php_fpm_smuggle` | CVE-2026-129289 | PHP core (FPM / LSAPI) | a FastCGI BEGIN_REQUEST + PARAMS record (`FCGI_BEGIN_REQUEST`) or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR (`FCGI_PARAMS`) in a POST body | **logonly** (burn-in from 2026-11-21) |
+| 10032 | `rule_cve_php_oversized_auth` | CVE-2026-129496 | PHP core (ext/date) | an Authorization header line over nginx's default 8 KB buffer (`BASIC_OVERSIZE` / `OVERSIZE`) | **logonly** (burn-in from 2026-11-21) |
+| 10033 | `rule_cve_php_multipart_desync` | CVE-2026-129289 (first leg) | PHP core | a multipart POST that leaves bytes PHP never reads (`GARBLED_STOP` / `NO_BOUNDARY` / `BOUNDARY_TOO_LARGE`) | **logonly** (burn-in from 2026-11-21) |
 
 Lua tests: `scripts/tests/cfm_waf_cve_<slug>_test.lua` per product (plus
 `*_e2e_test.lua` for 10021/10022, 10024, 10027/10028, 10030). 10023 is
@@ -159,32 +159,59 @@ tested in the `php_upload_progress` files, 10029 in
 
 ### 2.1 Rule notes (sources, residuals, decisions)
 
-- **10031–10033, the php-src advisories of 2026-11-19** (eight, fixed in
-  8.2.36 / 8.3.37 / 8.4.28 / 8.5.13; no fix commit or PoC was published with
-  them). Only three have a request shape a front proxy sees; the others are
-  use-after-frees, a session TOCTOU and a local FPM escalation, triggered by
-  configuration or by the application's own code. 115560 is the session
-  upload-progress field again: 10024 already blocks it. The three new rules
-  are logonly telemetry, run late in `check()` and are not in
-  `BURNIN_ENFORCE_IDS`: 10031 for CVE-2026-129289 (PHP-FPM request smuggling
-  through an unread body on a kept-open backend connection; its FastCGI
-  record and parameter-name layout is the FastCGI 1.0 specification's),
-  10032 for CVE-2026-129496 (an Authorization header past nginx's default
-  8 KB line, which this edge's 64 KB `large_client_header_buffers` admits),
-  10033 for the first leg of 129289 and the whole class of multipart parser
-  desyncs (`GARBLED_STOP`, checked against PHP 8.3.6: a part with a
-  Content-Disposition but neither name nor filename ends PHP's parse; a part
-  with none, or bytes after the closing boundary, do not). The fleet runs the
-  fixed PHP (CloudLinux backported the EOL branches on 2026-11-19), mostly
-  under LSAPI, with no `enablereuse` or `fastcgi_keep_conn` and
-  `session.upload_progress.enabled = 0`. A promotion of any of them decides
-  the autoblock intent in the same change, and moves an armed one early in
-  `check()`. Reading the burn-in: a hit shows its tag in `reason` only
-  when it is the request's headline; behind another rule's hit it is only an
-  id in `also_rule_ids` (count both), and a request an earlier block ends is
-  not measured. Expected noise to rule out before a promotion: 10031's
-  `FCGI_BEGIN_REQUEST` inside binary file uploads, 10032 on unusually large
-  bearer tokens, 10033 on clients that send broken multipart.
+- **10031–10033, the php-src advisories of 2026-11-19** (fixed in 8.2.36 /
+  8.3.37 / 8.4.28 / 8.5.13; no fix commit or PoC was published with them).
+  That day's batch is larger than the eight triaged here (it also has, e.g.,
+  a php-cgi and an FPM status-page advisory, outside what the fleet runs);
+  the eight and their decision:
+  - GHSA-qc49-hpvq-g2w6 / CVE-2026-129289, FPM request smuggling: **10031,
+    10033** (logonly).
+  - GHSA-gr4f-wgx5-jpfv / CVE-2026-129496, ext/date UAF: **10032** (logonly).
+  - GHSA-658j-r8rw-q6mx / CVE-2026-115560, session upload progress +
+    serializer mismatch: already blocked by **10024** (the same field).
+  - GHSA-2fjv-p558-g82m / CVE-2026-129182, GHSA-8mjj-2r7p-4hg2 /
+    CVE-2026-129474, GHSA-g3vh-838c-65v7 / CVE-2026-129481 (use-after-frees),
+    GHSA-fm2m-fjf5-v3cp / CVE-2026-126714 (session TOCTOU),
+    GHSA-jm4m-qfqx-967m / CVE-2026-129291 (local FPM escalation): no request
+    shape a proxy sees (configuration, the application's own code, or a
+    local foothold).
+
+  The three rules are logonly telemetry, run late in `check()` (after the
+  block rules and the logonly 503 / 417, before 612) and are not in
+  `BURNIN_ENFORCE_IDS`. 10031 reads the FastCGI records as php-src's
+  `fcgi_read_request` accepts them (any version >= 1, request id and
+  reserved byte, role 1–3; a BEGIN_REQUEST counts only with a PARAMS record
+  right after it) and the parameter names `init_request_info` /
+  the advisory use (SCRIPT_FILENAME, its fallback PATH_TRANSLATED,
+  PHP_ADMIN_VALUE, REMOTE_ADDR; not PHP_VALUE, whose length byte is a TAB).
+  10032: the advisory's FPM code-execution proof used an oversized HTTP
+  Basic header, which this edge's 64 KB `large_client_header_buffers`
+  admits. 10033, checked against PHP 8.3.6: a part with a
+  Content-Disposition but neither name nor filename ends the parse (a part
+  with none, or bytes after the closing boundary, do not), and only a rest
+  larger than PHP's 5120-byte read buffer is left unread (`GARBLED_STOP`);
+  no boundary parameter and a boundary over 5116 bytes make PHP parse
+  nothing. A body with no boundary line at all (an empty FormData, JSON
+  labelled multipart) is read to its end and not tagged. Fleet (2026-11-20):
+  fixed PHP everywhere (CloudLinux backported the EOL branches the day
+  before), mostly LSAPI, no `enablereuse` / `fastcgi_keep_conn`,
+  `session.upload_progress.enabled = 0`.
+
+  Reading the burn-in: a hit shows its tag in `reason` only when it is the
+  request's headline; behind another rule's hit it is only an id in
+  `also_rule_ids` (count both), and a request an earlier block ends is not
+  measured. The cfm.waf.log push is de-duplicated per (ip, WAF_CVE,
+  logonly) within `push_cooldown`, so one client firing these hides its
+  other WAF_CVE logonly tags (10024 SAME_SITE, 10028, 10029 EVAL_ZERO) for
+  that window. Expected noise to rule out before a promotion: 10031 inside
+  binary uploads, 10032 on unusually large bearer tokens.
+
+  Known gaps for any promotion: only the first `waf_body_max_len` (32 KB)
+  is read and the attacker chooses where PHP stops, so a garbled part or a
+  FastCGI record past the window is not seen; POST only, while an app that
+  half-reads php://input exposes PUT / PATCH bodies the same way. A
+  promotion decides the autoblock intent in the same change and moves an
+  armed rule early in `check()`.
 
 - **10001 Simple File List** (unauth upload → rename → RCE). One detector for
   both CVEs (same plugin, endpoints, exploit). Rename leg: extension match
@@ -421,7 +448,7 @@ not a WAF rule.
   endpoint + action, an upload of PHP to an exact endpoint, an exact
   injection payload on the vulnerable route, a header with no legitimate
   client use). Every rule in §2 ships at block on that basis, most after a
-  fleet read.
+  fleet read, except 10031–10033, logonly in their burn-in.
 - **Not built** (proposed in the original plan, no current need):
   per-rule CVE metadata on `WAFRule` (`CVEs`, `Product`, `ExploitClass`),
   `CVE_<year>_<suffix>` aliases in `[waf_security]`, and top-CVE summaries in
@@ -456,7 +483,7 @@ are what justified block.
 
 ### Step 1 — Pick the id
 
-Next free id (`10031` today). Never reuse `10015`. An id `>= 10100` needs a
+Next free id (`10034` today). Never reuse `10015`. An id `>= 10100` needs a
 `wafRuleGroupNames` entry first (§1.1).
 
 ### Step 2 — Lua detector (`configs/lua/cfm_waf_detectors.lua`)

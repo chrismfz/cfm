@@ -57,9 +57,9 @@ local CLOSE = "--XB--\r\n"
 
 -- FastCGI records as the spec lays them out: header (version 1, type,
 -- request id 1, content length, padding 0, reserved 0) + content.
-local function fcgi(rtype, content)
+local function fcgi(rtype, content, version, reserved)
   local n = #content
-  return string.char(1, rtype, 0, 1, math.floor(n / 256), n % 256, 0, 0) .. content
+  return string.char(version or 1, rtype, 0, 1, math.floor(n / 256), n % 256, 0, reserved or 0) .. content
 end
 local function pair(name, value) return string.char(#name, #value) .. name .. value end
 local BEGIN = fcgi(1, string.char(0, 1, 1, 0, 0, 0, 0, 0)) -- role RESPONDER, keep-conn
@@ -75,6 +75,20 @@ fires(req("POST", field("a", "1") .. GARBLED .. PARAMS), "FastCGI PARAMS record 
 local long = string.rep("x", 200)
 fires(req("POST", "zz" .. string.char(15, 128, 0, 0, 200) .. "SCRIPT_FILENAME" .. long),
       "four-byte value length", "WAF_CVE:CVE_2026_129289:PHP:FCGI_PARAMS")
+-- what fcgi_read_request also accepts: another version, a non-zero reserved
+-- byte, role AUTHORIZER / FILTER, PATH_TRANSLATED instead of SCRIPT_FILENAME
+local B2 = fcgi(1, string.char(0, 2, 1, 0, 0, 0, 0, 0), 2, 255)
+local P2 = fcgi(4, pair("PATH_TRANSLATED", "/home/u/public_html/x.php") .. pair("PHP_VALUE", "auto_prepend_file=php://input"), 2)
+fires(req("POST", GARBLED .. B2 .. P2), "version 2, reserved 0xFF, AUTHORIZER", "WAF_CVE:CVE_2026_129289:PHP:FCGI_BEGIN_REQUEST")
+fires(req("POST", GARBLED .. fcgi(1, string.char(0, 3, 0, 0, 0, 0, 0, 0)) .. fcgi(4, pair("A", "b"))),
+      "role FILTER, any params", "WAF_CVE:CVE_2026_129289:PHP:FCGI_BEGIN_REQUEST")
+fires(req("POST", "x" .. pair("PATH_TRANSLATED", "/x.php")), "PATH_TRANSLATED", "WAF_CVE:CVE_2026_129289:PHP:FCGI_PARAMS")
+fires(req("POST", "x" .. pair("REMOTE_ADDR", "127.0.0.1")), "REMOTE_ADDR", "WAF_CVE:CVE_2026_129289:PHP:FCGI_PARAMS")
+-- a BEGIN_REQUEST-shaped run with no PARAMS record after it (binary noise)
+clean(req("POST", "zz" .. string.char(1, 1, 7, 7, 0, 8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0) .. string.rep("\0", 40)),
+      "BEGIN-shaped bytes without a PARAMS record")
+clean(req("POST", "zz" .. string.char(1, 1, 7, 7, 0, 8, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0) .. fcgi(4, "")),
+      "role 9 (not one PHP accepts)")
 -- any content type: a urlencoded / octet-stream body too
 fires(req("POST", "a=1&" .. PARAMS, { ["Content-Type"] = "application/octet-stream" }),
       "octet-stream body", "WAF_CVE:CVE_2026_129289:PHP:FCGI_PARAMS")
@@ -91,12 +105,12 @@ clean(req("POST", field("content", "pool:\n\t\tPHP_VALUE=memory_limit=256M\nx\t 
 
 -- ── 10032 ───────────────────────────────────────────────────────────────────
 set_only({ rule_cve_php_oversized_auth = "logonly" })
-local limit = 8192 - #"Authorization: "
+local limit = 8192 - #"Authorization: " - 2 -- + CRLF
 fires(req("GET", "", { Authorization = "Basic " .. string.rep("A", limit) }),
       "Basic over 8 KB", "WAF_CVE:CVE_2026_129496:PHP:BASIC_OVERSIZE")
 fires(req("GET", "", { authorization = "Bearer " .. string.rep("A", limit) }),
       "Bearer over 8 KB", "WAF_CVE:CVE_2026_129496:PHP:OVERSIZE")
-clean(req("GET", "", { Authorization = string.rep("A", limit) }), "exactly at the 8 KB line")
+clean(req("GET", "", { Authorization = string.rep("A", limit - 1) }), "a line that fits the 8 KB buffer")
 clean(req("GET", "", { Authorization = "Basic dXNlcjpwYXNz" }), "a normal Basic header")
 clean(req("GET", "", { Authorization = "Bearer " .. string.rep("A", 4000) }), "a 4 KB JWT")
 -- a repeated header: each line on its own
@@ -105,21 +119,30 @@ fires(req("GET", "", { Authorization = { "Basic YQ==", "Basic " .. string.rep("A
 
 -- ── 10033 ───────────────────────────────────────────────────────────────────
 set_only({ rule_cve_php_multipart_desync = "logonly" })
+local BIG = string.rep("A", 6000) -- more than one 5120-byte read buffer
 -- PHP 8.3.6 registers only "a" here: the garbled part ends the parse
-fires(req("POST", field("a", "1") .. GARBLED .. "zz\r\n" .. field("b", "2") .. CLOSE),
-      "garbled part mid-body", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP")
-fires(req("POST", GARBLED .. "zz\r\n" .. CLOSE), "garbled first part", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP")
+fires(req("POST", field("a", "1") .. GARBLED .. BIG .. "\r\n" .. field("b", "2") .. CLOSE),
+      "garbled part mid-body, a large unread rest", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP")
+fires(req("POST", GARBLED .. BIG .. "\r\n" .. CLOSE), "garbled first part, a large rest", "WAF_CVE:CVE_2026_129289:PHP:GARBLED_STOP")
 fires(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form-data" }),
       "no boundary parameter", "WAF_CVE:CVE_2026_129289:PHP:NO_BOUNDARY")
-fires(req("POST", "hello world, no parts here\r\n"), "no boundary line at all", "WAF_CVE:CVE_2026_129289:PHP:NO_PART")
--- PHP reads on in all of these (8.3.6): no stop, no hit
+fires(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form-data; boundary=" .. string.rep("b", 5117) }),
+      "boundary PHP refuses as too large", "WAF_CVE:CVE_2026_129289:PHP:BOUNDARY_TOO_LARGE")
+-- a small rest is already in PHP's buffer; a garbled LAST part leaves nothing
+clean(req("POST", field("a", "1") .. GARBLED .. "zz\r\n" .. field("b", "2") .. CLOSE), "garbled part, small rest")
+clean(req("POST", field("a", "1") .. GARBLED .. CLOSE), "garbled last part")
+-- PHP reads all of these to the end (8.3.6): no hit
+clean(req("POST", "hello world, no parts here\r\n"), "no boundary line at all (read to EOF)")
+clean(req("POST", CLOSE), "an empty FormData")
+clean(req("POST", '{"a":1}'), "JSON labelled multipart")
 clean(req("POST", field("a", "1") .. field("b", "2") .. CLOSE), "a normal form")
 clean(req("POST", field("a", "1") .. "--XB\r\nX-Foo: y\r\n\r\nzz\r\n" .. field("b", "2") .. CLOSE),
       "a part with no Content-Disposition (PHP skips it)")
 clean(req("POST", field("a", "1") .. CLOSE .. field("b", "2") .. CLOSE), "bytes after the closing boundary")
-clean(req("POST", field("a", "1") .. GARBLED .. "\r\n"), "garbled part with only whitespace after")
 clean(req("POST", "   \r\n"), "a blank body")
 clean(req("POST", "a=1", { ["Content-Type"] = "application/x-www-form-urlencoded" }), "urlencoded")
+clean(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form-data; boundary=" .. string.rep("b", 5115) .. "x" }),
+      "boundary at PHP's limit, no such line in the body (read to EOF)")
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
