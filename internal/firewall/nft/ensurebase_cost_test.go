@@ -58,6 +58,11 @@ type fakeOpts struct {
 	chainsListing string
 	inputListing  string
 	inputFail     bool
+	// inputHang makes `-a list chain inet cfm input` never answer (EL8's
+	// 4-12 s listing, past any deadline a test can wait for).
+	inputHang bool
+	// scriptHang makes every `-f -` script never finish (after logging it).
+	scriptHang bool
 	// listChainFail makes every plain `list chain inet cfm <chain>` exit 1
 	// (EL8's 4-12 s listing past its 5 s deadline).
 	listChainFail bool
@@ -110,6 +115,9 @@ func fakeNFTOpts(t *testing.T, o fakeOpts) (logPath string) {
 	if o.inputFail {
 		inputCmd = "exit 1"
 	}
+	if o.inputHang {
+		inputCmd = "exec sleep 30"
+	}
 	chainsCmd := map[string]string{
 		"ok":    fmt.Sprintf("cat %q; exit 0", chains),
 		"empty": "exit 0",
@@ -123,6 +131,7 @@ func fakeNFTOpts(t *testing.T, o fakeOpts) (logPath string) {
 echo "ARGS $*" >> %[1]q
 if [ "$1" = "-f" ]; then
 	in=$(cat); printf '%%s\n' "$in" >> %[1]q
+	[ %[9]q = 1 ] && exec sleep 30
 	if [ -n %[5]q ] && printf '%%s' "$in" | tr '\n' ' ' | grep -qE %[5]q; then exit 1; fi
 	exit 0
 fi
@@ -136,7 +145,7 @@ case "$*" in
 "-j list set inet cfm self_v6") cat %[3]q || exit 1; exit 0 ;;
 esac
 exit 0
-`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript, inputCmd, map[bool]string{true: "1", false: "0"}[o.listChainFail], map[bool]string{true: "1", false: "0"}[o.countersFail])
+`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript, inputCmd, map[bool]string{true: "1", false: "0"}[o.listChainFail], map[bool]string{true: "1", false: "0"}[o.countersFail], map[bool]string{true: "1", false: "0"}[o.scriptHang])
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o700); err != nil { // #nosec G306 -- test helper must be executable
 		t.Fatal(err)
 	}

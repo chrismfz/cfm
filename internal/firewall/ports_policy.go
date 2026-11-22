@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"cfm/internal/config"
 )
@@ -604,19 +605,40 @@ func IsNFTNoSuchObject(stderr string) bool {
 }
 
 // NFTRead runs a read-only nft command and returns its stdout; an error
-// carries nft's stderr text.
-type NFTRead func(args ...string) (stdout string, err error)
+// carries nft's stderr text. A zero timeout is the engine's default deadline.
+type NFTRead func(timeout time.Duration, args ...string) (stdout string, err error)
+
+// PortsPolicyChainReadTimeout bounds each of the ports policy's chain reads
+// (`nft -a list chain inet cfm input|output`) and its transaction, on both
+// engines: EL8's nft 1.0.4 loads every set element before any `list chain`
+// (4–12 s idle on the fleet's EL8 nodes, 2026-11-22), and the deadline also
+// covers the wait for an nft slot. At the 10 s default the apply timed out
+// under load, and the extra `ct state established,related accept` copies
+// EnsureBase leaves to it (BaseDedupeExprs) stayed in place. A var only so
+// the engines' fake-nft tests can shorten it.
+var PortsPolicyChainReadTimeout = BaseInputReadTimeout
+
+// PortsPolicyReads is how ApplyPortsPolicyScript reads the kernel.
+type PortsPolicyReads struct {
+	// Read runs a read-only nft command.
+	Read NFTRead
+	// Chains names the table's chains from the cheap listing (`nft list
+	// chains inet`, 3–10 ms everywhere, or netlink); ok is false when it
+	// could not be read. Nil reads as not ok.
+	Chains func() (names map[string]bool, ok bool)
+}
 
 // ApplyPortsPolicyScript reads the input and output chains and the table's
 // sets, plans with PortsPolicyScript and runs the result as one nft
 // transaction. A failed transaction changes nothing (the kernel rolls the
 // whole batch back), so it is planned again from a fresh read and retried
 // once: another writer (a DNAT re-assert, a CLI one-shot) may have moved a
-// handle in between.
-func ApplyPortsPolicyScript(p PortsPolicy, read NFTRead, exec func(script string) error) error {
+// handle in between. exec runs the script under PortsPolicyChainReadTimeout
+// (it loads the same element cache as the reads).
+func ApplyPortsPolicyScript(p PortsPolicy, reads PortsPolicyReads, exec func(script string) error) error {
 	var errs []error
 	for attempt := 0; attempt < 2; attempt++ {
-		st, err := readPortsPolicyState(p, read)
+		st, err := readPortsPolicyState(p, reads)
 		if err != nil {
 			errs = append(errs, err)
 			break
@@ -629,19 +651,34 @@ func ApplyPortsPolicyScript(p PortsPolicy, read NFTRead, exec func(script string
 	return fmt.Errorf("ports policy: %w", errors.Join(errs...))
 }
 
-func readPortsPolicyState(p PortsPolicy, read NFTRead) (PortsPolicyState, error) {
+// readPortsPolicyState reads what PortsPolicyScript plans from. Every chain
+// read gets PortsPolicyChainReadTimeout, and a failed one is an error, never
+// an empty chain (planned from nothing, every rule would be added again). The
+// output chain is read only when the cheap chain listing has it: a node
+// without one (TCP_OUT/UDP_OUT never set) pays no 4–12 s EL8 listing for it.
+// An unreadable listing reads it anyway, where nft's own "No such file or
+// directory" is the one answer that means absent.
+func readPortsPolicyState(p PortsPolicy, reads PortsPolicyReads) (PortsPolicyState, error) {
 	var st PortsPolicyState
 	var err error
-	if st.Input, err = read("-a", "list", "chain", p.Family, p.Table, "input"); err != nil {
+	read := reads.Read
+	if st.Input, err = read(PortsPolicyChainReadTimeout, "-a", "list", "chain", p.Family, p.Table, "input"); err != nil {
 		return st, fmt.Errorf("reading the input chain (EnsureBase creates it): %w", err)
 	}
-	if st.Output, err = read("-a", "list", "chain", p.Family, p.Table, "output"); err != nil {
-		if !IsNFTNoSuchObject(err.Error()) {
-			return st, fmt.Errorf("reading the output chain: %w", err)
-		}
-		st.Output = ""
+	var chains map[string]bool
+	ok := false
+	if reads.Chains != nil {
+		chains, ok = reads.Chains()
 	}
-	sets, err := read("-t", "list", "sets", p.Family)
+	if !ok || chains["output"] {
+		if st.Output, err = read(PortsPolicyChainReadTimeout, "-a", "list", "chain", p.Family, p.Table, "output"); err != nil {
+			if !IsNFTNoSuchObject(err.Error()) {
+				return st, fmt.Errorf("reading the output chain: %w", err)
+			}
+			st.Output = ""
+		}
+	}
+	sets, err := read(0, "-t", "list", "sets", p.Family)
 	if err != nil {
 		return st, fmt.Errorf("listing the sets: %w", err)
 	}

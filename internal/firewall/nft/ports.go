@@ -58,14 +58,43 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 			ps.Enabled, ps.Interval, ps.TrackTCP, ps.TrackUDP, len(ps.OnlyPorts), len(ps.Ports))
 	}
 
-	return firewall.ApplyPortsPolicyScript(p, nftRead, b.nftCmd)
+	return firewall.ApplyPortsPolicyScript(p, firewall.PortsPolicyReads{Read: nftRead, Chains: cfmChainNames}, b.nftScriptPortsPolicy)
 }
 
-// nftRead is firewall.NFTRead for this engine.
-func nftRead(args ...string) (string, error) {
-	res, err := runNFTCommand(context.Background(), args...)
+// nftRead is firewall.NFTRead for this engine. Its deadline covers the wait
+// for an nft slot (nftSem); zero is the runner's default.
+func nftRead(timeout time.Duration, args ...string) (string, error) {
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	res, err := runNFTCommand(ctx, args...)
 	if err != nil {
 		return "", fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(res.Stderr))
 	}
 	return res.Stdout, nil
+}
+
+// cfmChainNames is cfmChains' names, for firewall.PortsPolicyReads.Chains.
+func cfmChainNames() (map[string]bool, bool) {
+	chains, ok := cfmChains()
+	if !ok {
+		return nil, false
+	}
+	names := make(map[string]bool, len(chains))
+	for c := range chains {
+		names[c] = true
+	}
+	return names, true
+}
+
+// nftScriptPortsPolicy runs the ports-policy transaction under
+// firewall.PortsPolicyChainReadTimeout: it loads the same element cache as
+// the chain reads.
+func (b *Backend) nftScriptPortsPolicy(script string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), firewall.PortsPolicyChainReadTimeout)
+	defer cancel()
+	return b.nftExprCtx(ctx, script)
 }

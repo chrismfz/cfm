@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/config"
 )
@@ -319,9 +320,14 @@ table inet other {
 }
 `
 
-// fakeRead answers the runner's three reads from fixed listings.
-func fakeRead(in, out string, outErr error) NFTRead {
-	return func(args ...string) (string, error) {
+// fakeRead answers the runner's three reads from fixed listings, as reads
+// whose chain listing is unreadable (so the output chain is always read).
+func fakeRead(in, out string, outErr error) PortsPolicyReads {
+	return PortsPolicyReads{Read: fakeNFTRead(in, out, outErr)}
+}
+
+func fakeNFTRead(in, out string, outErr error) NFTRead {
+	return func(_ time.Duration, args ...string) (string, error) {
 		switch strings.Join(args, " ") {
 		case "-a list chain inet cfm input":
 			return in, nil
@@ -337,7 +343,7 @@ func fakeRead(in, out string, outErr error) NFTRead {
 func TestApplyPortsPolicyScript(t *testing.T) {
 	t.Run("a read error writes nothing", func(t *testing.T) {
 		err := ApplyPortsPolicyScript(liveNodePolicy(),
-			func(...string) (string, error) { return "", errors.New("timed out") },
+			PortsPolicyReads{Read: func(time.Duration, ...string) (string, error) { return "", errors.New("timed out") }},
 			func(s string) error { t.Fatalf("wrote after a failed read:\n%s", s); return nil })
 		if err == nil || !strings.Contains(err.Error(), "timed out") {
 			t.Fatalf("err = %v", err)
@@ -388,15 +394,15 @@ func TestApplyPortsPolicyScript(t *testing.T) {
 		changed := strings.Replace(titanInput, "\t\tct state new tcp dport @tcp_in_ports accept # handle 485\n", "", 1)
 		var scripts []string
 		err := ApplyPortsPolicyScript(liveNodePolicy(),
-			func(args ...string) (string, error) {
+			PortsPolicyReads{Read: func(d time.Duration, args ...string) (string, error) {
 				if strings.Join(args, " ") == "-a list chain inet cfm input" {
 					reads++
 					if reads > 1 {
 						return changed, nil
 					}
 				}
-				return fakeRead(titanInput, convergedOutput, nil)(args...)
-			},
+				return fakeNFTRead(titanInput, convergedOutput, nil)(d, args...)
+			}},
 			func(s string) error {
 				scripts = append(scripts, s)
 				if len(scripts) == 1 {
@@ -409,6 +415,85 @@ func TestApplyPortsPolicyScript(t *testing.T) {
 		}
 		if strings.Contains(scripts[1], "handle 485") || !strings.Contains(scripts[1], "add rule inet cfm input ct state new tcp dport @tcp_in_ports accept") {
 			t.Fatalf("retry not planned from the fresh read:\n%s", scripts[1])
+		}
+	})
+	t.Run("chain reads get the EL8 deadline, the sets listing the default", func(t *testing.T) {
+		got := map[string]time.Duration{}
+		read := fakeNFTRead(titanInput, convergedOutput, nil)
+		reads := PortsPolicyReads{
+			Read: func(d time.Duration, args ...string) (string, error) {
+				got[strings.Join(args, " ")] = d
+				return read(d, args...)
+			},
+			Chains: func() (map[string]bool, bool) { return map[string]bool{"input": true, "output": true}, true },
+		}
+		if err := ApplyPortsPolicyScript(liveNodePolicy(), reads, func(string) error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]time.Duration{
+			"-a list chain inet cfm input":  PortsPolicyChainReadTimeout,
+			"-a list chain inet cfm output": PortsPolicyChainReadTimeout,
+			"-t list sets inet":             0,
+		}
+		if len(got) != len(want) {
+			t.Fatalf("reads = %v, want %v", got, want)
+		}
+		for k, d := range want {
+			if g, ok := got[k]; !ok || g != d {
+				t.Errorf("%s: deadline %v (read=%v), want %v", k, g, ok, d)
+			}
+		}
+		if PortsPolicyChainReadTimeout < BaseInputReadTimeout {
+			t.Errorf("PortsPolicyChainReadTimeout %v < BaseInputReadTimeout %v: EL8's 4–12 s listing plus the slot wait", PortsPolicyChainReadTimeout, BaseInputReadTimeout)
+		}
+	})
+	t.Run("an output chain the chain listing lacks is not read, and planned as fresh", func(t *testing.T) {
+		read := fakeNFTRead(titanInput, "", errors.New("must not be read"))
+		reads := PortsPolicyReads{
+			Read: func(d time.Duration, args ...string) (string, error) {
+				if strings.Join(args, " ") == "-a list chain inet cfm output" {
+					t.Errorf("read the output chain the listing says is absent")
+				}
+				return read(d, args...)
+			},
+			Chains: func() (map[string]bool, bool) { return map[string]bool{"input": true}, true },
+		}
+		var script string
+		if err := ApplyPortsPolicyScript(liveNodePolicy(), reads, func(s string) error { script = s; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(script, "add chain inet cfm output { type filter hook output priority 0; policy accept; }") {
+			t.Fatalf("absent output chain not planned as fresh:\n%s", script)
+		}
+	})
+	t.Run("a listed output chain whose read fails is an error, not an empty chain", func(t *testing.T) {
+		reads := PortsPolicyReads{
+			Read:   fakeNFTRead(titanInput, "", errors.New("signal: killed")),
+			Chains: func() (map[string]bool, bool) { return map[string]bool{"input": true, "output": true}, true },
+		}
+		err := ApplyPortsPolicyScript(liveNodePolicy(), reads, func(s string) error { t.Fatalf("wrote after a failed read:\n%s", s); return nil })
+		if err == nil || !strings.Contains(err.Error(), "output chain") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("an unreadable chain listing reads the output chain", func(t *testing.T) {
+		outReads := 0
+		read := fakeNFTRead(titanInput, convergedOutput, nil)
+		reads := PortsPolicyReads{
+			Read: func(d time.Duration, args ...string) (string, error) {
+				if strings.Join(args, " ") == "-a list chain inet cfm output" {
+					outReads++
+				}
+				return read(d, args...)
+			},
+			Chains: func() (map[string]bool, bool) { return nil, false },
+		}
+		var script string
+		if err := ApplyPortsPolicyScript(liveNodePolicy(), reads, func(s string) error { script = s; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if outReads != 1 || strings.Contains(script, "add chain") {
+			t.Fatalf("outReads=%d script:\n%s", outReads, script)
 		}
 	})
 	t.Run("two failures are returned", func(t *testing.T) {
