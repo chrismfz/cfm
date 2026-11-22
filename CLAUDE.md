@@ -128,7 +128,7 @@ The history behind each rule below is in the code comments it names.
   `repairIfTableAbsent`; the one-shot CLI still runs
   EnsureBase when `tableExists` is false, which is safe but not cheap); an unread chain is never taken for an empty one (no rule is
   added blind). The ports policy's two chain reads and its transaction get
-  `firewall.PortsPolicyChainReadTimeout` (30 s) on both engines, and the
+  `firewall.PortsPolicyNFTTimeout` (30 s) on both engines, and the
   output chain is read only when the chain listing has it
   (`PortsPolicyReads.Chains`; `nft/ports_cost_test.go`). Compare before you
   write (`firewall.SameSetElems`), and put a write in one script. `ensurebase_cost_test.go` pins EnsureBase's profile,

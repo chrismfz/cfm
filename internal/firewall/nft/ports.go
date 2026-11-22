@@ -91,10 +91,10 @@ func cfmChainNames() (map[string]bool, bool) {
 }
 
 // nftScriptPortsPolicy runs the ports-policy transaction under
-// firewall.PortsPolicyChainReadTimeout: it loads the same element cache as
+// firewall.PortsPolicyNFTTimeout: it loads the same element cache as
 // the chain reads.
 func (b *Backend) nftScriptPortsPolicy(script string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), firewall.PortsPolicyChainReadTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), firewall.PortsPolicyNFTTimeout)
 	defer cancel()
 	return b.nftExprCtx(ctx, script)
 }

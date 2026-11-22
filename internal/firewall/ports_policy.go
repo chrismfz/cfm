@@ -608,15 +608,15 @@ func IsNFTNoSuchObject(stderr string) bool {
 // carries nft's stderr text. A zero timeout is the engine's default deadline.
 type NFTRead func(timeout time.Duration, args ...string) (stdout string, err error)
 
-// PortsPolicyChainReadTimeout bounds each of the ports policy's chain reads
-// (`nft -a list chain inet cfm input|output`) and its transaction, on both
-// engines: EL8's nft 1.0.4 loads every set element before any `list chain`
-// (4–12 s idle on the fleet's EL8 nodes, 2026-11-22), and the deadline also
-// covers the wait for an nft slot. At the 10 s default the apply timed out
+// PortsPolicyNFTTimeout bounds each of the ports policy's chain reads
+// (`nft -a list chain inet cfm input|output`) and, set by each engine's exec
+// callback, its transaction: EL8's nft 1.0.4 loads every set element before
+// any `list chain` (4–12 s idle on the fleet's EL8 nodes, 2026-11-22), and
+// the deadline also covers the wait for an nft slot. At the 10 s default the apply timed out
 // under load, and the extra `ct state established,related accept` copies
 // EnsureBase leaves to it (BaseDedupeExprs) stayed in place. A var only so
 // the engines' fake-nft tests can shorten it.
-var PortsPolicyChainReadTimeout = BaseInputReadTimeout
+var PortsPolicyNFTTimeout = BaseInputReadTimeout
 
 // PortsPolicyReads is how ApplyPortsPolicyScript reads the kernel.
 type PortsPolicyReads struct {
@@ -633,8 +633,9 @@ type PortsPolicyReads struct {
 // transaction. A failed transaction changes nothing (the kernel rolls the
 // whole batch back), so it is planned again from a fresh read and retried
 // once: another writer (a DNAT re-assert, a CLI one-shot) may have moved a
-// handle in between. exec runs the script under PortsPolicyChainReadTimeout
-// (it loads the same element cache as the reads).
+// handle in between. The caller's exec must bound the script by
+// PortsPolicyNFTTimeout (it loads the same element cache as the reads); this
+// function does not.
 func ApplyPortsPolicyScript(p PortsPolicy, reads PortsPolicyReads, exec func(script string) error) error {
 	var errs []error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -652,7 +653,7 @@ func ApplyPortsPolicyScript(p PortsPolicy, reads PortsPolicyReads, exec func(scr
 }
 
 // readPortsPolicyState reads what PortsPolicyScript plans from. Every chain
-// read gets PortsPolicyChainReadTimeout, and a failed one is an error, never
+// read gets PortsPolicyNFTTimeout, and a failed one is an error, never
 // an empty chain (planned from nothing, every rule would be added again). The
 // output chain is read only when the cheap chain listing has it: a node
 // without one (TCP_OUT/UDP_OUT never set) pays no 4–12 s EL8 listing for it.
@@ -662,7 +663,7 @@ func readPortsPolicyState(p PortsPolicy, reads PortsPolicyReads) (PortsPolicySta
 	var st PortsPolicyState
 	var err error
 	read := reads.Read
-	if st.Input, err = read(PortsPolicyChainReadTimeout, "-a", "list", "chain", p.Family, p.Table, "input"); err != nil {
+	if st.Input, err = read(PortsPolicyNFTTimeout, "-a", "list", "chain", p.Family, p.Table, "input"); err != nil {
 		return st, fmt.Errorf("reading the input chain (EnsureBase creates it): %w", err)
 	}
 	var chains map[string]bool
@@ -671,7 +672,7 @@ func readPortsPolicyState(p PortsPolicy, reads PortsPolicyReads) (PortsPolicySta
 		chains, ok = reads.Chains()
 	}
 	if !ok || chains["output"] {
-		if st.Output, err = read(PortsPolicyChainReadTimeout, "-a", "list", "chain", p.Family, p.Table, "output"); err != nil {
+		if st.Output, err = read(PortsPolicyNFTTimeout, "-a", "list", "chain", p.Family, p.Table, "output"); err != nil {
 			if !IsNFTNoSuchObject(err.Error()) {
 				return st, fmt.Errorf("reading the output chain: %w", err)
 			}

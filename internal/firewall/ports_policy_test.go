@@ -431,8 +431,8 @@ func TestApplyPortsPolicyScript(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := map[string]time.Duration{
-			"-a list chain inet cfm input":  PortsPolicyChainReadTimeout,
-			"-a list chain inet cfm output": PortsPolicyChainReadTimeout,
+			"-a list chain inet cfm input":  PortsPolicyNFTTimeout,
+			"-a list chain inet cfm output": PortsPolicyNFTTimeout,
 			"-t list sets inet":             0,
 		}
 		if len(got) != len(want) {
@@ -443,8 +443,8 @@ func TestApplyPortsPolicyScript(t *testing.T) {
 				t.Errorf("%s: deadline %v (read=%v), want %v", k, g, ok, d)
 			}
 		}
-		if PortsPolicyChainReadTimeout < BaseInputReadTimeout {
-			t.Errorf("PortsPolicyChainReadTimeout %v < BaseInputReadTimeout %v: EL8's 4–12 s listing plus the slot wait", PortsPolicyChainReadTimeout, BaseInputReadTimeout)
+		if PortsPolicyNFTTimeout < BaseInputReadTimeout {
+			t.Errorf("PortsPolicyNFTTimeout %v < BaseInputReadTimeout %v: EL8's 4–12 s listing plus the slot wait", PortsPolicyNFTTimeout, BaseInputReadTimeout)
 		}
 	})
 	t.Run("an output chain the chain listing lacks is not read, and planned as fresh", func(t *testing.T) {
@@ -736,6 +736,9 @@ func TestApplyPortsPolicy_BothEnginesUseTheSharedTransaction(t *testing.T) {
 		if sel == nil || sel.Sel.Name != "ApplyPortsPolicyScript" {
 			t.Errorf("%s: ApplyPortsPolicy must end with `return firewall.ApplyPortsPolicyScript(...)`", f)
 		}
+		if sel != nil && len(call.Args) == 3 {
+			checkPortsPolicyWiring(t, f, file, call)
+		}
 		ast.Inspect(body, func(n ast.Node) bool {
 			if lit, ok := n.(*ast.BasicLit); ok {
 				for _, set := range []string{setTCPIn, setUDPIn, setTCPOut, setUDPOut, setPSTrackTCP, setPSTrackUDP} {
@@ -751,5 +754,50 @@ func TestApplyPortsPolicy_BothEnginesUseTheSharedTransaction(t *testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+// checkPortsPolicyWiring pins what each engine hands the shared transaction:
+// a PortsPolicyReads with a Chains listing (or the output chain is read on
+// every apply, a 4-12 s EL8 listing), and an exec method that bounds the
+// script by PortsPolicyNFTTimeout (the shared function does not).
+func checkPortsPolicyWiring(t *testing.T, f string, file *ast.File, call *ast.CallExpr) {
+	t.Helper()
+	lit, _ := call.Args[1].(*ast.CompositeLit)
+	hasChains := false
+	if lit != nil {
+		for _, e := range lit.Elts {
+			if kv, ok := e.(*ast.KeyValueExpr); ok {
+				if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Chains" {
+					if v, ok := kv.Value.(*ast.Ident); !ok || v.Name != "nil" {
+						hasChains = true
+					}
+				}
+			}
+		}
+	}
+	if !hasChains {
+		t.Errorf("%s: ApplyPortsPolicyScript must get a PortsPolicyReads literal with a non-nil Chains", f)
+	}
+	execSel, _ := call.Args[2].(*ast.SelectorExpr)
+	if execSel == nil {
+		t.Errorf("%s: the exec argument must be a method of the backend", f)
+		return
+	}
+	bounded := false
+	for _, d := range file.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != execSel.Sel.Name || fd.Body == nil {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			if s, ok := n.(*ast.SelectorExpr); ok && s.Sel.Name == "PortsPolicyNFTTimeout" {
+				bounded = true
+			}
+			return true
+		})
+	}
+	if !bounded {
+		t.Errorf("%s: %s must bound the transaction by firewall.PortsPolicyNFTTimeout", f, execSel.Sel.Name)
 	}
 }

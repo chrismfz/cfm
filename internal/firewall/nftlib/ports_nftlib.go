@@ -62,9 +62,9 @@ func nftReadPorts(timeout time.Duration, args ...string) (string, error) {
 }
 
 // nftExecPortsPolicy runs the ports-policy transaction under
-// firewall.PortsPolicyChainReadTimeout, as the nft engine does.
+// firewall.PortsPolicyNFTTimeout, as the nft engine does.
 func (b *Backend) nftExecPortsPolicy(script string) error {
-	return b.nftExecTimeout(script, firewall.PortsPolicyChainReadTimeout)
+	return b.nftExecTimeout(script, firewall.PortsPolicyNFTTimeout)
 }
 
 // cfmChainNames names inet cfm's chains over netlink (a chain listing, never

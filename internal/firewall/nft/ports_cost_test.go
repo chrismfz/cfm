@@ -17,7 +17,7 @@ import (
 // 2026-11-22), and the runner's 10 s default, which also covers the wait for
 // one of the four nft slots, timed the apply out under load. These tests pin
 // the deadline both reads and the transaction get
-// (firewall.PortsPolicyChainReadTimeout), that a timed-out read stays an
+// (firewall.PortsPolicyNFTTimeout), that a timed-out read stays an
 // error and writes nothing, and that the output chain is not read at all when
 // the cheap `list chains inet` says it does not exist.
 
@@ -51,9 +51,9 @@ func portsCfg() *config.PortsConfig {
 
 func withPortsReadTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
-	old := firewall.PortsPolicyChainReadTimeout
-	firewall.PortsPolicyChainReadTimeout = d
-	t.Cleanup(func() { firewall.PortsPolicyChainReadTimeout = old })
+	old := firewall.PortsPolicyNFTTimeout
+	firewall.PortsPolicyNFTTimeout = d
+	t.Cleanup(func() { firewall.PortsPolicyNFTTimeout = old })
 }
 
 func countLines(log, line string) int {
@@ -66,13 +66,13 @@ func countLines(log, line string) int {
 	return n
 }
 
-func TestPortsPolicyChainReadTimeout_FitsEL8(t *testing.T) {
-	if firewall.PortsPolicyChainReadTimeout < firewall.BaseInputReadTimeout {
-		t.Errorf("PortsPolicyChainReadTimeout = %v, below EnsureBase's %v: EL8's 4-12 s `list chain` plus the slot wait",
-			firewall.PortsPolicyChainReadTimeout, firewall.BaseInputReadTimeout)
+func TestPortsPolicyNFTTimeout_FitsEL8(t *testing.T) {
+	if firewall.PortsPolicyNFTTimeout < firewall.BaseInputReadTimeout {
+		t.Errorf("PortsPolicyNFTTimeout = %v, below EnsureBase's %v: EL8's 4-12 s `list chain` plus the slot wait",
+			firewall.PortsPolicyNFTTimeout, firewall.BaseInputReadTimeout)
 	}
-	if firewall.PortsPolicyChainReadTimeout <= defaultNFTCommandTimeout {
-		t.Errorf("PortsPolicyChainReadTimeout = %v, not above the runner's %v default", firewall.PortsPolicyChainReadTimeout, defaultNFTCommandTimeout)
+	if firewall.PortsPolicyNFTTimeout <= defaultNFTCommandTimeout {
+		t.Errorf("PortsPolicyNFTTimeout = %v, not above the runner's %v default", firewall.PortsPolicyNFTTimeout, defaultNFTCommandTimeout)
 	}
 }
 
@@ -113,7 +113,7 @@ func TestApplyPortsPolicy_UnreadableChainListReadsTheOutputChain(t *testing.T) {
 	}
 }
 
-// The chain read runs under PortsPolicyChainReadTimeout, not the runner's
+// The chain read runs under PortsPolicyNFTTimeout, not the runner's
 // default: shortened here, a hung read fails in well under the default.
 // And it fails: the apply plans nothing from an unread chain.
 func TestApplyPortsPolicy_ChainReadDeadlineIsAnError(t *testing.T) {
@@ -122,7 +122,7 @@ func TestApplyPortsPolicy_ChainReadDeadlineIsAnError(t *testing.T) {
 	start := time.Now()
 	err := New().ApplyPortsPolicy(portsCfg())
 	if took := time.Since(start); took > 5*time.Second {
-		t.Errorf("the hung input read took %v: not bounded by PortsPolicyChainReadTimeout", took)
+		t.Errorf("the hung input read took %v: not bounded by PortsPolicyNFTTimeout", took)
 	}
 	if err == nil || !strings.Contains(err.Error(), "input chain") {
 		t.Fatalf("err = %v, want the input-chain read error", err)
@@ -139,7 +139,7 @@ func TestApplyPortsPolicy_TransactionDeadline(t *testing.T) {
 	start := time.Now()
 	err := New().ApplyPortsPolicy(portsCfg())
 	if took := time.Since(start); took > 5*time.Second {
-		t.Errorf("two hung transactions took %v: not bounded by PortsPolicyChainReadTimeout", took)
+		t.Errorf("two hung transactions took %v: not bounded by PortsPolicyNFTTimeout", took)
 	}
 	if err == nil {
 		t.Fatal("a hung transaction reported success")
