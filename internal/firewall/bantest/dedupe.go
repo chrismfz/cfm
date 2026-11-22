@@ -170,3 +170,103 @@ func RunDedupeBaseRules(t *testing.T, newBackend func() firewall.Backend) {
 		t.Errorf("a second EnsureBase changed the chain:\nbefore:\n%s\nafter:\n%s", after, again)
 	}
 }
+
+// RunRestoresAPlainDrop drives an engine's EnsureBase against a live nft: with
+// the plain `ip saddr @block_v4 drop` deleted and its `ct state
+// established,related …` twin still there, EnsureBase puts the plain drop
+// back, above the ports policy's established accept (the early group's
+// place), and a second EnsureBase adds nothing more. The twin drops only
+// connections already open; while the plain drop read present inside it,
+// new connections from banned addresses got through and nothing re-added it.
+//
+// Gated like RunDedupeBaseRules; it refuses to run outside an empty network
+// namespace.
+func RunRestoresAPlainDrop(t *testing.T, newBackend func() firewall.Backend) {
+	t.Helper()
+	if os.Getenv("CFM_NFT_INTEGRATION") != "1" {
+		t.Skip("set CFM_NFT_INTEGRATION=1 (root + nft, isolated netns) to run")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	if _, err := exec.LookPath("nft"); err != nil {
+		t.Skip("nft not installed")
+	}
+	if out, err := exec.Command("nft", "list", "tables").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("refusing to run: this namespace already has tables (not an isolated netns?):\n%s", out)
+	}
+	t.Cleanup(func() { _ = exec.Command("nft", "delete", "table", "inet", "cfm").Run() })
+
+	const plain = `ip saddr @block_v4 drop`
+	b := newBackend()
+	if err := b.EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	listing := func() string {
+		out, err := exec.Command("nft", "-a", "list", "chain", "inet", "cfm", "input").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(out)
+	}
+	rules := firewall.ParseChainRules(listing())
+	h := rules.FirstHandle(plain)
+	if h == "" {
+		t.Fatalf("a fresh base layer must hold the plain drop:\n%s", listing())
+	}
+	// Delete every copy of the plain drop; the established twin stays.
+	for {
+		h = firewall.ParseChainRules(listing()).FirstHandle(plain)
+		if h == "" {
+			break
+		}
+		if out, err := exec.Command("nft", "delete", "rule", "inet", "cfm", "input", "handle", h).CombinedOutput(); err != nil {
+			t.Fatalf("deleting handle %s: %v %s", h, err, out)
+		}
+	}
+	if !strings.Contains(listing(), "ct state established,related ip saddr @block_v4 drop") {
+		t.Fatalf("the twin must still be there:\n%s", listing())
+	}
+
+	if err := b.EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase after the delete: %v", err)
+	}
+	after := listing()
+	if n := firewall.ParseChainRules(after).Count(plain); n < 1 {
+		t.Fatalf("EnsureBase did not put %q back (it read present inside its established twin):\n%s", plain, after)
+	}
+	// The restored drop sits above the established accept, where a NEW
+	// connection meets it before anything accepts it.
+	pos := func(l, s string) int {
+		for i, ln := range strings.Split(l, "\n") {
+			if strings.Contains(ln, s) {
+				return i
+			}
+		}
+		return -1
+	}
+	if p, a := pos(after, "\t"+plain), pos(after, firewall.BaseEstablishedAccept); p < 0 || a < 0 || p > a {
+		t.Errorf("the plain drop (line %d) must come before the established accept (line %d):\n%s", p, a, after)
+	}
+	// ...and after every allow accept of the early group: an insert at the
+	// top would drop an allowlisted address that is also in block_v4.
+	for _, e := range firewall.BaseEarlyRules(false) {
+		if !strings.Contains(e, "@allow_") && !strings.Contains(e, "@self_") && e != `iif lo accept` {
+			continue
+		}
+		want := e
+		if e == `iif lo accept` {
+			want = `iif "lo" accept`
+		}
+		if a, p := pos(after, want), pos(after, "\t"+plain); a < 0 || p < a {
+			t.Errorf("the restored drop (line %d) must come after %q (line %d):\n%s", p, e, a, after)
+		}
+	}
+
+	if err := b.EnsureBase(); err != nil {
+		t.Fatalf("second EnsureBase: %v", err)
+	}
+	if again := listing(); firewall.ParseChainRules(again).Count(plain) != firewall.ParseChainRules(after).Count(plain) {
+		t.Errorf("a second EnsureBase changed the plain drop's copies:\n%s", again)
+	}
+}

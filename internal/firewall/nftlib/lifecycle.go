@@ -18,7 +18,16 @@ import (
 // EnsureBase creates all core CFM-owned tables, chains, and sets using netlink.
 // The local set handle cache is invalidated so the next nftlib operation
 // re-fetches handles from the kernel.
-func (b *Backend) EnsureBase() (err error) {
+func (b *Backend) EnsureBase() (err error) { return b.ensureBase(false) }
+
+// ensureBaseAfterAbsent is EnsureBase for a repair that knows the table is
+// absent (the kernel's ENOENT to GETTABLE, or the table this backend just
+// deleted): the input chain is then new even when the chain list fails, so
+// its base rules are written rather than given up on (no daemon restart
+// would retry a tick's repair).
+func (b *Backend) ensureBaseAfterAbsent() error { return b.ensureBase(true) }
+
+func (b *Backend) ensureBase(tableWasAbsent bool) (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
 	// Split the timing so the self-test can tell contention (lock_wait) from
@@ -79,8 +88,8 @@ func (b *Backend) EnsureBase() (err error) {
 	// it — would fail. The priority differs whenever this process has no
 	// config (a one-shot `cfm dnat on`, which builds its backend without one)
 	// or NFT_INPUT_PRIORITY changed after the chain was created.
-	cur := b.existingInputChain()
-	newChain := cur == nil
+	cur, listed := b.existingInputChain()
+	inputState := inputStateOf(listed, cur != nil, tableWasAbsent)
 	if cur == nil {
 		b.conn.AddChain(&nftables.Chain{
 			Table:    table,
@@ -194,28 +203,67 @@ func (b *Backend) EnsureBase() (err error) {
 
 	// Install base input chain rules (idempotent).
 	cliStart := time.Now()
-	rulesErr = b.applyBaseInputRules(newChain)
+	rulesErr = b.applyBaseInputRules(inputState)
 	cliWork = time.Since(cliStart)
+	// Unlisted chains AND unread rules: the chain may be new and empty
+	// (policy accept, no allow/block rule), and nothing repairs a chain
+	// whose table is there. That one is not best effort: fail, as the nft
+	// backend does, so the daemon's start fails and systemd retries it.
+	if errors.Is(rulesErr, errInputChainUnknown) {
+		err := rulesErr
+		rulesErr = nil
+		return err
+	}
 
 	return nil
 }
 
-// existingInputChain returns inet cfm's input chain, or nil when it doesn't
-// exist or the chain list can't be read (EnsureBase then declares it, as it
-// always did). Only chains are listed: never the input chain's rules, which
+// inputChainState is what EnsureBase knows of the input chain before it reads
+// the chain's rules.
+type inputChainState int
+
+const (
+	inputChainExisted inputChainState = iota // listed: it holds rules
+	inputChainNew                            // listed absent, created by this EnsureBase: empty
+	inputChainUnknown                        // the chain list failed: declared blind, may be either
+)
+
+// inputStateOf is what EnsureBase knows of the input chain: listed says the
+// chain list was read, found that it held the chain, tableWasAbsent that the
+// caller knows the table was absent (then the chain is new, listed or not).
+func inputStateOf(listed, found, tableWasAbsent bool) inputChainState {
+	switch {
+	case !listed && tableWasAbsent:
+		return inputChainNew
+	case !listed:
+		return inputChainUnknown
+	case !found:
+		return inputChainNew
+	}
+	return inputChainExisted
+}
+
+// errInputChainUnknown: neither the chain list nor the chain's rules could be
+// read, so the input chain may be new and empty.
+var errInputChainUnknown = errors.New("neither the chain list nor the input chain could be read; the input chain may be new and empty, so its base rules are unknown")
+
+// existingInputChain returns inet cfm's input chain (nil when it doesn't
+// exist) and whether the chain list was read at all (false: EnsureBase
+// declares the chain, as it always did, but cannot tell a new one from an
+// existing one). Only chains are listed: never the input chain's rules, which
 // google/nftables can't decode (see panel_dnat_accepts.go). Must be called
 // with b.mu held.
-func (b *Backend) existingInputChain() *nftables.Chain {
+func (b *Backend) existingInputChain() (*nftables.Chain, bool) {
 	chains, err := b.conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	for _, ch := range chains {
 		if ch.Table != nil && ch.Table.Name == cfmTableName && ch.Name == "input" {
-			return ch
+			return ch, true
 		}
 	}
-	return nil
+	return nil, true
 }
 
 // refreshSelfSets loads self_v4/self_v6 over netlink. They used to take one
@@ -233,14 +281,17 @@ func (b *Backend) refreshSelfSets() {
 // Each rule is added only if it is not already present (idempotent): one read
 // of the chain, then the missing rules in one nft run (baseRulesScript), with
 // the extra copies of every base rule deleted in the same run.
-// newChain says the chain was created by this EnsureBase, so it holds no rules
-// yet. The error says the rules may be incomplete; they are best effort.
+// state says what EnsureBase knows of the chain: inputChainNew (created by
+// this EnsureBase, so it holds no rules yet), inputChainExisted, or
+// inputChainUnknown (the chain list failed). The error says the rules may be
+// incomplete; they are best effort, except errInputChainUnknown (an unread
+// chain that may be new and empty), which EnsureBase returns.
 //
 // The rules and their order are the nft backend's (firewall.BaseEarlyRules,
 // firewall.BaseLateRules, firewall.BaseFloodJump): the early group inserted
 // at position 0 in reverse so the first ends on top, the late group appended,
 // the flood jump last (before the ports policy's rules).
-func (b *Backend) applyBaseInputRules(newChain bool) error {
+func (b *Backend) applyBaseInputRules(state inputChainState) error {
 	early := firewall.BaseEarlyRules(b.cfg != nil && b.cfg.Hardening.ICMPRate > 0)
 	ins := make([]string, 0, len(early))
 	for i := len(early) - 1; i >= 0; i-- {
@@ -254,8 +305,12 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	// EnsureBase just created it: then it is empty, and leaving it so would
 	// leave the node without its allow/block rules.
 	chain, err := b.inputChainTextCLI()
-	if err != nil && !newChain {
-		err = fmt.Errorf("can't read the input chain, left as is: %w", err)
+	if err != nil && state != inputChainNew {
+		if state == inputChainUnknown {
+			err = fmt.Errorf("%w (%v)", errInputChainUnknown, err)
+		} else {
+			err = fmt.Errorf("can't read the input chain, left as is: %w", err)
+		}
 		logging.Logf("[nftlib] base input rules: %v", err)
 		return err
 	}
@@ -359,9 +414,17 @@ func baseRulesScript(chain string, ins, adds []string) []string {
 	// after its anchor on a chain that already holds it: an insert at 0
 	// would put it above the self / allow accepts, an append below the ports
 	// policy's accepts.
+	// A missing early rule on a chain that holds the rest goes right after
+	// the nearest early rule above it (EarlyAnchorHandle): an insert at 0
+	// would put a re-added drop above the allow accepts. ins is the early
+	// group bottom-up; EarlyAnchorHandle wants it top-down.
+	early := make([]string, len(ins))
+	for i, e := range ins {
+		early[len(ins)-1-i] = e
+	}
 	for _, e := range ins {
 		if missing(e) {
-			if h := have.AnchorHandle(e); h != "" {
+			if h := have.EarlyAnchorHandle(e, early); h != "" {
 				stmts = append(stmts, "add rule inet cfm input position "+h+" "+e)
 			} else {
 				stmts = append(stmts, "insert rule inet cfm input position 0 "+e)
@@ -416,7 +479,7 @@ func (b *Backend) ResetTable() error {
 	dropDur := time.Since(dropStart)
 
 	ensureStart := time.Now()
-	if err := b.EnsureBase(); err != nil {
+	if err := b.ensureBaseAfterAbsent(); err != nil { // the table was just deleted
 		return fmt.Errorf("nftlib: reset table (ensure): %w", err)
 	}
 	ensureDur := time.Since(ensureStart)

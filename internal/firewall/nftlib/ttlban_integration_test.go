@@ -47,3 +47,16 @@ func TestLiveNFTDedupeBaseRules(t *testing.T) {
 		return b
 	})
 }
+
+// The plain block drop is put back when only its established twin is left:
+//
+//	unshare -rn env CFM_NFT_INTEGRATION=1 go test ./internal/firewall/nftlib/ -run LiveNFTRestoresAPlainDrop -v
+func TestLiveNFTRestoresAPlainDrop(t *testing.T) {
+	bantest.RunRestoresAPlainDrop(t, func() firewall.Backend {
+		b, err := New()
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return b
+	})
+}

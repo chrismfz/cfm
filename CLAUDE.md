@@ -127,7 +127,19 @@ The history behind each rule below is in the code comments it names.
   `errTableAbsent`, the kernel's ENOENT to GETTABLE, via
   `repairIfTableAbsent`; the one-shot CLI still runs
   EnsureBase when `tableExists` is false, which is safe but not cheap); an unread chain is never taken for an empty one (no rule is
-  added blind). The ports policy's two chain reads and its transaction get
+  added blind), and never for a full one either: when the chain list failed
+  too, the chain was declared blind and may be new and empty (policy accept),
+  so EnsureBase FAILS (the daemon's start fails and systemd retries it)
+  rather than report success with no allow/block rule and nothing to repair
+  it. "Is this base rule there?" is `ChainRules.Present`: a rule inside
+  another BASE rule does not count (the plain block drop inside its
+  `ct state established,related …` twin, which drops only open connections,
+  read present and was never re-added); `Has`'s substring match stays for
+  everything else. A missing early rule on a chain that holds the rest goes
+  right after the nearest early rule above it that is listed
+  (`ChainRules.EarlyAnchorHandle`, both engines), never at position 0: at the
+  top, a re-added drop would beat the allow accepts (live:
+  `-run LiveNFTRestoresAPlainDrop`, both engines). The ports policy's two chain reads and its transaction get
   `firewall.PortsPolicyNFTTimeout` (30 s) on both engines, and the
   output chain is read only when the chain listing has it
   (`PortsPolicyReads.Chains`; `nft/ports_cost_test.go`). Compare before you

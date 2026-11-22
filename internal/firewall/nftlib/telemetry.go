@@ -557,7 +557,7 @@ func (b *Backend) loadPortScannerOnce() {
 			logging.Logf("[portscan] cannot check inet %s, skipping tick: %v", cfmTableName, terr)
 			return
 		}
-		if err := b.EnsureBase(); err != nil {
+		if err := b.ensureBaseAfterAbsent(); err != nil {
 			return
 		}
 	}
