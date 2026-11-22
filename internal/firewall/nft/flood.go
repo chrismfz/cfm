@@ -74,13 +74,17 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 	b.cfg = c
 	const meterRefreshInterval = 15 * time.Minute
 	h := floodCfgHash(c)
-	if h != 0 && h == b.lastFloodHash && b.tableExists() {
+	// An unknown table probe keeps the unchanged rules (a rebuild on every
+	// timed-out probe is the churn the probe once caused); only a definite
+	// absence rebuilds.
+	tbl := b.probeTable()
+	if h != 0 && h == b.lastFloodHash && tbl != tableAbsent {
 		if !b.lastFloodRebuild.IsZero() && time.Since(b.lastFloodRebuild) < meterRefreshInterval {
 			return nil
 		}
 	}
 	b.lastFloodHash = h
-	if !b.tableExists() {
+	if tbl == tableAbsent {
 		if err = b.EnsureBase(); err != nil {
 			return err
 		}

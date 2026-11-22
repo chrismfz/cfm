@@ -1322,25 +1322,59 @@ func (b *Backend) listSetText(setName string, v6 bool) ([]firewall.BlockedEntry,
 
 // -------- shell helpers --------
 
-// tableExists reports whether table inet cfm exists. It reads `nft list
-// chains inet`, which prints each inet table's header (`table inet cfm {`)
-// with only its chains: `list tables`, which reads the same answer, makes nft
-// load every set element of every table first, which on a node with large
-// feed / TTL-ban sets costs ~2 s per call (EnsureBase, ApplyFloodRules and the
-// per-tick portscan load all ask). If the cheap listing fails, the old one
-// answers: an unreadable listing is never taken for "absent" on one read and
-// "present" on another without nft itself saying so.
-func (b *Backend) tableExists() bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// tableState is what a probe of table inet cfm found. Unknown is its own
+// answer: a probe that timed out (the nft runs share four slots, and the wait
+// for one counts against the deadline) or failed says nothing about the
+// table, and must not start a repair (see the repair callers).
+type tableState int
+
+const (
+	tableUnknown tableState = iota
+	tablePresent
+	tableAbsent
+)
+
+// tableProbeTimeout bounds each probe run, the wait for an nft slot included.
+var tableProbeTimeout = 5 * time.Second
+
+// probeTable asks nft whether table inet cfm exists. It reads `nft list chains
+// inet`, which prints each inet table's header (`table inet cfm {`) with only
+// its chains, in ~5 ms. `list tables`, which gives the same answer, makes nft
+// load every set element of every table first (~2 s per call on a node with
+// large feed / TTL-ban sets), and its 5 s deadline, slot wait included, ran
+// out on loaded nodes: the timeout read as "no table", and the per-tick
+// portscan load re-ran EnsureBase every minute or two all day. `list tables`
+// now only answers when the cheap listing fails for a reason other than its
+// deadline (an nft that refuses it), with a deadline of its own.
+func (b *Backend) probeTable() tableState {
+	if st, timedOut := probeTableWith("list", "chains", family); st != tableUnknown || timedOut {
+		return st
+	}
+	st, _ := probeTableWith("list", "tables")
+	return st
+}
+
+// probeTableWith runs one listing under its own deadline: present / absent
+// from the listing, unknown (and whether the deadline ran out) on any error.
+func probeTableWith(args ...string) (tableState, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), tableProbeTimeout)
 	defer cancel()
-	if res, err := runNFTCommand(ctx, "list", "chains", family); err == nil {
-		return listingHasCFMTable(res.Stdout)
-	}
-	res, err := runNFTCommand(ctx, "list", "tables")
+	res, err := runNFTCommand(ctx, args...)
 	if err != nil {
-		return false
+		return tableUnknown, ctx.Err() != nil
 	}
-	return listingHasCFMTable(res.Stdout)
+	if listingHasCFMTable(res.Stdout) {
+		return tablePresent, false
+	}
+	return tableAbsent, false
+}
+
+// tableExists reports whether nft says table inet cfm exists: false for both
+// absent and unknown (the CLI's "not present" gate). A caller that would
+// REPAIR on false (EnsureBase, a flush, a delete) asks probeTable instead and
+// acts only on tableAbsent.
+func (b *Backend) tableExists() bool {
+	return b.probeTable() == tablePresent
 }
 
 // listingHasCFMTable finds the `table inet cfm` header line in an nft
@@ -1815,7 +1849,10 @@ func (b *Backend) DropFeedSets(feedName string) {
 // DropEverything: delete whole table inet cfm
 func (b *Backend) DropEverything() error {
 	b.forgetApplied("")
-	if !b.tableExists() {
+	// Only a definite absence skips the delete: on an unknown probe, try, and
+	// let nft's own error answer (a "nothing to do" success must not hide a
+	// table that is still loaded).
+	if b.probeTable() == tableAbsent {
 		return nil
 	}
 	// best-effort flush first (μην αποτύχει delete λόγω refs)
@@ -1826,7 +1863,7 @@ func (b *Backend) DropEverything() error {
 // ResetTable: flush whole table (rules + sets content), κρατώντας το table
 func (b *Backend) ResetTable() error {
 	b.forgetApplied("")
-	if !b.tableExists() {
+	if b.probeTable() == tableAbsent { // unknown: try, as DropEverything does
 		return nil
 	}
 	return b.nftCmd(fmt.Sprintf("flush table %s %s", family, tableName))
@@ -1858,10 +1895,41 @@ func (b *Backend) refreshSelfSets() {
 	if !b.setHolds("self_v4", v4) || !b.setHolds("self_v6", v6) {
 		script := replaceSetScript("self_v4", v4, "") + replaceSetScript("self_v6", v6, "")
 		if err := b.nftExpr(script); err != nil {
-			logging.Logf("[nft] self sets write failed, they keep their old content: %v", firstLine(err.Error()))
+			logging.Logf("[nft] self sets write failed: %v; retrying each set on its own", firstLine(err.Error()))
+			b.writeSelfSetFallback()
 		}
 	}
 	b.writeSelfIPsLua()
+}
+
+// writeSelfSetFallback runs after the one-transaction write was refused: one
+// element nft rejects fails the whole script, and after a reboot the sets
+// start empty, so without this not even loopback would be accepted early.
+// Each set is written on its own; a set that still refuses gets the static
+// ranges alone (loopback, link-local), which the old per-statement run always
+// landed. Every step is a single transaction, so a set is never left flushed.
+func (b *Backend) writeSelfSetFallback() {
+	v4, v6 := firewall.SelfSetElems(b.selfResolver.LocalIPs())
+	s4, s6 := firewall.SelfSetElems(nil)
+	for _, w := range []struct {
+		name         string
+		full, static []string
+	}{{"self_v4", v4, s4}, {"self_v6", v6, s6}} {
+		if b.setHolds(w.name, w.full) {
+			continue
+		}
+		err := b.nftExpr(replaceSetScript(w.name, w.full, ""))
+		if err == nil {
+			continue
+		}
+		logging.Logf("[nft] %s write failed: %v; writing loopback and link-local only", w.name, firstLine(err.Error()))
+		if b.setHolds(w.name, w.static) {
+			continue
+		}
+		if err := b.nftExpr(replaceSetScript(w.name, w.static, "")); err != nil {
+			logging.Logf("[nft] %s static write failed, it keeps its old content: %v", w.name, firstLine(err.Error()))
+		}
+	}
 }
 
 // setHolds reports whether the kernel's set holds exactly want. A failed read

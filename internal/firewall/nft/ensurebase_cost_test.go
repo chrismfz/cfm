@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/selfip"
@@ -32,6 +34,26 @@ import (
 // elements (nil = the set read fails).
 func fakeNFTEnsureBase(t *testing.T, chainsOK bool, self4, self6 []string) (logPath string) {
 	t.Helper()
+	mode := "ok"
+	if !chainsOK {
+		mode = "fail"
+	}
+	return fakeNFTOpts(t, fakeOpts{chains: mode, self4: self4, self6: self6})
+}
+
+// fakeOpts shapes fakeNFTOpts: chains is how `list chains inet` answers
+// ("ok" lists table inet cfm, "empty" lists nothing, "fail" exits 1, "slow"
+// outsleeps the probe deadline); a `-f -` script matching refuseScript (an
+// extended regex over the whole script, flattened to one line) exits 1.
+type fakeOpts struct {
+	chains       string
+	self4, self6 []string
+	refuseScript string
+}
+
+func fakeNFTOpts(t *testing.T, o fakeOpts) (logPath string) {
+	t.Helper()
+	self4, self6 := o.self4, o.self6
 	dir := t.TempDir()
 	logPath = filepath.Join(dir, "nft.log")
 	setJSON := func(name string, elems []string) string {
@@ -62,21 +84,30 @@ func fakeNFTEnsureBase(t *testing.T, chainsOK bool, self4, self6 []string) (logP
 	if err := os.WriteFile(chains, []byte("table inet cfm {\n}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	chainsRC := 0
-	if !chainsOK {
-		chainsRC = 1
+	chainsCmd := map[string]string{
+		"ok":    fmt.Sprintf("cat %q; exit 0", chains),
+		"empty": "exit 0",
+		"fail":  "exit 1",
+		"slow":  "exec sleep 2",
+	}[o.chains]
+	if chainsCmd == "" {
+		t.Fatalf("fakeOpts.chains %q", o.chains)
 	}
 	script := fmt.Sprintf(`#!/bin/sh
 echo "ARGS $*" >> %[1]q
-if [ "$1" = "-f" ]; then in=$(cat); printf '%%s\n' "$in" >> %[1]q; exit 0; fi
+if [ "$1" = "-f" ]; then
+	in=$(cat); printf '%%s\n' "$in" >> %[1]q
+	if [ -n %[5]q ] && printf '%%s' "$in" | tr '\n' ' ' | grep -qE %[5]q; then exit 1; fi
+	exit 0
+fi
 case "$*" in
-"list chains inet") [ %[5]d = 0 ] && cat %[4]q; exit %[5]d ;;
+"list chains inet") %[4]s ;;
 "list tables") echo "table inet cfm"; exit 0 ;;
 "-j list set inet cfm self_v4") cat %[2]q || exit 1; exit 0 ;;
 "-j list set inet cfm self_v6") cat %[3]q || exit 1; exit 0 ;;
 esac
 exit 0
-`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chains, chainsRC)
+`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript)
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o700); err != nil { // #nosec G306 -- test helper must be executable
 		t.Fatal(err)
 	}
@@ -222,5 +253,83 @@ func TestLiveNFTSelfSetsReadBackUnchanged(t *testing.T) {
 	}
 	if !b.tableExists() {
 		t.Fatal("tableExists after EnsureBase = false")
+	}
+}
+
+// A probe that outlives its deadline is "unknown", not "absent": it neither
+// falls back to the element-loading `list tables` nor starts a repair. That
+// is the per-tick EnsureBase loop loaded nodes ran all day.
+func TestProbeTable_TimeoutIsUnknownAndRepairsNothing(t *testing.T) {
+	old := tableProbeTimeout
+	tableProbeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { tableProbeTimeout = old })
+
+	log := fakeNFTOpts(t, fakeOpts{chains: "slow"})
+	b := New()
+	if st := b.probeTable(); st != tableUnknown {
+		t.Fatalf("probeTable after a timed-out listing = %v, want unknown", st)
+	}
+	b.loadPortScannerOnce()
+	_ = b.ResetTable()
+	got := readFile(t, log)
+	if strings.Contains(got, "ARGS list tables") {
+		t.Errorf("a timed-out cheap probe must not fall back to `list tables`:\n%s", got)
+	}
+	if strings.Contains(got, "add table inet cfm") {
+		t.Errorf("an unknown probe started EnsureBase:\n%s", got)
+	}
+	if !strings.Contains(got, "flush table inet cfm") {
+		t.Errorf("ResetTable on an unknown probe must still try the flush, not report a silent success:\n%s", got)
+	}
+}
+
+func TestProbeTable_EmptyListingIsAbsent(t *testing.T) {
+	log := fakeNFTOpts(t, fakeOpts{chains: "empty"})
+	b := New()
+	if st := b.probeTable(); st != tableAbsent {
+		t.Fatalf("probeTable with no inet cfm in the listing = %v, want absent", st)
+	}
+	if err := b.DropEverything(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, log); strings.Contains(got, "delete table") {
+		t.Errorf("DropEverything on a definitely absent table deleted something:\n%s", got)
+	}
+}
+
+// One element nft refuses fails the one-transaction self-set write; after a
+// reboot the sets are empty, so each set is retried on its own, and a set that
+// still refuses gets loopback and link-local alone.
+func TestEnsureBase_RefusedSelfSetWriteFallsBack(t *testing.T) {
+	v4, _ := wantSelfSets()
+	s4, _ := firewall.SelfSetElems(nil)
+	// Refuse the combined script (it holds both sets) and, if this host has a
+	// local IPv4 address, any self_v4 write carrying it.
+	refuse := "self_v4.*self_v6"
+	if len(v4) > len(s4) {
+		local := ""
+		for _, e := range v4 {
+			if e != "127.0.0.0/8" {
+				local = strings.ReplaceAll(e, ".", "[.]")
+				break
+			}
+		}
+		refuse += "|add element inet cfm self_v4 .*" + local
+	}
+	log := fakeNFTOpts(t, fakeOpts{chains: "ok", self4: []string{}, self6: []string{}, refuseScript: refuse})
+	if err := New().EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	got := readFile(t, log)
+	// self_v6 lands in a script of its own.
+	if !regexp.MustCompile(`ARGS -f -\nflush set inet cfm self_v6\n`).MatchString(got) {
+		t.Errorf("no self_v6-only write after the combined one was refused:\n%s", got)
+	}
+	if len(v4) > len(s4) {
+		if !strings.Contains(got, "ARGS -f -\nflush set inet cfm self_v4\nadd element inet cfm self_v4 { 127.0.0.0/8 }") {
+			t.Errorf("a refused self_v4 must still get loopback alone:\n%s", got)
+		}
+	} else if !regexp.MustCompile(`ARGS -f -\nflush set inet cfm self_v4\n`).MatchString(got) {
+		t.Errorf("no self_v4-only write after the combined one was refused:\n%s", got)
 	}
 }

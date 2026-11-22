@@ -107,11 +107,14 @@ The history behind each rule below is in the code comments it names.
   With large feed / TTL-ban sets each costs ~2 s (`list chain`, `-t list set`,
   `-j list set <one>`, `add set`, `add rule`, `flush set`: ~5 ms). The exec
   EnsureBase once ran one per self-set statement, which held the bridge and
-  ingest sockets 28.9 s on a restart. Its `list tables` existence probe also
-  passed its 5 s timeout, read as "no table" and re-ran EnsureBase every tick.
-  Probe with `list chains inet` (`tableExists`), compare before you write
+  ingest sockets 28.9 s on a restart. EnsureBase also re-ran every minute or
+  two on loaded nodes, most likely because its `list tables` existence probe
+  ran past its 5 s deadline (the wait for one of the 4 nft slots counts) and
+  the timeout read as "no table". Probe with `list chains inet`
+  (`probeTable`); a repair (EnsureBase, a flush, a delete) acts only on
+  `tableAbsent`, never on `tableUnknown`. Compare before you write
   (`firewall.SameSetElems`), and put a write in one script.
-  `ensurebase_cost_test.go` pins EnsureBase's profile.
+  `ensurebase_cost_test.go` pins EnsureBase's profile and the unknown probe.
 - **A base input rule added after the rest needs an anchor.** Both engines'
   EnsureBase insert a missing early rule at position 0 and append a missing
   late one: on a node's existing chain a new drop would land above the self /

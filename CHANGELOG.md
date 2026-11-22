@@ -29,14 +29,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `list tables` probe: 28.9 s on virgo's 2026.11.22 upgrade, during which every
   bridge lookup failed open and the access-log lines meant for the webdetector
   were lost (66 `[crit] connect() … No such file` lines in the edge error log).
-  The same probe, past its 5 s timeout, read as "no table" and re-ran
-  EnsureBase (20–30 s each) from the tick loop on earth, mars and virgo all
-  day. The table probe now reads `nft list chains inet` (~5 ms), the self sets
-  are compared with the kernel's and left alone when unchanged (every restart),
-  and a change is written in one transaction (also closing the moment a self
-  set sat flushed). EnsureBase on a restart: ~0.6 s in a netns with a 200k-entry
-  feed set, was 10 s. nft engine only; nftlib already wrote the self sets over
-  netlink.
+  EnsureBase also re-ran (20–30 s each) every minute or two, on the 20 s
+  tick, all day on earth, mars and virgo (hundreds of runs a day), most likely
+  because that probe ran past its 5 s deadline (nft-slot wait included) and a
+  timeout read as "no table". The table probe now reads `nft list chains inet`
+  (~5 ms), and a probe that times out or fails is "unknown": the tick-loop
+  repairs (portscan load, flood rules, counters dump) run EnsureBase only when
+  nft says the table is absent, and `cfm reset` / `cfm disable` still try their
+  flush / delete instead of reporting a silent success. The self sets are
+  compared with the kernel's and left alone when unchanged (every restart); a
+  change is one transaction (no moment with a flushed self set), and if nft
+  refuses it each set is retried alone, then with loopback and link-local
+  only, so a reboot never leaves them empty. EnsureBase on a restart: ~0.6 s in
+  a netns with a 200k-entry feed set, was 10 s. nft engine only; nftlib already
+  wrote the self sets over netlink.
 
 ## 2026.11.22
 
