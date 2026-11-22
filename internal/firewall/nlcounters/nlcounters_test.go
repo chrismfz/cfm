@@ -16,11 +16,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func objMsg(t *testing.T, msgType uint16, name string, objType uint32, withPkts bool, pkts, bytes uint64) netlink.Message {
+func objMsgIn(t *testing.T, family uint8, table string, msgType uint16, name string, objType uint32, withPkts bool, pkts, bytes uint64) netlink.Message {
 	t.Helper()
 	ae := netlink.NewAttributeEncoder()
 	ae.ByteOrder = binary.BigEndian
-	ae.String(unix.NFTA_OBJ_TABLE, "cfm")
+	ae.String(unix.NFTA_OBJ_TABLE, table)
 	if name != "" {
 		ae.String(unix.NFTA_OBJ_NAME, name)
 	}
@@ -39,8 +39,12 @@ func objMsg(t *testing.T, msgType uint16, name string, objType uint32, withPkts 
 	}
 	return netlink.Message{
 		Header: netlink.Header{Type: netlink.HeaderType(unix.NFNL_SUBSYS_NFTABLES<<8 | msgType)},
-		Data:   append([]byte{unix.NFPROTO_INET, 0, 0, 0}, b...),
+		Data:   append([]byte{family, 0, 0, 0}, b...),
 	}
+}
+
+func objMsg(t *testing.T, msgType uint16, name string, objType uint32, withPkts bool, pkts, bytes uint64) netlink.Message {
+	return objMsgIn(t, unix.NFPROTO_INET, "cfm", msgType, name, objType, withPkts, pkts, bytes)
 }
 
 func TestDecode(t *testing.T) {
@@ -52,8 +56,11 @@ func TestDecode(t *testing.T) {
 		objMsg(t, unix.NFT_MSG_NEWOBJ, "", unix.NFT_OBJECT_COUNTER, true, 3, 3),           // no name
 		objMsg(t, unix.NFT_MSG_NEWTABLE, "wrongmsg", unix.NFT_OBJECT_COUNTER, true, 3, 3), // other message
 		{Header: netlink.Header{Type: netlink.HeaderType(unix.NFNL_SUBSYS_NFTABLES<<8 | unix.NFT_MSG_NEWOBJ)}, Data: []byte{1}},
+		// Not inet cfm: the kernel filters these out, Decode does too.
+		objMsgIn(t, unix.NFPROTO_INET, "other", unix.NFT_MSG_NEWOBJ, "badflags_drop", unix.NFT_OBJECT_COUNTER, true, 99, 99),
+		objMsgIn(t, unix.NFPROTO_IPV4, "cfm", unix.NFT_MSG_NEWOBJ, "badflags_drop", unix.NFT_OBJECT_COUNTER, true, 98, 98),
 	}
-	got := Decode(msgs)
+	got := Decode(msgs, "cfm")
 	if len(got) != 2 {
 		t.Fatalf("Decode = %v, want badflags_drop and newrate_v4 only", got)
 	}
@@ -62,6 +69,17 @@ func TestDecode(t *testing.T) {
 	}
 	if c, ok := got["newrate_v4"]; !ok || c.Packets != 0 {
 		t.Errorf("a zero counter must be reported as zero, got %+v ok=%v", c, ok)
+	}
+}
+
+func TestInterrupted(t *testing.T) {
+	m := objMsg(t, unix.NFT_MSG_NEWOBJ, "a", unix.NFT_OBJECT_COUNTER, true, 1, 1)
+	if interrupted([]netlink.Message{m}) {
+		t.Fatal("a plain reply read as interrupted")
+	}
+	m.Header.Flags |= netlink.DumpInterrupted
+	if !interrupted([]netlink.Message{objMsg(t, unix.NFT_MSG_NEWOBJ, "b", unix.NFT_OBJECT_COUNTER, true, 1, 1), m}) {
+		t.Fatal("NLM_F_DUMP_INTR on any reply must mark the dump interrupted")
 	}
 }
 
@@ -104,8 +122,15 @@ func TestLiveNFTCounters(t *testing.T) {
 	if os.Getenv("CFM_NFT_INTEGRATION") != "1" {
 		t.Skip("set CFM_NFT_INTEGRATION=1 (root + nft, isolated netns) to run")
 	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root (unshare -rn)")
+	}
 	if _, err := exec.LookPath("nft"); err != nil {
 		t.Skip("nft not installed")
+	}
+	const other = "cfm_nlcounters_test_other"
+	if exec.Command("nft", "list", "table", "inet", other).Run() == nil {
+		t.Fatalf("refusing to run: table inet %s already exists", other)
 	}
 	if out, err := exec.Command("nft", "list", "table", "inet", "cfm").CombinedOutput(); err == nil {
 		if s := string(out); strings.Contains(s, "block_v4") || strings.Contains(s, "hook input") {
@@ -123,19 +148,19 @@ func TestLiveNFTCounters(t *testing.T) {
 	if got, err := Dump(context.Background(), "cfm"); err != nil || len(got) != 0 {
 		t.Fatalf("absent table: Dump = %v, %v; want empty, nil", got, err)
 	}
-	run(`add table inet cfm
+	run(strings.ReplaceAll(`add table inet cfm
 add counter inet cfm badflags_drop { packets 12 bytes 720 }
 add counter inet cfm newrate_v4
 add counter inet cfm portflood_80_tcp { packets 42 bytes 1234 }
 add quota inet cfm q { over 1 mbytes }
 add set inet cfm big { type ipv4_addr; flags interval; }
 add element inet cfm big { 10.0.0.0/24, 10.0.2.0/24 }
-add table inet other
-add counter inet other badflags_drop { packets 99 bytes 99 }
-`)
+add table inet OTHER
+add counter inet OTHER badflags_drop { packets 99 bytes 99 }
+`, "OTHER", other))
 	t.Cleanup(func() {
 		_ = exec.Command("nft", "delete", "table", "inet", "cfm").Run()
-		_ = exec.Command("nft", "delete", "table", "inet", "other").Run()
+		_ = exec.Command("nft", "delete", "table", "inet", other).Run()
 	})
 	got, err := Dump(context.Background(), "cfm")
 	if err != nil {

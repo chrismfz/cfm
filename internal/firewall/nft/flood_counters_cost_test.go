@@ -7,6 +7,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	cfgpkg "cfm/internal/config"
 )
 
 // The flood dump runs on every 20 s main-loop tick. It used to run `nft list
@@ -141,5 +144,37 @@ func TestParseCounterListing(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("%s = %d, want %d", k, got[k], v)
 		}
+	}
+}
+
+// The counters are log-only; the throttle autoblock pass that follows them is
+// not, and runs whether or not they could be read.
+func TestFloodDump_ThrottleRunsWhenTheCounterReadFails(t *testing.T) {
+	log := fakeNFTOpts(t, fakeOpts{chains: "ok", countersFail: true})
+	stubCounters(t, nil, errors.New("netlink: timeout"))
+	b := New()
+	b.cfg = &cfgpkg.Config{Throttle: cfgpkg.ThrottleConfig{Enabled: true, Sources: []string{"syn"}}}
+	b.dumpFloodCountersOnce()
+	if got := readFile(t, log); !strings.Contains(got, "list set inet cfm th_syn_v4") {
+		t.Errorf("a failed counter read skipped the throttle pass:\n%s", got)
+	}
+}
+
+// While netlink keeps failing, the element-loading CLI listing runs at most
+// once per floodCLIFallbackEvery, and a skipped tick neither probes nor
+// repairs.
+func TestFloodDump_CLIFallbackIsRateLimited(t *testing.T) {
+	log := fakeNFTOpts(t, fakeOpts{chains: "empty"}) // absent, if anyone asked
+	stubCounters(t, nil, errors.New("netlink: operation not permitted"))
+	b := New()
+	b.floodCLIAt = time.Now() // a fallback just ran
+	b.dumpFloodCountersOnce()
+	if got, err := os.ReadFile(log); err == nil && len(got) > 0 {
+		t.Errorf("a rate-limited tick ran nft:\n%s", got)
+	}
+	b.floodCLIAt = time.Now().Add(-floodCLIFallbackEvery)
+	b.dumpFloodCountersOnce()
+	if got := readFile(t, log); strings.Count(got, "ARGS list counters table inet cfm") != 1 {
+		t.Errorf("want one CLI fallback once the window passed:\n%s", got)
 	}
 }

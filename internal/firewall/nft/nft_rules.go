@@ -71,19 +71,38 @@ func floodCounterWanted(name string) bool {
 		strings.HasPrefix(name, "ppsrate_")
 }
 
+// floodCLIFallbackEvery bounds the CLI fallback while netlink keeps failing:
+// that listing loads every set element (seconds per run on EL8's nft 1.0.4,
+// holding one of the four nft slots), and the counters it feeds are log-only.
+// floodNLLogEvery repeats the netlink warning so a lasting failure stays
+// visible.
+var (
+	floodCLIFallbackEvery = 5 * time.Minute
+	floodNLLogEvery       = time.Hour
+)
+
+// errFloodCLISkipped is floodCounters' answer on a tick where netlink failed
+// and the CLI fallback already ran within floodCLIFallbackEvery.
+var errFloodCLISkipped = errors.New("netlink counter read failed; CLI fallback rate-limited")
+
 // floodCounters reads the table's counters: over netlink, and through the nft
-// CLI only when netlink fails (that listing loads every set element, seconds
-// per run on EL8's nft 1.0.4, and holds one of the four nft slots meanwhile).
-// An error means unknown, never "no counters".
+// CLI only when netlink fails, at most once per floodCLIFallbackEvery. An
+// error means unknown, never "no counters". Called from the overlap-guarded
+// dump goroutine only (the guard's mutex orders the runs).
 func (b *Backend) floodCounters() (map[string]uint64, error) {
 	cs, nlErr := readCounters()
 	if nlErr == nil {
 		return cs, nil
 	}
-	if !b.floodNLWarned {
-		b.floodNLWarned = true
-		logging.Logf("[flood] netlink counter read failed (%v); falling back to `nft list counters`", nlErr)
+	now := time.Now()
+	if msg := nlErr.Error(); msg != b.floodNLErr || now.Sub(b.floodNLLogAt) >= floodNLLogEvery {
+		b.floodNLErr, b.floodNLLogAt = msg, now
+		logging.Logf("[flood] netlink counter read failed (%v); falling back to `nft list counters` at most every %s", nlErr, floodCLIFallbackEvery)
 	}
+	if !b.floodCLIAt.IsZero() && now.Sub(b.floodCLIAt) < floodCLIFallbackEvery {
+		return nil, errFloodCLISkipped
+	}
+	b.floodCLIAt = now
 	out, err := b.runCmdOutputWithTimeout("list counters table inet cfm", 30*time.Second)
 	if err != nil {
 		return nil, err
@@ -127,14 +146,19 @@ func (b *Backend) dumpFloodCountersOnce() {
 	// read is unknown, not a missing table. An empty netlink answer is what an
 	// absent table gives (the dump filter matches nothing), but also a table
 	// with no counters, so it is checked the same way (`list chains inet`, ms).
-	if err != nil || len(cs) == 0 {
+	// A skipped CLI fallback says nothing new about the table.
+	if (err != nil && !errors.Is(err, errFloodCLISkipped)) || (err == nil && len(cs) == 0) {
 		if b.probeTable() == tableAbsent {
 			_ = b.EnsureBase()
 		}
-		if err != nil {
+	}
+	if err != nil {
+		if !errors.Is(err, errFloodCLISkipped) {
 			logging.Logf("[flood] cannot list counters: %v", err)
-			return
 		}
+		// The counters are log-only; the throttle autoblock below is not, and
+		// must not stop because they could not be read.
+		cs = nil
 	}
 
 	if b.last == nil {

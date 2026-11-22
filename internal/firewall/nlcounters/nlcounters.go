@@ -21,6 +21,7 @@ package nlcounters
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 
@@ -44,16 +45,45 @@ func Dump(ctx context.Context, table string) (map[string]Counter, error) {
 		return nil, fmt.Errorf("nlcounters: dial: %w", err)
 	}
 	defer c.Close()
-	if dl, ok := ctx.Deadline(); ok {
-		_ = c.SetDeadline(dl)
-	} else {
-		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	dl, ok := ctx.Deadline()
+	if !ok {
+		dl = time.Now().Add(5 * time.Second)
 	}
-	msgs, err := c.Execute(Request(table))
-	if err != nil {
-		return nil, fmt.Errorf("nlcounters: dump: %w", err)
+	// Without a deadline a dump the kernel never finishes would block the
+	// caller for good (the flood dump's overlap guard would then skip every
+	// later tick), so a deadline that cannot be set is an error.
+	if err := c.SetDeadline(dl); err != nil {
+		return nil, fmt.Errorf("nlcounters: set deadline: %w", err)
 	}
-	return Decode(msgs), nil
+	// A ruleset change during the dump (a feed apply, a ban) makes the kernel
+	// flag the reply NLM_F_DUMP_INTR: it may miss objects. Retry, then fail
+	// rather than hand back a partial answer as a whole one.
+	for attempt := 0; attempt < dumpAttempts; attempt++ {
+		msgs, err := c.Execute(Request(table))
+		if err != nil {
+			return nil, fmt.Errorf("nlcounters: dump: %w", err)
+		}
+		if !interrupted(msgs) {
+			return Decode(msgs, table), nil
+		}
+	}
+	return nil, ErrInterrupted
+}
+
+// dumpAttempts bounds the retries of an interrupted dump.
+const dumpAttempts = 3
+
+// ErrInterrupted is Dump's answer when the ruleset changed during every
+// attempt.
+var ErrInterrupted = errors.New("nlcounters: the ruleset changed during every dump attempt")
+
+func interrupted(msgs []netlink.Message) bool {
+	for _, m := range msgs {
+		if m.Header.Flags&netlink.DumpInterrupted != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Request is the GETOBJ dump request for table's counter objects.
@@ -74,13 +104,14 @@ func Request(table string) netlink.Message {
 	}
 }
 
-// Decode turns NEWOBJ dump replies into counters. A message that is not a
-// counter, or that lacks a name or a packet count, is skipped.
-func Decode(msgs []netlink.Message) map[string]Counter {
+// Decode turns NEWOBJ dump replies into table's counters. A message that is
+// not a counter of inet table (the kernel filters the dump, this does not
+// rely on it), or that lacks a name or a packet count, is skipped.
+func Decode(msgs []netlink.Message, table string) map[string]Counter {
 	out := make(map[string]Counter, len(msgs))
 	want := netlink.HeaderType(unix.NFNL_SUBSYS_NFTABLES<<8 | unix.NFT_MSG_NEWOBJ)
 	for _, m := range msgs {
-		if m.Header.Type != want || len(m.Data) < 4 {
+		if m.Header.Type != want || len(m.Data) < 4 || m.Data[0] != unix.NFPROTO_INET {
 			continue
 		}
 		ad, err := netlink.NewAttributeDecoder(m.Data[4:])
@@ -90,6 +121,7 @@ func Decode(msgs []netlink.Message) map[string]Counter {
 		ad.ByteOrder = binary.BigEndian
 		var (
 			name     string
+			tbl      string
 			objType  uint32
 			typeSeen bool
 			cnt      Counter
@@ -97,6 +129,8 @@ func Decode(msgs []netlink.Message) map[string]Counter {
 		)
 		for ad.Next() {
 			switch ad.Type() {
+			case unix.NFTA_OBJ_TABLE:
+				tbl = ad.String()
 			case unix.NFTA_OBJ_NAME:
 				name = ad.String()
 			case unix.NFTA_OBJ_TYPE:
@@ -115,7 +149,7 @@ func Decode(msgs []netlink.Message) map[string]Counter {
 				})
 			}
 		}
-		if ad.Err() != nil || name == "" || !typeSeen || objType != unix.NFT_OBJECT_COUNTER || !pktsSeen {
+		if ad.Err() != nil || tbl != table || name == "" || !typeSeen || objType != unix.NFT_OBJECT_COUNTER || !pktsSeen {
 			continue
 		}
 		out[name] = cnt
