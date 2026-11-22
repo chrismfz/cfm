@@ -743,6 +743,12 @@ func (b *Backend) loadPortScannerOnce() {
 			return
 		}
 	case tableUnknown:
+		// Say so, at most every 10 minutes: a node whose nft slots stay
+		// saturated would otherwise stop loading the portscan sets silently.
+		if time.Since(b.portscanSkipLogged) > 10*time.Minute {
+			b.portscanSkipLogged = time.Now()
+			logging.Logf("[portscan] skipped this tick's load: the nft table probe did not answer in time (nft busy); retrying next tick")
+		}
 		return
 	}
 	b.ensurePortscanSets()

@@ -49,6 +49,12 @@ type fakeOpts struct {
 	chains       string
 	self4, self6 []string
 	refuseScript string
+	// chainsListing replaces the `list chains inet` output of "ok" (default:
+	// an empty table inet cfm); inputListing is what `-a list chain inet cfm
+	// input` prints, and inputFail makes that read exit 1.
+	chainsListing string
+	inputListing  string
+	inputFail     bool
 }
 
 func fakeNFTOpts(t *testing.T, o fakeOpts) (logPath string) {
@@ -81,8 +87,20 @@ func fakeNFTOpts(t *testing.T, o fakeOpts) (logPath string) {
 		return p
 	}
 	chains := filepath.Join(dir, "chains")
-	if err := os.WriteFile(chains, []byte("table inet cfm {\n}\n"), 0o600); err != nil {
+	listing := o.chainsListing
+	if listing == "" {
+		listing = "table inet cfm {\n}\n"
+	}
+	if err := os.WriteFile(chains, []byte(listing), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	input := filepath.Join(dir, "input")
+	if err := os.WriteFile(input, []byte(o.inputListing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inputCmd := fmt.Sprintf("cat %q; exit 0", input)
+	if o.inputFail {
+		inputCmd = "exit 1"
 	}
 	chainsCmd := map[string]string{
 		"ok":    fmt.Sprintf("cat %q; exit 0", chains),
@@ -102,12 +120,13 @@ if [ "$1" = "-f" ]; then
 fi
 case "$*" in
 "list chains inet") %[4]s ;;
+"-a list chain inet cfm input") %[6]s ;;
 "list tables") echo "table inet cfm"; exit 0 ;;
 "-j list set inet cfm self_v4") cat %[2]q || exit 1; exit 0 ;;
 "-j list set inet cfm self_v6") cat %[3]q || exit 1; exit 0 ;;
 esac
 exit 0
-`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript)
+`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript, inputCmd)
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o700); err != nil { // #nosec G306 -- test helper must be executable
 		t.Fatal(err)
 	}
@@ -375,5 +394,237 @@ func TestEnsureBase_UnknownElementShapeIsRewritten(t *testing.T) {
 	}
 	if got := readFile(t, log); !strings.Contains(got, "flush set inet cfm self_v4") {
 		t.Errorf("a self set holding an unreadable element must be rewritten:\n%s", got)
+	}
+}
+
+// The chains of table inet cfm, as `nft list chains inet` prints them on the
+// fleet (mars, nft 1.0.4), with another table holding a same-named chain.
+const marsChains = `table inet cfm {
+	chain input {
+		type filter hook input priority -50; policy accept;
+	}
+	chain flood {
+	}
+	chain output {
+		type filter hook output priority filter; policy accept;
+	}
+}
+table inet filter {
+	chain input {
+		type filter hook input priority 0; policy accept;
+	}
+	chain challenge_guard {
+	}
+}
+`
+
+func TestParseCFMChains(t *testing.T) {
+	got := parseCFMChains(marsChains)
+	want := map[string]string{
+		"input":  "type filter hook input priority -50; policy accept;",
+		"flood":  "",
+		"output": "type filter hook output priority filter; policy accept;",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseCFMChains = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("chain %q = %q, want %q", k, got[k], v)
+		}
+	}
+	if _, ok := got["challenge_guard"]; ok {
+		t.Error("a chain of another table was read as inet cfm's")
+	}
+	if len(parseCFMChains("table inet filter {\n\tchain input {\n\t}\n}\n")) != 0 {
+		t.Error("no table inet cfm must read as no chains")
+	}
+}
+
+// On EL8's nft 1.0.4 every `nft list chain` loads all set elements (4-12 s on
+// mars). EnsureBase on an existing table runs exactly one, the rule read it
+// cannot avoid: chain existence and the input priority come from the cheap
+// `list chains inet`.
+func TestEnsureBase_OnlyTheRuleReadListsAChain(t *testing.T) {
+	v4, v6 := wantSelfSets()
+	log := fakeNFTOpts(t, fakeOpts{chains: "ok", chainsListing: marsChains, self4: v4, self6: v6})
+	if err := New().EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	got := readFile(t, log)
+	var lists []string
+	for _, ln := range strings.Split(got, "\n") {
+		if strings.HasPrefix(ln, "ARGS ") && strings.Contains(ln, " list chain ") {
+			lists = append(lists, ln)
+		}
+	}
+	if len(lists) != 1 || lists[0] != "ARGS -a list chain inet cfm input" {
+		t.Errorf("want only the rule read to list a chain, got:\n%s", strings.Join(lists, "\n"))
+	}
+	if strings.Contains(got, "add chain inet cfm input") || strings.Contains(got, "add chain inet cfm flood") {
+		t.Errorf("re-declared chains the listing shows:\n%s", got)
+	}
+}
+
+// An input chain whose rules cannot be read is not an empty one: adding every
+// base rule blind is how mars came to hold ~268 copies of each.
+func TestEnsureBase_UnreadInputChainAddsNoRules(t *testing.T) {
+	v4, v6 := wantSelfSets()
+	log := fakeNFTOpts(t, fakeOpts{chains: "ok", chainsListing: marsChains, self4: v4, self6: v6, inputFail: true})
+	if err := New().EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase must not fail the daemon on an unread chain: %v", err)
+	}
+	got := readFile(t, log)
+	if strings.Contains(got, "insert rule inet cfm input") || strings.Contains(got, "add rule inet cfm input") {
+		t.Errorf("rules written to an input chain that could not be read:\n%s", got)
+	}
+}
+
+// Every base rule's extra copies go, the top-most of each stays, in one
+// transaction; the ports policy's established accept is never touched.
+func TestEnsureBase_DedupesEveryBaseRule(t *testing.T) {
+	v4, v6 := wantSelfSets()
+	var sb strings.Builder
+	sb.WriteString("table inet cfm {\n\tchain input { # handle 1\n\t\ttype filter hook input priority -50; policy accept;\n")
+	h := 100
+	rule := func(r string) int {
+		h++
+		fmt.Fprintf(&sb, "\t\t%s # handle %d\n", r, h)
+		return h
+	}
+	// Two full copies of the base layer, as one blind re-add leaves them:
+	// the newer early group on top, the late group appended twice.
+	early := baseEarlyRules(false)
+	var keep []int
+	for _, r := range early {
+		keep = append(keep, rule(strings.ReplaceAll(r, "iif lo", `iif "lo"`)))
+	}
+	for _, r := range early {
+		rule(strings.ReplaceAll(r, "iif lo", `iif "lo"`))
+	}
+	estFirst := 0
+	for _, r := range baseLateRules {
+		if r == baseEstablishedAccept && estFirst == 0 {
+			estFirst = rule(r)
+			continue
+		}
+		rule(r)
+	}
+	for _, r := range baseLateRules {
+		rule(r)
+	}
+	rule("jump flood")
+	rule("jump flood")
+	sb.WriteString("\t}\n}\n")
+
+	log := fakeNFTOpts(t, fakeOpts{chains: "ok", chainsListing: marsChains, self4: v4, self6: v6, inputListing: sb.String()})
+	if err := New().EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	got := readFile(t, log)
+	var scripts int
+	for _, block := range strings.Split(got, "ARGS ") {
+		if strings.HasPrefix(block, "-f -") && strings.Contains(block, "delete rule inet cfm input handle") {
+			scripts++
+		}
+	}
+	if scripts != 1 {
+		t.Errorf("want the duplicate deletes in ONE transaction, got %d:\n%s", scripts, got)
+	}
+	for _, k := range keep {
+		if strings.Contains(got, fmt.Sprintf("delete rule inet cfm input handle %d\n", k)) {
+			t.Errorf("deleted handle %d, the top-most copy of its rule", k)
+		}
+	}
+	// Every handle of the second early copy goes.
+	for i := range early {
+		hd := keep[len(keep)-1] + 1 + i
+		if !strings.Contains(got, fmt.Sprintf("delete rule inet cfm input handle %d", hd)) {
+			t.Errorf("second copy %d (%s) not deleted", hd, early[i])
+		}
+	}
+	if strings.Contains(got, fmt.Sprintf("handle %d\n", estFirst)) {
+		t.Errorf("deleted the established accept the ports policy positions")
+	}
+	if strings.Contains(got, "insert rule inet cfm input") || strings.Contains(got, "add rule inet cfm input") {
+		t.Errorf("re-added a rule the chain already holds:\n%s", got)
+	}
+}
+
+// Against a real nft: a chain holding 50 copies of the base layer (what the
+// old blind re-add left, ~268 on mars) is brought back to one copy of each
+// rule by the next EnsureBase, and a second EnsureBase deletes nothing more.
+//
+//	unshare -rn env CFM_NFT_INTEGRATION=1 go test ./internal/firewall/nft/ -run LiveNFTDedupe -v
+func TestLiveNFTDedupeBaseRules(t *testing.T) {
+	if os.Getenv("CFM_NFT_INTEGRATION") != "1" {
+		t.Skip("set CFM_NFT_INTEGRATION=1 (root + nft, isolated netns) to run")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	if out, err := exec.Command("nft", "list", "chains", "inet").CombinedOutput(); err == nil && listingHasCFMTable(string(out)) {
+		t.Fatalf("refusing to run: an `inet cfm` table already exists — run this test inside an isolated netns (unshare -rn)")
+	}
+	b := New()
+	t.Cleanup(func() { _ = b.DropEverything() })
+	if err := b.EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	// Re-add the whole base layer 49 times, as a blind EnsureBase did.
+	var sb strings.Builder
+	for i := 0; i < 49; i++ {
+		early := baseEarlyRules(false)
+		for j := len(early) - 1; j >= 0; j-- {
+			fmt.Fprintf(&sb, "insert rule inet cfm input position 0 %s\n", early[j])
+		}
+		for _, r := range baseLateRules {
+			fmt.Fprintf(&sb, "add rule inet cfm input %s\n", r)
+		}
+		sb.WriteString("add rule inet cfm input jump flood\n")
+	}
+	cmd := exec.Command("nft", "-f", "-")
+	cmd.Stdin = strings.NewReader(sb.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("seeding copies: %v %s", err, out)
+	}
+	count := func() map[string]int {
+		out, err := exec.Command("nft", "list", "chain", "inet", "cfm", "input").Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := map[string]int{}
+		for _, ln := range strings.Split(string(out), "\n") {
+			n[strings.TrimSpace(ln)]++
+		}
+		return n
+	}
+	if c := count()["ip saddr @block_v4 drop"]; c < 50 {
+		t.Fatalf("seeding left %d copies of ip saddr @block_v4 drop, want >= 50", c)
+	}
+	if err := b.EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase after seeding: %v", err)
+	}
+	after := count()
+	for _, e := range baseDedupeExprs(baseEarlyRules(false), baseLateRules) {
+		k := strings.ReplaceAll(e, "iif lo", `iif "lo"`)
+		if strings.Contains(e, "icmp") {
+			continue // ICMP rate limiting is off here: no jump was written
+		}
+		if after[k] != 1 {
+			t.Errorf("%q: %d copies after EnsureBase, want 1", k, after[k])
+		}
+	}
+	if after[baseEstablishedAccept] < 1 {
+		t.Errorf("the established accept is gone")
+	}
+	// The order the base layer wants: loopback first, the self accept above
+	// every block, the block drops above the established accept.
+	out, _ := exec.Command("nft", "list", "chain", "inet", "cfm", "input").Output()
+	listing := string(out)
+	lo, self, blk, est := strings.Index(listing, `iif "lo" accept`), strings.Index(listing, "ip saddr @self_v4 accept"),
+		strings.Index(listing, "ip saddr @block_v4 drop"), strings.Index(listing, baseEstablishedAccept)
+	if !(lo >= 0 && lo < self && self < blk && blk < est) {
+		t.Errorf("base order broken after dedupe:\n%s", listing)
 	}
 }

@@ -120,6 +120,22 @@ func (c *ChainRules) Add(expr string) {
 	c.rules = append(c.rules, chainRule{key: ruleKey(expr)})
 }
 
+// Forget drops the listed rules with these handles, for rules just deleted:
+// an anchor lookup must not return a handle that is gone.
+func (c *ChainRules) Forget(handles []string) {
+	gone := make(map[string]bool, len(handles))
+	for _, h := range handles {
+		gone[h] = true
+	}
+	kept := c.rules[:0]
+	for _, r := range c.rules {
+		if r.handle == "" || !gone[r.handle] {
+			kept = append(kept, r)
+		}
+	}
+	c.rules = kept
+}
+
 // DuplicateHandles returns the handles of the listed rules that repeat one of
 // exprs exactly, all but the first (top-most) of each. A rule the old presence
 // check didn't recognise was added again on every EnsureBase — `iif lo accept`

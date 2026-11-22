@@ -103,22 +103,27 @@ The history behind each rule below is in the code comments it names.
   (`setprobe.Lookup`, via `ipquery.FindMany`), and an interval-boundary answer
   the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
 - **Some nft CLI runs load every set element of the table first**: `list
-  tables`, `list table`, `list sets` (without `-t`), `list counters`, and
-  `add element` next to a large interval set. It bites on EL8's nft 1.0.4:
+  tables`, `list table`, `list sets` (without `-t`), `list counters`, `list
+  chain <chain>` (with or without `-t`, even for an absent chain), and `add
+  element` next to a large interval set. It bites on EL8's nft 1.0.4:
   measured 2026-11-22 on the fleet's EL8 nodes (26k–85k `block_v4`, 307k feed
-  hosts), idle, `list tables` 3.3–12.3 s and `list counters` 3.9–11 s, while
-  `list chains inet` and `-j list set <one>` took 3–10 ms. EL9/EL10 (nft
+  hosts), idle, `list tables` 3.3–12.3 s, `list chain` 4–12 s and `list
+  counters` 3.9–11 s, while `list chains inet` and `-j list set <one>` took
+  3–10 ms. EL9/EL10 (nft
   1.0.9 / 1.1.5) answered all of them in ms with the same sets; nft 0.9.x
   loads the cache on every `list`. The exec
   EnsureBase once ran one per self-set statement, which held the bridge and
   ingest sockets 28.9 s on a restart. EnsureBase also re-ran every minute or
   two on the EL8 nodes: its `list tables` existence probe ran past its 5 s
   deadline (12 s on mars; the wait for one of the 4 nft slots counts too) and
-  the timeout read as "no table". Probe with `list chains inet`
-  (`probeTable`); a repair (EnsureBase, a flush, a delete) acts only on
-  `tableAbsent`, never on `tableUnknown`. Compare before you write
-  (`firewall.SameSetElems`), and put a write in one script.
-  `ensurebase_cost_test.go` pins EnsureBase's profile and the unknown probe.
+  the timeout read as "no table"; each re-run whose input-chain read failed
+  added every base rule again (~268 copies of each on mars). Probe with `list
+  chains inet` (`probeTable`, `chainExists`, `cfmChains`); a repair
+  (EnsureBase, a flush, a delete) acts only on `tableAbsent`, never on
+  `tableUnknown`; an unread chain is never taken for an empty one (no rule is
+  added blind). Compare before you write (`firewall.SameSetElems`), and put a
+  write in one script. `ensurebase_cost_test.go` pins EnsureBase's profile,
+  the unknown probe and the dedupe (live: `-run LiveNFTDedupe`).
 - **A base input rule added after the rest needs an anchor.** Both engines'
   EnsureBase insert a missing early rule at position 0 and append a missing
   late one: on a node's existing chain a new drop would land above the self /

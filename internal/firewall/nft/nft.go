@@ -132,6 +132,9 @@ type Backend struct {
 	floodDumpRunning bool
 	lastFloodHash    uint64
 	lastFloodRebuild time.Time
+	// portscanSkipLogged throttles the "skipped this tick" line of
+	// loadPortScannerOnce (guarded by abMu, which that function holds).
+	portscanSkipLogged time.Time
 
 	portScanMu      sync.Mutex
 	portScanRunning bool
@@ -341,6 +344,121 @@ var icmpFloodJumps = []string{
 	`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
 }
 
+// inputChainReadTimeout bounds EnsureBase's read of the input chain's rules
+// (~4 s idle on an EL8 node with large sets).
+var inputChainReadTimeout = 30 * time.Second
+
+// dedupeTimeout bounds the one-transaction delete of duplicate base rules:
+// the runner's default plus 1 s per 1000 handles (mars held ~7,400).
+func dedupeTimeout(n int) time.Duration {
+	return defaultNFTCommandTimeout + time.Duration(n/1000)*time.Second
+}
+
+// baseEarlyRules is the top of the input chain, top-down: loopback, self,
+// every allow set, every unconditional block set, then (ICMP rate limiting
+// on) the ICMP jumps to flood.
+func baseEarlyRules(icmpJumps bool) []string {
+	early := []string{
+		// 1) loopback
+		`iif lo accept`,
+
+		// 2) self IPs
+		`ip saddr @self_v4 accept`,
+		`ip6 saddr @self_v6 accept`,
+
+		// 3) ALLOW sets (manual + dyn + external + nets)
+		`ip saddr @allow_v4 accept`,
+		`ip6 saddr @allow_v6 accept`,
+		`ip saddr @allow_dyn_v4 accept`,
+		`ip6 saddr @allow_dyn_v6 accept`,
+		`ip saddr @allow_ext_v4_hosts accept`,
+		`ip6 saddr @allow_ext_v6_hosts accept`,
+		`ip saddr @allow_ext_v4_nets accept`,
+		`ip6 saddr @allow_ext_v6_nets accept`,
+		`ip saddr @allow_v4_nets accept`,
+		`ip6 saddr @allow_v6_nets accept`,
+
+		// 4) UNCONDITIONAL BLOCKS (must be above ICMP/conntrack/ports)
+		`ip saddr @block_v4 drop`,
+		`ip6 saddr @block_v6 drop`,
+		`ip saddr @block_ext_v4_hosts drop`,
+		`ip6 saddr @block_ext_v6_hosts drop`,
+		`ip saddr @block_ext_v4_nets drop`,
+		`ip6 saddr @block_ext_v6_nets drop`,
+		`ip saddr @block_v4_nets drop`,
+		`ip6 saddr @block_v6_nets drop`,
+		`ip6 saddr @block_v6_clients drop`,
+	}
+	// 5) ICMP → flood (below unconditional drops)
+	if icmpJumps {
+		early = append(early, icmpFloodJumps...)
+	}
+	return early
+}
+
+// baseLateRules are appended after the early group, in this order (a rule
+// the early group already holds reads present and is not added again).
+var baseLateRules = []string{
+	// Established/related from IPs already in a block set
+	`ct state established,related ip saddr @block_v4 drop`,
+	`ct state established,related ip6 saddr @block_v6 drop`,
+	// External feeds — hosts & nets
+	`ct state established,related ip saddr @block_ext_v4_hosts drop`,
+	`ct state established,related ip saddr @block_ext_v4_nets drop`,
+	`ct state established,related ip6 saddr @block_ext_v6_hosts drop`,
+	`ct state established,related ip6 saddr @block_ext_v6_nets drop`,
+	// Manual/aggregate nets
+	`ct state established,related ip saddr @block_v4_nets drop`,
+	`ct state established,related ip6 saddr @block_v6_nets drop`,
+	`ct state established,related ip6 saddr @block_v6_clients drop`,
+	// The general established/related accept, after the drops
+	baseEstablishedAccept,
+	// 1) manual allow
+	`ip saddr @allow_v4 accept`,
+	`ip6 saddr @allow_v6 accept`,
+	// 2) dyn allow
+	`ip saddr @allow_dyn_v4 accept`,
+	`ip6 saddr @allow_dyn_v6 accept`,
+	// 3) external allow (hosts, then nets)
+	`ip saddr @allow_ext_v4_hosts accept`,
+	`ip6 saddr @allow_ext_v6_hosts accept`,
+	`ip saddr @allow_ext_v4_nets accept`,
+	`ip6 saddr @allow_ext_v6_nets accept`,
+	// 4) manual block
+	`ip saddr @block_v4 drop`,
+	`ip6 saddr @block_v6 drop`,
+	// 5) external block (hosts, then nets)
+	`ip saddr @block_ext_v4_hosts drop`,
+	`ip6 saddr @block_ext_v6_hosts drop`,
+	`ip saddr @block_ext_v4_nets drop`,
+	`ip6 saddr @block_ext_v6_nets drop`,
+	// manual block nets
+	`ip saddr @block_v4_nets drop`,
+	`ip6 saddr @block_v6_nets drop`,
+}
+
+// baseEstablishedAccept is also the ports policy's ruleEstablished, which it
+// positions itself: never deduplicated here.
+const baseEstablishedAccept = `ct state established,related accept`
+
+// baseDedupeExprs is every base rule EnsureBase writes, each once, but the
+// established accept: the ICMP jumps always (a copy left from when ICMP rate
+// limiting was on is still a copy) and `jump flood`.
+func baseDedupeExprs(early, late []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, group := range [][]string{early, icmpFloodJumps, late, {"jump flood"}} {
+		for _, e := range group {
+			if e == baseEstablishedAccept || seen[e] {
+				continue
+			}
+			seen[e] = true
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 func (b *Backend) EnsureBase() (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
@@ -365,16 +483,21 @@ func (b *Backend) EnsureBase() (err error) {
 	}
 
 	// 2) Ensure chains (input με σωστό priority, flood χωρίς hook)
+	// One cheap read answers which chains exist and the input chain's hook
+	// line (see chainExists); `nft list chain` costs 4-12 s apiece on EL8.
+	chains, chainsOK := cfmChains()
+	hasChain := func(name string) bool {
+		if chainsOK {
+			_, has := chains[name]
+			return has
+		}
+		return b.chainExists(name)
+	}
 	needCreate := false
-	if !b.chainExists("input") {
+	if !hasChain("input") {
 		needCreate = true
-	} else {
-
-		ctx5, cancel5 := context.WithTimeout(context.Background(), 5*time.Second)
-		res, _ := runNFTCommand(ctx5, "list", "chain", family, tableName, "input")
-		out := []byte(res.Stdout + res.Stderr)
-		cancel5()
-		s := string(out)
+	} else if chainsOK {
+		s := chains["input"]
 		want := fmt.Sprintf("priority %d", prio)
 		same := strings.Contains(s, want) || (prio == 0 && strings.Contains(s, "priority filter"))
 		if !same {
@@ -396,7 +519,7 @@ func (b *Backend) EnsureBase() (err error) {
 			return err
 		}
 	}
-	if !b.chainExists("flood") {
+	if !hasChain("flood") {
 		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s flood`, family, tableName)); err != nil {
 			return err
 		}
@@ -519,23 +642,47 @@ func (b *Backend) EnsureBase() (err error) {
 	// NOTE: querying `nft list chain ...` repeatedly can become very expensive on
 	// large installations. Cache the input chain snapshot once and keep it updated
 	// as we add/insert rules during this EnsureBase run.
-	resInput, _ := runNFTCommand(context.Background(), "-a", "list", "chain", family, tableName, "input")
+	// This read is the one EnsureBase cannot make cheap: on EL8's nft 1.0.4 any
+	// `list chain` loads every set element (~4 s on mars, idle), so it gets a
+	// deadline of its own. If it fails, the rules are NOT taken for absent:
+	// an unread chain used to read as empty, so every base rule was added
+	// again, and the per-tick re-runs left ~268 copies of each on mars (141
+	// on earth and virgo). A chain this run just created is empty for sure.
+	readCtx, readCancel := context.WithTimeout(context.Background(), inputChainReadTimeout)
+	resInput, readErr := runNFTCommand(readCtx, "-a", "list", "chain", family, tableName, "input")
+	readCancel()
+	if readErr != nil && !needCreate {
+		logging.Logf("[nft] EnsureBase: cannot read the input chain (%v); its base rules are left as they are, unchecked (adding them blind would duplicate every one)", firstLine(readErr.Error()))
+		return nil
+	}
 	inputRules := firewall.ParseChainRules(resInput.Stdout)
 	ruleInInput := inputRules.Present
 	recordRuleInInput := inputRules.Add
 
-	// Drop the copies the old presence check piled up: it never recognised
-	// `iif lo accept` (nft prints `iif "lo" accept`), so every EnsureBase
-	// inserted another at the top of the chain.
-	if dups := inputRules.DuplicateHandles(append([]string{`iif lo accept`, `jump flood`}, icmpFloodJumps...)...); len(dups) > 0 {
+	// The early group, top-down (inserted in reverse below), and the late
+	// group, appended in order. Each base rule is wanted exactly once.
+	early := baseEarlyRules(b.cfg != nil && b.cfg.Hardening.ICMPRate > 0)
+	late := baseLateRules
+
+	// Drop the copies earlier versions piled up, keeping the top-most of each
+	// (the one the base order wants): the old presence check never recognised
+	// `iif lo accept` (nft prints `iif "lo" accept`), and an unread chain added
+	// every rule again (above). One transaction: a packet sees all the copies
+	// or one, never none. `ct state established,related accept` is left to the
+	// ports policy, which positions its own copy (firewall.PortsPolicyScript).
+	if dups := inputRules.DuplicateHandles(baseDedupeExprs(early, late)...); len(dups) > 0 {
 		var sb strings.Builder
 		for _, h := range dups {
 			fmt.Fprintf(&sb, "delete rule %s %s input handle %s\n", family, tableName, h)
 		}
-		if err := b.nftExpr(strings.TrimSpace(sb.String())); err != nil {
-			logging.Logf("[nft] EnsureBase: removing %d duplicate base rules failed: %v", len(dups), err)
+		ctx, cancel := context.WithTimeout(context.Background(), dedupeTimeout(len(dups)))
+		err := b.nftExprCtx(ctx, strings.TrimSpace(sb.String()))
+		cancel()
+		if err != nil {
+			logging.Logf("[nft] EnsureBase: removing %d duplicate base rules failed: %v", len(dups), firstLine(err.Error()))
 		} else {
 			logging.Logf("[nft] EnsureBase: removed %d duplicate base rules", len(dups))
+			inputRules.Forget(dups)
 		}
 	}
 
@@ -572,143 +719,15 @@ func (b *Backend) EnsureBase() (err error) {
 		}
 	}
 
-	// Build desired top-down order:
-	early := []string{
-		// 1) loopback
-		`iif lo accept`,
-
-		// 2) self IPs
-		`ip saddr @self_v4 accept`,
-		`ip6 saddr @self_v6 accept`,
-
-		// 3) ALLOW sets (manual + dyn + external + nets)
-		`ip saddr @allow_v4 accept`,
-		`ip6 saddr @allow_v6 accept`,
-		`ip saddr @allow_dyn_v4 accept`,
-		`ip6 saddr @allow_dyn_v6 accept`,
-		`ip saddr @allow_ext_v4_hosts accept`,
-		`ip6 saddr @allow_ext_v6_hosts accept`,
-		`ip saddr @allow_ext_v4_nets accept`,
-		`ip6 saddr @allow_ext_v6_nets accept`,
-		`ip saddr @allow_v4_nets accept`,
-		`ip6 saddr @allow_v6_nets accept`,
-
-		// 4) UNCONDITIONAL BLOCKS (must be above ICMP/conntrack/ports)
-		`ip saddr @block_v4 drop`,
-		`ip6 saddr @block_v6 drop`,
-		`ip saddr @block_ext_v4_hosts drop`,
-		`ip6 saddr @block_ext_v6_hosts drop`,
-		`ip saddr @block_ext_v4_nets drop`,
-		`ip6 saddr @block_ext_v6_nets drop`,
-		`ip saddr @block_v4_nets drop`,
-		`ip6 saddr @block_v6_nets drop`,
-		`ip6 saddr @block_v6_clients drop`,
-	}
-
-	// 5) ICMP → flood (below unconditional drops)
-	if b.cfg != nil && b.cfg.Hardening.ICMPRate > 0 {
-		early = append(early, icmpFloodJumps...)
-	}
-
 	// Insert in reverse so first item ends up highest in chain
 	for i := len(early) - 1; i >= 0; i-- {
 		addEarly(early[i])
 	}
 
-	// Κόψε established/related από IPs που είναι ήδη σε block sets
-	if err := addRule(`ct state established,related ip saddr @block_v4 drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ct state established,related ip6 saddr @block_v6 drop`); err != nil {
-		return err
-	}
-
-	// External feeds — hosts & nets
-	if err := addRule(`ct state established,related ip saddr @block_ext_v4_hosts drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ct state established,related ip saddr @block_ext_v4_nets drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_hosts drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`); err != nil {
-		return err
-	}
-
-	// Manual/aggregate nets (αν τα έχεις)
-	if err := addRule(`ct state established,related ip saddr @block_v4_nets drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ct state established,related ip6 saddr @block_v6_nets drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ct state established,related ip6 saddr @block_v6_clients drop`); err != nil {
-		return err
-	}
-
-	// Τώρα το γενικό established/related accept (μετά τα drops)
-	if err := addRule(`ct state established,related accept`); err != nil {
-		return err
-	}
-
-	// Rules continue //
-
-	// 1) manual allow
-	if err := addRule(`ip saddr @allow_v4 accept`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @allow_v6 accept`); err != nil {
-		return err
-	}
-	// 2) dyn allow
-	if err := addRule(`ip saddr @allow_dyn_v4 accept`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @allow_dyn_v6 accept`); err != nil {
-		return err
-	}
-	// 3) external allow (hosts, then nets)
-	if err := addRule(`ip saddr @allow_ext_v4_hosts accept`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @allow_ext_v6_hosts accept`); err != nil {
-		return err
-	}
-	if err := addRule(`ip saddr @allow_ext_v4_nets accept`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @allow_ext_v6_nets accept`); err != nil {
-		return err
-	}
-	// 4) manual block
-	if err := addRule(`ip saddr @block_v4 drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @block_v6 drop`); err != nil {
-		return err
-	}
-	// 5) external block (hosts, then nets)
-	if err := addRule(`ip saddr @block_ext_v4_hosts drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @block_ext_v6_hosts drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ip saddr @block_ext_v4_nets drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @block_ext_v6_nets drop`); err != nil {
-		return err
-	}
-
-	// NEW: manual block nets
-	if err := addRule(`ip saddr @block_v4_nets drop`); err != nil {
-		return err
-	}
-	if err := addRule(`ip6 saddr @block_v6_nets drop`); err != nil {
-		return err
+	for _, expr := range late {
+		if err := addRule(expr); err != nil {
+			return err
+		}
 	}
 
 	// 6) jump flood στο τέλος του base layer. The presence check matches it as a
@@ -1395,11 +1414,63 @@ func TableExistsCFM() bool {
 	return b.tableExists()
 }
 
+// chainExists reports whether table inet cfm has the chain. It reads `nft
+// list chains inet` (3-10 ms on every fleet node): `nft list chain inet cfm
+// <chain>`, which it used, makes nft 1.0.4 (EL8) load every set element first
+// (4-12 s per call on mars, even for a chain that does not exist), and its 5 s
+// deadline then read a present chain as missing. The old listing answers only
+// when the cheap one fails.
 func (b *Backend) chainExists(chain string) bool {
+	if chains, ok := cfmChains(); ok {
+		_, has := chains[chain]
+		return has
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := runNFTCommand(ctx, "list", "chain", family, tableName, chain)
 	return err == nil
+}
+
+// cfmChains reads table inet cfm's chains from `nft list chains inet`: each
+// chain's name, mapped to its hook line ("type filter hook input priority
+// -50; policy accept;"), or "" for a regular chain. ok is false when the
+// listing could not be read; a table that is absent reads as no chains.
+func cfmChains() (map[string]string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), tableProbeTimeout)
+	defer cancel()
+	res, err := runNFTCommand(ctx, "list", "chains", family)
+	if err != nil {
+		return nil, false
+	}
+	return parseCFMChains(res.Stdout), true
+}
+
+// parseCFMChains is cfmChains' parser: the chains inside the `table inet cfm
+// {` block only (another table may have a chain of the same name).
+func parseCFMChains(out string) map[string]string {
+	chains := map[string]string{}
+	inTable, chain := false, ""
+	for _, ln := range strings.Split(out, "\n") {
+		t := strings.TrimSpace(ln)
+		switch {
+		case strings.HasPrefix(t, "table "):
+			inTable = strings.TrimSpace(strings.TrimSuffix(t, "{")) == "table "+family+" "+tableName
+			chain = ""
+		case !inTable:
+		case strings.HasPrefix(t, "chain ") && strings.HasSuffix(t, "{"):
+			chain = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(t, "chain "), "{"))
+			chains[chain] = ""
+		case t == "}":
+			if chain != "" {
+				chain = ""
+			} else {
+				inTable = false
+			}
+		case chain != "" && strings.Contains(t, " hook "):
+			chains[chain] = t
+		}
+	}
+	return chains
 }
 
 func (b *Backend) ruleExists(chain, needle string) bool {
@@ -1878,25 +1949,27 @@ func (b *Backend) ResetCFMTable() error {
 }
 
 // refreshSelfSets loads self_v4/self_v6 (loopback, link-local, every local
-// address). It used to run one nft process per statement — two flushes, the
-// three static ranges, one add per local address — and each `add element`
-// makes nft load every set element in the table first: with large feed and
-// TTL-ban sets that is ~2 s a statement, and it held EnsureBase (and so the
-// bridge and ingest sockets, which bind after it) for 28.9 s on a restart of a
-// busy node. Now it reads both sets (`list set` does not load the others), and
-// writes nothing when they already hold the wanted content — every restart of
-// a node whose addresses did not change. Otherwise ONE transaction replaces
-// both, so a packet never sees a flushed, half-filled self set either; a
-// refused write leaves the old content (logged), where the old per-statement
-// run could leave a set flushed and empty.
+// address). It used to run one nft process per statement (two flushes, the
+// three static ranges, one add per local address) on every EnsureBase. Now it
+// reads both sets (`-j list set <one>`: 3-10 ms on every fleet node), writes
+// nothing when they already hold the wanted content (every restart of a node
+// whose addresses did not change), and otherwise replaces both in ONE
+// transaction, so a packet never sees a flushed, half-filled self set. If nft
+// refuses that write, writeSelfSetFallback retries each set on its own, then
+// with loopback and link-local only; a write that ran out of time is not
+// retried (a retry waits for the same busy nft slots).
 func (b *Backend) refreshSelfSets() {
 	b.selfResolver.Refresh()
 	v4, v6 := firewall.SelfSetElems(b.selfResolver.LocalIPs())
 	if !b.setHolds("self_v4", v4) || !b.setHolds("self_v6", v6) {
 		script := replaceSetScript("self_v4", v4, "") + replaceSetScript("self_v6", v6, "")
 		if err := b.nftExpr(script); err != nil {
-			logging.Logf("[nft] self sets write failed: %v; retrying each set on its own", firstLine(err.Error()))
-			b.writeSelfSetFallback()
+			if nftTimedOut(err) {
+				logging.Logf("[nft] self sets write timed out, they keep their old content: %v", firstLine(err.Error()))
+			} else {
+				logging.Logf("[nft] self sets write failed: %v; retrying each set on its own", firstLine(err.Error()))
+				b.writeSelfSetFallback()
+			}
 		}
 	}
 	b.writeSelfIPsLua()
@@ -1930,6 +2003,12 @@ func (b *Backend) writeSelfSetFallback() {
 			logging.Logf("[nft] %s static write failed, it keeps its old content: %v", w.name, firstLine(err.Error()))
 		}
 	}
+}
+
+// nftTimedOut reports whether an nft run failed on its deadline (the slot
+// wait included), not because nft refused the script.
+func nftTimedOut(err error) bool {
+	return err != nil && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "timed_out=true"))
 }
 
 // setHolds reports whether the kernel's set holds exactly want. A failed read,
