@@ -342,13 +342,6 @@ func (b *Backend) ensureSet(name, typ string) error {
 	return b.ensureSetWithFlags(name, typ, "timeout")
 }
 
-// icmpFloodJumps send echo-requests through the flood chain when ICMP rate
-// limiting is on.
-var icmpFloodJumps = []string{
-	`ip protocol icmp icmp type echo-request jump flood`,
-	`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
-}
-
 // inputChainReadTimeout bounds EnsureBase's read of the input chain's rules
 // (~4 s idle on an EL8 node with large sets).
 var inputChainReadTimeout = 30 * time.Second
@@ -357,111 +350,6 @@ var inputChainReadTimeout = 30 * time.Second
 // the runner's default plus 1 s per 1000 handles (mars held ~7,400).
 func dedupeTimeout(n int) time.Duration {
 	return defaultNFTCommandTimeout + time.Duration(n/1000)*time.Second
-}
-
-// baseEarlyRules is the top of the input chain, top-down: loopback, self,
-// every allow set, every unconditional block set, then (ICMP rate limiting
-// on) the ICMP jumps to flood.
-func baseEarlyRules(icmpJumps bool) []string {
-	early := []string{
-		// 1) loopback
-		`iif lo accept`,
-
-		// 2) self IPs
-		`ip saddr @self_v4 accept`,
-		`ip6 saddr @self_v6 accept`,
-
-		// 3) ALLOW sets (manual + dyn + external + nets)
-		`ip saddr @allow_v4 accept`,
-		`ip6 saddr @allow_v6 accept`,
-		`ip saddr @allow_dyn_v4 accept`,
-		`ip6 saddr @allow_dyn_v6 accept`,
-		`ip saddr @allow_ext_v4_hosts accept`,
-		`ip6 saddr @allow_ext_v6_hosts accept`,
-		`ip saddr @allow_ext_v4_nets accept`,
-		`ip6 saddr @allow_ext_v6_nets accept`,
-		`ip saddr @allow_v4_nets accept`,
-		`ip6 saddr @allow_v6_nets accept`,
-
-		// 4) UNCONDITIONAL BLOCKS (must be above ICMP/conntrack/ports)
-		`ip saddr @block_v4 drop`,
-		`ip6 saddr @block_v6 drop`,
-		`ip saddr @block_ext_v4_hosts drop`,
-		`ip6 saddr @block_ext_v6_hosts drop`,
-		`ip saddr @block_ext_v4_nets drop`,
-		`ip6 saddr @block_ext_v6_nets drop`,
-		`ip saddr @block_v4_nets drop`,
-		`ip6 saddr @block_v6_nets drop`,
-		`ip6 saddr @block_v6_clients drop`,
-	}
-	// 5) ICMP → flood (below unconditional drops)
-	if icmpJumps {
-		early = append(early, icmpFloodJumps...)
-	}
-	return early
-}
-
-// baseLateRules are appended after the early group, in this order (a rule
-// the early group already holds reads present and is not added again).
-var baseLateRules = []string{
-	// Established/related from IPs already in a block set
-	`ct state established,related ip saddr @block_v4 drop`,
-	`ct state established,related ip6 saddr @block_v6 drop`,
-	// External feeds — hosts & nets
-	`ct state established,related ip saddr @block_ext_v4_hosts drop`,
-	`ct state established,related ip saddr @block_ext_v4_nets drop`,
-	`ct state established,related ip6 saddr @block_ext_v6_hosts drop`,
-	`ct state established,related ip6 saddr @block_ext_v6_nets drop`,
-	// Manual/aggregate nets
-	`ct state established,related ip saddr @block_v4_nets drop`,
-	`ct state established,related ip6 saddr @block_v6_nets drop`,
-	`ct state established,related ip6 saddr @block_v6_clients drop`,
-	// The general established/related accept, after the drops
-	baseEstablishedAccept,
-	// 1) manual allow
-	`ip saddr @allow_v4 accept`,
-	`ip6 saddr @allow_v6 accept`,
-	// 2) dyn allow
-	`ip saddr @allow_dyn_v4 accept`,
-	`ip6 saddr @allow_dyn_v6 accept`,
-	// 3) external allow (hosts, then nets)
-	`ip saddr @allow_ext_v4_hosts accept`,
-	`ip6 saddr @allow_ext_v6_hosts accept`,
-	`ip saddr @allow_ext_v4_nets accept`,
-	`ip6 saddr @allow_ext_v6_nets accept`,
-	// 4) manual block
-	`ip saddr @block_v4 drop`,
-	`ip6 saddr @block_v6 drop`,
-	// 5) external block (hosts, then nets)
-	`ip saddr @block_ext_v4_hosts drop`,
-	`ip6 saddr @block_ext_v6_hosts drop`,
-	`ip saddr @block_ext_v4_nets drop`,
-	`ip6 saddr @block_ext_v6_nets drop`,
-	// manual block nets
-	`ip saddr @block_v4_nets drop`,
-	`ip6 saddr @block_v6_nets drop`,
-}
-
-// baseEstablishedAccept is also the ports policy's ruleEstablished, which it
-// positions itself: never deduplicated here.
-const baseEstablishedAccept = `ct state established,related accept`
-
-// baseDedupeExprs is every base rule EnsureBase writes, each once, but the
-// established accept: the ICMP jumps always (a copy left from when ICMP rate
-// limiting was on is still a copy) and `jump flood`.
-func baseDedupeExprs(early, late []string) []string {
-	seen := map[string]bool{}
-	var out []string
-	for _, group := range [][]string{early, icmpFloodJumps, late, {"jump flood"}} {
-		for _, e := range group {
-			if e == baseEstablishedAccept || seen[e] {
-				continue
-			}
-			seen[e] = true
-			out = append(out, e)
-		}
-	}
-	return out
 }
 
 func (b *Backend) EnsureBase() (err error) {
@@ -667,8 +555,8 @@ func (b *Backend) EnsureBase() (err error) {
 
 	// The early group, top-down (inserted in reverse below), and the late
 	// group, appended in order. Each base rule is wanted exactly once.
-	early := baseEarlyRules(b.cfg != nil && b.cfg.Hardening.ICMPRate > 0)
-	late := baseLateRules
+	early := firewall.BaseEarlyRules(b.cfg != nil && b.cfg.Hardening.ICMPRate > 0)
+	late := firewall.BaseLateRules()
 
 	// Drop the copies earlier versions piled up, keeping the top-most of each
 	// (the one the base order wants): the old presence check never recognised
@@ -676,7 +564,7 @@ func (b *Backend) EnsureBase() (err error) {
 	// every rule again (above). One transaction: a packet sees all the copies
 	// or one, never none. `ct state established,related accept` is left to the
 	// ports policy, which positions its own copy (firewall.PortsPolicyScript).
-	if dups := inputRules.DuplicateHandles(baseDedupeExprs(early, late)...); len(dups) > 0 {
+	if dups := inputRules.DuplicateHandles(firewall.BaseDedupeExprs()...); len(dups) > 0 {
 		var sb strings.Builder
 		for _, h := range dups {
 			fmt.Fprintf(&sb, "delete rule %s %s input handle %s\n", family, tableName, h)
@@ -739,11 +627,11 @@ func (b *Backend) EnsureBase() (err error) {
 	// 6) jump flood στο τέλος του base layer. The presence check matches it as a
 	// whole rule, not inside the ICMP jumps above (which, as a substring, kept
 	// it out whenever ICMP rate limiting was on and the chain was new).
-	if !ruleInInput("jump flood") {
-		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input jump flood`, family, tableName)); err != nil {
+	if !ruleInInput(firewall.BaseFloodJump) {
+		if err := b.nftCmd(fmt.Sprintf(`add rule %s %s input %s`, family, tableName, firewall.BaseFloodJump)); err != nil {
 			return err
 		}
-		recordRuleInInput("jump flood")
+		recordRuleInInput(firewall.BaseFloodJump)
 	}
 
 	//moved to ports.go

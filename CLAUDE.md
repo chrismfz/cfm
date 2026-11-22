@@ -137,6 +137,14 @@ The history behind each rule below is in the code comments it names.
   `firewall.BaseRuleAnchors` (rule + the rule it follows): a missing one is
   then added right after its anchor (`add rule … position <handle>`), and the
   live `LiveNFTClientSlash64` test pins the upgrade case.
+- **The base input rules are ONE list for both engines**
+  (`internal/firewall/base_rules.go`: `BaseEarlyRules`, `BaseLateRules`,
+  `BaseFloodJump`, and `BaseDedupeExprs`, every one but the ports policy's
+  established accept). Each EnsureBase deletes every extra copy of each
+  (top-most kept) in one transaction, through nft text on nftlib too; the
+  parity pins are `TestEnsureBase_DedupeParity` / `TestApplyBaseInputRules_DedupeParity`
+  (one fixture, `bantest.DuplicatedBaseChain`) and live `-run LiveNFTDedupe`
+  on both engines.
 - **A change here gets a live run in an isolated netns** (the fleet's kernels,
   4.18 and 5.14, are older than a dev box's):
   `unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run 'LiveNFT|ApplyPortsPolicyIsAtomic'`;

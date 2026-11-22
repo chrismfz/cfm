@@ -21,11 +21,17 @@ const nftlibCLITimeout = 10 * time.Second
 // Errors from "already exists" are silently swallowed — callers that need to fail-fast
 // should inspect the returned error themselves.
 func (b *Backend) nftExec(expr string) error {
+	return b.nftExecTimeout(expr, nftlibCLITimeout)
+}
+
+// nftExecTimeout is nftExec with its own deadline, for a script that can be
+// long (EnsureBase's base rules with thousands of duplicate deletes).
+func (b *Backend) nftExecTimeout(expr string, timeout time.Duration) error {
 	expr = strings.TrimSpace(expr)
 	if !strings.HasSuffix(expr, ";") {
 		expr += ";"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), nftlibCLITimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nft", "-f", "-") // #nosec G204
 	cmd.Stdin = strings.NewReader(expr + "\n")
