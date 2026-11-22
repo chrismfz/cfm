@@ -3,6 +3,7 @@
 package nft
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -676,5 +677,25 @@ func TestHookPriority(t *testing.T) {
 	// -5 is not -50: the old substring check took one for the other.
 	if p, _ := hookPriority("type filter hook input priority -50; policy accept;"); p == -5 {
 		t.Error("-50 read as -5")
+	}
+}
+
+// A script that runs out of time waiting for one of the 4 nft slots is a
+// timeout, not a refusal: the self-set fallback must not re-queue behind the
+// same busy slots (the final review reproduced it read as a refusal).
+func TestNFTTimedOut_SlotWait(t *testing.T) {
+	for i := 0; i < cap(nftSem); i++ {
+		nftSem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < cap(nftSem); i++ {
+			<-nftSem
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := (&Backend{}).nftExprCtx(ctx, "add table inet cfm")
+	if err == nil || !nftTimedOut(err) {
+		t.Fatalf("slot-wait deadline: err=%v, nftTimedOut=%v; want a timeout", err, nftTimedOut(err))
 	}
 }

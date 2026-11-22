@@ -462,10 +462,13 @@ func baseDedupeExprs(early, late []string) []string {
 func (b *Backend) EnsureBase() (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
+	unchecked := false
 	defer func() {
 		st := "ok"
 		if err != nil {
 			st = "fail"
+		} else if unchecked {
+			st = "unchecked" // the input chain's rules could not be read
 		}
 		b.logPhase("EnsureBase", st, time.Since(start), err, "")
 	}()
@@ -649,7 +652,8 @@ func (b *Backend) EnsureBase() (err error) {
 	resInput, readErr := runNFTCommand(readCtx, "-a", "list", "chain", family, tableName, "input")
 	readCancel()
 	if readErr != nil && !needCreate {
-		logging.Logf("[nft] EnsureBase: cannot read the input chain (%v); its base rules are left as they are, unchecked (adding them blind would duplicate every one)", firstLine(readErr.Error()))
+		logging.Logf("[nft] WARNING: EnsureBase cannot read the input chain (%v); its base rules are left as they are, unchecked until the next restart (adding them blind would duplicate every one)", firstLine(readErr.Error()))
+		unchecked = true
 		return nil
 	}
 	inputRules := firewall.ParseChainRules(resInput.Stdout)
@@ -1880,7 +1884,7 @@ func (b *Backend) nftExprCtx(ctx context.Context, expr string) error {
 		}
 	}
 	if err != nil {
-		return fmt.Errorf("%v: %s", err, string(out))
+		return fmt.Errorf("%w: %s", err, string(out)) // %w: nftTimedOut must see a slot-wait deadline
 	}
 	return nil
 }

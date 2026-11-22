@@ -118,9 +118,10 @@ The history behind each rule below is in the code comments it names.
   deadline (12 s on mars; the wait for one of the 4 nft slots counts too) and
   the timeout read as "no table"; each re-run whose input-chain read failed
   added every base rule again (~268 copies of each on mars). Probe with `list
-  chains inet` (`probeTable`, `chainExists`, `cfmChains`); a repair
-  (EnsureBase, a flush, a delete) acts only on `tableAbsent`, never on
-  `tableUnknown`; an unread chain is never taken for an empty one (no rule is
+  chains inet` (`probeTable`, `chainExists`, `cfmChains`); the daemon's repairs
+  (EnsureBase from the tick loop, a flush, a delete) act only on
+  `tableAbsent`, never on `tableUnknown` (the one-shot CLI still runs
+  EnsureBase when `tableExists` is false, which is safe but not cheap); an unread chain is never taken for an empty one (no rule is
   added blind). Compare before you write (`firewall.SameSetElems`), and put a
   write in one script. `ensurebase_cost_test.go` pins EnsureBase's profile,
   the unknown probe and the dedupe (live: `-run LiveNFTDedupe`).
