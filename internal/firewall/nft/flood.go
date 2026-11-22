@@ -83,12 +83,12 @@ func (b *Backend) ApplyFloodRules(c *cfgpkg.Config) error {
 			return nil
 		}
 	}
-	b.lastFloodHash = h
 	if tbl == tableAbsent {
-		if err = b.EnsureBase(); err != nil {
-			return err
+		if err = b.ensureBaseAfterAbsent(); err != nil {
+			return err // lastFloodHash not recorded: the next tick rebuilds
 		}
 	}
+	b.lastFloodHash = h
 	_ = b.nftExpr("flush chain inet cfm flood;")
 	_ = b.nftExpr(`add rule inet cfm flood ip saddr @self_v4 return`)
 	_ = b.nftExpr(`add rule inet cfm flood ip6 saddr @self_v6 return`)

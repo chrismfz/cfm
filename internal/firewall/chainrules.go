@@ -152,7 +152,12 @@ func baseRuleKeys() map[string]struct{} {
 
 // EarlyAnchorHandle is the handle a missing rule of the early group (early, in
 // its top-down order) must be added after on this chain: its anchor
-// (BaseRuleAnchors), else the nearest rule above it in early that is listed.
+// (BaseRuleAnchors), else the nearest rule above it in early that is listed
+// in the early region, above the first `ct state established,related …`
+// rule. Several early rules (the allows, the plain drops) are in the late
+// group too: anchored on a late copy, a re-added allow would land below the
+// early drops, and an address in both an allow and a block set would be
+// dropped.
 // "" when none is (a new chain: the insert at position 0, in reverse, builds
 // the order). An insert at 0 on a chain that holds the rest would put a
 // re-added drop above the self and allow accepts, so an allowlisted address
@@ -167,11 +172,27 @@ func (c *ChainRules) EarlyAnchorHandle(expr string, early []string) string {
 			continue
 		}
 		for j := i - 1; j >= 0; j-- {
-			if h := c.FirstHandle(early[j]); h != "" {
+			if h := c.earlyRegionHandle(early[j]); h != "" {
 				return h
 			}
 		}
 		return ""
+	}
+	return ""
+}
+
+// earlyRegionHandle is FirstHandle limited to the rules listed above the first
+// `ct state established,related …` one (where the late group, and the ports
+// policy's established accept, begin).
+func (c *ChainRules) earlyRegionHandle(expr string) string {
+	k := ruleKey(expr)
+	for _, r := range c.rules {
+		if strings.HasPrefix(r.key, "ct state established,related") {
+			return ""
+		}
+		if r.handle != "" && r.key == k {
+			return r.handle
+		}
 	}
 	return ""
 }

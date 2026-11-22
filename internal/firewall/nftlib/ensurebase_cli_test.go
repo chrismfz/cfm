@@ -360,3 +360,23 @@ func TestExistingInputChain_ListFailureIsUnknown(t *testing.T) {
 		t.Errorf("empty list: got (%v, %v), want (nil, true)", ch, listed)
 	}
 }
+
+// A repair that knows the table was absent (ENOENT, or the table ResetTable
+// just deleted) takes an unlisted chain for the new one it is: its base rules
+// are written, not given up on (no daemon restart retries a tick's repair).
+func TestInputStateOf(t *testing.T) {
+	for _, tc := range []struct {
+		listed, found, absent bool
+		want                  inputChainState
+	}{
+		{true, true, false, inputChainExisted},
+		{true, false, false, inputChainNew},
+		{false, false, false, inputChainUnknown},
+		{false, false, true, inputChainNew},
+		{true, true, true, inputChainExisted}, // the listing wins: someone recreated it
+	} {
+		if got := inputStateOf(tc.listed, tc.found, tc.absent); got != tc.want {
+			t.Errorf("inputStateOf(listed=%v, found=%v, absent=%v) = %v, want %v", tc.listed, tc.found, tc.absent, got, tc.want)
+		}
+	}
+}

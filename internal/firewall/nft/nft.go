@@ -346,7 +346,17 @@ func (b *Backend) ensureSet(name, typ string) error {
 // (shared with nftlib: firewall.BaseInputReadTimeout).
 var inputChainReadTimeout = firewall.BaseInputReadTimeout
 
-func (b *Backend) EnsureBase() (err error) {
+func (b *Backend) EnsureBase() (err error) { return b.ensureBase(false) }
+
+// ensureBaseAfterAbsent is EnsureBase for a repair whose probe just found the
+// table definitely absent (probeTable == tableAbsent): the input chain this run
+// declares is then new for sure, even when the chain listing fails, so an
+// unread chain is taken for the empty one it is, and the base rules are
+// written. Without it a repair that met two failed reads gave up and left the
+// new chain empty (policy accept), with no daemon restart to retry it.
+func (b *Backend) ensureBaseAfterAbsent() error { return b.ensureBase(true) }
+
+func (b *Backend) ensureBase(tableWasAbsent bool) (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
 	unchecked := false
@@ -381,7 +391,7 @@ func (b *Backend) EnsureBase() (err error) {
 	// listing could not be read the chains are declared anyway (`add chain`
 	// is idempotent, so a cold boot still gets them), but the read guard
 	// stays on: adding rules blind is how mars came to hold 268 copies.
-	needCreate := chainsOK && !hasCFMChain(chains, "input")
+	needCreate := (chainsOK && !hasCFMChain(chains, "input")) || (!chainsOK && tableWasAbsent)
 	if chainsOK && !needCreate {
 		if p, ok := hookPriority(chains["input"]); !ok || p != prio {
 			// Do NOT silently destroy the input chain on a priority

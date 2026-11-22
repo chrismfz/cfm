@@ -31,7 +31,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
     the ports policy's accepts, and EnsureBase never re-added the rule. A
     rule inside another base rule no longer counts (both engines). A missing
     early rule now goes back right after the nearest early rule above it
-    that the chain holds, not at the top: there, a re-added drop would sit
+    that the chain holds (in the early part of the chain, never a late
+    copy), not at the top: there, a re-added drop would sit
     above the allow accepts and drop an allowlisted address that is also in
     a block set.
   - **An unreadable chain whose existence was unknown read as success.** When
@@ -42,8 +43,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
     acts on a chain whose table exists. EnsureBase now fails there, so the
     daemon's start fails and systemd starts it again. nftlib took the same
     case for a new chain and added every rule blind (duplicates); it now
-    fails the same way. A chain that was listed and cannot be read is still
-    left as it is (best effort), as before.
+    fails the same way. A repair that knows the table was absent (the tick
+    loop's, or `cfm reset` on nftlib) takes the chain for the new one it is
+    and writes the rules. A chain that was listed and cannot be read is
+    still left as it is (best effort), as before.
 - **On EL8 nodes, the ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT, on every
   start and config reload) no longer times out reading the firewall.** Its
   two reads of `inet cfm input` / `output` ran under nft's 10 s default,

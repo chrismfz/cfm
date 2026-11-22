@@ -152,3 +152,23 @@ func TestChainRules_EarlyAnchorHandle(t *testing.T) {
 		t.Errorf("empty chain: got %q, want \"\"", got)
 	}
 }
+
+// The anchor of a re-added early rule is searched above the late group only:
+// several early rules have a late copy, and anchored on it a re-added allow
+// would land below the early drops (the review's scenario: the early
+// allow_ext_v6_nets copy gone, its late copy left, allow_v4_nets missing).
+func TestChainRules_EarlyAnchorHandleIgnoresLateCopies(t *testing.T) {
+	early := BaseEarlyRules(false)
+	listing := "table inet cfm {\n\tchain input { # handle 1\n" +
+		"\t\tiif \"lo\" accept # handle 2\n" +
+		"\t\tip saddr @allow_ext_v4_nets accept # handle 10\n" +
+		"\t\tip saddr @block_v4 drop # handle 20\n" +
+		"\t\tct state established,related ip saddr @block_v4 drop # handle 30\n" +
+		"\t\tct state established,related accept # handle 31\n" +
+		"\t\tip6 saddr @allow_ext_v6_nets accept # handle 40\n" +
+		"\t}\n}\n"
+	c := ParseChainRules(listing)
+	if got := c.EarlyAnchorHandle(`ip saddr @allow_v4_nets accept`, early); got != "10" {
+		t.Errorf("EarlyAnchorHandle(allow_v4_nets) = %q, want 10 (the early allow_ext_v4_nets), never the late copy 40", got)
+	}
+}

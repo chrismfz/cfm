@@ -18,7 +18,16 @@ import (
 // EnsureBase creates all core CFM-owned tables, chains, and sets using netlink.
 // The local set handle cache is invalidated so the next nftlib operation
 // re-fetches handles from the kernel.
-func (b *Backend) EnsureBase() (err error) {
+func (b *Backend) EnsureBase() (err error) { return b.ensureBase(false) }
+
+// ensureBaseAfterAbsent is EnsureBase for a repair that knows the table is
+// absent (the kernel's ENOENT to GETTABLE, or the table this backend just
+// deleted): the input chain is then new even when the chain list fails, so
+// its base rules are written rather than given up on (no daemon restart
+// would retry a tick's repair).
+func (b *Backend) ensureBaseAfterAbsent() error { return b.ensureBase(true) }
+
+func (b *Backend) ensureBase(tableWasAbsent bool) (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
 	// Split the timing so the self-test can tell contention (lock_wait) from
@@ -80,13 +89,7 @@ func (b *Backend) EnsureBase() (err error) {
 	// config (a one-shot `cfm dnat on`, which builds its backend without one)
 	// or NFT_INPUT_PRIORITY changed after the chain was created.
 	cur, listed := b.existingInputChain()
-	inputState := inputChainExisted
-	switch {
-	case !listed:
-		inputState = inputChainUnknown
-	case cur == nil:
-		inputState = inputChainNew
-	}
+	inputState := inputStateOf(listed, cur != nil, tableWasAbsent)
 	if cur == nil {
 		b.conn.AddChain(&nftables.Chain{
 			Table:    table,
@@ -224,6 +227,21 @@ const (
 	inputChainNew                            // listed absent, created by this EnsureBase: empty
 	inputChainUnknown                        // the chain list failed: declared blind, may be either
 )
+
+// inputStateOf is what EnsureBase knows of the input chain: listed says the
+// chain list was read, found that it held the chain, tableWasAbsent that the
+// caller knows the table was absent (then the chain is new, listed or not).
+func inputStateOf(listed, found, tableWasAbsent bool) inputChainState {
+	switch {
+	case !listed && tableWasAbsent:
+		return inputChainNew
+	case !listed:
+		return inputChainUnknown
+	case !found:
+		return inputChainNew
+	}
+	return inputChainExisted
+}
 
 // errInputChainUnknown: neither the chain list nor the chain's rules could be
 // read, so the input chain may be new and empty.
@@ -461,7 +479,7 @@ func (b *Backend) ResetTable() error {
 	dropDur := time.Since(dropStart)
 
 	ensureStart := time.Now()
-	if err := b.EnsureBase(); err != nil {
+	if err := b.ensureBaseAfterAbsent(); err != nil { // the table was just deleted
 		return fmt.Errorf("nftlib: reset table (ensure): %w", err)
 	}
 	ensureDur := time.Since(ensureStart)

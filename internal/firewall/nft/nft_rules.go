@@ -149,7 +149,7 @@ func (b *Backend) dumpFloodCountersOnce() {
 	// A skipped CLI fallback says nothing new about the table.
 	if (err != nil && !errors.Is(err, errFloodCLISkipped)) || (err == nil && len(cs) == 0) {
 		if b.probeTable() == tableAbsent {
-			_ = b.EnsureBase()
+			_ = b.ensureBaseAfterAbsent()
 		}
 	}
 	if err != nil {
@@ -794,7 +794,7 @@ func (b *Backend) loadPortScannerOnce() {
 	// this tick's load; the next tick asks again.
 	switch b.probeTable() {
 	case tableAbsent:
-		if err := b.EnsureBase(); err != nil {
+		if err := b.ensureBaseAfterAbsent(); err != nil {
 			return
 		}
 	case tableUnknown:

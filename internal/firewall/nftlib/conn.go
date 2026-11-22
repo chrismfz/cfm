@@ -90,7 +90,7 @@ func (b *Backend) repairIfTableAbsent(err error) (bool, error) {
 	if b.repairBase != nil {
 		return true, b.repairBase()
 	}
-	return true, b.EnsureBase()
+	return true, b.ensureBaseAfterAbsent()
 }
 
 // lookupSet returns (or caches) a named set handle from the inet cfm table.

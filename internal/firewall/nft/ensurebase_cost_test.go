@@ -639,6 +639,21 @@ func TestEnsureBase_UnlistedChainsAndUnreadRulesAddNothing(t *testing.T) {
 	}
 }
 
+// The same two failed reads in a repair whose probe found the table absent:
+// the chain this run declares is new for sure, so its base rules are written
+// (the tick paths have no daemon restart to retry a failed EnsureBase).
+func TestEnsureBaseAfterAbsent_UnlistedChainsGetTheRules(t *testing.T) {
+	v4, v6 := wantSelfSets()
+	log := fakeNFTOpts(t, fakeOpts{chains: "fail", self4: v4, self6: v6, inputFail: true, listChainFail: true})
+	if err := New().ensureBaseAfterAbsent(); err != nil {
+		t.Fatalf("ensureBaseAfterAbsent: %v", err)
+	}
+	got := readFile(t, log)
+	if !strings.Contains(got, "insert rule inet cfm input position 0 ip saddr @block_v4 drop") {
+		t.Errorf("the base rules must be written to the new chain:\n%s", got)
+	}
+}
+
 func TestParseCFMChains_HandleComments(t *testing.T) {
 	got := parseCFMChains("table inet cfm { # handle 7\n\tchain input { # handle 1\n\t\ttype filter hook input priority -50; policy accept;\n\t}\n\tchain flood { # handle 2\n\t}\n}\n")
 	if got["input"] != "type filter hook input priority -50; policy accept;" || !hasCFMChain(got, "flood") {
