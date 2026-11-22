@@ -1,6 +1,7 @@
 package dnat
 
 import (
+	"fmt"
 	"strings"
 
 	"cfm/internal/edgeengine"
@@ -54,10 +55,19 @@ func panelOffWithOptions(autoRemoveAllowlist bool) (panelOffResult, error) {
 func panelOffWithOptionsAndBackend(autoRemoveAllowlist bool, backend firewall.Backend) (panelOffResult, error) {
 	result := panelOffResult{}
 	health := panelGetFirewallHealthFn()
+	var derr error
 	if backend != nil {
-		_ = backend.PanelDNATOff()
+		derr = backend.PanelDNATOff()
 	} else {
-		_ = panelDeleteRedirectTableFn()
+		derr = panelDeleteRedirectTableFn()
+	}
+	// The redirect still in place: stop here. Removing the allowlist under a
+	// live redirect would drop the panel traffic it sends to the edge, and
+	// persisting OFF would lie; the caller (and its exit code) must know.
+	if derr != nil {
+		err := fmt.Errorf("removing the panel DNAT redirect: %w", derr)
+		panelSetFirewallHealthFn("FAILED", err.Error(), health.Attempted)
+		return result, err
 	}
 
 	if autoRemoveAllowlist {
@@ -89,7 +99,11 @@ func panelOffWithOptionsAndBackend(autoRemoveAllowlist bool, backend firewall.Ba
 func panelOffPreserveIntent(autoRemoveAllowlist bool) (panelOffResult, error) {
 	result := panelOffResult{}
 	health := panelGetFirewallHealthFn()
-	_ = panelDeleteRedirectTableFn()
+	if derr := panelDeleteRedirectTableFn(); derr != nil {
+		err := fmt.Errorf("removing the panel DNAT redirect: %w", derr)
+		panelSetFirewallHealthFn("FAILED", err.Error(), health.Attempted)
+		return result, err
+	}
 	if autoRemoveAllowlist {
 		changes, err := panelRemoveAllowlistFn()
 		result.FirewallChanges = changes
