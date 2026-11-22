@@ -5,12 +5,14 @@ package nftlib
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 	"math/bits"
 	"net"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"cfm/internal/firewall"
@@ -45,12 +47,50 @@ func (b *Backend) lookupTable() (*nftables.Table, error) {
 	if b.table != nil {
 		return b.table, nil
 	}
-	t, err := b.conn.ListTableOfFamily(cfmTableName, nftables.TableFamilyINet)
+	t, err := b.probeTableFresh()
 	if err != nil {
-		return nil, fmt.Errorf("nftlib: inet cfm table: %w", err)
+		return nil, err
 	}
 	b.table = t
 	return t, nil
+}
+
+// probeTableFresh asks the KERNEL for the inet cfm table, bypassing the
+// cached handle, and marks a definite absence errTableAbsent. It changes no
+// cache. Must be called with b.mu held.
+func (b *Backend) probeTableFresh() (*nftables.Table, error) {
+	t, err := b.conn.ListTableOfFamily(cfmTableName, nftables.TableFamilyINet)
+	if err != nil {
+		if errors.Is(err, syscall.ENOENT) {
+			// The kernel answered the GETTABLE: there is no such table.
+			return nil, fmt.Errorf("nftlib: inet cfm table: %w: %w", errTableAbsent, err)
+		}
+		return nil, fmt.Errorf("nftlib: inet cfm table: %w", err)
+	}
+	return t, nil
+}
+
+// errTableAbsent marks a lookupTable / probeTableFresh error that is a definite answer: the
+// kernel answered and the inet cfm table does not exist. Any other lookupTable
+// error (a netlink failure, ENOBUFS, a read deadline) says nothing about the
+// table, and must never start a repair (CLAUDE.md §2: repairs act only on a
+// definite absence, as the exec backend's tableAbsent).
+var errTableAbsent = errors.New("table absent")
+
+// tableAbsent reports whether a lookupTable error is a definite absence.
+func tableAbsent(err error) bool { return errors.Is(err, errTableAbsent) }
+
+// repairIfTableAbsent runs EnsureBase only when err (from lookupTable) says
+// the table is definitely absent, and reports whether it did. Must be called
+// WITHOUT b.mu held (EnsureBase takes it).
+func (b *Backend) repairIfTableAbsent(err error) (bool, error) {
+	if !tableAbsent(err) {
+		return false, nil
+	}
+	if b.repairBase != nil {
+		return true, b.repairBase()
+	}
+	return true, b.EnsureBase()
 }
 
 // lookupSet returns (or caches) a named set handle from the inet cfm table.
