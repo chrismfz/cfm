@@ -1,5 +1,7 @@
 package firewall
 
+import "time"
+
 // The base layer of the `inet cfm input` chain, written by both backends'
 // EnsureBase (nft/nft.go, nftlib/lifecycle.go): ONE list, so the two engines
 // can't drift in what they write or in what they deduplicate.
@@ -131,4 +133,17 @@ func BaseDedupeExprs() []string {
 		}
 	}
 	return out
+}
+
+// BaseInputReadTimeout bounds EnsureBase's read of the input chain's rules,
+// on both engines: on EL8's nft 1.0.4 any `list chain` loads every set
+// element first (4–12 s idle on the fleet's EL8 nodes, 2026-11-22), and a
+// read that times out leaves the chain, duplicates included, as it is.
+const BaseInputReadTimeout = 30 * time.Second
+
+// BaseScriptTimeout bounds one `nft -f` run of n base-rule statements (the
+// duplicate deletes, with nftlib the missing rules too): the same cache load
+// as the read, plus 1 s per 1000 statements (mars held ~7,400 duplicates).
+func BaseScriptTimeout(n int) time.Duration {
+	return BaseInputReadTimeout + time.Duration(n/1000)*time.Second
 }

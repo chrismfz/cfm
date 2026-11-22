@@ -64,11 +64,24 @@ func (b *Backend) chainTextCLI(chain string) (string, error) {
 	return nftReadCLI("-a", "list", "chain", "inet", cfmTableName, chain)
 }
 
+// inputChainTextCLI is chainTextCLI for EnsureBase's read of the input chain,
+// with the exec engine's deadline (firewall.BaseInputReadTimeout): at the CLI
+// default (10 s) an EL8 node's 4–12 s listing timed out, and the base rules,
+// duplicates included, were left as they were.
+func (b *Backend) inputChainTextCLI() (string, error) {
+	return nftReadCLITimeout(firewall.BaseInputReadTimeout, "-a", "list", "chain", "inet", cfmTableName, "input")
+}
+
 // nftReadCLI runs a read-only nft command (firewall.NFTRead). It gets the CLI
 // write timeout: on a node with large feed sets one nft process takes seconds.
 // An error carries nft's stderr.
 func nftReadCLI(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), nftlibCLITimeout)
+	return nftReadCLITimeout(nftlibCLITimeout, args...)
+}
+
+// nftReadCLITimeout is nftReadCLI with its own deadline.
+func nftReadCLITimeout(timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "nft", args...) // #nosec G204 -- fixed binary, args built by CFM
 	var stdout, stderr bytes.Buffer

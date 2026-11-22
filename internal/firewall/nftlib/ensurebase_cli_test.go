@@ -291,3 +291,14 @@ func TestApplyBaseInputRules_FallbackKeepsDeletesInOneRun(t *testing.T) {
 		t.Errorf("last run %q, want the flood jump alone", last)
 	}
 }
+
+// When the fallback's delete run fails too, the error says so in its own
+// words, not as one statement among the rest.
+func TestApplyBaseInputRules_FallbackReportsFailedDeletes(t *testing.T) {
+	chain, want := bantest.DuplicatedBaseChain()
+	fakeNFTChain(t, chain, 2) // the whole script, then the delete run
+	err := (&Backend{}).applyBaseInputRules(false)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("the run deleting %d duplicate base rules failed too", len(want))) {
+		t.Errorf("err = %v, want the failed delete run named with its %d deletes", err, len(want))
+	}
+}

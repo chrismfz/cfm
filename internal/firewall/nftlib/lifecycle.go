@@ -253,7 +253,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	// second time — unless this
 	// EnsureBase just created it: then it is empty, and leaving it so would
 	// leave the node without its allow/block rules.
-	chain, err := b.chainTextCLI("input")
+	chain, err := b.inputChainTextCLI()
 	if err != nil && !newChain {
 		err = fmt.Errorf("can't read the input chain, left as is: %w", err)
 		logging.Logf("[nftlib] base input rules: %v", err)
@@ -263,7 +263,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	if len(stmts) == 0 {
 		return nil
 	}
-	err = b.nftExecTimeout(strings.Join(stmts, "\n"), baseScriptTimeout(len(stmts)))
+	err = b.nftExecTimeout(strings.Join(stmts, "\n"), firewall.BaseScriptTimeout(len(stmts)))
 	if err == nil {
 		if n := countPrefix(stmts, "delete rule "); n > 0 {
 			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", n)
@@ -275,7 +275,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	// killed at its timeout), and running the statements again would
 	// duplicate them.
 	runErr := fmt.Errorf("one nft run of %d statements failed: %s", len(stmts), errTail(err, 300))
-	chain, err = b.chainTextCLI("input")
+	chain, err = b.inputChainTextCLI()
 	if err != nil {
 		err = fmt.Errorf("%v; can't re-read the input chain, left as is: %w", runErr, err)
 		logging.Logf("[nftlib] base input rules: %v", err)
@@ -286,31 +286,28 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	// every nft run costs seconds); only the rules to add go one by one.
 	dels := countPrefix(stmts, "delete rule ") // baseRulesScript puts them first
 	logging.Logf("[nftlib] base input rules: %v; applying %d deletes in one run, %d statements one by one", runErr, dels, len(stmts)-dels)
-	failed := 0
+	var fails []string
 	if dels > 0 {
-		if err := b.nftExecTimeout(strings.Join(stmts[:dels], "\n"), baseScriptTimeout(dels)); err != nil {
+		if err := b.nftExecTimeout(strings.Join(stmts[:dels], "\n"), firewall.BaseScriptTimeout(dels)); err != nil {
 			logging.Logf("[nftlib] EnsureBase: removing %d duplicate base rules failed: %s", dels, errTail(err, 300))
-			failed++
+			fails = append(fails, fmt.Sprintf("the run deleting %d duplicate base rules failed too", dels))
 		} else {
 			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", dels)
 		}
 	}
+	failed := 0
 	for _, st := range stmts[dels:] {
 		if b.nftExec(st) != nil {
 			failed++
 		}
 	}
 	if failed > 0 {
-		return fmt.Errorf("%v; %d of %d single statements failed too", runErr, failed, len(stmts))
+		fails = append(fails, fmt.Sprintf("%d of %d single statements failed too", failed, len(stmts)-dels))
+	}
+	if len(fails) > 0 {
+		return fmt.Errorf("%v; %s", runErr, strings.Join(fails, "; "))
 	}
 	return nil
-}
-
-// baseScriptTimeout bounds one run of n base-rule statements: the CLI
-// timeout plus 1 s per 1000 statements (mars held ~7,400 duplicates), as the
-// nft backend's dedupe.
-func baseScriptTimeout(n int) time.Duration {
-	return nftlibCLITimeout + time.Duration(n/1000)*time.Second
 }
 
 func countPrefix(stmts []string, prefix string) int {

@@ -32,6 +32,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the same `nft -f` transaction as the missing rules, the top-most copy of
   each kept, and the ports policy's own established/related accept is left
   alone. Both engines now write and deduplicate ONE list of base rules.
+  nftlib's read of the input chain now gets the nft engine's 30 s (it had
+  10 s, and EL8's `list chain` takes 4–12 s: a timed-out read leaves the
+  chain, duplicates included, as it is), and on both engines the run that
+  deletes the duplicates starts from 30 s, not 10 s, plus 1 s per 1000.
 - **On EL8 nodes running the nft engine, the flood-counter dump that runs on
   every 20 s tick no longer holds an nft slot for seconds.** It read the
   counters with `nft list counters table inet cfm`, which on EL8's nft 1.0.4

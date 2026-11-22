@@ -343,14 +343,8 @@ func (b *Backend) ensureSet(name, typ string) error {
 }
 
 // inputChainReadTimeout bounds EnsureBase's read of the input chain's rules
-// (~4 s idle on an EL8 node with large sets).
-var inputChainReadTimeout = 30 * time.Second
-
-// dedupeTimeout bounds the one-transaction delete of duplicate base rules:
-// the runner's default plus 1 s per 1000 handles (mars held ~7,400).
-func dedupeTimeout(n int) time.Duration {
-	return defaultNFTCommandTimeout + time.Duration(n/1000)*time.Second
-}
+// (shared with nftlib: firewall.BaseInputReadTimeout).
+var inputChainReadTimeout = firewall.BaseInputReadTimeout
 
 func (b *Backend) EnsureBase() (err error) {
 	start := time.Now()
@@ -569,7 +563,7 @@ func (b *Backend) EnsureBase() (err error) {
 		for _, h := range dups {
 			fmt.Fprintf(&sb, "delete rule %s %s input handle %s\n", family, tableName, h)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), dedupeTimeout(len(dups)))
+		ctx, cancel := context.WithTimeout(context.Background(), firewall.BaseScriptTimeout(len(dups)))
 		err := b.nftExprCtx(ctx, strings.TrimSpace(sb.String()))
 		cancel()
 		if err != nil {
