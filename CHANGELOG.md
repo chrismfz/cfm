@@ -40,9 +40,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   apply did the same: a netlink failure, ENOBUFS or a read deadline on an
   already slow kernel started a full repair. Both now repair only when the
   kernel answers that the table does not exist (ENOENT), as the nft engine
-  does; any other error is logged and retried next tick. The counter dump's
-  failure also no longer skips that tick's throttle autoblock pass on this
-  engine (the counters are log-only, the throttle bans are not).
+  does; any other error is logged and retried next tick. The portscan loop's
+  table probe uses the same test. After an out-of-band wipe (`nft flush
+  ruleset`, a panel firewall reload) the dump no longer keeps logging
+  "cannot list counters" against a stale cached table handle: it drops the
+  cache, so the next tick asks the kernel. The counter dump's failure also no
+  longer skips that tick's throttle autoblock pass on this engine (the
+  counters are log-only, the throttle bans are not).
 - **A failed flood-counter read no longer skips that tick's throttle
   autoblock pass.** The dump returned before evaluating the throttle sets
   (`th_syn_v4`, …) whenever the log-only counters could not be read, so a

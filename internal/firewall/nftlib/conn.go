@@ -47,6 +47,18 @@ func (b *Backend) lookupTable() (*nftables.Table, error) {
 	if b.table != nil {
 		return b.table, nil
 	}
+	t, err := b.probeTableFresh()
+	if err != nil {
+		return nil, err
+	}
+	b.table = t
+	return t, nil
+}
+
+// probeTableFresh asks the KERNEL for the inet cfm table, bypassing the
+// cached handle, and marks a definite absence errTableAbsent. It changes no
+// cache. Must be called with b.mu held.
+func (b *Backend) probeTableFresh() (*nftables.Table, error) {
 	t, err := b.conn.ListTableOfFamily(cfmTableName, nftables.TableFamilyINet)
 	if err != nil {
 		if errors.Is(err, syscall.ENOENT) {
@@ -55,11 +67,10 @@ func (b *Backend) lookupTable() (*nftables.Table, error) {
 		}
 		return nil, fmt.Errorf("nftlib: inet cfm table: %w", err)
 	}
-	b.table = t
 	return t, nil
 }
 
-// errTableAbsent marks a lookupTable error that is a definite answer: the
+// errTableAbsent marks a lookupTable / probeTableFresh error that is a definite answer: the
 // kernel answered and the inet cfm table does not exist. Any other lookupTable
 // error (a netlink failure, ENOBUFS, a read deadline) says nothing about the
 // table, and must never start a repair (CLAUDE.md §2: repairs act only on a

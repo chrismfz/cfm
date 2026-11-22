@@ -65,10 +65,14 @@ func (b *Backend) logFloodCounters() {
 	t, err := b.lookupTable()
 	if err != nil {
 		b.mu.Unlock()
-		if repaired, rerr := b.repairIfTableAbsent(err); repaired {
-			logging.Logf("[flood] inet %s table absent, ran EnsureBase (result: %v): %v", cfmTableName, rerr, err)
-		} else {
+		repaired, rerr := b.repairIfTableAbsent(err)
+		switch {
+		case !repaired:
 			logging.Logf("[flood] cannot get table, skipping counters this tick: %v", err)
+		case rerr != nil:
+			logging.Logf("[flood] inet %s table absent, EnsureBase failed: %v", cfmTableName, rerr)
+		default:
+			logging.Logf("[flood] inet %s table absent, EnsureBase rebuilt it", cfmTableName)
 		}
 		return
 	}
@@ -77,6 +81,16 @@ func (b *Backend) logFloodCounters() {
 	// the read race a locked writer on that socket → "unexpected header type"
 	// desync → wedge; per-call sockets, nlconn.go, remove that failure mode.)
 	objs, err := b.conn.GetObjects(t)
+	if isNotFound(err) && b.table == t {
+		// The cached handle names a table the kernel no longer has (an
+		// out-of-band `nft flush ruleset`, a panel firewall reload). Drop
+		// the cache so the next tick's lookupTable asks the kernel, which
+		// repairs only on its own definite answer (errTableAbsent). The
+		// looser isNotFound is enough here: google/nftables wraps this
+		// error with %v (errors.Is cannot see the ENOENT), and a wrong
+		// guess costs one GETTABLE, never a repair.
+		b.invalidateCache()
+	}
 	b.mu.Unlock()
 	if err != nil {
 		logging.Logf("[flood] cannot list counters: %v", err)
@@ -526,15 +540,17 @@ func (b *Backend) loadPortScannerOnce() {
 	// the table went missing. The portscan sets are (re)ensured by
 	// ensurePortscanSetsNative below via netlink regardless.
 	//
-	// Probe the KERNEL directly (not lookupTable, which returns a cached handle
-	// that never re-checks the kernel) so an out-of-band wipe — `nft flush
-	// ruleset`, an nftables.service restart, a panel firewall reload — is actually
-	// detected and self-healed instead of trusting a stale cache forever.
+	// Probe the KERNEL directly (probeTableFresh, not lookupTable, which
+	// returns a cached handle that never re-checks the kernel) so an
+	// out-of-band wipe — `nft flush ruleset`, an nftables.service restart, a
+	// panel firewall reload — is actually detected and self-healed instead of
+	// trusting a stale cache forever. Only the kernel's definite answer
+	// (errTableAbsent) repairs, the same classifier lookupTable uses.
 	b.mu.Lock()
-	_, terr := b.conn.ListTableOfFamily(cfmTableName, nftables.TableFamilyINet)
+	_, terr := b.probeTableFresh()
 	b.mu.Unlock()
 	if terr != nil {
-		if !isNotFound(terr) {
+		if !tableAbsent(terr) {
 			// Not "missing" — the read itself failed (e.g. a netlink read
 			// timeout). Rebuilding now would flush and rewrite every set on a
 			// kernel that is already slow; skip this tick and look again next.
