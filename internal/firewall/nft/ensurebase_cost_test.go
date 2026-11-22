@@ -10,11 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/bantest"
 	"cfm/internal/firewall/selfip"
 )
 
@@ -502,7 +504,7 @@ func TestEnsureBase_DedupesEveryBaseRule(t *testing.T) {
 	}
 	// Two full copies of the base layer, as one blind re-add leaves them:
 	// the newer early group on top, the late group appended twice.
-	early := baseEarlyRules(false)
+	early := firewall.BaseEarlyRules(false)
 	var keep []int
 	for _, r := range early {
 		keep = append(keep, rule(strings.ReplaceAll(r, "iif lo", `iif "lo"`)))
@@ -511,14 +513,14 @@ func TestEnsureBase_DedupesEveryBaseRule(t *testing.T) {
 		rule(strings.ReplaceAll(r, "iif lo", `iif "lo"`))
 	}
 	estFirst := 0
-	for _, r := range baseLateRules {
-		if r == baseEstablishedAccept && estFirst == 0 {
+	for _, r := range firewall.BaseLateRules() {
+		if r == firewall.BaseEstablishedAccept && estFirst == 0 {
 			estFirst = rule(r)
 			continue
 		}
 		rule(r)
 	}
-	for _, r := range baseLateRules {
+	for _, r := range firewall.BaseLateRules() {
 		rule(r)
 	}
 	rule("jump flood")
@@ -559,82 +561,44 @@ func TestEnsureBase_DedupesEveryBaseRule(t *testing.T) {
 	}
 }
 
+// Engine parity: on the chain one blind re-add of the base layer leaves, the
+// nft backend deletes exactly the handles nftlib does (the same fixture and
+// answer, bantest.DuplicatedBaseChain; nftlib's twin is
+// TestApplyBaseInputRules_DedupeParity), in one transaction, adding nothing.
+func TestEnsureBase_DedupeParity(t *testing.T) {
+	v4, v6 := wantSelfSets()
+	chain, want := bantest.DuplicatedBaseChain()
+	log := fakeNFTOpts(t, fakeOpts{chains: "ok", chainsListing: marsChains, self4: v4, self6: v6, inputListing: chain})
+	if err := New().EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	got := readFile(t, log)
+	var scripts int
+	for _, block := range strings.Split(got, "ARGS ") {
+		if strings.HasPrefix(block, "-f -") && strings.Contains(block, "delete rule inet cfm input handle") {
+			scripts++
+		}
+	}
+	if scripts != 1 {
+		t.Errorf("want the duplicate deletes in ONE transaction, got %d:\n%s", scripts, got)
+	}
+	if strings.Contains(got, "insert rule inet cfm input") || strings.Contains(got, "add rule inet cfm input") {
+		t.Errorf("re-added a rule the chain already holds:\n%s", got)
+	}
+	sort.Strings(want)
+	if d := bantest.DeletedHandles(got); strings.Join(d, " ") != strings.Join(want, " ") {
+		t.Errorf("deleted handles\n%v\nwant\n%v", d, want)
+	}
+}
+
 // Against a real nft: a chain holding 50 copies of the base layer (what the
 // old blind re-add left, ~268 on mars) is brought back to one copy of each
 // rule by the next EnsureBase, and a second EnsureBase deletes nothing more.
+// nftlib runs the same driver (its TestLiveNFTDedupeBaseRules).
 //
 //	unshare -rn env CFM_NFT_INTEGRATION=1 go test ./internal/firewall/nft/ -run LiveNFTDedupe -v
 func TestLiveNFTDedupeBaseRules(t *testing.T) {
-	if os.Getenv("CFM_NFT_INTEGRATION") != "1" {
-		t.Skip("set CFM_NFT_INTEGRATION=1 (root + nft, isolated netns) to run")
-	}
-	if os.Geteuid() != 0 {
-		t.Skip("needs root")
-	}
-	if out, err := exec.Command("nft", "list", "chains", "inet").CombinedOutput(); err == nil && listingHasCFMTable(string(out)) {
-		t.Fatalf("refusing to run: an `inet cfm` table already exists — run this test inside an isolated netns (unshare -rn)")
-	}
-	b := New()
-	t.Cleanup(func() { _ = b.DropEverything() })
-	if err := b.EnsureBase(); err != nil {
-		t.Fatalf("EnsureBase: %v", err)
-	}
-	// Re-add the whole base layer 49 times, as a blind EnsureBase did.
-	var sb strings.Builder
-	for i := 0; i < 49; i++ {
-		early := baseEarlyRules(false)
-		for j := len(early) - 1; j >= 0; j-- {
-			fmt.Fprintf(&sb, "insert rule inet cfm input position 0 %s\n", early[j])
-		}
-		for _, r := range baseLateRules {
-			fmt.Fprintf(&sb, "add rule inet cfm input %s\n", r)
-		}
-		sb.WriteString("add rule inet cfm input jump flood\n")
-	}
-	cmd := exec.Command("nft", "-f", "-")
-	cmd.Stdin = strings.NewReader(sb.String())
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("seeding copies: %v %s", err, out)
-	}
-	count := func() map[string]int {
-		out, err := exec.Command("nft", "list", "chain", "inet", "cfm", "input").Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		n := map[string]int{}
-		for _, ln := range strings.Split(string(out), "\n") {
-			n[strings.TrimSpace(ln)]++
-		}
-		return n
-	}
-	if c := count()["ip saddr @block_v4 drop"]; c < 50 {
-		t.Fatalf("seeding left %d copies of ip saddr @block_v4 drop, want >= 50", c)
-	}
-	if err := b.EnsureBase(); err != nil {
-		t.Fatalf("EnsureBase after seeding: %v", err)
-	}
-	after := count()
-	for _, e := range baseDedupeExprs(baseEarlyRules(false), baseLateRules) {
-		k := strings.ReplaceAll(e, "iif lo", `iif "lo"`)
-		if strings.Contains(e, "icmp") {
-			continue // ICMP rate limiting is off here: no jump was written
-		}
-		if after[k] != 1 {
-			t.Errorf("%q: %d copies after EnsureBase, want 1", k, after[k])
-		}
-	}
-	if after[baseEstablishedAccept] < 1 {
-		t.Errorf("the established accept is gone")
-	}
-	// The order the base layer wants: loopback first, the self accept above
-	// every block, the block drops above the established accept.
-	out, _ := exec.Command("nft", "list", "chain", "inet", "cfm", "input").Output()
-	listing := string(out)
-	lo, self, blk, est := strings.Index(listing, `iif "lo" accept`), strings.Index(listing, "ip saddr @self_v4 accept"),
-		strings.Index(listing, "ip saddr @block_v4 drop"), strings.Index(listing, baseEstablishedAccept)
-	if !(lo >= 0 && lo < self && self < blk && blk < est) {
-		t.Errorf("base order broken after dedupe:\n%s", listing)
-	}
+	bantest.RunDedupeBaseRules(t, func() firewall.Backend { return New() })
 }
 
 // When `nft list chains inet` cannot be read, nothing says the input chain is

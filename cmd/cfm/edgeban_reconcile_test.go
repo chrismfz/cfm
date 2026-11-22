@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"testing"
 	"time"
 
@@ -110,36 +109,37 @@ func TestEdgeBanReconcileSelfIsAllowed(t *testing.T) {
 }
 
 // Both lists are the input chain's own: every set EnsureBase accepts before
-// its block drops, on both backends, and the two host block sets.
+// its block drops (both backends write firewall.BaseEarlyRules /
+// BaseLateRules), and the host block sets.
 func TestEdgeBanSetsMatchTheInputChain(t *testing.T) {
-	acceptRe := regexp.MustCompile("saddr @([a-z0-9_]+) accept`")
-	for _, src := range []string{"../../internal/firewall/nft/nft.go", "../../internal/firewall/nftlib/lifecycle.go"} {
-		raw, err := os.ReadFile(src)
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := map[string]bool{}
-		for _, m := range acceptRe.FindAllStringSubmatch(string(raw), -1) {
+	acceptRe := regexp.MustCompile(`saddr @([a-z0-9_]+) accept$`)
+	dropRe := regexp.MustCompile(`^ip6? saddr @([a-z0-9_]+) drop$`)
+	got, drops := map[string]bool{}, map[string]bool{}
+	for _, r := range append(firewall.BaseEarlyRules(true), firewall.BaseLateRules()...) {
+		if m := acceptRe.FindStringSubmatch(r); m != nil {
 			got[m[1]] = true
 		}
-		want := map[string]bool{}
-		for _, s := range edgeBanAllowSets {
-			want[s] = true
+		if m := dropRe.FindStringSubmatch(r); m != nil {
+			drops[m[1]] = true
 		}
-		for s := range got {
-			if !want[s] && !strings.HasPrefix(s, "debug") {
-				t.Errorf("%s: the input chain accepts @%s, edgeBanAllowSets does not read it", src, s)
-			}
+	}
+	want := map[string]bool{}
+	for _, s := range edgeBanAllowSets {
+		want[s] = true
+	}
+	for s := range got {
+		if !want[s] {
+			t.Errorf("the input chain accepts @%s, edgeBanAllowSets does not read it", s)
 		}
-		for s := range want {
-			if !got[s] {
-				t.Errorf("%s: edgeBanAllowSets reads %s, the input chain accepts no such set", src, s)
-			}
+	}
+	for s := range want {
+		if !got[s] {
+			t.Errorf("edgeBanAllowSets reads %s, the input chain accepts no such set", s)
 		}
-		for _, s := range edgeBanBlockSets {
-			if !strings.Contains(string(raw), "saddr @"+s+" drop`") {
-				t.Errorf("%s: no `saddr @%s drop` rule", src, s)
-			}
+	}
+	for _, s := range edgeBanBlockSets {
+		if !drops[s] {
+			t.Errorf("no `saddr @%s drop` base rule", s)
 		}
 	}
 }

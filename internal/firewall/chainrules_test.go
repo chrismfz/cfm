@@ -55,3 +55,24 @@ func TestChainRules_DuplicateHandles(t *testing.T) {
 		t.Errorf("DuplicateHandles = %v, want [41 44] (all but the top-most iif lo)", got)
 	}
 }
+
+// BaseDedupeExprs covers every base rule each engine writes, ICMP jumps
+// always (a copy left from ICMP rate limiting is still a copy) and the flood
+// jump, once each, but never the ports policy's established accept.
+func TestBaseDedupeExprs(t *testing.T) {
+	got := map[string]int{}
+	for _, e := range BaseDedupeExprs() {
+		got[e]++
+	}
+	if got[BaseEstablishedAccept] != 0 {
+		t.Errorf("the established accept is the ports policy's to position")
+	}
+	for _, e := range append(append(BaseEarlyRules(true), BaseLateRules()...), BaseFloodJump) {
+		if e != BaseEstablishedAccept && got[e] != 1 {
+			t.Errorf("%q listed %d times, want once", e, got[e])
+		}
+	}
+	if c := ParseChainRules("iif \"lo\" accept # handle 3\niif lo accept\nip protocol icmp icmp type echo-request jump flood\n").Count; c(`iif lo accept`) != 2 || c(`icmp type echo-request jump flood`) != 1 || c(`jump flood`) != 0 {
+		t.Errorf("Count must match the printed key exactly, not a substring")
+	}
+}

@@ -229,106 +229,31 @@ func (b *Backend) refreshSelfSets() {
 	_ = b.ReplaceSetFlushAdd("self_v6", v6, nil)
 }
 
-// icmpFloodJumps send echo-requests through the flood chain when ICMP rate
-// limiting is on.
-var icmpFloodJumps = []string{
-	`ip protocol icmp icmp type echo-request jump flood`,
-	`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
-}
-
 // applyBaseInputRules installs all permanent set-matching rules in the input chain.
 // Each rule is added only if it is not already present (idempotent): one read
-// of the chain, then the missing rules in one nft run (baseRulesScript).
+// of the chain, then the missing rules in one nft run (baseRulesScript), with
+// the extra copies of every base rule deleted in the same run.
 // newChain says the chain was created by this EnsureBase, so it holds no rules
 // yet. The error says the rules may be incomplete; they are best effort.
+//
+// The rules and their order are the nft backend's (firewall.BaseEarlyRules,
+// firewall.BaseLateRules, firewall.BaseFloodJump): the early group inserted
+// at position 0 in reverse so the first ends on top, the late group appended,
+// the flood jump last (before the ports policy's rules).
 func (b *Backend) applyBaseInputRules(newChain bool) error {
-	var ins, adds []string
-	insertRule := func(expr string) { ins = append(ins, expr) }
-	addRule := func(expr string) { adds = append(adds, expr) }
-
-	// Early rules inserted at position 0 in reverse order so the final
-	// top-down order matches the nft backend's EnsureBase:
-	//   1 iif lo accept
-	//   2 ip saddr @self_v4 accept
-	//   3 ip6 saddr @self_v6 accept
-	//   4-13 allow sets (manual, dyn, ext, nets)
-	//   14-21 block sets (manual, ext, nets)
-	//   (optional) ICMP → jump flood
-
-	icmpEnabled := b.cfg != nil && b.cfg.Hardening.ICMPRate > 0
-
-	early := []string{
-		`iif "lo" accept`,
-		`ip saddr @self_v4 accept`,
-		`ip6 saddr @self_v6 accept`,
-		`ip saddr @allow_v4 accept`,
-		`ip6 saddr @allow_v6 accept`,
-		`ip saddr @allow_dyn_v4 accept`,
-		`ip6 saddr @allow_dyn_v6 accept`,
-		`ip saddr @allow_ext_v4_hosts accept`,
-		`ip6 saddr @allow_ext_v6_hosts accept`,
-		`ip saddr @allow_ext_v4_nets accept`,
-		`ip6 saddr @allow_ext_v6_nets accept`,
-		`ip saddr @allow_v4_nets accept`,
-		`ip6 saddr @allow_v6_nets accept`,
-		`ip saddr @block_v4 drop`,
-		`ip6 saddr @block_v6 drop`,
-		`ip saddr @block_ext_v4_hosts drop`,
-		`ip6 saddr @block_ext_v6_hosts drop`,
-		`ip saddr @block_ext_v4_nets drop`,
-		`ip6 saddr @block_ext_v6_nets drop`,
-		`ip saddr @block_v4_nets drop`,
-		`ip6 saddr @block_v6_nets drop`,
-		`ip6 saddr @block_v6_clients drop`,
-	}
-	if icmpEnabled {
-		early = append(early, icmpFloodJumps...)
-	}
-
-	// Insert in reverse so the first item ends up at the top.
+	early := firewall.BaseEarlyRules(b.cfg != nil && b.cfg.Hardening.ICMPRate > 0)
+	ins := make([]string, 0, len(early))
 	for i := len(early) - 1; i >= 0; i-- {
-		insertRule(early[i])
+		ins = append(ins, early[i])
 	}
-
-	// Established/related drops for blocked sets (before the general est/rel accept).
-	addRule(`ct state established,related ip saddr @block_v4 drop`)
-	addRule(`ct state established,related ip6 saddr @block_v6 drop`)
-	addRule(`ct state established,related ip saddr @block_ext_v4_hosts drop`)
-	addRule(`ct state established,related ip saddr @block_ext_v4_nets drop`)
-	addRule(`ct state established,related ip6 saddr @block_ext_v6_hosts drop`)
-	addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`)
-	addRule(`ct state established,related ip saddr @block_v4_nets drop`)
-	addRule(`ct state established,related ip6 saddr @block_v6_nets drop`)
-	addRule(`ct state established,related ip6 saddr @block_v6_clients drop`)
-	addRule(`ct state established,related accept`)
-
-	// Duplicate allow/block rules appended (nft backend adds them both early and late).
-	addRule(`ip saddr @allow_v4 accept`)
-	addRule(`ip6 saddr @allow_v6 accept`)
-	addRule(`ip saddr @allow_dyn_v4 accept`)
-	addRule(`ip6 saddr @allow_dyn_v6 accept`)
-	addRule(`ip saddr @allow_ext_v4_hosts accept`)
-	addRule(`ip6 saddr @allow_ext_v6_hosts accept`)
-	addRule(`ip saddr @allow_ext_v4_nets accept`)
-	addRule(`ip6 saddr @allow_ext_v6_nets accept`)
-	addRule(`ip saddr @block_v4 drop`)
-	addRule(`ip6 saddr @block_v6 drop`)
-	addRule(`ip saddr @block_ext_v4_hosts drop`)
-	addRule(`ip6 saddr @block_ext_v6_hosts drop`)
-	addRule(`ip saddr @block_ext_v4_nets drop`)
-	addRule(`ip6 saddr @block_ext_v6_nets drop`)
-	addRule(`ip saddr @block_v4_nets drop`)
-	addRule(`ip6 saddr @block_v6_nets drop`)
-
-	// jump flood at the end of the base layer (before ports policy rules).
-	addRule("jump flood")
+	adds := append(firewall.BaseLateRules(), firewall.BaseFloodJump)
 
 	// Rules are added (only piled-up copies are ever deleted), so an unread
 	// chain must not be taken for an empty one — that would add every rule a
 	// second time — unless this
 	// EnsureBase just created it: then it is empty, and leaving it so would
 	// leave the node without its allow/block rules.
-	chain, err := b.chainTextCLI("input")
+	chain, err := b.inputChainTextCLI()
 	if err != nil && !newChain {
 		err = fmt.Errorf("can't read the input chain, left as is: %w", err)
 		logging.Logf("[nftlib] base input rules: %v", err)
@@ -338,7 +263,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	if len(stmts) == 0 {
 		return nil
 	}
-	err = b.nftExec(strings.Join(stmts, "\n"))
+	err = b.nftExecTimeout(strings.Join(stmts, "\n"), firewall.BaseScriptTimeout(len(stmts)))
 	if err == nil {
 		if n := countPrefix(stmts, "delete rule "); n > 0 {
 			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", n)
@@ -350,22 +275,37 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	// killed at its timeout), and running the statements again would
 	// duplicate them.
 	runErr := fmt.Errorf("one nft run of %d statements failed: %s", len(stmts), errTail(err, 300))
-	chain, err = b.chainTextCLI("input")
+	chain, err = b.inputChainTextCLI()
 	if err != nil {
 		err = fmt.Errorf("%v; can't re-read the input chain, left as is: %w", runErr, err)
 		logging.Logf("[nftlib] base input rules: %v", err)
 		return err
 	}
 	stmts = baseRulesScript(chain, ins, adds)
-	logging.Logf("[nftlib] base input rules: %v; applying %d one by one", runErr, len(stmts))
+	// The deletes stay one transaction (a node can hold thousands, and on EL8
+	// every nft run costs seconds); only the rules to add go one by one.
+	dels := countPrefix(stmts, "delete rule ") // baseRulesScript puts them first
+	logging.Logf("[nftlib] base input rules: %v; applying %d deletes in one run, %d statements one by one", runErr, dels, len(stmts)-dels)
+	var fails []string
+	if dels > 0 {
+		if err := b.nftExecTimeout(strings.Join(stmts[:dels], "\n"), firewall.BaseScriptTimeout(dels)); err != nil {
+			logging.Logf("[nftlib] EnsureBase: removing %d duplicate base rules failed: %s", dels, errTail(err, 300))
+			fails = append(fails, fmt.Sprintf("the run deleting %d duplicate base rules failed too", dels))
+		} else {
+			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", dels)
+		}
+	}
 	failed := 0
-	for _, st := range stmts {
+	for _, st := range stmts[dels:] {
 		if b.nftExec(st) != nil {
 			failed++
 		}
 	}
 	if failed > 0 {
-		return fmt.Errorf("%v; %d of %d single statements failed too", runErr, failed, len(stmts))
+		fails = append(fails, fmt.Sprintf("%d of %d single statements failed too", failed, len(stmts)-dels))
+	}
+	if len(fails) > 0 {
+		return fmt.Errorf("%v; %s", runErr, strings.Join(fails, "; "))
 	}
 	return nil
 }
@@ -396,7 +336,10 @@ func errTail(err error, n int) string {
 // counts as present per firewall.ChainRules, the rules queued before it
 // included — the check the one-nft-process-per-rule version made against the
 // chain as it grew, except that `jump flood` must be a whole rule. Extra
-// copies of the rules that check used to miss are deleted first.
+// copies of every base rule (firewall.BaseDedupeExprs: all but the ports
+// policy's established accept) are deleted first, the top-most of each kept,
+// so the whole script is one transaction: a packet sees all the copies or
+// one, never none.
 func baseRulesScript(chain string, ins, adds []string) []string {
 	have := firewall.ParseChainRules(chain)
 	missing := func(expr string) bool {
@@ -407,9 +350,11 @@ func baseRulesScript(chain string, ins, adds []string) []string {
 		return true
 	}
 	var stmts []string
-	for _, h := range have.DuplicateHandles(append([]string{`iif "lo" accept`, `jump flood`}, icmpFloodJumps...)...) {
+	dups := have.DuplicateHandles(firewall.BaseDedupeExprs()...)
+	for _, h := range dups {
 		stmts = append(stmts, "delete rule inet cfm input handle "+h)
 	}
+	have.Forget(dups)
 	// A rule written after the rest (firewall.BaseRuleAnchors) goes right
 	// after its anchor on a chain that already holds it: an insert at 0
 	// would put it above the self / allow accepts, an append below the ports

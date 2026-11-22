@@ -65,6 +65,19 @@ func (c *ChainRules) FirstHandle(expr string) string {
 	return ""
 }
 
+// Count is how many listed (or queued) rules are exactly expr, for the test
+// drivers that count copies (bantest.RunDedupeBaseRules). Not a presence
+// check: unlike Has / Present it never matches a rule inside a longer one.
+func (c *ChainRules) Count(expr string) int {
+	k, n := ruleKey(expr), 0
+	for _, r := range c.rules {
+		if r.key == k {
+			n++
+		}
+	}
+	return n
+}
+
 // AnchoredRule is a base rule added after the rules it was written to follow
 // existed: on a chain that already holds Anchor, a missing Expr goes right
 // after the anchor's first copy (`add rule … position <handle>`), not where

@@ -21,6 +21,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **On a node running the nftlib engine, EnsureBase now deletes every extra
+  copy of each base rule in the `inet cfm input` chain, as the nft engine's
+  does (below).** An old exec-engine bug re-added the whole base
+  layer whenever its read of the chain failed (141–268 copies of each rule on
+  earth, mars and virgo, 2026-11-22); nftlib removed only the loopback accept,
+  the flood jump and the ICMP jumps, so a node switched to `nftlib` before its
+  first restart on the fixed nft engine kept every other copy, and its flood
+  meters counted each packet once per leftover `jump flood`. The extras go in
+  the same `nft -f` transaction as the missing rules, the top-most copy of
+  each kept, and the ports policy's own established/related accept is left
+  alone. Both engines now write and deduplicate ONE list of base rules.
+  nftlib's read of the input chain now gets the nft engine's 30 s (it had
+  10 s, and EL8's `list chain` takes 4–12 s: a timed-out read leaves the
+  chain, duplicates included, as it is), and on both engines the run that
+  deletes the duplicates starts from 30 s, not 10 s, plus 1 s per 1000.
 - **On EL8 nodes running the nft engine, the flood-counter dump that runs on
   every 20 s tick no longer holds an nft slot for seconds.** It read the
   counters with `nft list counters table inet cfm`, which on EL8's nft 1.0.4

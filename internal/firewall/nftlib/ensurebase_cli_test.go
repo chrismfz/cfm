@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	"cfm/internal/firewall"
+	"cfm/internal/firewall/bantest"
 )
 
 // fakeNFTChain puts an `nft` script first in PATH that prints chain for
@@ -81,7 +85,7 @@ func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 		t.Fatalf("%d nft processes, want 2 (one read, one write):\n%s", n, got)
 	}
 	first := strings.Index(got, `insert rule inet cfm input position 0 ip6 saddr @block_v6_clients drop`)
-	last := strings.Index(got, `insert rule inet cfm input position 0 iif "lo" accept`)
+	last := strings.Index(got, `insert rule inet cfm input position 0 iif lo accept`)
 	flood := strings.Index(got, "add rule inet cfm input jump flood")
 	if first < 0 || last < 0 || first > last || flood < last {
 		t.Errorf("want the early rules inserted bottom-up (so iif lo ends on top), then the adds, jump flood last:\n%s", got)
@@ -166,7 +170,7 @@ func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
 	if err := (&Backend{}).applyBaseInputRules(true); err != nil {
 		t.Fatalf("applyBaseInputRules on a new chain: %v", err)
 	}
-	if got := readNFTLog(t, log); strings.Count(got, "ARGS -f -") != 1 || !strings.Contains(got, `iif "lo" accept`) {
+	if got := readNFTLog(t, log); strings.Count(got, "ARGS -f -") != 1 || !strings.Contains(got, `iif lo accept`) {
 		t.Errorf("want the rules written to the new chain in one run:\n%.300s", got)
 	}
 }
@@ -208,7 +212,7 @@ func TestBaseRulesScript_JumpFloodAndDuplicates(t *testing.T) {
 		"\t\tip protocol icmp icmp type echo-request jump flood # handle 9\n" +
 		"\t\tiif \"lo\" accept # handle 10\n" +
 		"\t}\n}\n"
-	got := baseRulesScript(chain, []string{`iif "lo" accept`, icmpFloodJumps[0]}, []string{"jump flood"})
+	got := baseRulesScript(chain, []string{`iif "lo" accept`, firewall.ICMPFloodJumps[0]}, []string{"jump flood"})
 	want := []string{
 		"delete rule inet cfm input handle 10",
 		"delete rule inet cfm input handle 9",
@@ -242,5 +246,59 @@ func TestBaseRulesScriptAnchorsTheClientDrops(t *testing.T) {
 	fresh := baseRulesScript("", []string{`ip6 saddr @block_v6_clients drop`}, nil)
 	if len(fresh) != 1 || fresh[0] != "insert rule inet cfm input position 0 ip6 saddr @block_v6_clients drop" {
 		t.Fatalf("a new chain: %v", fresh)
+	}
+}
+
+// Engine parity: on the chain one blind re-add of the base layer leaves,
+// nftlib deletes exactly the handles the nft backend does (the same fixture
+// and answer, bantest.DuplicatedBaseChain; nft's twin is
+// TestEnsureBase_DedupeParity), every one in the run that adds nothing, and
+// the established accept the ports policy positions is never touched.
+func TestApplyBaseInputRules_DedupeParity(t *testing.T) {
+	chain, want := bantest.DuplicatedBaseChain()
+	log := fakeNFTChain(t, chain, 0)
+	if err := (&Backend{}).applyBaseInputRules(false); err != nil {
+		t.Fatalf("applyBaseInputRules: %v", err)
+	}
+	got := readNFTLog(t, log)
+	if n := strings.Count(got, "ARGS -f -"); n != 1 {
+		t.Errorf("%d nft -f runs, want the deletes in ONE transaction:\n%s", n, got)
+	}
+	if strings.Contains(got, "insert rule") || strings.Contains(got, "add rule") {
+		t.Errorf("re-added a rule the chain already holds:\n%s", got)
+	}
+	sort.Strings(want)
+	if d := bantest.DeletedHandles(got); strings.Join(d, " ") != strings.Join(want, " ") {
+		t.Errorf("deleted handles\n%v\nwant\n%v", d, want)
+	}
+}
+
+// A failed run's fallback keeps the deletes in one transaction (a node can
+// hold thousands; one nft run each costs seconds on EL8) and runs only the
+// rules to add one by one.
+func TestApplyBaseInputRules_FallbackKeepsDeletesInOneRun(t *testing.T) {
+	chain, _ := bantest.DuplicatedBaseChain()
+	// Drop the flood jumps so the script also adds one rule.
+	chain = strings.NewReplacer("\t\tjump flood # handle", "\t\tudp dport 9 drop # handle").Replace(chain)
+	log := fakeNFTChain(t, chain, 1)
+	_ = (&Backend{}).applyBaseInputRules(false)
+	got := readNFTLog(t, log)
+	if n := strings.Count(got, "ARGS -f -"); n != 3 {
+		t.Errorf("%d nft -f runs, want the failed script, the deletes, the one add:\n%s", n, got)
+	}
+	last := got[strings.LastIndex(got, "SCRIPT "):]
+	if !strings.HasPrefix(last, "SCRIPT add rule inet cfm input jump flood") {
+		t.Errorf("last run %q, want the flood jump alone", last)
+	}
+}
+
+// When the fallback's delete run fails too, the error says so in its own
+// words, not as one statement among the rest.
+func TestApplyBaseInputRules_FallbackReportsFailedDeletes(t *testing.T) {
+	chain, want := bantest.DuplicatedBaseChain()
+	fakeNFTChain(t, chain, 2) // the whole script, then the delete run
+	err := (&Backend{}).applyBaseInputRules(false)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("the run deleting %d duplicate base rules failed too", len(want))) {
+		t.Errorf("err = %v, want the failed delete run named with its %d deletes", err, len(want))
 	}
 }
