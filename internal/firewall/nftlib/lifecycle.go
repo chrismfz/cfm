@@ -6,13 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
 	"strings"
 	"syscall"
 	"time"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/feedutil"
 	"cfm/internal/logging"
 	"github.com/google/nftables"
 )
@@ -226,29 +224,9 @@ func (b *Backend) existingInputChain() *nftables.Chain {
 // over a second (the CLI loads the whole ruleset, set elements included).
 func (b *Backend) refreshSelfSets() {
 	b.selfResolver.Refresh()
-	v4, v6 := selfSetElems(b.selfResolver.LocalIPs())
+	v4, v6 := firewall.SelfSetElems(b.selfResolver.LocalIPs())
 	_ = b.ReplaceSetFlushAdd("self_v4", v4, nil) // logs its own failure
 	_ = b.ReplaceSetFlushAdd("self_v6", v6, nil)
-}
-
-// selfSetElems is what self_v4/self_v6 hold: loopback, link-local and each
-// local address, as CIDRs with overlaps merged. The sets are interval sets,
-// which refuse overlapping elements, and a local link-local address lies
-// inside fe80::/10.
-func selfSetElems(local []string) (v4, v6 []string) {
-	v4 = []string{"127.0.0.0/8"}
-	v6 = []string{"::1/128", "fe80::/10"}
-	for _, s := range local {
-		ip := net.ParseIP(s)
-		switch {
-		case ip == nil:
-		case ip.To4() != nil:
-			v4 = append(v4, ip.To4().String()+"/32")
-		default:
-			v6 = append(v6, ip.String()+"/128")
-		}
-	}
-	return feedutil.NormalizeCIDRsV4(v4), feedutil.NormalizeCIDRsV6(v6)
 }
 
 // icmpFloodJumps send echo-requests through the flood chain when ICMP rate

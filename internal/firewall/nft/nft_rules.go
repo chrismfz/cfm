@@ -43,8 +43,12 @@ func (b *Backend) dumpFloodCountersOnce() {
 	// Use a generous timeout so nft gets enough time under load, without stalling the daemon tick path.
 	out, err := b.runCmdOutputWithTimeout("list counters table inet cfm", 30*time.Second)
 	if err != nil {
-		// Προσπάθησε να επαναφέρεις τη βάση και βγες ήσυχα.
-		_ = b.EnsureBase()
+		// Repair the base only if the table is really gone: a timed-out read
+		// (this listing loads every set element, ~2 s on a large table) is not
+		// a missing table.
+		if b.probeTable() == tableAbsent {
+			_ = b.EnsureBase()
+		}
 		logging.Logf("[flood] cannot list counters: %v", err)
 		return
 	}
@@ -729,11 +733,23 @@ func (b *Backend) loadPortScannerOnce() {
 	b.abMu.Lock()
 	defer b.abMu.Unlock()
 
-	// σιγουρέψου ότι υπάρχει η βάση
-	if !b.tableExists() {
+	// Make sure the base exists, but repair only on a DEFINITE absence: a probe
+	// that timed out (nft slots busy on a loaded node) used to read as "no
+	// table" here and re-ran EnsureBase from every tick. On an unknown, skip
+	// this tick's load; the next tick asks again.
+	switch b.probeTable() {
+	case tableAbsent:
 		if err := b.EnsureBase(); err != nil {
 			return
 		}
+	case tableUnknown:
+		// Say so, at most every 10 minutes: a node whose nft slots stay
+		// saturated would otherwise stop loading the portscan sets silently.
+		if time.Since(b.portscanSkipLogged) > 10*time.Minute {
+			b.portscanSkipLogged = time.Now()
+			logging.Logf("[portscan] skipped this tick's load: the nft table probe did not answer in time (nft busy); retrying next tick")
+		}
+		return
 	}
 	b.ensurePortscanSets()
 

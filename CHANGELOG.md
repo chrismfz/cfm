@@ -20,7 +20,44 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A cfm restart no longer leaves the edge without its bridge and ingest
+  sockets for ~30 s; the nft engine no longer re-runs EnsureBase every minute
+  or two, and no longer piles copies of its base rules into the input chain.**
+  On EL8 (nft 1.0.4) with the fleet's large ban and feed sets, many nft
+  listings load every set element first (measured idle: `list tables` 3.3–12.3
+  s, `list chain inet cfm <chain>` 4–12 s, even for a chain that does not
+  exist; EL9/EL10's nft answers in ms). EnsureBase ran several, plus one nft
+  run per self-set statement: 28.9 s on virgo's 2026.11.22 upgrade, during
+  which every bridge lookup failed open and the access-log lines meant for the
+  webdetector were lost (66 `[crit] connect() … No such file` lines in the edge
+  error log). Its `list tables` probe also ran past its 5 s deadline, read as
+  "no table" and re-ran EnsureBase (20–30 s each) from the 20 s tick all day on
+  earth, mars and virgo. Each re-run whose read of the input chain failed added
+  every base rule again: mars's input chain held ~268 copies of each (7,546
+  rules every packet walks), earth's and virgo's 141.
+  - Table and chain existence, and the input chain's priority, now come from
+    one `nft list chains inet` (3–10 ms on every node); a probe that times out
+    or fails is "unknown", and only a definite absence starts a repair
+    (portscan load, flood rules, counters dump). `cfm reset` / `cfm disable`
+    try their flush / delete on an unknown instead of reporting success.
+  - An input chain whose rules cannot be read gets no rules added (logged);
+    the next EnsureBase removes every extra copy of each base rule in one
+    transaction, keeping the top-most one, so the first restart after this
+    upgrade brings those chains back to one copy of each rule (7,531 deletes
+    on mars, 0.67 s in nft's check mode). **Expect flood limits to look
+    looser on those nodes afterwards:** each copy of `jump flood` (and of the
+    ICMP jumps) ran the flood chain again, so its per-IP meters counted every
+    packet ~141–268 times. They now act at their configured values; retune
+    nothing that was set against the old effective strictness without
+    looking at it first.
+  - The self sets are compared with the kernel's and left alone when
+    unchanged (every restart); a change is one transaction, and if nft refuses
+    it each set is retried alone, then with loopback and link-local only.
+  - EnsureBase on a restart: on EL8 about the one input-chain read left (~4 s
+    on mars, idle), was ~30 s; ~0.6 s on nft 1.0.9 in a netns with a 200k-entry
+    feed set, was 10 s. nft engine only; nftlib already wrote the self sets
+    over netlink.
 
 ## 2026.11.22
 
