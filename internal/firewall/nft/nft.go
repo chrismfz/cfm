@@ -539,6 +539,17 @@ func (b *Backend) EnsureBase() (err error) {
 	resInput, readErr := runNFTCommand(readCtx, "-a", "list", "chain", family, tableName, "input")
 	readCancel()
 	if readErr != nil && !needCreate {
+		// Unlisted chains AND unread rules: the chain was declared above
+		// without knowing whether it existed, so it may be one this run just
+		// created, empty, with policy accept: no self / allow / block rule at
+		// all. Reporting success would leave the node open with nothing to
+		// repair it (the daemon's repairs act on an absent TABLE only); the
+		// error fails the daemon's start instead, and systemd starts it again.
+		// Adding the rules blind is not the answer either (a chain that did
+		// exist would get a copy of each).
+		if !chainsOK {
+			return fmt.Errorf("EnsureBase: neither the chain list nor the input chain could be read (%s); the input chain may be new and empty, so its base rules are unknown", firstLine(readErr.Error()))
+		}
 		logging.Logf("[nft] WARNING: EnsureBase cannot read the input chain (%v); its base rules are left as they are, unchecked until the next restart (adding them blind would duplicate every one)", firstLine(readErr.Error()))
 		unchecked = true
 		return nil
@@ -598,11 +609,18 @@ func (b *Backend) EnsureBase() (err error) {
 	// --- EARLY RULES (insert in reverse so final order is top-down) ---
 
 	// helper stays the same
+	// A missing early rule on a chain that holds the rest goes right after
+	// the nearest early rule above it (firewall.ChainRules.EarlyAnchorHandle):
+	// an insert at 0 would put a re-added drop above the allow accepts.
 	addEarly := func(expr string) {
 		if ruleInInput(expr) {
 			return
 		}
-		if err := b.nftCmd(place(expr, fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr))); err == nil {
+		cmd := fmt.Sprintf(`insert rule %s %s input position 0 %s`, family, tableName, expr)
+		if h := inputRules.EarlyAnchorHandle(expr, early); h != "" {
+			cmd = fmt.Sprintf(`add rule %s %s input position %s %s`, family, tableName, h, expr)
+		}
+		if err := b.nftCmd(cmd); err == nil {
 			recordRuleInInput(expr)
 		}
 	}

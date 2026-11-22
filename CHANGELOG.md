@@ -21,6 +21,29 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **The firewall's base rules: two cases where the input chain could be left
+  open while EnsureBase reported success.**
+  - **A missing plain block drop was never put back.** The "is this base rule
+    already there?" check matched a rule inside a longer one, so a missing
+    `ip saddr @block_v4 drop` (or any plain allow/block rule) read present
+    inside its `ct state established,related …` twin. That twin drops only
+    connections already open: new connections from banned addresses reached
+    the ports policy's accepts, and EnsureBase never re-added the rule. A
+    rule inside another base rule no longer counts (both engines). A missing
+    early rule now goes back right after the nearest early rule above it
+    that the chain holds, not at the top: there, a re-added drop would sit
+    above the allow accepts and drop an allowlisted address that is also in
+    a block set.
+  - **An unreadable chain whose existence was unknown read as success.** When
+    neither `nft list chains inet` nor the input chain's rules could be read
+    (two timeouts in a row), the exec engine declared the chain blind and
+    reported success: on a cold boot or after `cfm reset` that chain could be
+    new and empty, with policy accept and no allow/block rule, and no repair
+    acts on a chain whose table exists. EnsureBase now fails there, so the
+    daemon's start fails and systemd starts it again. nftlib took the same
+    case for a new chain and added every rule blind (duplicates); it now
+    fails the same way. A chain that was listed and cannot be read is still
+    left as it is (best effort), as before.
 - **On EL8 nodes, the ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT, on every
   start and config reload) no longer times out reading the firewall.** Its
   two reads of `inet cfm input` / `output` ran under nft's 10 s default,

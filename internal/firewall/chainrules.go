@@ -5,14 +5,15 @@ import "strings"
 // ChainRules answers EnsureBase's "is this base rule already in the chain?"
 // from one `nft -a list chain` listing, on both backends.
 //
-// A rule counts as present when a listed rule contains it (the check the base
-// rules have always used, so an established/related copy of a block rule
-// counts), compared as nft prints rules: quotes dropped (`iif lo` is printed
+// For Has, a rule counts as present when a listed rule contains it, compared
+// as nft prints rules: quotes dropped (`iif lo` is printed
 // `iif "lo"`) and an ICMP type match without the protocol match that implies
 // it (nft 1.0.9 prints the ICMP jumps as written; older versions may not). A
 // bare verdict (`jump flood`) must be a whole rule: as a substring it is found
 // inside every `… jump flood` rule, and with ICMP rate limiting on, the plain
 // `jump flood` that sends TCP/UDP through the flood chain was never added.
+// Present (EnsureBase's check) is stricter: a rule inside another BASE rule
+// does not count (the plain block drop inside its established/related twin).
 type ChainRules struct {
 	rules []chainRule // listing order, then rules queued with Add
 }
@@ -97,23 +98,82 @@ var BaseRuleAnchors = []AnchoredRule{
 	{Expr: `ct state established,related ip6 saddr @block_v6_clients drop`, Anchor: `ct state established,related ip6 saddr @block_v6_nets drop`},
 }
 
-// Present is Has, except for an anchored rule (BaseRuleAnchors), which must be
-// present as itself: Has matches a rule inside a longer one, and the plain
-// drop reads present inside its `ct state established,related …` twin, so a
-// missing one would never be added back.
+// Present is EnsureBase's "is this base rule already in the chain?". A rule
+// counts as present when a listed rule is exactly expr, or contains it (as
+// Has: an nft that prints a rule with more text around it) unless that
+// listed rule is itself another base rule. The plain drops and accepts are
+// each inside their `ct state established,related …` twin, and that twin
+// matches only packets of connections already open: a missing plain
+// `ip saddr @block_v4 drop` read present inside it, was never added back,
+// and new connections from banned addresses reached the ports policy's
+// accepts. An anchored rule (BaseRuleAnchors) must be present as itself.
 func (c *ChainRules) Present(expr string) bool {
 	k := ruleKey(expr)
+	for _, r := range c.rules {
+		if r.key == k {
+			return true
+		}
+	}
+	if isBareVerdict(k) {
+		return false
+	}
 	for _, a := range BaseRuleAnchors {
 		if ruleKey(a.Expr) == k {
-			for _, r := range c.rules {
-				if r.key == k {
-					return true
-				}
-			}
 			return false
 		}
 	}
-	return c.Has(expr)
+	base := baseRuleKeys()
+	for _, r := range c.rules {
+		if _, isBase := base[r.key]; isBase {
+			continue
+		}
+		if strings.Contains(" "+r.key+" ", " "+k+" ") {
+			return true
+		}
+	}
+	return false
+}
+
+// baseRuleKeys is the ruleKey of every base input rule (both ICMP variants,
+// the flood jump and the ports policy's established accept): the rules that
+// are each wanted as themselves, so one never stands in for another.
+func baseRuleKeys() map[string]struct{} {
+	m := map[string]struct{}{}
+	for _, e := range BaseEarlyRules(true) {
+		m[ruleKey(e)] = struct{}{}
+	}
+	for _, e := range BaseLateRules() {
+		m[ruleKey(e)] = struct{}{}
+	}
+	m[ruleKey(BaseFloodJump)] = struct{}{}
+	m[ruleKey(BaseEstablishedAccept)] = struct{}{}
+	return m
+}
+
+// EarlyAnchorHandle is the handle a missing rule of the early group (early, in
+// its top-down order) must be added after on this chain: its anchor
+// (BaseRuleAnchors), else the nearest rule above it in early that is listed.
+// "" when none is (a new chain: the insert at position 0, in reverse, builds
+// the order). An insert at 0 on a chain that holds the rest would put a
+// re-added drop above the self and allow accepts, so an allowlisted address
+// in a block set would be dropped (the allow must win).
+func (c *ChainRules) EarlyAnchorHandle(expr string, early []string) string {
+	if h := c.AnchorHandle(expr); h != "" {
+		return h
+	}
+	k := ruleKey(expr)
+	for i := range early {
+		if ruleKey(early[i]) != k {
+			continue
+		}
+		for j := i - 1; j >= 0; j-- {
+			if h := c.FirstHandle(early[j]); h != "" {
+				return h
+			}
+		}
+		return ""
+	}
+	return ""
 }
 
 // AnchorHandle is the handle a missing expr must be added after on this

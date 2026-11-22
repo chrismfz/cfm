@@ -610,14 +610,25 @@ func TestLiveNFTDedupeBaseRules(t *testing.T) {
 	bantest.RunDedupeBaseRules(t, func() firewall.Backend { return New() })
 }
 
+// The plain block drop is put back when only its established twin is left:
+//
+//	unshare -rn env CFM_NFT_INTEGRATION=1 go test ./internal/firewall/nft/ -run LiveNFTRestoresAPlainDrop -v
+func TestLiveNFTRestoresAPlainDrop(t *testing.T) {
+	bantest.RunRestoresAPlainDrop(t, func() firewall.Backend { return New() })
+}
+
 // When `nft list chains inet` cannot be read, nothing says the input chain is
 // new, so a failed rule read must still add nothing (the review reproduced 33
-// blind rules through the old chainExists fallback).
+// blind rules through the old chainExists fallback). Nor may it report
+// success: the chain was declared blind and may be new and empty (policy
+// accept, no allow/block rule), and no tick repairs a chain whose table is
+// there. The error fails the daemon's start, and systemd retries it.
 func TestEnsureBase_UnlistedChainsAndUnreadRulesAddNothing(t *testing.T) {
 	v4, v6 := wantSelfSets()
 	log := fakeNFTOpts(t, fakeOpts{chains: "fail", self4: v4, self6: v6, inputFail: true, listChainFail: true})
-	if err := New().EnsureBase(); err != nil {
-		t.Fatalf("EnsureBase: %v", err)
+	err := New().EnsureBase()
+	if err == nil || !strings.Contains(err.Error(), "may be new and empty") {
+		t.Fatalf("EnsureBase = %v; want an error: the input chain's base rules are unknown", err)
 	}
 	got := readFile(t, log)
 	if strings.Contains(got, "insert rule inet cfm input") || strings.Contains(got, "add rule inet cfm input") {
