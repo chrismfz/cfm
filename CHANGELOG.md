@@ -21,6 +21,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **On EL8 nodes running the nft engine, the flood-counter dump that runs on
+  every 20 s tick no longer holds an nft slot for seconds.** It read the
+  counters with `nft list counters table inet cfm`, which on EL8's nft 1.0.4
+  loads every set element of the table first: 2.8–18.5 s per run, idle
+  (earth, mars, virgo, orion, 2026-11-22). Every other nft run waited behind
+  it, and the wait counted against its own deadline. The counters now come
+  from one netlink object dump, filtered by the kernel to the table's counters
+  (0.3–1.2 ms on the same nodes, the same counters and values). The CLI
+  listing is kept only as a fallback when netlink fails (logged once). A
+  failed read, or an empty answer, still repairs the table only when the cheap
+  `list chains inet` probe says it is absent. The `[flood]` log lines are
+  unchanged, except that they are now sorted by counter name.
 - **A cfm restart no longer leaves the edge without its bridge and ingest
   sockets for ~30 s; the nft engine no longer re-runs EnsureBase every minute
   or two, and no longer piles copies of its base rules into the input chain.**

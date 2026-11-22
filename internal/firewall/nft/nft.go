@@ -130,6 +130,7 @@ type Backend struct {
 
 	floodDumpMu      sync.Mutex
 	floodDumpRunning bool
+	floodNLWarned    bool // the netlink counter read failed once (logged once)
 	lastFloodHash    uint64
 	lastFloodRebuild time.Time
 	// portscanSkipLogged throttles the "skipped this tick" line of

@@ -59,6 +59,8 @@ type fakeOpts struct {
 	// listChainFail makes every plain `list chain inet cfm <chain>` exit 1
 	// (EL8's 4-12 s listing past its 5 s deadline).
 	listChainFail bool
+	// countersFail makes `list counters table inet cfm` exit 1.
+	countersFail bool
 }
 
 func fakeNFTOpts(t *testing.T, o fakeOpts) (logPath string) {
@@ -127,11 +129,12 @@ case "$*" in
 "-a list chain inet cfm input") %[6]s ;;
 "list chain inet cfm "*) [ %[7]q = 1 ] && exit 1; exit 0 ;;
 "list tables") echo "table inet cfm"; exit 0 ;;
+"list counters table inet cfm") [ %[8]q = 1 ] && exit 1; exit 0 ;;
 "-j list set inet cfm self_v4") cat %[2]q || exit 1; exit 0 ;;
 "-j list set inet cfm self_v6") cat %[3]q || exit 1; exit 0 ;;
 esac
 exit 0
-`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript, inputCmd, map[bool]string{true: "1", false: "0"}[o.listChainFail])
+`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript, inputCmd, map[bool]string{true: "1", false: "0"}[o.listChainFail], map[bool]string{true: "1", false: "0"}[o.countersFail])
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o700); err != nil { // #nosec G306 -- test helper must be executable
 		t.Fatal(err)
 	}
