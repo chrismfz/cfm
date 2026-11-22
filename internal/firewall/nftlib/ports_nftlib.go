@@ -9,6 +9,7 @@ import (
 	"cfm/internal/config"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+	"github.com/google/nftables"
 )
 
 // ApplyPortsPolicy writes the TCP_IN/UDP_IN/TCP_OUT/UDP_OUT policy, the
@@ -47,5 +48,40 @@ func (b *Backend) ApplyPortsPolicy(cfg *config.PortsConfig) (err error) {
 			ps.Enabled, ps.Interval, ps.TrackTCP, ps.TrackUDP, len(ps.OnlyPorts), len(ps.Ports))
 	}
 
-	return firewall.ApplyPortsPolicyScript(p, nftReadCLI, b.nftExec)
+	return firewall.ApplyPortsPolicyScript(p, firewall.PortsPolicyReads{Read: nftReadPorts, Chains: b.cfmChainNames}, b.nftExecPortsPolicy)
+}
+
+// nftReadPorts is firewall.NFTRead for this engine: the chain reads stay nft
+// text (google/nftables can't decode the input chain's DNAT accepts), zero
+// is the CLI default deadline.
+func nftReadPorts(timeout time.Duration, args ...string) (string, error) {
+	if timeout <= 0 {
+		timeout = nftlibCLITimeout
+	}
+	return nftReadCLITimeout(timeout, args...)
+}
+
+// nftExecPortsPolicy runs the ports-policy transaction under
+// firewall.PortsPolicyNFTTimeout, as the nft engine does.
+func (b *Backend) nftExecPortsPolicy(script string) error {
+	return b.nftExecTimeout(script, firewall.PortsPolicyNFTTimeout)
+}
+
+// cfmChainNames names inet cfm's chains over netlink (a chain listing, never
+// a rule dump), for firewall.PortsPolicyReads.Chains; ok is false when the
+// listing fails, and the output chain is then read anyway.
+func (b *Backend) cfmChainNames() (map[string]bool, bool) {
+	b.mu.Lock()
+	chains, err := b.conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
+	b.mu.Unlock()
+	if err != nil {
+		return nil, false
+	}
+	names := map[string]bool{}
+	for _, ch := range chains {
+		if ch != nil && ch.Table != nil && ch.Table.Name == cfmTableName {
+			names[ch.Name] = true
+		}
+	}
+	return names, true
 }

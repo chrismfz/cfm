@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/config"
 )
@@ -45,7 +46,7 @@ func TestPortsPolicyScript_LiveNFT(t *testing.T) {
 		}
 	}
 	listing := func(chain string) string { return nft("-a", "list", "chain", "inet", "cfm", chain) }
-	read := func(args ...string) (string, error) {
+	read := func(_ time.Duration, args ...string) (string, error) {
 		out, err := exec.Command("nft", args...).Output() // #nosec G204 -- test, fixed binary
 		if ee, ok := err.(*exec.ExitError); ok {
 			return "", fmt.Errorf("%w: %s", err, ee.Stderr)
@@ -54,7 +55,7 @@ func TestPortsPolicyScript_LiveNFT(t *testing.T) {
 	}
 	st := func() PortsPolicyState {
 		t.Helper()
-		s, err := readPortsPolicyState(PortsPolicy{Family: "inet", Table: "cfm"}, read)
+		s, err := readPortsPolicyState(PortsPolicy{Family: "inet", Table: "cfm"}, PortsPolicyReads{Read: read})
 		if err != nil {
 			t.Fatal(err)
 		}

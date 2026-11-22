@@ -21,6 +21,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **On EL8 nodes, the ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT, on every
+  start and config reload) no longer times out reading the firewall.** Its
+  two reads of `inet cfm input` / `output` ran under nft's 10 s default,
+  which also covers the wait for one of the four nft slots, and EL8's nft
+  1.0.4 takes 4–12 s for any `list chain` (earth, mars, virgo, idle,
+  2026-11-22). A timed-out apply changed nothing, so the extra
+  `ct state established,related accept` copies EnsureBase now leaves to the
+  ports policy stayed in place. Both reads and the policy's one `nft -f`
+  transaction now get 30 s, on both engines; the output chain is not read at
+  all when `nft list chains inet` (3–10 ms) shows it does not exist (a node
+  without TCP_OUT/UDP_OUT). A failed read is still an error: nothing is
+  planned from an unread chain.
 - **On a node running the nftlib engine, EnsureBase now deletes every extra
   copy of each base rule in the `inet cfm input` chain, as the nft engine's
   does (below).** An old exec-engine bug re-added the whole base
