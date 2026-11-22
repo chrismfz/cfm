@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.22
+
 ### Fixed
 - **An upgrade restarts the cfm daemon once, not twice.** The rpm's `%post`
   stops and starts it, and `%systemd_postun_with_restart` asked for a second
@@ -40,8 +44,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   still on.
 
 _Nothing yet._
-
-## 2026.11.22
 
 ### Fixed
 - **The firewall's base rules: two cases where the input chain could be left
