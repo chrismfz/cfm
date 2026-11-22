@@ -44,7 +44,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   - An input chain whose rules cannot be read gets no rules added (logged);
     the next EnsureBase removes every extra copy of each base rule in one
     transaction, keeping the top-most one, so the first restart after this
-    upgrade brings those chains back to one copy of each rule.
+    upgrade brings those chains back to one copy of each rule (7,531 deletes
+    on mars, 0.67 s in nft's check mode). **Expect flood limits to look
+    looser on those nodes afterwards:** each copy of `jump flood` (and of the
+    ICMP jumps) ran the flood chain again, so its per-IP meters counted every
+    packet ~141–268 times. They now act at their configured values; retune
+    nothing that was set against the old effective strictness without
+    looking at it first.
   - The self sets are compared with the kernel's and left alone when
     unchanged (every restart); a change is one transaction, and if nft refuses
     it each set is retried alone, then with loopback and link-local only.

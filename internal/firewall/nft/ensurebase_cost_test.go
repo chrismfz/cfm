@@ -55,6 +55,9 @@ type fakeOpts struct {
 	chainsListing string
 	inputListing  string
 	inputFail     bool
+	// listChainFail makes every plain `list chain inet cfm <chain>` exit 1
+	// (EL8's 4-12 s listing past its 5 s deadline).
+	listChainFail bool
 }
 
 func fakeNFTOpts(t *testing.T, o fakeOpts) (logPath string) {
@@ -121,12 +124,13 @@ fi
 case "$*" in
 "list chains inet") %[4]s ;;
 "-a list chain inet cfm input") %[6]s ;;
+"list chain inet cfm "*) [ %[7]q = 1 ] && exit 1; exit 0 ;;
 "list tables") echo "table inet cfm"; exit 0 ;;
 "-j list set inet cfm self_v4") cat %[2]q || exit 1; exit 0 ;;
 "-j list set inet cfm self_v6") cat %[3]q || exit 1; exit 0 ;;
 esac
 exit 0
-`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript, inputCmd)
+`, logPath, setJSON("self_v4", self4), setJSON("self_v6", self6), chainsCmd, o.refuseScript, inputCmd, map[bool]string{true: "1", false: "0"}[o.listChainFail])
 	if err := os.WriteFile(filepath.Join(dir, "nft"), []byte(script), 0o700); err != nil { // #nosec G306 -- test helper must be executable
 		t.Fatal(err)
 	}
@@ -626,5 +630,51 @@ func TestLiveNFTDedupeBaseRules(t *testing.T) {
 		strings.Index(listing, "ip saddr @block_v4 drop"), strings.Index(listing, baseEstablishedAccept)
 	if !(lo >= 0 && lo < self && self < blk && blk < est) {
 		t.Errorf("base order broken after dedupe:\n%s", listing)
+	}
+}
+
+// When `nft list chains inet` cannot be read, nothing says the input chain is
+// new, so a failed rule read must still add nothing (the review reproduced 33
+// blind rules through the old chainExists fallback).
+func TestEnsureBase_UnlistedChainsAndUnreadRulesAddNothing(t *testing.T) {
+	v4, v6 := wantSelfSets()
+	log := fakeNFTOpts(t, fakeOpts{chains: "fail", self4: v4, self6: v6, inputFail: true, listChainFail: true})
+	if err := New().EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	got := readFile(t, log)
+	if strings.Contains(got, "insert rule inet cfm input") || strings.Contains(got, "add rule inet cfm input") {
+		t.Errorf("rules written blind with neither the chains nor the rules read:\n%s", got)
+	}
+	if !strings.Contains(got, "add chain inet cfm input") {
+		t.Errorf("unlisted chains must still be declared (idempotent), or a cold boot has none:\n%s", got)
+	}
+}
+
+func TestParseCFMChains_HandleComments(t *testing.T) {
+	got := parseCFMChains("table inet cfm { # handle 7\n\tchain input { # handle 1\n\t\ttype filter hook input priority -50; policy accept;\n\t}\n\tchain flood { # handle 2\n\t}\n}\n")
+	if got["input"] != "type filter hook input priority -50; policy accept;" || !hasCFMChain(got, "flood") {
+		t.Errorf("parseCFMChains with -a handles = %v", got)
+	}
+}
+
+func TestHookPriority(t *testing.T) {
+	for in, want := range map[string]int{
+		"type filter hook input priority -50; policy accept;":        -50,
+		"type filter hook input priority filter; policy accept;":     0,
+		"type filter hook input priority filter + 10; policy drop;":  10,
+		"type filter hook input priority filter - 5; policy accept;": -5,
+		"type nat hook prerouting priority dstnat; policy accept;":   -100,
+	} {
+		if got, ok := hookPriority(in); !ok || got != want {
+			t.Errorf("hookPriority(%q) = %d,%v, want %d", in, got, ok, want)
+		}
+	}
+	if _, ok := hookPriority("type filter hook input; policy accept;"); ok {
+		t.Error("no priority must read as unknown")
+	}
+	// -5 is not -50: the old substring check took one for the other.
+	if p, _ := hookPriority("type filter hook input priority -50; policy accept;"); p == -5 {
+		t.Error("-50 read as -5")
 	}
 }

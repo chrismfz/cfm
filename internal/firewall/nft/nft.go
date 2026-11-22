@@ -486,41 +486,38 @@ func (b *Backend) EnsureBase() (err error) {
 	// One cheap read answers which chains exist and the input chain's hook
 	// line (see chainExists); `nft list chain` costs 4-12 s apiece on EL8.
 	chains, chainsOK := cfmChains()
-	hasChain := func(name string) bool {
-		if chainsOK {
-			_, has := chains[name]
-			return has
-		}
-		return b.chainExists(name)
-	}
-	needCreate := false
-	if !hasChain("input") {
-		needCreate = true
-	} else if chainsOK {
-		s := chains["input"]
-		want := fmt.Sprintf("priority %d", prio)
-		same := strings.Contains(s, want) || (prio == 0 && strings.Contains(s, "priority filter"))
-		if !same {
+	// A chain is NEW only when this run saw it absent: then the rule read
+	// below may find it empty and every base rule is written. When the
+	// listing could not be read the chains are declared anyway (`add chain`
+	// is idempotent, so a cold boot still gets them), but the read guard
+	// stays on: adding rules blind is how mars came to hold 268 copies.
+	needCreate := chainsOK && !hasCFMChain(chains, "input")
+	if chainsOK && !needCreate {
+		if p, ok := hookPriority(chains["input"]); !ok || p != prio {
 			// Do NOT silently destroy the input chain on a priority
 			// mismatch — that leaves the server unprotected during recreate.
 			// Log the discrepancy and leave the existing chain intact.
 			// To migrate the priority deliberately, run: cfm reset && cfm daemon
-			logging.Logf("[nft] WARNING: input chain priority mismatch (want %d). "+
-				"Run 'cfm reset' to apply the new priority. Keeping existing chain.", prio)
-			// needCreate stays false — we proceed with the existing chain as-is.
+			logging.Logf("[nft] WARNING: input chain priority mismatch (want %d, chain has %q). "+
+				"Run 'cfm reset' to apply the new priority. Keeping existing chain.", prio, chains["input"])
 		}
 	}
 
-	if needCreate {
+	if needCreate || !chainsOK {
 		if err := b.nftCmd(fmt.Sprintf(
 			`add chain %s %s input { type filter hook input priority %d; policy accept; }`,
 			family, tableName, prio,
 		)); err != nil {
-			return err
+			if needCreate {
+				return err
+			}
+			// Unlisted, the chain may exist with another priority, which nft
+			// refuses to redeclare: keep it, as the mismatch check does.
+			logging.Logf("[nft] EnsureBase: declaring the input chain blind failed (kept as is): %v", firstLine(err.Error()))
 		}
 	}
-	if !hasChain("flood") {
-		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s flood`, family, tableName)); err != nil {
+	if !chainsOK || !hasCFMChain(chains, "flood") {
+		if err := b.nftCmd(fmt.Sprintf(`add chain %s %s flood`, family, tableName)); err != nil && chainsOK {
 			return err
 		}
 	}
@@ -1451,7 +1448,11 @@ func parseCFMChains(out string) map[string]string {
 	chains := map[string]string{}
 	inTable, chain := false, ""
 	for _, ln := range strings.Split(out, "\n") {
-		t := strings.TrimSpace(ln)
+		t := ln
+		if i := strings.Index(t, " # "); i >= 0 && !strings.Contains(t[:i], `"`) {
+			t = t[:i] // `-a` prints "chain input { # handle 1"
+		}
+		t = strings.TrimSpace(t)
 		switch {
 		case strings.HasPrefix(t, "table "):
 			inTable = strings.TrimSpace(strings.TrimSuffix(t, "{")) == "table "+family+" "+tableName
@@ -1471,6 +1472,51 @@ func parseCFMChains(out string) map[string]string {
 		}
 	}
 	return chains
+}
+
+func hasCFMChain(chains map[string]string, name string) bool {
+	_, ok := chains[name]
+	return ok
+}
+
+// hookPriorities are the names nft prints for the filter-family hook
+// priorities, in place of their numbers.
+var hookPriorities = map[string]int{"raw": -300, "mangle": -150, "dstnat": -100, "filter": 0, "security": 50, "srcnat": 100}
+
+// hookPriority reads the priority of a hook line as a number. nft prints it
+// as a number (-50), a name (filter) or a name with an offset (filter + 10,
+// filter - 5); ok is false when there is none it can read.
+func hookPriority(hook string) (int, bool) {
+	i := strings.Index(hook, "priority ")
+	if i < 0 {
+		return 0, false
+	}
+	f := strings.Fields(strings.TrimSpace(strings.SplitN(hook[i+len("priority "):], ";", 2)[0]))
+	if len(f) == 0 {
+		return 0, false
+	}
+	base, err := strconv.Atoi(f[0])
+	if err != nil {
+		n, ok := hookPriorities[f[0]]
+		if !ok {
+			return 0, false
+		}
+		base = n
+	}
+	if len(f) == 1 {
+		return base, true
+	}
+	if len(f) == 3 && (f[1] == "+" || f[1] == "-") {
+		off, err := strconv.Atoi(f[2])
+		if err != nil {
+			return 0, false
+		}
+		if f[1] == "-" {
+			off = -off
+		}
+		return base + off, true
+	}
+	return 0, false
 }
 
 func (b *Backend) ruleExists(chain, needle string) bool {
