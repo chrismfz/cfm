@@ -30,7 +30,8 @@
 #   Logs:          /var/log/cfm-edge/             (rotated by the cfm-edge rpm)
 #   Caches:        /var/cache/nginx/              (cfm_static + cfm_micro_<ttl>s)
 #   Temp dirs:     /var/lib/cfm/nginx/*           (cfm:cfm)
-#   PID:           /run/cfm-edge.pid              (the unit's PIDFile)
+#   PID:           the package's (its compiled default = its unit's PIDFile;
+#                  CFM's config sets none, so cfm-edge can move it)
 #
 # Usage: bash scripts/install-edge.sh
 #   CFM_EDGE_SKIP_INSTALL=1   do not install the rpm (it must already be there)

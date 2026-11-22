@@ -3,7 +3,7 @@
 #
 # cfm-edge (chrismfz/cfm-edge) runs the OpenResty edge config unchanged except
 # for its paths: it is packaged like a distro nginx (/etc/cfm-edge,
-# /var/log/cfm-edge, /run/cfm-edge.pid) instead of under /usr/local/openresty.
+# /var/log/cfm-edge) instead of under /usr/local/openresty.
 # One template, one derivation: never edit configs/cfm-edge.conf by hand; edit
 # openresty.conf and re-run this. scripts/tests/check_cfm_edge_conf.sh fails CI
 # when the committed file differs from a fresh render, or when any
@@ -23,9 +23,13 @@ tmp=$(mktemp "${DST}.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
 # Order matters: the pid file and the legacy Lua dir before the generic dirs.
-#   - pid: the unit's PIDFile=/run/cfm-edge.pid. A pid line that disagrees
-#     makes systemd (Type=forking) wait for a file that never appears and
-#     kill the edge.
+#   - pid: NOT set here. The cfm-edge package owns it: its compiled
+#     --pid-path is its unit's PIDFile= and its logrotate's USR1 target. A
+#     pid line here that disagrees with them makes systemd (Type=forking)
+#     wait for a file that never appears and kill the edge, so a pid line
+#     would tie a cfm-edge release that moves the pid (out of /run, into its
+#     RuntimeDirectory, for the sandbox) to a CFM release in lockstep. The
+#     line becomes a comment saying so.
 #   - lua_package_path: cfm-edge never had a legacy Lua dir (CFM's Lua lives
 #     only in /var/lib/cfm/lua), so that entry goes.
 #   - the comment about OpenResty's default temp dirs names cfm-edge's.
@@ -41,7 +45,7 @@ trap 'rm -f "$tmp"' EXIT
     echo "# cfm-edge-adopted-by: cfm"
     sed '1d' "$SRC"
 } | sed \
-    -e 's|/usr/local/openresty/nginx/logs/nginx\.pid|/run/cfm-edge.pid|g' \
+    -e 's|^pid[[:space:]][[:space:]]*/usr/local/openresty/nginx/logs/nginx\.pid;$|# pid: set by the cfm-edge package (its compiled default is its unit'"'"'s PIDFile=); never here.|' \
     -e 's|;/usr/local/openresty/nginx/lua/?\.lua;|;|g' \
     -e 's|/usr/local/openresty/nginx/\*_temp|/var/lib/cfm-edge/{client_body,proxy}|g' \
     -e 's|^# the OpenResty package as root-owned|# the cfm-edge package as root-owned|' \
@@ -49,6 +53,10 @@ trap 'rm -f "$tmp"' EXIT
     -e 's|/usr/local/openresty/nginx/logs/|/var/log/cfm-edge/|g' \
     > "$tmp"
 
+if grep -nE '^[[:space:]]*pid[[:space:]]' "$tmp" >&2; then
+    echo "render-cfm-edge-conf: a pid directive survived (above); the cfm-edge package owns the pid path" >&2
+    exit 1
+fi
 if grep -n '/usr/local/openresty' "$tmp" >&2; then
     echo "render-cfm-edge-conf: the lines above still name /usr/local/openresty; map them in this script" >&2
     exit 1

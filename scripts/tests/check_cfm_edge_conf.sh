@@ -31,13 +31,18 @@ fi
 
 # The mappings that matter, named one by one (a render that went wrong in one
 # of them would still be "current"):
-#   - pid = the unit's PIDFile (Type=forking: a mismatch gets the edge killed);
+#   - no pid directive: the package's compiled default is the unit's PIDFile
+#     (Type=forking: a mismatch gets the edge killed), and cfm-edge moves it
+#     without a CFM release;
 #   - mime.types / sidecars from /etc/cfm-edge (the cfm-edge package ships
 #     mime.types there; CFM's deploy puts the sidecars next to it);
 #   - logs in /var/log/cfm-edge (rotated by the cfm-edge package);
 #   - Lua only from the shared /var/lib/cfm/lua (no legacy edge Lua dir).
 want() { grep -qE "$1" configs/cfm-edge.conf || fail "configs/cfm-edge.conf lacks: $2"; }
-want '^pid[[:space:]]+/run/cfm-edge\.pid;' "pid /run/cfm-edge.pid (the unit's PIDFile)"
+if grep -nE '^[[:space:]]*pid[[:space:]]' configs/cfm-edge.conf; then
+    fail "configs/cfm-edge.conf sets pid (line above): the cfm-edge package owns it (its compiled default = its unit's PIDFile)"
+fi
+want '^# pid: set by the cfm-edge package' "the comment saying the package owns pid"
 want '^[[:space:]]*include[[:space:]]+/etc/cfm-edge/mime\.types;' "include /etc/cfm-edge/mime.types"
 want '^[[:space:]]*include[[:space:]]+/etc/cfm-edge/trusted_proxies\.conf;' "include /etc/cfm-edge/trusted_proxies.conf"
 want '^[[:space:]]*include[[:space:]]+/etc/cfm-edge/cfm-panel-listeners\.conf;' "include /etc/cfm-edge/cfm-panel-listeners.conf"
@@ -48,4 +53,4 @@ if grep -nE '^[[:space:]]*(access_log|error_log)[[:space:]]+/' configs/cfm-edge.
     fail "configs/cfm-edge.conf logs outside /var/log/cfm-edge (lines above)"
 fi
 
-echo "[cfm-edge-conf] OK: configs/cfm-edge.conf is the current render of configs/openresty.conf, with cfm-edge's pid, conf, log and Lua paths."
+echo "[cfm-edge-conf] OK: configs/cfm-edge.conf is the current render of configs/openresty.conf, with cfm-edge's conf, log and Lua paths, and no pid (the package's)."
