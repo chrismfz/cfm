@@ -351,11 +351,11 @@ func (b *Backend) EnsureBase() (err error) {
 		}
 		b.logPhase("EnsureBase", st, time.Since(start), err, "")
 	}()
-	// 1) Ensure table
-	if !b.tableExists() {
-		if err := b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName)); err != nil {
-			return err
-		}
+	// 1) Ensure table. `add table` is idempotent and costs one cheap nft run;
+	// the existence probe it replaced (`list tables`) made nft load every set
+	// element in the table first (~2 s with a large feed or TTL-ban set).
+	if err := b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName)); err != nil {
+		return err
 	}
 
 	// desired priority (default -50; override από cfg)
@@ -1322,16 +1322,34 @@ func (b *Backend) listSetText(setName string, v6 bool) ([]firewall.BlockedEntry,
 
 // -------- shell helpers --------
 
+// tableExists reports whether table inet cfm exists. It reads `nft list
+// chains inet`, which prints each inet table's header (`table inet cfm {`)
+// with only its chains: `list tables`, which reads the same answer, makes nft
+// load every set element of every table first, which on a node with large
+// feed / TTL-ban sets costs ~2 s per call (EnsureBase, ApplyFloodRules and the
+// per-tick portscan load all ask). If the cheap listing fails, the old one
+// answers: an unreadable listing is never taken for "absent" on one read and
+// "present" on another without nft itself saying so.
 func (b *Backend) tableExists() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if res, err := runNFTCommand(ctx, "list", "chains", family); err == nil {
+		return listingHasCFMTable(res.Stdout)
+	}
 	res, err := runNFTCommand(ctx, "list", "tables")
-	out := []byte(res.Stdout)
 	if err != nil {
 		return false
 	}
-	for _, ln := range strings.Split(string(out), "\n") {
-		if strings.TrimSpace(ln) == "table inet cfm" {
+	return listingHasCFMTable(res.Stdout)
+}
+
+// listingHasCFMTable finds the `table inet cfm` header line in an nft
+// listing (`list tables` prints it bare, `list chains` with " {").
+func listingHasCFMTable(out string) bool {
+	for _, ln := range strings.Split(out, "\n") {
+		ln = strings.TrimSpace(ln)
+		ln = strings.TrimSpace(strings.TrimSuffix(ln, "{"))
+		if ln == "table "+family+" "+tableName {
 			return true
 		}
 	}
@@ -1822,26 +1840,38 @@ func (b *Backend) ResetCFMTable() error {
 	return b.nftCmd(fmt.Sprintf("add table %s %s", family, tableName))
 }
 
+// refreshSelfSets loads self_v4/self_v6 (loopback, link-local, every local
+// address). It used to run one nft process per statement — two flushes, the
+// three static ranges, one add per local address — and each `add element`
+// makes nft load every set element in the table first: with large feed and
+// TTL-ban sets that is ~2 s a statement, and it held EnsureBase (and so the
+// bridge and ingest sockets, which bind after it) for 28.9 s on a restart of a
+// busy node. Now it reads both sets (`list set` does not load the others), and
+// writes nothing when they already hold the wanted content — every restart of
+// a node whose addresses did not change. Otherwise ONE transaction replaces
+// both, so a packet never sees a flushed, half-filled self set either; a
+// refused write leaves the old content (logged), where the old per-statement
+// run could leave a set flushed and empty.
 func (b *Backend) refreshSelfSets() {
-	_ = b.nftExpr("flush set inet cfm self_v4;")
-	_ = b.nftExpr("flush set inet cfm self_v6;")
-	_ = b.nftExpr("add element inet cfm self_v4 { 127.0.0.0/8 };")
-	_ = b.nftExpr("add element inet cfm self_v6 { ::1 };")
-	_ = b.nftExpr("add element inet cfm self_v6 { fe80::/10 };")
-
 	b.selfResolver.Refresh()
-	for _, s := range b.selfResolver.LocalIPs() {
-		ip := net.ParseIP(s)
-		if ip == nil {
-			continue
-		}
-		if ip.To4() != nil {
-			_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v4 { %s };", s))
-		} else {
-			_ = b.nftExpr(fmt.Sprintf("add element inet cfm self_v6 { %s };", s))
+	v4, v6 := firewall.SelfSetElems(b.selfResolver.LocalIPs())
+	if !b.setHolds("self_v4", v4) || !b.setHolds("self_v6", v6) {
+		script := replaceSetScript("self_v4", v4, "") + replaceSetScript("self_v6", v6, "")
+		if err := b.nftExpr(script); err != nil {
+			logging.Logf("[nft] self sets write failed, they keep their old content: %v", firstLine(err.Error()))
 		}
 	}
 	b.writeSelfIPsLua()
+}
+
+// setHolds reports whether the kernel's set holds exactly want. A failed read
+// is "no": the caller writes the set again rather than trust an unknown.
+func (b *Backend) setHolds(setName string, want []string) bool {
+	have, err := b.ListSetElementsRaw(setName)
+	if err != nil {
+		return false
+	}
+	return firewall.SameSetElems(have, want)
 }
 
 func (b *Backend) writeSelfIPsLua() {

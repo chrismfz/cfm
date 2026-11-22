@@ -102,6 +102,16 @@ The history behind each rule below is in the code comments it names.
   behind the daemon's back; the same probe answers IP lookups
   (`setprobe.Lookup`, via `ipquery.FindMany`), and an interval-boundary answer
   the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
+- **Some nft CLI runs load every set element of the table first**: `list
+  tables`, `list table`, `list sets` (without `-t`) and any `add element`.
+  With large feed / TTL-ban sets each costs ~2 s (`list chain`, `-t list set`,
+  `-j list set <one>`, `add set`, `add rule`, `flush set`: ~5 ms). The exec
+  EnsureBase once ran one per self-set statement, which held the bridge and
+  ingest sockets 28.9 s on a restart. Its `list tables` existence probe also
+  passed its 5 s timeout, read as "no table" and re-ran EnsureBase every tick.
+  Probe with `list chains inet` (`tableExists`), compare before you write
+  (`firewall.SameSetElems`), and put a write in one script.
+  `ensurebase_cost_test.go` pins EnsureBase's profile.
 - **A base input rule added after the rest needs an anchor.** Both engines'
   EnsureBase insert a missing early rule at position 0 and append a missing
   late one: on a node's existing chain a new drop would land above the self /

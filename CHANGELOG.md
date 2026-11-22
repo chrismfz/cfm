@@ -20,7 +20,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A cfm restart no longer leaves the edge without its bridge and ingest
+  sockets for ~30 s, and the nft engine no longer re-runs EnsureBase every
+  minute or two.** On nodes with large feed / TTL-ban sets, every nft command
+  that makes nft load the table's set elements (`list tables`, any `add
+  element`) costs ~2 s, and EnsureBase ran one per self-set statement plus a
+  `list tables` probe: 28.9 s on virgo's 2026.11.22 upgrade, during which every
+  bridge lookup failed open and the access-log lines meant for the webdetector
+  were lost (66 `[crit] connect() … No such file` lines in the edge error log).
+  The same probe, past its 5 s timeout, read as "no table" and re-ran
+  EnsureBase (20–30 s each) from the tick loop on earth, mars and virgo all
+  day. The table probe now reads `nft list chains inet` (~5 ms), the self sets
+  are compared with the kernel's and left alone when unchanged (every restart),
+  and a change is written in one transaction (also closing the moment a self
+  set sat flushed). EnsureBase on a restart: ~0.6 s in a netns with a 200k-entry
+  feed set, was 10 s. nft engine only; nftlib already wrote the self sets over
+  netlink.
 
 ## 2026.11.22
 

@@ -151,17 +151,6 @@ func TestBaseRulesScript(t *testing.T) {
 	}
 }
 
-func TestSelfSetElems(t *testing.T) {
-	v4, v6 := selfSetElems([]string{"192.0.2.10", "fe80::1234", "2001:db8::5", "192.0.2.10", "::ffff:198.51.100.7", "junk"})
-	if got := strings.Join(v4, " "); got != "127.0.0.0/8 192.0.2.10/32 198.51.100.7/32" {
-		t.Errorf("v4 = %s", got)
-	}
-	// fe80::1234 lies inside fe80::/10: an interval set refuses the overlap.
-	if got := strings.Join(v6, " "); got != "::1/128 2001:db8::5/128 fe80::/10" {
-		t.Errorf("v6 = %s", got)
-	}
-}
-
 // Rules are only ever added, so a chain that can't be read must not be taken
 // for an empty one — that would add every rule a second time.
 func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
