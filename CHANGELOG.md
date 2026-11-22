@@ -20,6 +20,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Changed
+- **CFM's cfm-edge config no longer sets the `pid` path; the cfm-edge package
+  owns it.** Nothing changes on a node today: the package's built-in default
+  is the same `/run/cfm-edge.pid` its unit watches. It lets a later cfm-edge
+  release move the pid file into its own runtime directory (so its sandbox no
+  longer needs all of `/run` writable) without a CFM release in lockstep: a
+  `pid` line here that disagreed with the unit's `PIDFile=` would get the
+  edge killed at start. The render and its CI check now fail on a `pid`
+  directive.
+
 ### Fixed
 - **`install-edge.sh`, `install-openresty.sh` and `install-angie.sh` started
   with `sh` no longer fail half-way.**
