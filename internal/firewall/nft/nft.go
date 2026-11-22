@@ -130,6 +130,11 @@ type Backend struct {
 
 	floodDumpMu      sync.Mutex
 	floodDumpRunning bool
+	// Flood dump state, touched only by the overlap-guarded dump goroutine:
+	// the last netlink error logged and when, and the last CLI fallback.
+	floodNLErr   string
+	floodNLLogAt time.Time
+	floodCLIAt   time.Time
 	lastFloodHash    uint64
 	lastFloodRebuild time.Time
 	// portscanSkipLogged throttles the "skipped this tick" line of
