@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.22
+
 ### Fixed
 - **The firewall's base rules: two cases where the input chain could be left
   open while EnsureBase reported success.**
@@ -141,8 +145,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
     on mars, idle), was ~30 s; ~0.6 s on nft 1.0.9 in a netns with a 200k-entry
     feed set, was 10 s. nft engine only; nftlib already wrote the self sets
     over netlink.
-
-## 2026.11.22
 
 ### Changed
 - **CFM's cfm-edge config no longer sets the `pid` path; the cfm-edge package
