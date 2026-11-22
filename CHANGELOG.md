@@ -30,9 +30,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   bridge lookup failed open and the access-log lines meant for the webdetector
   were lost (66 `[crit] connect() … No such file` lines in the edge error log).
   EnsureBase also re-ran (20–30 s each) every minute or two, on the 20 s
-  tick, all day on earth, mars and virgo (hundreds of runs a day), most likely
-  because that probe ran past its 5 s deadline (nft-slot wait included) and a
-  timeout read as "no table". The table probe now reads `nft list chains inet`
+  tick, all day on earth, mars and virgo (hundreds of runs a day): on EL8's
+  nft 1.0.4 that probe alone takes 4.6–12.3 s on those nodes, past its 5 s
+  deadline, and the timeout read as "no table" (EL9/EL10 nodes answer it in
+  ms and never looped). The table probe now reads `nft list chains inet`
   (~5 ms), and a probe that times out or fails is "unknown": the tick-loop
   repairs (portscan load, flood rules, counters dump) run EnsureBase only when
   nft says the table is absent, and `cfm reset` / `cfm disable` still try their

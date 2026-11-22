@@ -104,14 +104,16 @@ The history behind each rule below is in the code comments it names.
   the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
 - **Some nft CLI runs load every set element of the table first**: `list
   tables`, `list table`, `list sets` (without `-t`), `list counters`, and
-  `add element` when the table holds a large INTERVAL set (feeds). Measured on
-  nft 1.0.9 with a 200k-entry interval set: ~2 s each; `list chains`, `-t list
-  set`, `-j list set <one>`, `add set`, `add rule`, `flush set`: ~5 ms. On nft
-  0.9.x every `list` loads it; EL8's 1.0.4 is unmeasured. The exec
+  `add element` next to a large interval set. It bites on EL8's nft 1.0.4:
+  measured 2026-11-22 on the fleet's EL8 nodes (26k–85k `block_v4`, 307k feed
+  hosts), idle, `list tables` 3.3–12.3 s and `list counters` 3.9–11 s, while
+  `list chains inet` and `-j list set <one>` took 3–10 ms. EL9/EL10 (nft
+  1.0.9 / 1.1.5) answered all of them in ms with the same sets; nft 0.9.x
+  loads the cache on every `list`. The exec
   EnsureBase once ran one per self-set statement, which held the bridge and
   ingest sockets 28.9 s on a restart. EnsureBase also re-ran every minute or
-  two on loaded nodes, most likely because its `list tables` existence probe
-  ran past its 5 s deadline (the wait for one of the 4 nft slots counts) and
+  two on the EL8 nodes: its `list tables` existence probe ran past its 5 s
+  deadline (12 s on mars; the wait for one of the 4 nft slots counts too) and
   the timeout read as "no table". Probe with `list chains inet`
   (`probeTable`); a repair (EnsureBase, a flush, a delete) acts only on
   `tableAbsent`, never on `tableUnknown`. Compare before you write
