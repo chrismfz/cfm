@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.22
+
 ### Changed
 - **CFM's cfm-edge config no longer sets the `pid` path; the cfm-edge package
   owns it.** Nothing changes on a node today: the package's built-in default
