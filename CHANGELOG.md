@@ -20,6 +20,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Fixed
+- **An upgrade restarts the cfm daemon once, not twice.** The rpm's `%post`
+  stops and starts it, and `%systemd_postun_with_restart` asked for a second
+  restart: on EL9/EL10 at the end of the transaction, after every
+  `%posttrans`, where it landed in the middle of cfm-edge's post-upgrade
+  restart (rigel, 2026-11-23: the starting daemon put the panel DNAT back while
+  the edge was being taken out of the path). On an upgrade the OLD package's
+  `%postun` runs, so the change takes effect from the upgrade after next.
+- **`cfm edge panel off` reports a redirect it could not remove.** The nft
+  engine dropped the delete's error and the panel-off path dropped it again,
+  so the command returned 0 with the panel DNAT still in place. Now the error
+  reaches the exit code (an absent table is still "already off"), and the off
+  stops there: it no longer removes the panel allowlist under a live redirect
+  (that would drop the panel traffic it still sends to the edge) or persists
+  OFF. The failsafe's reason names the failure instead of calling it an
+  allowlist removal failure.
+
 _Nothing yet._
 
 ## 2026.11.22

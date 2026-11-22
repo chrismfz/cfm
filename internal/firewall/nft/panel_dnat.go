@@ -69,7 +69,14 @@ func (b *Backend) PanelDNATOff() (err error) {
 		}
 		b.logPhase("PanelDNATOff", st, time.Since(start), err, "op=dnat scope=cpanel")
 	}()
-	_ = b.nftCmd("delete table inet cfm_panel_redirect")
+	// An absent table is already off. Any other failure (nft busy while the
+	// daemon starts, a timeout) is reported: dropped, `cfm edge panel off`
+	// returned 0 with the redirect still in place, and cfm-edge's
+	// post-upgrade restart could not tell (rigel, 2026-11-23).
+	out, derr := b.nftOut("delete table inet cfm_panel_redirect")
+	if derr != nil && !firewall.IsNFTNoSuchObject(out) {
+		return fmt.Errorf("delete table inet cfm_panel_redirect: %v: %s", derr, firstLine(strings.TrimSpace(out)))
+	}
 	return nil
 }
 

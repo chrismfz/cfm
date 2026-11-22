@@ -88,13 +88,12 @@ func newPanelDNATFailSafeTarget(backend firewall.Backend) dnatFailSafeTarget {
 		Cleanup: func(failCount int, probeErr error) {
 			offResult, offErr := panelOffFn(autoRemoveAllowlist)
 			reason := fmt.Sprintf("auto-disabled after %d consecutive probe failures: %v", failCount, probeErr)
-			if autoRemoveAllowlist {
-				if offErr != nil {
-					reason += "; allowlist removal failed: " + offErr.Error()
-				} else {
-					reason += "; allowlist removed: " + panelOffFirewallSummary(offResult.FirewallChanges)
-				}
-			} else {
+			switch {
+			case offErr != nil:
+				reason += "; the off failed: " + offErr.Error()
+			case autoRemoveAllowlist:
+				reason += "; allowlist removed: " + panelOffFirewallSummary(offResult.FirewallChanges)
+			default:
 				reason += "; allowlist removal skipped"
 			}
 			setPanelFirewallHealth("AUTO_FAILSAFE", reason, true)
