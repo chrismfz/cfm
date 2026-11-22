@@ -87,10 +87,18 @@ func newPanelDNATFailSafeTarget(backend firewall.Backend) dnatFailSafeTarget {
 		HealthProbe: probe,
 		Cleanup: func(failCount int, probeErr error) {
 			offResult, offErr := panelOffFn(autoRemoveAllowlist)
+			if offErr != nil {
+				// The redirect is still live: say so. Recording AUTO_FAILSAFE
+				// and an OFF transition here told the operator the panel was
+				// auto-disabled while it was not.
+				reason := fmt.Sprintf("auto-disable after %d consecutive probe failures (%v) FAILED, the panel DNAT is still on: %v", failCount, probeErr, offErr)
+				setPanelFirewallHealth("FAILED", reason, true)
+				setPanelFailSafeAction(reason)
+				LogTransition(ScopeCPanel, "ON", "failsafe-off-failed", reason)
+				return
+			}
 			reason := fmt.Sprintf("auto-disabled after %d consecutive probe failures: %v", failCount, probeErr)
 			switch {
-			case offErr != nil:
-				reason += "; the off failed: " + offErr.Error()
 			case autoRemoveAllowlist:
 				reason += "; allowlist removed: " + panelOffFirewallSummary(offResult.FirewallChanges)
 			default:

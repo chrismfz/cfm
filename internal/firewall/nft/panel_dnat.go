@@ -75,7 +75,7 @@ func (b *Backend) PanelDNATOff() (err error) {
 	// post-upgrade restart could not tell (rigel, 2026-11-23).
 	out, derr := b.nftOut("delete table inet cfm_panel_redirect")
 	if derr != nil && !firewall.IsNFTNoSuchObject(out) {
-		return fmt.Errorf("delete table inet cfm_panel_redirect: %v: %s", derr, firstLine(strings.TrimSpace(out)))
+		return fmt.Errorf("delete table inet cfm_panel_redirect: %w", derr) // derr carries nft's stderr
 	}
 	return nil
 }

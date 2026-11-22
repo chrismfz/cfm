@@ -34,8 +34,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   reaches the exit code (an absent table is still "already off"), and the off
   stops there: it no longer removes the panel allowlist under a live redirect
   (that would drop the panel traffic it still sends to the edge) or persists
-  OFF. The failsafe's reason names the failure instead of calling it an
-  allowlist removal failure.
+  OFF. When the panel failsafe's own off fails, it now records FAILED health
+  and an ON transition (`failsafe-off-failed`) instead of AUTO_FAILSAFE and an
+  OFF transition, which reported the panel auto-disabled while its DNAT was
+  still on.
 
 _Nothing yet._
 

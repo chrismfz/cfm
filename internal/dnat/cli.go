@@ -863,7 +863,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		res, err := panelOffWithBackend(backend)
 		changes := res.FirewallChanges
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err)
+			fmt.Fprintln(os.Stderr, "dnat cpanel off failed:", err)
 			return 1
 		}
 		LogTransition(ScopeCPanel, "OFF", "manual", "")

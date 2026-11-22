@@ -123,3 +123,25 @@ func TestProbePanelTargetsAllSuccess(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// A failsafe off that could not remove the redirect says so: FAILED health
+// and an ON transition, never AUTO_FAILSAFE / OFF while the panel DNAT is
+// still live (that told the operator it was auto-disabled when it was not).
+func TestPanelDNATFailSafeCleanupFailedOffIsNotAnOff(t *testing.T) {
+	origOff := panelOffFn
+	defer func() { panelOffFn = origOff }()
+	setPanelFirewallHealth("OK", "", false)
+	panelOffFn = func(bool) (panelOffResult, error) {
+		return panelOffResult{}, errors.New("removing the panel DNAT redirect: nft busy")
+	}
+	target := newPanelDNATFailSafeTarget(nil)
+	target.Cleanup(3, errors.New("panel down"))
+
+	health := getPanelFirewallHealth()
+	if health.State != "FAILED" || !strings.Contains(health.LastReason, "still on") || !strings.Contains(health.LastReason, "nft busy") {
+		t.Fatalf("health = %+v, want FAILED naming the live redirect and the error", health)
+	}
+	if lt := GetLastTransition(ScopeCPanel); lt.State != "ON" || lt.Action != "failsafe-off-failed" {
+		t.Fatalf("last transition = %+v, want state=ON action=failsafe-off-failed", lt)
+	}
+}
