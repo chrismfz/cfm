@@ -103,9 +103,11 @@ The history behind each rule below is in the code comments it names.
   (`setprobe.Lookup`, via `ipquery.FindMany`), and an interval-boundary answer
   the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
 - **Some nft CLI runs load every set element of the table first**: `list
-  tables`, `list table`, `list sets` (without `-t`) and any `add element`.
-  With large feed / TTL-ban sets each costs ~2 s (`list chain`, `-t list set`,
-  `-j list set <one>`, `add set`, `add rule`, `flush set`: ~5 ms). The exec
+  tables`, `list table`, `list sets` (without `-t`), `list counters`, and
+  `add element` when the table holds a large INTERVAL set (feeds). Measured on
+  nft 1.0.9 with a 200k-entry interval set: ~2 s each; `list chains`, `-t list
+  set`, `-j list set <one>`, `add set`, `add rule`, `flush set`: ~5 ms. On nft
+  0.9.x every `list` loads it; EL8's 1.0.4 is unmeasured. The exec
   EnsureBase once ran one per self-set statement, which held the bridge and
   ingest sockets 28.9 s on a restart. EnsureBase also re-ran every minute or
   two on loaded nodes, most likely because its `list tables` existence probe

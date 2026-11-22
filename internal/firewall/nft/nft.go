@@ -1932,10 +1932,11 @@ func (b *Backend) writeSelfSetFallback() {
 	}
 }
 
-// setHolds reports whether the kernel's set holds exactly want. A failed read
-// is "no": the caller writes the set again rather than trust an unknown.
+// setHolds reports whether the kernel's set holds exactly want. A failed read,
+// or an element it cannot read, is "no": the caller writes the set again
+// rather than trust an unknown.
 func (b *Backend) setHolds(setName string, want []string) bool {
-	have, err := b.ListSetElementsRaw(setName)
+	have, err := listSetElemsStrict(setName)
 	if err != nil {
 		return false
 	}

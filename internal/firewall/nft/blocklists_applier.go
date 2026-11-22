@@ -126,6 +126,18 @@ func (b *Backend) RebuildExternalUnions() error {
 // a {"prefix":…} / {"range":…} element (an interval set's) into "<nil>" and a
 // timeout-wrapped one into "map[…]".
 func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
+	return listSetElems(setName, false)
+}
+
+// listSetElemsStrict is ListSetElementsRaw for a caller that compares the
+// result with what the set should hold (setHolds): an element of a shape it
+// cannot read is an error, not dropped, or an extra element the kernel holds
+// (an extra trusted self source) would read as "already right".
+func listSetElemsStrict(setName string) ([]string, error) {
+	return listSetElems(setName, true)
+}
+
+func listSetElems(setName string, strict bool) ([]string, error) {
 	res, err := runNFTCommand(context.Background(), "-j", "list", "set", family, tableName, setName)
 	if err != nil {
 		return nil, err
@@ -149,9 +161,14 @@ func (b *Backend) ListSetElementsRaw(setName string) ([]string, error) {
 			arr, _ = setObj["elements"].([]any)
 		}
 		for _, e := range arr {
-			if s := rawElemString(e); s != "" {
-				out = append(out, s)
+			s := rawElemString(e)
+			if s == "" {
+				if strict {
+					return nil, fmt.Errorf("set %s: element of an unknown shape: %v", setName, e)
+				}
+				continue
 			}
+			out = append(out, s)
 		}
 	}
 	return out, nil

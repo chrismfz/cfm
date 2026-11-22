@@ -239,6 +239,17 @@ func TestLiveNFTSelfSetsReadBackUnchanged(t *testing.T) {
 	if out, err := exec.Command("nft", "list", "chains", "inet").CombinedOutput(); err == nil && listingHasCFMTable(string(out)) {
 		t.Fatalf("refusing to run: an `inet cfm` table already exists — run this test inside an isolated netns (unshare -rn)")
 	}
+	// A netns has no local address: add some, so more than the static ranges
+	// round-trip (two adjacent /32s, which nft must keep apart, and a /128
+	// where the netns has IPv6).
+	if out, err := exec.Command("ip", "link", "set", "lo", "up").CombinedOutput(); err != nil {
+		t.Skipf("ip link set lo up: %v %s", err, out)
+	}
+	for _, a := range []string{"192.0.2.10/32", "192.0.2.11/32", "2001:db8::10/128"} {
+		if out, err := exec.Command("ip", "addr", "add", a, "dev", "lo").CombinedOutput(); err != nil {
+			t.Logf("ip addr add %s: %v %s (left out)", a, err, out)
+		}
+	}
 	b := New()
 	_ = b.DropEverything()
 	t.Cleanup(func() { _ = b.DropEverything() })
@@ -246,6 +257,10 @@ func TestLiveNFTSelfSetsReadBackUnchanged(t *testing.T) {
 		t.Fatalf("EnsureBase: %v", err)
 	}
 	v4, v6 := firewall.SelfSetElems(b.selfResolver.LocalIPs())
+	if len(v4) < 3 {
+		t.Fatalf("local IPv4 addresses missing from the wanted self_v4: %v", v4)
+	}
+	t.Logf("self_v4=%v self_v6=%v", v4, v6)
 	if !b.setHolds("self_v4", v4) || !b.setHolds("self_v6", v6) {
 		h4, _ := b.ListSetElementsRaw("self_v4")
 		h6, _ := b.ListSetElementsRaw("self_v6")
@@ -253,6 +268,10 @@ func TestLiveNFTSelfSetsReadBackUnchanged(t *testing.T) {
 	}
 	if !b.tableExists() {
 		t.Fatal("tableExists after EnsureBase = false")
+	}
+	// A second EnsureBase (every restart) leaves them alone.
+	if !b.setHolds("self_v4", v4) || !b.setHolds("self_v6", v6) {
+		t.Fatal("self sets no longer read back as wanted")
 	}
 }
 
@@ -331,5 +350,30 @@ func TestEnsureBase_RefusedSelfSetWriteFallsBack(t *testing.T) {
 		}
 	} else if !regexp.MustCompile(`ARGS -f -\nflush set inet cfm self_v4\n`).MatchString(got) {
 		t.Errorf("no self_v4-only write after the combined one was refused:\n%s", got)
+	}
+}
+
+// An element of a shape the reader does not know must not be dropped before
+// the comparison: the kernel would hold an extra self source while the set
+// read as "already right". Here self_v4 holds the wanted content plus one
+// element in an unknown shape; it must be rewritten.
+func TestEnsureBase_UnknownElementShapeIsRewritten(t *testing.T) {
+	v4, v6 := wantSelfSets()
+	log := fakeNFTOpts(t, fakeOpts{chains: "ok", self4: v4, self6: v6})
+	// Append an element shape rawElemString does not know to self_v4's JSON.
+	p := filepath.Join(filepath.Dir(log), "self_v4.json")
+	b, err := os.ReadFile(p) // #nosec G304 -- test temp file
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = []byte(strings.Replace(string(b), `"elem":[`, `"elem":[{"set":["203.0.113.0/24"]},`, 1))
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := New().EnsureBase(); err != nil {
+		t.Fatalf("EnsureBase: %v", err)
+	}
+	if got := readFile(t, log); !strings.Contains(got, "flush set inet cfm self_v4") {
+		t.Errorf("a self set holding an unreadable element must be rewritten:\n%s", got)
 	}
 }
