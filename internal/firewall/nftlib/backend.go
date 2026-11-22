@@ -69,6 +69,9 @@ type Backend struct {
 	namedSets map[string]*nftables.Set
 	table     *nftables.Table
 
+	// repairBase, when set (tests), replaces EnsureBase in repairIfTableAbsent.
+	repairBase func() error
+
 	// External feed element cache — avoids kernel reads on every feed update.
 	extFeedMu sync.RWMutex
 	extAllow  map[string]extFeedData // feedKey → data

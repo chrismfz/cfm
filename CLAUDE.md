@@ -123,7 +123,9 @@ The history behind each rule below is in the code comments it names.
   `list counters` took 2.8–18.5 s on EL8, the netlink dump 0.3–1.2 ms;
   `flood_counters_cost_test.go` pins it); the daemon's repairs
   (EnsureBase from the tick loop, a flush, a delete) act only on
-  `tableAbsent`, never on `tableUnknown` (the one-shot CLI still runs
+  `tableAbsent`, never on `tableUnknown` (nftlib: only a `lookupTable`
+  error marked `errTableAbsent`, the kernel's ENOENT, via
+  `repairIfTableAbsent`) (the one-shot CLI still runs
   EnsureBase when `tableExists` is false, which is safe but not cheap); an unread chain is never taken for an empty one (no rule is
   added blind). Compare before you write (`firewall.SameSetElems`), and put a
   write in one script. `ensurebase_cost_test.go` pins EnsureBase's profile,

@@ -49,12 +49,27 @@ func (b *Backend) DumpFloodCounters() {
 }
 
 func (b *Backend) dumpFloodCountersOnce() {
+	b.logFloodCounters()
+	// The counters above are log-only; the throttle bans are not, so a failed
+	// counter read never skips this pass.
+	if b.cfg != nil && b.cfg.Throttle.Enabled {
+		b.dumpThrottledIPsNative()
+	}
+}
+
+// logFloodCounters logs the flood counter deltas. A failed table lookup is
+// logged; only a definite absence repairs the table (an unknown read — a
+// netlink error, ENOBUFS, a deadline — is retried on the next tick).
+func (b *Backend) logFloodCounters() {
 	b.mu.Lock()
 	t, err := b.lookupTable()
 	if err != nil {
 		b.mu.Unlock()
-		_ = b.EnsureBase()
-		logging.Logf("[flood] cannot get table: %v", err)
+		if repaired, rerr := b.repairIfTableAbsent(err); repaired {
+			logging.Logf("[flood] inet %s table absent, ran EnsureBase (result: %v): %v", cfmTableName, rerr, err)
+		} else {
+			logging.Logf("[flood] cannot get table, skipping counters this tick: %v", err)
+		}
 		return
 	}
 	// Hold b.mu across the read: it serialises this backend's netlink calls.
@@ -98,10 +113,6 @@ func (b *Backend) dumpFloodCountersOnce() {
 				c.Name, pkts, delta, autoblock.ReasonForName(c.Name))
 		}
 		b.last[c.Name] = pkts
-	}
-
-	if b.cfg != nil && b.cfg.Throttle.Enabled {
-		b.dumpThrottledIPsNative()
 	}
 }
 

@@ -34,6 +34,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   failed read, or an empty answer, still repairs the table only when the cheap
   `list chains inet` probe says it is absent. The `[flood]` log lines are
   unchanged, except that they are now sorted by counter name.
+- **On nodes running the nftlib engine, a failed table lookup no longer
+  rebuilds the firewall base.** The flood-counter dump (every tick) ran
+  EnsureBase on any error looking up the `inet cfm` table, and the flood-rules
+  apply did the same: a netlink failure, ENOBUFS or a read deadline on an
+  already slow kernel started a full repair. Both now repair only when the
+  kernel answers that the table does not exist (ENOENT), as the nft engine
+  does; any other error is logged and retried next tick. The counter dump's
+  failure also no longer skips that tick's throttle autoblock pass on this
+  engine (the counters are log-only, the throttle bans are not).
 - **A failed flood-counter read no longer skips that tick's throttle
   autoblock pass.** The dump returned before evaluating the throttle sets
   (`th_syn_v4`, …) whenever the log-only counters could not be read, so a
