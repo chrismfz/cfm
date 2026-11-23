@@ -21,6 +21,22 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **agent config sync: spamd no longer skips the files we push.** Every
+  synced file was written with mode 0600, whatever it had before. spamd reads
+  its config without root, so on 2026-11-22 `myip.cf` and
+  `mailfromfilters.cf` were rewritten 0600 on every cPanel node and spamd
+  dropped them ("cannot open … Permission denied"): no `*_MYIP` RBL tests, no
+  Mail From Filters, and no `dns_server` line (Spamhaus answered the public
+  resolver with `*_BLOCKED_OPENDNS`). A rewrite now keeps the file's mode and
+  owner, a SpamAssassin file is always made group/other readable (so one an
+  older agent left at 0600 is repaired by the next sync), and a new file under
+  `/etc/mail/spamassassin/` gets 0644 (0600 elsewhere). The temp file is
+  unique and gets its mode before the rename, so a failed chmod fails the
+  update instead of leaving an unreadable file (a failed chown is logged and
+  the file is written as the agent's, as before). A rollback restores the old
+  content but keeps a SpamAssassin file readable, every directory level
+  created under the SpamAssassin dir is 0755, and temp files a killed write
+  left behind are removed by the next write.
 - **sslcollector: edge workers no longer grow with every certificate
   reload.** The certificates and keys a worker had replaced were freed only
   when LuaJIT's garbage collector next ran a full cycle, which it rarely did,
