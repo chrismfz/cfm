@@ -444,7 +444,7 @@ end
 -- ---------------------------------------------------------------------------
 -- Core ingestion
 -- ---------------------------------------------------------------------------
--- This worker's resident set in MB, for the ingest line ("-" when unread):
+-- This worker's resident set in MB, for the gc line ("-" when unread):
 -- what the OpenSSL side of the store costs, which the Lua heap does not show.
 local function worker_rss_mb()
   local f = io.open("/proc/self/status", "r")
