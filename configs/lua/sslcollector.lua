@@ -444,6 +444,18 @@ end
 -- ---------------------------------------------------------------------------
 -- Core ingestion
 -- ---------------------------------------------------------------------------
+-- This worker's resident set in MB, for the ingest line ("-" when unread):
+-- what the OpenSSL side of the store costs, which the Lua heap does not show.
+local function worker_rss_mb()
+  local f = io.open("/proc/self/status", "r")
+  if not f then return "-" end
+  local s = f:read("*a") or ""
+  f:close()
+  local kb = s:match("VmRSS:%s*(%d+)")
+  if not kb then return "-" end
+  return string.format("%.0f", tonumber(kb) / 1024)
+end
+
 local function ingest_dumpall(data, src)
   local ver = data.version or data.Version or ""
   if ver ~= "" then
@@ -561,6 +573,23 @@ local function ingest_dumpall(data, src)
     _worker_last_dumpall = ngx.time()
   end
 
+  -- The pairs the store just let go of (the whole old store on a replace, the
+  -- overwritten names on a merge) hold OpenSSL memory (X509 chains, EVP_PKEY)
+  -- that LuaJIT's GC does not see: to it each pair is a few bytes of cdata,
+  -- so it ran rarely and every ingest's old store piled up (titan,
+  -- 2026-11-23: 3513 names, workers at 410-530 MB PSS; in a container 20
+  -- loads of 3000 pairs took a worker from 51 to 238 MB RSS, and a late
+  -- collect still left 215 MB, the heap having fragmented). A full collect
+  -- now frees them while they are the newest allocations, once per ingest
+  -- that changed the store (~50 ms for 3000 pairs, in a timer, never a
+  -- handshake).
+  local gc_ms = "-"
+  if okN > 0 then
+    local t0 = os.clock()
+    collectgarbage("collect")
+    gc_ms = string.format("%.0f", (os.clock() - t0) * 1000)
+  end
+
   local cached_exact, cached_wild = 0, 0
   for k in pairs(_store) do
     if k:sub(1, 2) == "e:" then
@@ -578,7 +607,10 @@ local function ingest_dumpall(data, src)
     " ok=", okN,
     " fail=", failN,
     " mode=", mode,
-    " ver=", (ver ~= "" and ver or "-"))
+    " ver=", (ver ~= "" and ver or "-"),
+    " gc_ms=", gc_ms,
+    " lua_kb=", string.format("%.0f", collectgarbage("count")),
+    " rss_mb=", worker_rss_mb())
 
   return okN, failN
 end

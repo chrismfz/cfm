@@ -20,7 +20,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **sslcollector: edge workers no longer grow with every certificate
+  reload.** The certificates and keys a worker had replaced were freed only
+  when LuaJIT's garbage collector next ran a full cycle, which it rarely did,
+  because it does not see the OpenSSL memory behind them; on titan (3513
+  names) workers reached 410-530 MB. Each ingest that changes the store now
+  runs a full collect right after the swap (~50 ms for 3000 pairs, in the
+  background timer, never on a handshake). The `ingest` log line now also
+  reports `gc_ms=`, the Lua heap (`lua_kb=`) and the worker's RSS (`rss_mb=`).
 
 ## 2026.11.23
 

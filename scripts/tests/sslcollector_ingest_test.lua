@@ -368,6 +368,48 @@ do
   check(n5() == 5, "x1: the payload was taken (got " .. n5() .. ")")
 end
 
+-- ── A full GC runs once per ingest that changed the store, after the swap ───
+-- The old store's OpenSSL memory is invisible to LuaJIT's GC (titan,
+-- 2026-11-23: workers grew to 410-530 MB). The collect must come after the
+-- swap (before it, the old store is still referenced and nothing is freed),
+-- and only when the store changed (an empty or all-failed payload frees
+-- nothing). The ingest line reports the Lua heap and the worker's RSS.
+do
+  local M6 = fresh_module()
+  local ingest6 = find_upvalue(M6.start_background, "ingest_dumpall")
+  local function n6() local e, w = M6.cert_counts(); return e + w end
+  local real_gc = collectgarbage
+  local collects = {}
+  _G.collectgarbage = function(opt, ...)
+    if opt == "collect" then collects[#collects + 1] = n6() end
+    return real_gc(opt, ...)
+  end
+  local ok, err = pcall(function()
+    warn_lines = {}
+    ingest6({ version = "g1", complete = true, exact = names("g", 6, "A"), wild = {} }, "dumpall")
+    check(#collects == 1, "g1: one collect after a replace (got " .. #collects .. ")")
+    check(collects[1] == 6, "g1: the collect ran after the swap (store held " ..
+          tostring(collects[1]) .. ")")
+    check(logged("gc_ms="), "g1: the ingest line reports gc_ms=")
+    check(logged("lua_kb="), "g1: the ingest line reports lua_kb=")
+    check(logged("rss_mb="), "g1: the ingest line reports rss_mb=")
+
+    ingest6({ version = "g2", complete = false, exact = names("x", 2, "B"), wild = {} }, "dumpall")
+    check(#collects == 2, "g2: one collect after a merge (got " .. #collects .. ")")
+    check(collects[2] == 8, "g2: the collect ran after the merge (store held " ..
+          tostring(collects[2]) .. ")")
+
+    warn_lines = {}
+    ingest6({ version = "g3", complete = true, exact = {}, wild = {} }, "dumpall")
+    ingest6({ version = "g4", complete = true, wild = {},
+      exact = { { host = "g1.example", cert_pem = "BAD", key_pem = "K" } } }, "dumpall")
+    check(#collects == 2, "g3/g4: no collect when the store did not change (got " .. #collects .. ")")
+    check(logged("gc_ms=-"), "g3: the ingest line says gc_ms=- when no collect ran")
+  end)
+  _G.collectgarbage = real_gc
+  check(ok, "GC section ran (" .. tostring(err) .. ")")
+end
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)

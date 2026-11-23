@@ -154,7 +154,21 @@ hold:
 A payload entry whose PEM is missing or does not parse keeps the worker's
 current pair for that name. A held shrink logs `merged, not replaced` and
 sets `meta:last_error`. Every ingest logs one line,
-`ingest src=… mode=replace|merge_shrink|merge_incomplete|none`.
+`ingest src=… mode=replace|merge_shrink|merge_incomplete|none … gc_ms= lua_kb= rss_mb=`.
+
+**A full GC after every ingest that changed the store.** Each pair is OpenSSL
+memory (the parsed X509 chain and EVP_PKEY) behind a few bytes of cdata, so
+LuaJIT's GC, which counts only those bytes, ran rarely, and the stores an
+ingest let go of piled up: titan (3513 names, 2026-11-23) had workers at
+410-530 MB PSS. In a container, 20 loads of 3000 pairs took a worker from 51
+to 238 MB RSS without it, and a late collect still left 215 MB (the freed
+memory is not returned to the OS once fragmented); with a collect right after
+each swap it stayed at 92 MB. The collect runs in the ingest timer, after the
+swap or merge (before it, the old store is still referenced), only when the
+payload stored at least one pair; for 3000 pairs it takes ~50 ms. The ingest
+line reports it (`gc_ms=`, `-` when none ran), the Lua heap (`lua_kb=`) and the
+worker's resident set (`rss_mb=`, from `/proc/self/status`), which is where
+the OpenSSL side shows.
 
 ---
 
