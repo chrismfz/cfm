@@ -444,6 +444,18 @@ end
 -- ---------------------------------------------------------------------------
 -- Core ingestion
 -- ---------------------------------------------------------------------------
+-- This worker's resident set in MB, for the gc line ("-" when unread):
+-- what the OpenSSL side of the store costs, which the Lua heap does not show.
+local function worker_rss_mb()
+  local f = io.open("/proc/self/status", "r")
+  if not f then return "-" end
+  local s = f:read("*a") or ""
+  f:close()
+  local kb = s:match("VmRSS:%s*(%d+)")
+  if not kb then return "-" end
+  return string.format("%.0f", tonumber(kb) / 1024)
+end
+
 local function ingest_dumpall(data, src)
   local ver = data.version or data.Version or ""
   if ver ~= "" then
@@ -583,6 +595,29 @@ local function ingest_dumpall(data, src)
   return okN, failN
 end
 
+-- A full collect once an ingest that changed the store has returned and its
+-- caller has dropped the payload. The pairs the store let go of (the whole old
+-- store on a replace, the overwritten names on a merge) hold OpenSSL memory
+-- (X509 chains, EVP_PKEY) that LuaJIT's GC does not see: to it each pair is a
+-- few bytes of cdata, so it ran rarely and the released stores piled up
+-- (titan, 2026-11-23: 3513 names, workers at 410-530 MB PSS; in a container
+-- 20 loads of 3000 pairs took a worker from 51 to 238 MB RSS, and a late
+-- collect still left 215 MB, the heap having fragmented). Collecting before
+-- the next ingest allocates on top of them keeps it flat. It runs from the
+-- caller, not inside ingest_dumpall, because there the raw body (~20 MB on
+-- titan) and the decoded payload are still referenced and would survive it.
+-- ~50 ms for 3000 pairs, in a timer, never on a handshake.
+local function collect_released(src)
+  if ngx.update_time then ngx.update_time() end
+  local t0 = ngx.now()
+  collectgarbage("collect")
+  if ngx.update_time then ngx.update_time() end
+  ngx.log(ngx.WARN, "[sslcollector] gc src=", (src or "?"),
+    " gc_ms=", string.format("%.0f", (ngx.now() - t0) * 1000),
+    " lua_kb=", string.format("%.0f", collectgarbage("count")),
+    " rss_mb=", worker_rss_mb())
+end
+
 local function load_from_snapshot()
   if not OFFLINE_CACHE then
     ngx.log(ngx.INFO, "[sslcollector] offline cache disabled (SSLCOLLECTOR_OFFLINE_CACHE=0), skipping snapshot load")
@@ -616,17 +651,20 @@ local function load_from_snapshot()
     return
   end
 
-  ingest_dumpall(data, "snapshot")
+  -- true: the store changed (the caller collects once body/data are gone).
+  return (ingest_dumpall(data, "snapshot")) > 0
 end
 
 -- load_from_snapshot under pcall. Both callers are timers whose later steps
 -- (the fetch, the poll reschedule) must run: an error in the snapshot ingest
 -- ended them, and the worker never fetched or polled again.
 local function safe_load_snapshot()
-  local ok, err = pcall(load_from_snapshot)
+  local ok, res = pcall(load_from_snapshot)
   if not ok then
-    ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(err))
-    set_last_error("snapshot load: " .. tostring(err))
+    ngx.log(ngx.ERR, "[sslcollector] snapshot load error: ", tostring(res))
+    set_last_error("snapshot load: " .. tostring(res))
+  elseif res then
+    collect_released("snapshot")
   end
 end
 
@@ -686,6 +724,9 @@ local function do_dumpall(shared_lock)
   -- throttle correctly suppresses redundant force attempts after any dumpall type.
   dict:set("meta:last_dumpall_attempt_at", ngx.time(), 0)
 
+  -- Set inside the pcall: the collect runs after it, once r.body and the
+  -- decoded payload are out of reach.
+  local changed = false
   local ok, err = pcall(function()
     local r, rerr = sock_get("/dumpall")
     if not r then
@@ -707,7 +748,7 @@ local function do_dumpall(shared_lock)
     end
 
     -- Always update RAM cache (soft: version optional)
-    ingest_dumpall(vdata, "dumpall")
+    changed = (ingest_dumpall(vdata, "dumpall")) > 0
 
     -- Worker no longer writes the disk snapshot. The cfm daemon owns
     -- /var/lib/cfm/sslcollector/dump.json — it writes after every
@@ -730,6 +771,8 @@ local function do_dumpall(shared_lock)
     ngx.log(ngx.ERR, "[sslcollector] do_dumpall unhandled error (lock released): ", err)
     set_last_error("do_dumpall panic: " .. tostring(err))
   end
+  -- After the lock is released: another worker's fetch need not wait on it.
+  if changed then collect_released("dumpall") end
 end
 
 -- ---------------------------------------------------------------------------

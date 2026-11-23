@@ -368,6 +368,98 @@ do
   check(n5() == 5, "x1: the payload was taken (got " .. n5() .. ")")
 end
 
+-- ── A full GC once an ingest changed the store and the payload is released ──
+-- The old store's OpenSSL memory is invisible to LuaJIT's GC (titan,
+-- 2026-11-23: workers grew to 410-530 MB). The collect runs in the callers
+-- (do_dumpall, the snapshot load), after ingest_dumpall has returned and the
+-- body and decoded payload are out of reach (inside ingest they survived it),
+-- after the shared lock is released, and only when the store changed. Its own
+-- line reports the collect, the Lua heap and the worker's RSS.
+do
+  local real_http, real_decode, real_open = package.loaded["resty.http"],
+    package.loaded["cjson.safe"].decode, io.open
+  local body = string.rep(" ", 300)
+  local next_payload           -- built by decode, never held by the test
+  local live = setmetatable({}, { __mode = "k" })
+  package.loaded["resty.http"] = { new = function()
+    return {
+      set_timeout = function() end,
+      connect = function() return true end,
+      request = function() return { status = 200, read_body = function() return body end } end,
+      close = function() end,
+    }
+  end }
+  package.loaded["cjson.safe"].decode = function()
+    local d = next_payload()
+    live[d] = true
+    return d
+  end
+  local M6 = fresh_module()
+  local ingest6 = find_upvalue(M6.start_background, "ingest_dumpall")
+  local do_dumpall6 = find_upvalue(M6.start_background, "do_dumpall")
+  local snap6 = find_upvalue(M6.start_background, "safe_load_snapshot")
+  local function n6() local e, w = M6.cert_counts(); return e + w end
+  local real_gc = collectgarbage
+  local collects = {}
+  _G.collectgarbage = function(opt, ...)
+    if opt == "collect" then
+      local r = real_gc(opt, ...)
+      local held = 0
+      for _ in pairs(live) do held = held + 1 end
+      collects[#collects + 1] = { n = n6(), held = held, lock = dict_data["lock:dumpall"] }
+      return r
+    end
+    return real_gc(opt, ...)
+  end
+  local ok, err = pcall(function()
+    check(do_dumpall6 ~= nil and snap6 ~= nil, "found do_dumpall and safe_load_snapshot")
+
+    -- ingest_dumpall itself never collects.
+    ingest6({ version = "g0", complete = true, exact = names("z", 2, "A"), wild = {} }, "dumpall")
+    check(#collects == 0, "g0: ingest_dumpall alone does not collect (got " .. #collects .. ")")
+
+    warn_lines = {}
+    next_payload = function() return { version = "g1", complete = true, exact = names("g", 6, "A"), wild = {} } end
+    do_dumpall6(true)
+    check(#collects == 1, "g1: one collect after a /dumpall that replaced (got " .. #collects .. ")")
+    local c = collects[1] or {}
+    check(c.n == 6, "g1: the collect ran after the swap (store held " .. tostring(c.n) .. ")")
+    check(c.held == 0, "g1: the decoded payload was out of reach at the collect (" .. tostring(c.held) .. " held)")
+    check(c.lock == nil, "g1: the shared lock was released before the collect")
+    check(logged("gc src=dumpall gc_ms="), "g1: the gc line reports gc_ms=")
+    check(logged("lua_kb=") and logged("rss_mb="), "g1: the gc line reports lua_kb= and rss_mb=")
+
+    next_payload = function() return { version = "g2", complete = false, exact = names("x", 2, "B"), wild = {} } end
+    do_dumpall6(false)
+    check(#collects == 2 and collects[2].n == 8, "g2: one collect after a merge, store already merged")
+
+    -- An all-failed payload changes nothing: no collect.
+    next_payload = function() return { version = "g3", complete = true, wild = {},
+      exact = { { host = "g1.example", cert_pem = "BAD", key_pem = "K" } } } end
+    do_dumpall6(false)
+    check(#collects == 2, "g3: no collect when the store did not change (got " .. #collects .. ")")
+
+    -- The snapshot at boot: same rule.
+    io.open = function(path, mode)
+      if path == "/var/lib/cfm/sslcollector/dump.json" then
+        return { read = function() return body end, close = function() end }
+      end
+      return real_open(path, mode)
+    end
+    next_payload = function() return { version = "g4", complete = true, exact = names("s", 4, "C"), wild = {} } end
+    snap6()
+    check(#collects == 3, "g4: one collect after a snapshot load (got " .. #collects .. ")")
+    c = collects[3] or {}
+    check(c.n == 4 and c.held == 0, "g4: after the swap, the snapshot payload out of reach (n=" ..
+          tostring(c.n) .. " held=" .. tostring(c.held) .. ")")
+  end)
+  _G.collectgarbage = real_gc
+  io.open = real_open
+  package.loaded["resty.http"] = real_http
+  package.loaded["cjson.safe"].decode = real_decode
+  check(ok, "GC section ran (" .. tostring(err) .. ")")
+end
+
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")
   os.exit(1)
