@@ -80,12 +80,20 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 		}
 		return nil
 	}
+	usage := fmt.Sprintf("usage: cfm webtop %s %s [add|remove] <value> [--type host|path]%s",
+		prefix, resource, ruleFlagUsage(prefix))
+	if isCLIHelpArg(args[0]) || (len(args) > 1 && isCLIHelpArg(args[1])) {
+		fmt.Println(usage)
+		return nil
+	}
 	if len(args) < 2 {
-		return fmt.Errorf("usage: cfm webtop %s %s [add|remove] <value> [--type host|path]%s",
-			prefix, resource, ruleFlagUsage(prefix))
+		return fmt.Errorf("%s", usage)
 	}
 	action := args[0]
 	value := args[1]
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("invalid value %q: looks like a flag (the value comes first)\n%s", value, usage)
+	}
 	typ := "host"
 	var rules []string  // collected raw specifiers; sent verbatim to API for parsing
 	var scopes []string // waf / challenge: host(s) to scope the entry to
@@ -108,6 +116,24 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			scopes = append(scopes, strings.TrimPrefix(args[i], "--scope="))
 		default:
 			return fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	// A host value or --scope host goes through the shared host check: on add
+	// the hostname grammar with the stores' glob metacharacters, on remove only
+	// "not a flag" (an existing entry may predate the grammar). A path value
+	// was only refused above when it looks like a flag.
+	kind := cliHostGlob
+	if action != "add" {
+		kind = cliHostExisting
+	}
+	if typ == "host" {
+		if err := validateCLIHostKind(value, kind); err != nil {
+			return fmt.Errorf("invalid host %q: %v\n%s", value, err, usage)
+		}
+	}
+	for _, sc := range scopes {
+		if err := validateCLIHostKind(sc, kind); err != nil {
+			return fmt.Errorf("invalid --scope host %q: %v\n%s", sc, err, usage)
 		}
 	}
 	var endpoint string
