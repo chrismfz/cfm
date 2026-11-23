@@ -25,10 +25,14 @@ func TestCLIHelpWordsCallNothing(t *testing.T) {
 		setIPv6: func(string, []string) int { fail("setIPv6"); return 0 },
 	}
 	for _, h := range []string{"-h", "--help", "help"} {
-		for _, pre := range [][]string{{}, {"status"}, {"web"}} {
+		for _, pre := range [][]string{{}, {"status"}, {"web"}, {"ipv6"}, {"ipv6", "status"}, {"ipv6", "on"}, {"ipv6", "off"}, {"ipv6", "on", "OpenResty"}} {
 			out.Reset()
 			args := append(append([]string{}, pre...), h)
-			if rc := run(args, d); rc != 0 || !strings.Contains(out.String(), "cfm edge [status]") {
+			want := "cfm edge [status]"
+			if len(pre) > 0 && pre[0] == "ipv6" {
+				want = "cfm edge ipv6"
+			}
+			if rc := run(args, d); rc != 0 || !strings.Contains(out.String(), want) {
 				t.Errorf("%q: rc=%d out=%q err=%q", args, rc, out.String(), errOut.String())
 			}
 		}

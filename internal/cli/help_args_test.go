@@ -17,7 +17,7 @@ import (
 )
 
 // trapBackend fails the test on any backend call: its embedded Backend is nil,
-// so every method panics, and runTrapped turns the panic into the failure.
+// so every method panics, and each test's recover turns that into a failure.
 type trapBackend struct{ firewall.Backend }
 
 // captureStdio runs fn with os.Stdout and os.Stderr redirected and returns
@@ -84,6 +84,12 @@ func TestCLIHelpWordsPrintUsageAndDoNothing(t *testing.T) {
 		{"unblock", nil, "usage: cfm unblock", RunUnblock},
 		{"allow", nil, "usage: cfm allow", RunAllow},
 		{"unallow", nil, "usage: cfm unallow", RunUnallow},
+		// A help word after the target (the review of the first cut:
+		// `unblock 1.2.3.4 --help` unblocked, `allow 1.2.3.4 help` allowed).
+		{"unblock IP", []string{"203.0.113.9"}, "usage: cfm unblock", RunUnblock},
+		{"unallow IP", []string{"203.0.113.9"}, "usage: cfm unallow", RunUnallow},
+		{"allow IP", []string{"203.0.113.9"}, "usage: cfm allow", RunAllow},
+		{"which IP", []string{"203.0.113.9"}, "usage: cfm which", func(a []string, be firewall.Backend, d string, p func() bool) int { return RunWhich(a, be, d, srv.URL, p) }},
 		{"list", nil, "usage: cfm list", func(a []string, be firewall.Backend, _ string, p func() bool) int { return RunList(a, be, p) }},
 		{"allow-list", nil, "usage: cfm allow-list", func(a []string, be firewall.Backend, _ string, p func() bool) int { return RunAllowList(a, be, p) }},
 		{"which", nil, "usage: cfm which", func(a []string, be firewall.Backend, d string, p func() bool) int { return RunWhich(a, be, d, srv.URL, p) }},

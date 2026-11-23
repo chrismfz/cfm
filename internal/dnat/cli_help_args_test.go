@@ -7,8 +7,8 @@ import (
 	"cfm/internal/firewall"
 )
 
-// trapBackend fails the test on any backend call (its embedded Backend is
-// nil, so every method panics).
+// helpTrapBackend fails the test on any backend call (its embedded Backend is
+// nil, so every method panics; the test's recover reports it).
 type helpTrapBackend struct{ firewall.Backend }
 
 // Every `cfm dnat` (and so `cfm edge on|off|panel`) command line answers -h,
@@ -26,6 +26,9 @@ func TestCLIHelpWordsTouchNothing(t *testing.T) {
 		{"bypass"}, {"bypass", "add"}, {"bypass", "remove"}, {"bypass", "list"},
 		{"cpanel"}, {"panel"}, {"cpanel", "on"}, {"cpanel", "off"}, {"cpanel", "status"},
 		{"cpanel", "mode"}, {"cpanel", "priority"}, {"cpanel", "bypass", "add"}, {"panel", "on"},
+		// A help word after the target: `bypass add <IP> --help` added it.
+		{"bypass", "add", "198.51.100.0/24"}, {"bypass", "remove", "198.51.100.7"},
+		{"cpanel", "bypass", "add", "198.51.100.0/24"}, {"cpanel", "bypass", "remove", "198.51.100.7"},
 	}
 	for _, h := range []string{"-h", "--help", "help"} {
 		for _, s := range subs {

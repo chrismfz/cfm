@@ -22,9 +22,15 @@ func RunAllow(args []string, be firewall.Backend, cfgDir string, tableExists fun
 	fs := flag.NewFlagSet("allow", flag.ExitOnError)
 	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
 	flagArgs, posArgs := SplitFlagsAndPositionals(args, map[string]bool{"--ttl": true})
-	if clihelp.First(args) || clihelp.First(posArgs) {
+	// A help word anywhere is usage, and the target is the only positional:
+	// `cfm allow 1.2.3.4 help` allowed 1.2.3.4 permanently.
+	if clihelp.Any(args) {
 		fmt.Println(allowUsage)
 		return 0
+	}
+	if len(posArgs) > 1 {
+		fmt.Fprintf(os.Stderr, "allow: unexpected argument %q\n%s\n", posArgs[1], allowUsage)
+		return 2
 	}
 	_ = fs.Parse(flagArgs)
 
@@ -117,9 +123,13 @@ func RunAllow(args []string, be firewall.Backend, cfgDir string, tableExists fun
 }
 
 func RunUnallow(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
-	if clihelp.First(args) {
+	if clihelp.Any(args) { // `cfm unallow 1.2.3.4 --help` removed the allow
 		fmt.Println(unallowUsage)
 		return 0
+	}
+	if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "unallow: unexpected argument %q\n%s\n", args[1], unallowUsage)
+		return 2
 	}
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, unallowUsage)

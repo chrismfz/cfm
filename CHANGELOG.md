@@ -54,6 +54,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
     user-kill --id=N help` (killed the connection), `webtop waf clear`,
     `http3 enable|disable`, `rules remove`, `challenge-access remove`, `tokens
     revoke`, `clam sigignore add help`.
+  - A help word after the target: `cfm unblock|unallow <IP> --help` and
+    `cfm allow <IP> help` acted on the IP, and `cfm dnat [cpanel] bypass
+    add|remove <IP> --help` edited the bypass list. They now print usage, and
+    refuse any argument after the target.
   - `cfm auth session purge help` and `cfm auth log purge help` purged:
     every `cfm auth` leaf is now flags-only.
   - Harmless but wrong: `cfm test --help` ran the checks, `cfm debug help`

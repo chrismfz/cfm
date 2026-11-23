@@ -37,7 +37,7 @@ func RunWhich(args []string, be firewall.Backend, cfgDir, baseURL string, tableE
 		_ = fs.Parse(args)
 	}
 
-	if clihelp.First(args) || clihelp.First(fs.Args()) {
+	if clihelp.First(args) || clihelp.Any(fs.Args()) { // `which 1.2.3.4 --help` too
 		fmt.Println("usage: cfm which <IP|CIDR> [--json]")
 		return 0
 	}

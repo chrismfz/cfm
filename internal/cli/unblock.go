@@ -22,9 +22,15 @@ import (
 const unblockUsage = "usage: cfm unblock <IP | IPv6 client /64>"
 
 func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
-	if clihelp.First(args) {
+	// A help word anywhere is usage, and the target is the only argument:
+	// `cfm unblock 1.2.3.4 --help` unblocked 1.2.3.4.
+	if clihelp.Any(args) {
 		fmt.Println(unblockUsage)
 		return 0
+	}
+	if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "unblock: unexpected argument %q\n%s\n", args[1], unblockUsage)
+		return 2
 	}
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, unblockUsage)

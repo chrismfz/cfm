@@ -48,7 +48,7 @@ func RunCLI(args []string, defaultSockPath, defaultToken string) {
 	}
 	// A help word after the subcommand is usage; scan/refresh/stats take no
 	// positional (`ssl refresh help` asked the daemon for a refresh).
-	if clihelp.First(fs.Args()) {
+	if clihelp.Any(fs.Args()) { // `ssl dump example.com --help` too
 		fmt.Println(sslUsage)
 		return
 	}

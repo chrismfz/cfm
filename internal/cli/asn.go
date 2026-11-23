@@ -30,7 +30,7 @@ func RunASN(args []string) int {
 		_ = fs.Parse(args)
 	}
 
-	if clihelp.First(args) || clihelp.First(fs.Args()) {
+	if clihelp.First(args) || clihelp.Any(fs.Args()) { // `asn AS1 --help` too
 		fmt.Println("usage: cfm asn <AS12345> [--json]")
 		return 0
 	}
