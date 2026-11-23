@@ -20,7 +20,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **`cfm webtop` no longer takes a flag for a host.** `cfm webtop challenge
+  add --help` armed manual challenges for `--help` and `www.--help`, and
+  `challenge remove -- --help` removed a host named `--`. Every subcommand
+  that takes a host (`challenge add/remove/status/host/tier/lockdown`,
+  `attack on|off`, `site-cache get/set/off/remove/purge`, and the
+  challenge/WAF/clam exclude value and `--scope`) now prints its usage for
+  `-h`, `--help` or `help` and refuses a host that starts with `-` or is not
+  a hostname (letters, digits, dots, hyphens, an optional leading `*.`;
+  exclude values keep their `*`/`?` globs), before calling the API.
 
 ## 2026.11.23
 

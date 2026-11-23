@@ -48,22 +48,38 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache get <vhost>")
 		}
-		return runSiteCacheGet(baseURL, args[1])
+		host, ok, err := cliHostArg(args[1], "usage: cfm webtop site-cache get <vhost>")
+		if !ok {
+			return err
+		}
+		return runSiteCacheGet(baseURL, host)
 	case "set":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache set <vhost> [--static RECIPE|off] [--micro RECIPE|off] [--static-ttl D] [--micro-ttl D] [--strict-cookies|--no-strict-cookies] [--auth-cookies a,b,c|--no-auth-cookies]")
 		}
-		return runSiteCacheSet(baseURL, args[1], args[2:])
+		host, ok, err := cliHostArg(args[1], "usage: cfm webtop site-cache set <vhost> [--static RECIPE|off] [--micro RECIPE|off] [--static-ttl D] [--micro-ttl D] [--strict-cookies|--no-strict-cookies] [--auth-cookies a,b,c|--no-auth-cookies]")
+		if !ok {
+			return err
+		}
+		return runSiteCacheSet(baseURL, host, args[2:])
 	case "off", "disable":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache off <vhost>")
 		}
-		return runSiteCacheOff(baseURL, args[1])
+		host, ok, err := cliHostArg(args[1], "usage: cfm webtop site-cache off <vhost>")
+		if !ok {
+			return err
+		}
+		return runSiteCacheOff(baseURL, host)
 	case "remove", "rm":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache remove <vhost>")
 		}
-		return runSiteCacheRemove(baseURL, args[1])
+		host, ok, err := cliHostArg(args[1], "usage: cfm webtop site-cache remove <vhost>")
+		if !ok {
+			return err
+		}
+		return runSiteCacheRemove(baseURL, host)
 	case "purge":
 		return runSiteCachePurge(baseURL, args[1:])
 	case "stats":
@@ -415,8 +431,12 @@ func runSiteCachePurge(baseURL string, args []string) error {
 		q.Set("all", "1")
 		msg = "✓ purged ALL vhost caches\n"
 	default:
-		q.Set("host", args[0])
-		msg = fmt.Sprintf("✓ purged cache for %s\n", args[0])
+		host, ok, err := cliHostArg(args[0], "usage: cfm webtop site-cache purge <vhost> | --all")
+		if !ok {
+			return err
+		}
+		q.Set("host", host)
+		msg = fmt.Sprintf("✓ purged cache for %s\n", host)
 	}
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/purge?" + q.Encode()
 	return siteCachePostStatus(u, msg, "site-cache purge")

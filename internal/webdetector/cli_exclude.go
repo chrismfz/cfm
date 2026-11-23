@@ -80,12 +80,20 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 		}
 		return nil
 	}
+	usage := fmt.Sprintf("usage: cfm webtop %s %s [add|remove] <value> [--type host|path]%s",
+		prefix, resource, ruleFlagUsage(prefix))
+	if isCLIHelpArg(args[0]) || (len(args) > 1 && isCLIHelpArg(args[1])) {
+		fmt.Println(usage)
+		return nil
+	}
 	if len(args) < 2 {
-		return fmt.Errorf("usage: cfm webtop %s %s [add|remove] <value> [--type host|path]%s",
-			prefix, resource, ruleFlagUsage(prefix))
+		return fmt.Errorf("%s", usage)
 	}
 	action := args[0]
 	value := args[1]
+	if strings.HasPrefix(value, "-") {
+		return fmt.Errorf("invalid value %q: looks like a flag (the value comes first)\n%s", value, usage)
+	}
 	typ := "host"
 	var rules []string  // collected raw specifiers; sent verbatim to API for parsing
 	var scopes []string // waf / challenge: host(s) to scope the entry to
@@ -108,6 +116,22 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			scopes = append(scopes, strings.TrimPrefix(args[i], "--scope="))
 		default:
 			return fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	// A host value or --scope host goes through the shared host check (glob:
+	// the stores match these as globs); a path value was only refused above
+	// when it looks like a flag.
+	if typ == "host" {
+		if _, ok, err := cliHostArgGlob(value, usage, true); !ok {
+			return err
+		}
+	}
+	for _, sc := range scopes {
+		if _, ok, err := cliHostArgGlob(sc, usage, true); !ok {
+			if err == nil {
+				err = fmt.Errorf("--scope needs a host")
+			}
+			return err
 		}
 	}
 	var endpoint string
