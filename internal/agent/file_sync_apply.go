@@ -174,11 +174,13 @@ type applyResult struct {
 
 // pendingWrite is one update on its way to disk, with what it replaces.
 type pendingWrite struct {
-	u       ConfigUpdate
-	path    string
-	prev    []byte
-	existed bool
-	mode    fs.FileMode
+	u        ConfigUpdate
+	path     string
+	prev     []byte
+	existed  bool
+	mode     fs.FileMode // the mode the new content is written with
+	prevMode fs.FileMode // the existing file's mode, put back by a rollback
+	owner    *fileOwner  // the existing file's owner, kept by a rewrite
 }
 
 // applyUpdates writes the updates that differ from disk, lints SpamAssassin
@@ -209,13 +211,14 @@ func (st *fileSyncState) applyUpdates(ctx context.Context, updates []ConfigUpdat
 				continue
 			}
 		}
-		w := pendingWrite{u: u, path: path, mode: newFileMode(path)}
+		w := pendingWrite{u: u, path: path, mode: newFileMode(path), prevMode: newFileMode(path)}
 		prev, err := os.ReadFile(path)
 		switch {
 		case err == nil:
 			w.prev, w.existed = prev, true
 			if fi, err := os.Stat(path); err == nil {
-				w.mode = fi.Mode().Perm()
+				w.prevMode, w.owner = fi.Mode().Perm(), ownerOf(fi)
+				w.mode = keptFileMode(path, w.prevMode)
 			}
 		case errors.Is(err, fs.ErrNotExist):
 		default:
@@ -514,19 +517,26 @@ func newFileMode(path string) fs.FileMode {
 	return 0o600
 }
 
+// keptFileMode is the mode a rewrite of an existing file gets: its own, but a
+// SpamAssassin file is always made group/other readable, so one the old agent
+// left at 0600 is repaired by the next sync instead of kept unreadable.
+func keptFileMode(path string, prev fs.FileMode) fs.FileMode {
+	if isSpamassassinFile(path) {
+		return prev | 0o044
+	}
+	return prev
+}
+
 func writePending(w pendingWrite) bool {
 	if err := os.MkdirAll(filepath.Dir(w.path), 0750); err != nil {
 		logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(w.path), err)
 		return false
 	}
-	if err := atomicWrite(w.path, []byte(w.u.Content), w.mode); err != nil {
+	// The mode and owner are set on the temp file before the rename, so a
+	// failed chmod/chown fails the write and the old file stays in place.
+	if err := atomicWrite(w.path, []byte(w.u.Content), w.mode, w.owner); err != nil {
 		logging.LogfAPI("[files] write %s: %v", w.path, err)
 		return false
-	}
-	// atomicWrite's mode is masked by the umask, and the temp file it renames
-	// over the target replaces the old file's mode: set it explicitly.
-	if err := os.Chmod(w.path, w.mode); err != nil {
-		logging.LogfAPI("[files] chmod %s %o: %v", w.path, w.mode, err)
 	}
 	logging.LogfAPI("[files] updated %s", w.path)
 	return true
@@ -538,9 +548,7 @@ func rollback(ws []pendingWrite, res *applyResult) {
 	for _, w := range ws {
 		var err error
 		if w.existed {
-			if err = atomicWrite(w.path, w.prev, w.mode); err == nil {
-				err = os.Chmod(w.path, w.mode) // atomicWrite's mode is masked by the umask
-			}
+			err = atomicWrite(w.path, w.prev, w.prevMode, w.owner)
 		} else {
 			err = os.Remove(w.path)
 		}

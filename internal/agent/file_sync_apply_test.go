@@ -189,30 +189,32 @@ func TestApplyUpdatesRefusesSpamassassinCode(t *testing.T) {
 	}
 }
 
-// A lint problem the update introduced rolls the file back (old content and
-// mode), skips the restart, and parks that version; a new version applies.
 // A rewrite keeps the file's mode, and a new file gets 0644 under the
 // SpamAssassin dir (spamd reads its config without root) and 0600 elsewhere.
+// A SpamAssassin file left at 0600 by an older agent is made readable again.
 // Before, every write was 0600, which made spamd skip myip.cf fleet-wide.
 func TestApplyUpdatesKeepsOrSetsTheFileMode(t *testing.T) {
 	f := newSyncFixture(t)
 	f.seed(t, f.saDir+"myip.cf", "old\n", 0o644)
+	f.seed(t, f.saDir+"mailfromfilters.cf", "old\n", 0o600)
 	f.seed(t, f.other+"private.conf", "old\n", 0o640)
 	var st fileSyncState
 	res := st.applyUpdates(context.Background(), []ConfigUpdate{
 		f.update(f.saDir+"myip.cf", "new\n", ""),
+		f.update(f.saDir+"mailfromfilters.cf", "new\n", ""),
 		f.update(f.saDir+"new-rules.cf", "rules\n", ""),
 		f.update(f.other+"private.conf", "new\n", ""),
 		f.update(f.other+"new.conf", "x=1\n", ""),
 	}, f.allowed())
-	if len(res.Written) != 4 {
+	if len(res.Written) != 5 {
 		t.Fatalf("written %v", res.Written)
 	}
 	for path, want := range map[string]os.FileMode{
-		f.saDir + "myip.cf":      0o644,
-		f.saDir + "new-rules.cf": 0o644,
-		f.other + "private.conf": 0o640,
-		f.other + "new.conf":     0o600,
+		f.saDir + "myip.cf":            0o644,
+		f.saDir + "mailfromfilters.cf": 0o644,
+		f.saDir + "new-rules.cf":       0o644,
+		f.other + "private.conf":       0o640,
+		f.other + "new.conf":           0o600,
 	} {
 		fi, err := os.Stat(path)
 		if err != nil {
@@ -222,8 +224,13 @@ func TestApplyUpdatesKeepsOrSetsTheFileMode(t *testing.T) {
 			t.Errorf("%s: mode %o, want %o", path, got, want)
 		}
 	}
+	if left, _ := filepath.Glob(filepath.Join(f.saDir, ".*.tmp*")); len(left) != 0 {
+		t.Errorf("temp files left behind: %v", left)
+	}
 }
 
+// A lint problem the update introduced rolls the file back (old content and
+// mode), skips the restart, and parks that version; a new version applies.
 func TestApplyUpdatesRollsBackOnNewLintProblem(t *testing.T) {
 	f := newSyncFixture(t)
 	f.seed(t, f.saDir+"rules.cf", "old rules\n", 0o644)

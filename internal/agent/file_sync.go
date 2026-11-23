@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"cfm/internal/logging"
 )
@@ -25,14 +26,53 @@ func sha1File(p string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	tmp := filepath.Join(dir, "."+base+".tmp")
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+// fileOwner is the uid/gid a rewritten file keeps.
+type fileOwner struct{ uid, gid int }
+
+// ownerOf is fi's owner, or nil when the platform doesn't say.
+func ownerOf(fi os.FileInfo) *fileOwner {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return &fileOwner{uid: int(st.Uid), gid: int(st.Gid)}
+	}
+	return nil
+}
+
+// atomicWrite replaces path with data: a unique temp file in the same dir,
+// given perm (exactly — not masked by the umask) and, when owner is set, that
+// owner, then renamed over path. A reader sees the old file or the new one,
+// never a half-written one or one with the wrong mode.
+func atomicWrite(path string, data []byte, perm os.FileMode, owner *fileOwner) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		return err
+	}
+	if owner != nil {
+		if err := os.Chown(tmp, owner.uid, owner.gid); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 // startConfigSync runs syncConfigs on its own goroutine, so a SpamAssassin lint

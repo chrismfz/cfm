@@ -27,8 +27,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `mailfromfilters.cf` were rewritten 0600 on every cPanel node and spamd
   dropped them ("cannot open … Permission denied"): no `*_MYIP` RBL tests, no
   Mail From Filters, and no `dns_server` line (Spamhaus answered the public
-  resolver with `*_BLOCKED_OPENDNS`). A rewrite now keeps the file's mode, and
-  a new file under `/etc/mail/spamassassin/` gets 0644 (0600 elsewhere).
+  resolver with `*_BLOCKED_OPENDNS`). A rewrite now keeps the file's mode and
+  owner, a SpamAssassin file is always made group/other readable (so one an
+  older agent left at 0600 is repaired by the next sync), and a new file under
+  `/etc/mail/spamassassin/` gets 0644 (0600 elsewhere). The temp file is
+  unique and gets its mode and owner before the rename, so a failed
+  chmod/chown fails the update instead of leaving an unreadable file.
 - **sslcollector: edge workers no longer grow with every certificate
   reload.** The certificates and keys a worker had replaced were freed only
   when LuaJIT's garbage collector next ran a full cycle, which it rarely did,
