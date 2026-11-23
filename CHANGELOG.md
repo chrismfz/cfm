@@ -69,6 +69,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   command package runs every subcommand with each help word against a
   backend and an API server that fail on any call.
 
+### Changed
+- **The SSL Collector sends each key without the chain its file may carry.**
+  Panels write key files as bundles (cPanel's combined key+leaf+chain,
+  DirectAdmin's `.combined`, Virtualmin's `ssl.combined`), and the whole file
+  went out as `key_pem`: every chain twice in `/dumpall`, in `/cert` and in the
+  on-disk snapshot, decoded again by every edge worker. Only the key blocks go
+  now (the chain is in `cert_pem`; nothing read it from `key_pem`); a file with
+  no key block is sent as it is. Discovery is unchanged. Measured on the
+  fleet's snapshots, 2026-11-23: 4181 of virgo's 4193 key files were bundles;
+  `dump.json` 56 to ~32 MB on virgo, 101 to ~58 MB on earth. Offline check on
+  virgo's real snapshot: every key byte-identical and every pair still loads.
+
 ## 2026.11.23
 
 ### Fixed
