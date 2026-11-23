@@ -268,10 +268,14 @@ func TestWritePendingCreatesReadableSpamassassinDir(t *testing.T) {
 	f := newSyncFixture(t)
 	var st fileSyncState
 	st.applyUpdates(context.Background(), []ConfigUpdate{
-		f.update(f.saDir+"cfm/keywords.cf", "rules\n", ""),
+		f.update(f.saDir+"cfm/deep/keywords.cf", "rules\n", ""),
 		f.update(f.other+"sub/x.conf", "x=1\n", ""),
 	}, f.allowed())
-	for dir, want := range map[string]os.FileMode{f.saDir + "cfm": 0o755, f.other + "sub": 0o750} {
+	for dir, want := range map[string]os.FileMode{
+		f.saDir + "cfm":      0o755,
+		f.saDir + "cfm/deep": 0o755,
+		f.other + "sub":      0o750,
+	} {
 		fi, err := os.Stat(dir)
 		if err != nil {
 			t.Fatal(err)
@@ -288,14 +292,18 @@ func TestAtomicWriteRemovesStaleTemps(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "myip.cf")
 	stale, fresh := filepath.Join(dir, ".myip.cf.tmp111"), filepath.Join(dir, ".myip.cf.tmp222")
-	for _, p := range []string{stale, fresh} {
+	// A name with glob metacharacters: matched by prefix, not as a pattern.
+	oddPath, oddStale := filepath.Join(dir, "rules[1]*.cf"), filepath.Join(dir, ".rules[1]*.cf.tmp333")
+	for _, p := range []string{stale, fresh, oddStale} {
 		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	old := time.Now().Add(-2 * staleTempAge)
-	if err := os.Chtimes(stale, old, old); err != nil {
-		t.Fatal(err)
+	for _, p := range []string{stale, oddStale} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := atomicWrite(path, []byte("new\n"), 0o644, nil); err != nil {
 		t.Fatal(err)
@@ -307,6 +315,15 @@ func TestAtomicWriteRemovesStaleTemps(t *testing.T) {
 		t.Errorf("fresh temp removed: %v", err)
 	}
 	if got := readFile(t, path); got != "new\n" {
+		t.Errorf("content %q", got)
+	}
+	if err := atomicWrite(oddPath, []byte("odd\n"), 0o644, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oddStale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale temp of a glob-like name not removed: %v", err)
+	}
+	if got := readFile(t, oddPath); got != "odd\n" {
 		t.Errorf("content %q", got)
 	}
 }

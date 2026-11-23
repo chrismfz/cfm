@@ -50,9 +50,11 @@ const staleTempAge = time.Minute
 // always did (an NFS root_squash mount or a non-root agent can't chown).
 // Temp files a crashed earlier write left behind are removed first.
 func atomicWrite(path string, data []byte, perm os.FileMode, owner *fileOwner) error {
-	dir, pattern := filepath.Dir(path), "."+filepath.Base(path)+".tmp*"
-	removeStaleTemps(dir, pattern)
-	f, err := os.CreateTemp(dir, pattern)
+	dir, prefix := filepath.Dir(path), "."+filepath.Base(path)+".tmp"
+	removeStaleTemps(dir, prefix)
+	// CreateTemp puts its random suffix at the LAST '*', which is ours, so a
+	// '*' in the file name itself is harmless.
+	f, err := os.CreateTemp(dir, prefix+"*")
 	if err != nil {
 		return err
 	}
@@ -85,13 +87,21 @@ func atomicWrite(path string, data []byte, perm os.FileMode, owner *fileOwner) e
 	return nil
 }
 
-// removeStaleTemps deletes temp files matching pattern in dir that are older
-// than staleTempAge: what a write killed between CreateTemp and Rename leaves.
-func removeStaleTemps(dir, pattern string) {
-	matches, _ := filepath.Glob(filepath.Join(dir, pattern))
-	for _, m := range matches {
-		if fi, err := os.Lstat(m); err == nil && fi.Mode().IsRegular() && time.Since(fi.ModTime()) > staleTempAge {
-			os.Remove(m)
+// removeStaleTemps deletes the files in dir whose name starts with prefix and
+// that are older than staleTempAge: what a write killed between CreateTemp and
+// Rename leaves. A prefix match, not a glob: a target name may hold '*', '?'
+// or '['.
+func removeStaleTemps(dir, prefix string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > staleTempAge {
+			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 }

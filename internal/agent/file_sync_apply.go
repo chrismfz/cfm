@@ -506,10 +506,11 @@ func (st *fileSyncState) park(ws []pendingWrite, intro []string, res *applyResul
 
 // newFileMode is the mode a target gets when it does not exist yet. An
 // existing file keeps its own mode, except that keptFileMode adds group/other
-// read to a SpamAssassin file. SpamAssassin files must be world-readable: spamd reads its config after dropping root
-// privileges, so a 0600 .cf is skipped with "cannot open … Permission
-// denied" — on 2026-11-22 that silently unloaded myip.cf and
-// mailfromfilters.cf (all our RBL tests and the DNS server line) fleet-wide.
+// read to a SpamAssassin file. SpamAssassin files must be world-readable:
+// spamd reads its config after dropping root privileges, so a 0600 .cf is
+// skipped with "cannot open … Permission denied" — on 2026-11-22 that
+// silently unloaded myip.cf and mailfromfilters.cf (all our RBL tests and the
+// DNS server line) fleet-wide.
 func newFileMode(path string) fs.FileMode {
 	if isSpamassassinFile(path) {
 		return 0o644
@@ -536,21 +537,38 @@ func newDirMode(path string) fs.FileMode {
 	return 0o750
 }
 
+// missingDirs is dir and each of its parents that does not exist yet,
+// deepest first: the directories MkdirAll(dir) is about to create.
+func missingDirs(dir string) []string {
+	var out []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); !errors.Is(err, fs.ErrNotExist) {
+			return out
+		}
+		out = append(out, d)
+		if parent := filepath.Dir(d); parent == d {
+			return out
+		}
+	}
+}
+
 func writePending(w pendingWrite) bool {
 	dir := filepath.Dir(w.path)
-	_, statErr := os.Stat(dir)
+	missing := missingDirs(dir)
 	if err := os.MkdirAll(dir, newDirMode(w.path)); err != nil {
 		logging.LogfAPI("[files] mkdir %s: %v", dir, err)
 		return false
 	}
-	if errors.Is(statErr, fs.ErrNotExist) {
-		// MkdirAll's mode is masked by the umask.
-		if err := os.Chmod(dir, newDirMode(w.path)); err != nil {
-			logging.LogfAPI("[files] chmod %s: %v", dir, err)
+	// MkdirAll's mode is masked by the umask: set it on every level it made,
+	// so spamd can walk down to a SpamAssassin file several levels deep.
+	for _, d := range missing {
+		if err := os.Chmod(d, newDirMode(w.path)); err != nil {
+			logging.LogfAPI("[files] chmod %s: %v", d, err)
 		}
 	}
-	// The mode and owner are set on the temp file before the rename, so a
-	// failed chmod/chown fails the write and the old file stays in place.
+	// The mode is set on the temp file before the rename, so a failed chmod
+	// fails the write and the old file stays in place; a failed chown is
+	// logged and the file is written as the agent's (atomicWrite).
 	if err := atomicWrite(w.path, []byte(w.u.Content), w.mode, w.owner); err != nil {
 		logging.LogfAPI("[files] write %s: %v", w.path, err)
 		return false
