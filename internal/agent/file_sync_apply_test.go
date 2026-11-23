@@ -191,6 +191,39 @@ func TestApplyUpdatesRefusesSpamassassinCode(t *testing.T) {
 
 // A lint problem the update introduced rolls the file back (old content and
 // mode), skips the restart, and parks that version; a new version applies.
+// A rewrite keeps the file's mode, and a new file gets 0644 under the
+// SpamAssassin dir (spamd reads its config without root) and 0600 elsewhere.
+// Before, every write was 0600, which made spamd skip myip.cf fleet-wide.
+func TestApplyUpdatesKeepsOrSetsTheFileMode(t *testing.T) {
+	f := newSyncFixture(t)
+	f.seed(t, f.saDir+"myip.cf", "old\n", 0o644)
+	f.seed(t, f.other+"private.conf", "old\n", 0o640)
+	var st fileSyncState
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{
+		f.update(f.saDir+"myip.cf", "new\n", ""),
+		f.update(f.saDir+"new-rules.cf", "rules\n", ""),
+		f.update(f.other+"private.conf", "new\n", ""),
+		f.update(f.other+"new.conf", "x=1\n", ""),
+	}, f.allowed())
+	if len(res.Written) != 4 {
+		t.Fatalf("written %v", res.Written)
+	}
+	for path, want := range map[string]os.FileMode{
+		f.saDir + "myip.cf":      0o644,
+		f.saDir + "new-rules.cf": 0o644,
+		f.other + "private.conf": 0o640,
+		f.other + "new.conf":     0o600,
+	} {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != want {
+			t.Errorf("%s: mode %o, want %o", path, got, want)
+		}
+	}
+}
+
 func TestApplyUpdatesRollsBackOnNewLintProblem(t *testing.T) {
 	f := newSyncFixture(t)
 	f.seed(t, f.saDir+"rules.cf", "old rules\n", 0o644)

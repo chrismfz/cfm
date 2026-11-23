@@ -209,7 +209,7 @@ func (st *fileSyncState) applyUpdates(ctx context.Context, updates []ConfigUpdat
 				continue
 			}
 		}
-		w := pendingWrite{u: u, path: path, mode: 0600}
+		w := pendingWrite{u: u, path: path, mode: newFileMode(path)}
 		prev, err := os.ReadFile(path)
 		switch {
 		case err == nil:
@@ -501,14 +501,32 @@ func (st *fileSyncState) park(ws []pendingWrite, intro []string, res *applyResul
 	}
 }
 
+// newFileMode is the mode a target gets when it does not exist yet. An
+// existing file keeps its own mode (applyUpdates reads it). SpamAssassin
+// files must be world-readable: spamd reads its config after dropping root
+// privileges, so a 0600 .cf is skipped with "cannot open … Permission
+// denied" — on 2026-11-22 that silently unloaded myip.cf and
+// mailfromfilters.cf (all our RBL tests and the DNS server line) fleet-wide.
+func newFileMode(path string) fs.FileMode {
+	if isSpamassassinFile(path) {
+		return 0o644
+	}
+	return 0o600
+}
+
 func writePending(w pendingWrite) bool {
 	if err := os.MkdirAll(filepath.Dir(w.path), 0750); err != nil {
 		logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(w.path), err)
 		return false
 	}
-	if err := atomicWrite(w.path, []byte(w.u.Content), 0600); err != nil {
+	if err := atomicWrite(w.path, []byte(w.u.Content), w.mode); err != nil {
 		logging.LogfAPI("[files] write %s: %v", w.path, err)
 		return false
+	}
+	// atomicWrite's mode is masked by the umask, and the temp file it renames
+	// over the target replaces the old file's mode: set it explicitly.
+	if err := os.Chmod(w.path, w.mode); err != nil {
+		logging.LogfAPI("[files] chmod %s %o: %v", w.path, w.mode, err)
 	}
 	logging.LogfAPI("[files] updated %s", w.path)
 	return true
