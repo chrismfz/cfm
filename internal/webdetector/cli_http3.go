@@ -14,6 +14,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
@@ -23,10 +24,11 @@ import (
 )
 
 func runHTTP3WebTop(baseURL string, args []string) error {
-	if len(args) == 0 || args[0] == "list" {
+	if len(args) == 0 || args[0] == "list" && !clihelp.Any(args) {
 		return runHTTP3List(baseURL)
 	}
-	if a := args[0]; a == "help" || a == "-h" || a == "--help" {
+	// A help word anywhere is usage, never a vhost (`http3 enable --help`).
+	if clihelp.Any(args) {
 		printHTTP3Help()
 		return nil
 	}

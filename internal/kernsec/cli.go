@@ -1,6 +1,7 @@
 package kernsec
 
 import (
+	"cfm/internal/clihelp"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +28,23 @@ func handleFlagErr(name string, err error, w io.Writer) (int, bool) {
 	return 2, true
 }
 
+// The entry points RunCLI dispatches to. Tests swap them for fakes
+// (cli_help_args_test.go), so a help word that slipped past a guard fails the
+// test instead of applying kernel hardening on the test host.
+var (
+	cliLive        = runLive
+	cliInit        = RunInit
+	cliStatus      = RunStatus
+	cliStatusJSON  = RunStatusJSON
+	cliPreview     = RunPreview
+	cliApply       = RunApply
+	cliMonitor     = RunMonitor
+	cliSecureTmp   = RunSecureTmp
+	cliRollback    = RunRollback
+	cliDisable     = RunDisable
+	cliModuleAudit = CollectModuleAudit
+)
+
 // RunCLI is the entry point invoked from cmd/cfm/main.go.
 //
 // Phase 1 + Phase 2a (read-only):
@@ -47,7 +65,12 @@ func RunCLI(args []string) int {
 	}
 	switch args[0] {
 	case "live", "tui", "ui":
-		return runLive()
+		fs := flag.NewFlagSet("kernsec live", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		if rc, done := handleFlagErr("kernsec live", clihelp.Parse(fs, args[1:]), os.Stdout); done {
+			return rc
+		}
+		return cliLive()
 	case "text":
 		return runText(args[1:], os.Stdout)
 	case "status":
@@ -55,7 +78,13 @@ func RunCLI(args []string) int {
 	case "preview":
 		return runPreviewCmd(args[1:], os.Stdout)
 	case "init":
-		return RunInit(os.Stdout)
+		// init takes no argument: `kernsec init --help` ran the bring-up.
+		fs := flag.NewFlagSet("kernsec init", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		if rc, done := handleFlagErr("kernsec init", clihelp.Parse(fs, args[1:]), os.Stdout); done {
+			return rc
+		}
+		return cliInit(os.Stdout)
 	case "apply":
 		return runApplyCmd(args[1:], os.Stdout)
 	case "disable":
@@ -106,17 +135,17 @@ func runText(args []string, w io.Writer) int {
 	checkExit := fs.Bool("check", false, "exit non-zero on any WARN (for monitoring)")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of text (for fleet aggregation)")
 
-	if rc, done := handleFlagErr("kernsec", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("kernsec", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
 	if *jsonOut {
-		res := RunStatusJSON(w)
+		res := cliStatusJSON(w)
 		if *checkExit {
 			return statusCheckExitCode(res)
 		}
 		return 0
 	}
-	res := RunStatus(w, StatusOptions{SkipAFAlg: *skipAFAlg})
+	res := cliStatus(w, StatusOptions{SkipAFAlg: *skipAFAlg})
 	if *checkExit {
 		return statusCheckExitCode(res)
 	}
@@ -144,7 +173,7 @@ func runPreviewCmd(args []string, w io.Writer) int {
 	skip := fs.String("skip", "", "comma-separated rule IDs to ad-hoc skip (not persisted)")
 	force := fs.String("force-id", "", "comma-separated rule IDs to ad-hoc force (not persisted)")
 
-	if rc, done := handleFlagErr("kernsec preview", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("kernsec preview", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
 	if *tier < -1 || *tier > 3 {
@@ -166,7 +195,7 @@ func runPreviewCmd(args []string, w io.Writer) int {
 		po.Tier = Tier(*tier)
 		po.TierOverride = true
 	}
-	return RunPreview(w, po)
+	return cliPreview(w, po)
 }
 
 func runApplyCmd(args []string, w io.Writer) int {
@@ -179,10 +208,10 @@ func runApplyCmd(args []string, w io.Writer) int {
 	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
 	forceUnsafe := fs.Bool("force-unsafe", false, "acknowledge state = force overrides for rules the host-profile would have skipped (e.g. forcing llc on a Docker host)")
 
-	if rc, done := handleFlagErr("kernsec apply", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("kernsec apply", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	return RunApply(w, ApplyOptions{
+	return cliApply(w, ApplyOptions{
 		DryRun:      *dryRun,
 		Check:       *check,
 		NoRefresh:   *noRefresh,
@@ -198,6 +227,10 @@ func runMonitorCmd(args []string, w io.Writer) int {
 		printUsage(os.Stderr)
 		return 2
 	}
+	if clihelp.First(args) {
+		printUsage(w)
+		return 0
+	}
 	action := args[0]
 	rest := args[1:]
 
@@ -205,10 +238,10 @@ func runMonitorCmd(args []string, w io.Writer) int {
 	fs.SetOutput(io.Discard)
 	interval := fs.String("interval", "", "systemd OnCalendar expression (default \"daily\")")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing or running systemctl")
-	if rc, done := handleFlagErr("kernsec monitor", fs.Parse(rest), w); done {
+	if rc, done := handleFlagErr("kernsec monitor", clihelp.Parse(fs, rest), w); done {
 		return rc
 	}
-	return RunMonitor(w, MonitorOptions{
+	return cliMonitor(w, MonitorOptions{
 		Action:   action,
 		Interval: *interval,
 		DryRun:   *dryRun,
@@ -226,7 +259,7 @@ func runSecureTmpCmd(args []string, w io.Writer) int {
 	size := fs.String("size", "", "size of /var/tmpDSK (e.g. 16G; minimum 1G, maximum 256G)")
 	dryRun := fs.Bool("dry-run", false, "show what would happen without writing")
 
-	if rc, done := handleFlagErr("kernsec secure-tmp", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("kernsec secure-tmp", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
 	sizeBytes, err := ParseSecureTmpSize(*size)
@@ -234,7 +267,7 @@ func runSecureTmpCmd(args []string, w io.Writer) int {
 		fmt.Fprintln(w, "kernsec secure-tmp:", err)
 		return 2
 	}
-	return RunSecureTmp(w, SecureTmpOptions{
+	return cliSecureTmp(w, SecureTmpOptions{
 		SizeBytes: sizeBytes,
 		DryRun:    *dryRun,
 	})
@@ -245,10 +278,10 @@ func runRollbackCmd(args []string, w io.Writer) int {
 	fs.SetOutput(io.Discard)
 	dryRun := fs.Bool("dry-run", false, "show what would be restored without writing")
 
-	if rc, done := handleFlagErr("kernsec rollback", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("kernsec rollback", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	return RunRollback(w, *dryRun)
+	return cliRollback(w, *dryRun)
 }
 
 func runDisableCmd(args []string, w io.Writer) int {
@@ -262,10 +295,10 @@ func runDisableCmd(args []string, w io.Writer) int {
 	yes := fs.Bool("yes", false, "skip the interactive safety preview / confirmation (required for unattended runs)")
 	forceUnsafe := fs.Bool("force-unsafe", false, "acknowledge state = force overrides for rules the host-profile would have skipped")
 
-	if rc, done := handleFlagErr("kernsec disable", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("kernsec disable", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	return RunDisable(w, DisableOptions{
+	return cliDisable(w, DisableOptions{
 		Purge:       *purge,
 		DryRun:      *dryRun,
 		NoRefresh:   *noRefresh,
@@ -303,10 +336,10 @@ func runModulesAuditCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("kernsec modules audit", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	checkExit := fs.Bool("check", false, "exit non-zero if any unsigned or signed-untrusted modules are loaded")
-	if rc, done := handleFlagErr("kernsec modules audit", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("kernsec modules audit", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	a := CollectModuleAudit()
+	a := cliModuleAudit()
 	fmt.Fprint(w, FormatTextAudit(a))
 	if *checkExit {
 		if a.Counts[ModuleSigUnsigned] > 0 || a.Counts[ModuleSigSignedUntrusted] > 0 || a.Counts[ModuleSigUnknown] > 0 {

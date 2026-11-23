@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
@@ -44,6 +45,15 @@ func RunClamMode(baseURL string, args []string) error {
 // resource is the API path segment after the feature prefix ("exclude" for
 // waf/challenge, "override" for clam).
 func runGenericExclude(baseURL, prefix, resource string, args []string) error {
+	usage := fmt.Sprintf("usage: cfm webtop %s %s [add|remove] <value> [--type host|path]%s",
+		prefix, resource, ruleFlagUsage(prefix))
+	// A help word is usage (`list --help` listed): as the action or the
+	// value, or anywhere clihelp.Sub reads one. `--scope help` is the scope's
+	// value (refused below as a host), not a help request.
+	if clihelp.Sub(args) {
+		fmt.Println(usage)
+		return nil
+	}
 	if len(args) == 0 || args[0] == "list" {
 		u := fmt.Sprintf("%s/api/v1/%s/%s/list", strings.TrimRight(baseURL, "/"), prefix, resource)
 		resp, err := clihttp.Get(u)
@@ -78,12 +88,6 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			}
 			fmt.Printf("%-8s %-40s %-16s %-24s %s\n", r.Type, r.Value, rules, scope, r.CreatedAt)
 		}
-		return nil
-	}
-	usage := fmt.Sprintf("usage: cfm webtop %s %s [add|remove] <value> [--type host|path]%s",
-		prefix, resource, ruleFlagUsage(prefix))
-	if isCLIHelpArg(args[0]) || (len(args) > 1 && isCLIHelpArg(args[1])) {
-		fmt.Println(usage)
 		return nil
 	}
 	if len(args) < 2 {

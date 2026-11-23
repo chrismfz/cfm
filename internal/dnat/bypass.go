@@ -3,6 +3,7 @@ package dnat
 import (
 	"bufio"
 	"bytes"
+	"cfm/internal/clihelp"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,9 @@ func runBypassCLI(args []string, scope firewall.DNATBypassScope, backend firewal
 	}
 	sub := args[0]
 	rest := args[1:]
+	if clihelp.First(rest) { // `bypass add --help`: usage, never a target
+		sub = "help"
+	}
 	switch sub {
 	case "help", "-h", "--help":
 		printBypassUsage(scope)

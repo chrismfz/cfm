@@ -14,6 +14,8 @@
 package cli
 
 import (
+	"errors"
+	"cfm/internal/clihelp"
 	"context"
 	"flag"
 	"fmt"
@@ -57,6 +59,9 @@ const (
 // args is os.Args[2:] — the trailing portion after `cfm debug`.
 func RunDebug(args []string) int {
 	opts, err := parseDebugFlags(args)
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cfm debug:", err)
 		return 2
@@ -393,7 +398,9 @@ func parseDebugFlags(args []string) (*debugOpts, error) {
 	configFlag := fs.String("config", "/etc/cfm/cfm.conf", "config file to dump (sanitised); empty to skip")
 	logRootFlag := fs.String("log-root", "/var/log/cfm", "directory to scan for log tails")
 
-	if err := fs.Parse(args); err != nil {
+	// clihelp.Parse: `cfm debug help` stopped the flag parse and wrote a
+	// one-minute bundle.
+	if err := clihelp.Parse(fs, args); err != nil {
 		return nil, err
 	}
 

@@ -15,6 +15,7 @@
 package edgecli
 
 import (
+	"cfm/internal/clihelp"
 	"bufio"
 	"bytes"
 	"context"
@@ -72,6 +73,12 @@ func run(args []string, d deps) int {
 	sub, rest := "", args
 	if len(args) > 0 {
 		sub, rest = args[0], args[1:]
+	}
+	// `cfm edge status --help`, `cfm edge web help`: usage, not "takes no
+	// arguments". (on/off/panel/realip/ipv6/check answer their own help.)
+	if (sub == "status" || sub == "web") && clihelp.First(rest) {
+		fmt.Fprint(d.out, usage)
+		return 0
 	}
 	switch sub {
 	case "", "status":

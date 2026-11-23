@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,8 +33,14 @@ import (
 func RunWhich(args []string, be firewall.Backend, cfgDir, baseURL string, tableExists func() bool) int {
 	fs := flag.NewFlagSet("which", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
-	_ = fs.Parse(args)
+	if !clihelp.First(args) {
+		_ = fs.Parse(args)
+	}
 
+	if clihelp.First(args) || clihelp.First(fs.Args()) {
+		fmt.Println("usage: cfm which <IP|CIDR> [--json]")
+		return 0
+	}
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: cfm which <IP|CIDR> [--json]")
 		return 2

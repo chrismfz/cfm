@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"cfm/internal/clam"
+	"cfm/internal/clihelp"
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/logging"
 	"errors"
@@ -24,6 +25,14 @@ func RunClam(args []string, cfgDir string) int {
 	if len(args) == 0 {
 		printClamHelp()
 		return 2
+	}
+	// A help word anywhere is usage, before the config is loaded: the
+	// subcommands ignored what followed them, so `clam enable --help` and
+	// `clam scan on --help` rewrote cfm.conf. (Scan a file literally named
+	// "help" as ./help.)
+	if clihelp.First(args) || clihelp.Any(args[1:]) {
+		printClamHelp()
+		return 0
 	}
 
 	cfg, err := loadClamConfig(cfgDir)

@@ -2,6 +2,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
@@ -160,9 +161,27 @@ func printWebTopHelp() {
 
 }
 
+// webTopOwnHelp lists the `cfm webtop` families that answer a help word
+// themselves (each with its subcommand's usage line); RunWebTop answers it
+// for every other view and family.
+var webTopOwnHelp = map[string]bool{
+	"challenge": true, "attack": true, "site-cache": true, "cache": true,
+	"waf": true, "http3": true, "h3": true, "rules": true,
+	"challenge-access": true, "access": true, "history": true, "tokens": true,
+}
+
 // RunWebTop is the CLI entrypoint for `cfm webtop`.
 // baseURL is something like "http://127.0.0.1:9070".
 func RunWebTop(baseURL string, args []string) error {
+
+	// A help word on a view or a family without usage text of its own prints
+	// the webtop usage, never a target: `analyze --help` analysed host
+	// "--help", `ip help` drilled into IP "help". The families that answer
+	// their own help (with the subcommand's usage line) are left to it.
+	if len(args) > 0 && !webTopOwnHelp[args[0]] && clihelp.Sub(args) {
+		printWebTopHelp()
+		return nil
+	}
 
 	// 🔥 Offline analyze mode: cfm webtop analyze <ip>|<host>
 	if len(args) > 0 && args[0] == "analyze" {
@@ -1255,7 +1274,11 @@ type chalEvent struct {
 }
 
 func runChallengeWebTop(baseURL string, args []string) error {
-	if len(args) > 0 && isCLIHelpArg(args[0]) {
+	// A help word right after the subcommand gets that subcommand's usage
+	// line (its host check prints it); anywhere else on the line it is the
+	// webtop usage, never a run: `challenge add example.com --help` armed
+	// the challenge and `challenge remove example.com --help` removed it.
+	if clihelp.Sub(args) && !(len(args) > 1 && isCLIHelpArg(args[1])) {
 		printWebTopHelp() // the challenge commands are listed there
 		return nil
 	}
@@ -1284,6 +1307,10 @@ func runChallengeWebTop(baseURL string, args []string) error {
 
 	// subcommands
 	if len(args) > 0 && args[0] == "events" {
+		if clihelp.Sub(args) {
+			printWebTopHelp()
+			return nil
+		}
 		limit := 50
 		if len(args) > 1 {
 			if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
@@ -1436,6 +1463,9 @@ func runAttackWebTop(baseURL string, args []string) error {
 		return runAttackStatus(baseURL)
 	}
 	var on bool
+	if clihelp.Sub(args) { // `attack on example.com --help` too
+		args = []string{"help"}
+	}
 	switch strings.ToLower(args[0]) {
 	case "-h", "--help", "help":
 		fmt.Println("usage: cfm webtop attack [on <vhost> [--ttl 6h] | off <vhost>]")

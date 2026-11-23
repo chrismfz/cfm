@@ -19,6 +19,8 @@
 package main
 
 import (
+	"cfm/internal/clihelp"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -99,6 +101,7 @@ It lets you bootstrap and maintain local auth state without starting the web UI.
 	)
 
 	authRoot.AddCommand(userCmd, sessionCmd, logCmd, mfaCmd)
+	authRefusePositionals(authRoot)
 
 	root := &cobra.Command{
 		Use:           "cfm",
@@ -109,6 +112,9 @@ It lets you bootstrap and maintain local auth state without starting the web UI.
 	root.SetArgs(os.Args[1:])
 
 	if err := root.Execute(); err != nil {
+		if errors.Is(err, errAuthHelpShown) {
+			return
+		}
 		os.Exit(1)
 	}
 }
@@ -622,4 +628,35 @@ func (a *authAuditFlags) contextFor(target string) (goauth.AdminAuditContext, er
 		Reason: reason,
 		Ticket: ticket,
 	}, nil
+}
+
+// errAuthHelpShown ends a `cfm auth` run whose leaf printed its help for a
+// positional help word (exit 0, nothing run).
+var errAuthHelpShown = errors.New("help shown")
+
+// authRefusePositionals makes every `cfm auth` leaf flags-only: a help word
+// prints the command's help and any other positional argument is refused.
+// Cobra hands a leaf's positionals to RunE, which ignored them, so `cfm auth
+// session purge help` purged and `cfm auth log purge help` deleted audit log
+// entries. It is the Args check, which cobra runs before the required-flag
+// check, so `cfm auth user delete help` prints help too.
+func authRefusePositionals(cmd *cobra.Command) {
+	for _, c := range cmd.Commands() {
+		authRefusePositionals(c)
+	}
+	if cmd.RunE == nil && cmd.Run == nil {
+		return
+	}
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			return nil
+		}
+		if clihelp.First(args) {
+			_ = c.Help()
+			return errAuthHelpShown
+		}
+		err := fmt.Errorf("%s: unexpected argument %q (flags only; see --help)", c.CommandPath(), args[0])
+		fmt.Fprintln(c.ErrOrStderr(), err) // the root silences cobra's own error print
+		return err
+	}
 }

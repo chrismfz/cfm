@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"bytes"
 	"cfm/internal/clihttp"
 	"encoding/json"
@@ -16,6 +17,11 @@ import (
 )
 
 func runRulesWebTop(baseURL string, args []string) error {
+	// A help word is usage, never a rule id (`rules remove --help`).
+	if clihelp.Sub(args) {
+		printWebTopHelp()
+		return nil
+	}
 	if len(args) == 0 || args[0] == "list" {
 		return runRulesList(baseURL)
 	}

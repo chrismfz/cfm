@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,6 +16,11 @@ import (
 // the /api/v1/challenge/access/* API. Mirrors runRulesWebTop (JSON-body add/
 // update from a --file, id-keyed remove, flag-driven simulate).
 func runChallengeAccessWebTop(baseURL string, args []string) error {
+	// A help word is usage, never an entry id (`challenge-access remove --help`).
+	if clihelp.Sub(args) {
+		printWebTopHelp()
+		return nil
+	}
 	if len(args) == 0 || args[0] == "list" {
 		return runCAList(baseURL)
 	}

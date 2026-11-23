@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"context"
 	"fmt"
 	"os"
@@ -18,9 +19,15 @@ import (
 	"cfm/internal/unblock"
 )
 
+const unblockUsage = "usage: cfm unblock <IP | IPv6 client /64>"
+
 func RunUnblock(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
+	if clihelp.First(args) {
+		fmt.Println(unblockUsage)
+		return 0
+	}
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: cfm unblock <IP | IPv6 client /64>")
+		fmt.Fprintln(os.Stderr, unblockUsage)
 		return 2
 	}
 	// An address, or an automatic IPv6 client ban's /64.

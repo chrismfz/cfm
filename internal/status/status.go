@@ -1,6 +1,7 @@
 package status
 
 import (
+	"cfm/internal/clihelp"
 	"bufio"
 	"bytes"
 	"cfm/internal/detconf"
@@ -191,7 +192,20 @@ func Run(args []string, backend firewall.Backend) {
 	showTimings := fs.Bool("timings", false, "print per-section timings")
 	showTTL := fs.Bool("ttl-summary", false, "include TTL summary (slower)")
 	cacheTTL := fs.Duration("cache-ttl", 0, "cache table/sets summary for duration (example: 5s)")
-	_ = fs.Parse(args)
+	// `cfm status` takes flags only: `status help` ran the full status. A
+	// leading help word is answered here, not by the flag package's os.Exit.
+	if clihelp.First(args) {
+		args = args[:1]
+	} else {
+		_ = fs.Parse(args)
+		args = fs.Args()
+	}
+	if rc, done := clihelp.NoArgs("status", "usage: cfm status [--json] [--timings] [--ttl-summary] [--cache-ttl 5s]", args); done {
+		if rc != 0 {
+			os.Exit(rc)
+		}
+		return
+	}
 	timing := make(map[string]int64)
 	printTimings := func() {
 		if !*showTimings {

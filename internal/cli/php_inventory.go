@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -17,7 +19,13 @@ func RunPHPInventory(args []string) int {
 	fs.SetOutput(os.Stderr)
 	asJSON := fs.Bool("json", false, "emit the inventory as JSON")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
+	}
+	if rc, done := clihelp.NoArgs("php-inventory", "usage: cfm php-inventory [--json]", fs.Args()); done {
+		return rc
 	}
 
 	rep := phpinventory.DefaultScanner().Scan()
