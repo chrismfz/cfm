@@ -50,7 +50,7 @@ relevant output and stop (don't keep going past a hard failure).
 
 Keep this list in sync with `security.yml`. It drifted twice — once silently
 dropping seven gates, later missing `check_site_cache_config.sh` — the same
-false-confidence failure the guardrails exist to prevent; step 24 now fails CI
+false-confidence failure the guardrails exist to prevent; step 25 now fails CI
 on any difference, in either direction.
 
 If everything passes, say so explicitly. If something fails, summarize what

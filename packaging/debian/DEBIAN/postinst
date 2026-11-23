@@ -36,7 +36,8 @@ chmod 0700 /etc/cfm
 # They are NOT dpkg conffiles (packaging/etc-cfm-files.list says why: dpkg
 # stopped every upgrade to ask, apt -y cannot answer it, and
 # unattended-upgrades skipped cfm). Per file of the list:
-#   - missing                       -> install the shipped default;
+#   - missing                       -> install the shipped default (also
+#                                      when it was deleted: as the rpm does);
 #   - untouched since we installed  -> replace it with the new default;
 #   - edited (by hand or by CFM)    -> keep it, put the new default beside it
 #                                      as <name>.dpkg-dist (the .rpmnew).
@@ -58,6 +59,7 @@ cfm_etc_dpkg_md5() { # <path> -> md5 dpkg recorded for the old conffile, or noth
 if [ -f "$CFM_ETC_LIST" ]; then
     mkdir -p /var/lib/cfm
     cfm_etc_new=$(mktemp /var/lib/cfm/.etc-cfm-files.sha256.XXXXXX)
+    trap 'rm -f "$cfm_etc_new"' EXIT
     grep -Ev '^[[:space:]]*(#|$)' "$CFM_ETC_LIST" | while read -r name mode; do
         src=/usr/share/cfm/configs/$name
         dst=/etc/cfm/$name
@@ -81,6 +83,9 @@ if [ -f "$CFM_ETC_LIST" ]; then
                 pristine=1
             fi
         fi
+        # A symlinked file is never replaced (mv would swap the link for a
+        # plain file): it gets the .dpkg-dist like an edited one.
+        if [ -L "$dst" ] && [ "$cur_sum" != "$new_sum" ]; then pristine=0; fi
         if [ "$pristine" = 1 ]; then
             if [ "$cur_sum" != "$new_sum" ]; then
                 # keep the operator's mode and owner, like dpkg / rpm do
@@ -103,7 +108,9 @@ if [ -f "$CFM_ETC_LIST" ]; then
             echo "${old_sum:--} $name" >>"$cfm_etc_new"
         fi
     done
-    chmod 0644 "$cfm_etc_new" && mv -f "$cfm_etc_new" "$CFM_ETC_SUMS"
+    chmod 0644 "$cfm_etc_new"
+    mv -f "$cfm_etc_new" "$CFM_ETC_SUMS"
+    trap - EXIT
 fi
 
 # detectors.conf overlay directory (docs/detectors-config-unification.md par.4):

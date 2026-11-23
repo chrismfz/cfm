@@ -32,7 +32,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `%config(noreplace)` always did: an edited file is kept and the new default is
   written beside it as `<name>.dpkg-dist` (the `.rpmnew`), a file nobody changed
   is updated, and nothing is asked. The first upgrade to this version already
-  runs without a question; your files are not touched.
+  runs without a question; your files are not touched. As on the rpm, a
+  listed `/etc/cfm` file you deleted is installed again from the default.
 
 ## 2026.11.22
 
