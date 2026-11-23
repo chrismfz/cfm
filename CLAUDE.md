@@ -196,6 +196,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_edge_listen_v6.sh          # edge IPv6 listen: script <-> conf ports/glob includes, default (script = Go) + EDGE_LISTEN_V6, the decision, deploy hook
 ./scripts/tests/check_install_edge.sh            # install-edge.sh prepares only: no systemctl switch / cfm dnat, adoption line = deploy's, -t before install
 ./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments + build-dated top %changelog entry (see §5)
+./scripts/tests/check_deb_config_seed.sh         # the .deb ships no dpkg conffile; postinst seeds /etc/cfm like %config(noreplace) (see §5)
 ./scripts/tests/check_site_cache_config.sh       # Site Cache bypass-by-default: every proxy_cache location gated on $cfm_cache_skip (see §6)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ./scripts/tests/release_notes_test.sh            # release-notes extractor (make release) regression test
@@ -340,6 +341,19 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `check_package_lua_delivery.sh` pins it. A hand-edit under
   `/var/lib/cfm/lua/` is overwritten on upgrade with no backup; the operator
   edit surface is `/etc/cfm/*`.
+- **The .deb ships NO dpkg conffile.** dpkg stops an upgrade to ask about a
+  conffile both sides changed, `apt -y` cannot answer it, and
+  unattended-upgrades skips the whole package; CFM edits several `/etc/cfm`
+  files itself (`cfm allow`/`block`, the WebUI editors, `cfm edge ipv6`,
+  `cfm kernsec`), so it hit every Debian node. The `/etc/cfm` files are listed
+  once, in `packaging/etc-cfm-files.list`, and postinst seeds them from
+  `/usr/share/cfm/configs/` the way the rpm's `%config(noreplace)` does: an
+  edited file is kept and the new default lands as `<name>.dpkg-dist`; one
+  untouched since postinst installed it (its sha256 in
+  `/var/lib/cfm/etc-cfm-files.sha256`) is replaced. A new `/etc/cfm` file goes
+  into that list AND the spec's `%config(noreplace)`;
+  `check_deb_config_seed.sh` pins both, and that the deb target writes nothing
+  under `/etc/cfm`.
 - **Never write a bare `%macro` in an rpm spec COMMENT — escape it `%%`.** On
   EL, `/usr/lib/rpm/redhat/macros` makes rpm expand macros inside comments, so
   a comment mentioning `%install` injects a real section header (`error: line

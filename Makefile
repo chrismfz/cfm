@@ -257,23 +257,10 @@ deb: build cfm-edge-conf
 	@install -m0644 NOTICE "$(PKGROOT)/usr/share/doc/cfm/NOTICE"
 	@install -m0644 LICENSES/GPL-2.0-only.txt "$(PKGROOT)/usr/share/doc/cfm/GPL-2.0-only.txt"
 	@install -m0640 "$(CONFIG_DIR)/cfm.service"   "$(PKGROOT)/lib/systemd/system/cfm.service"
-	@install -m0640 "$(CONFIG_DIR)/cfm.conf"      "$(PKGROOT)/etc/cfm/cfm.conf"
-	@install -m0640 "$(CONFIG_DIR)/detectors.conf"      "$(PKGROOT)/etc/cfm/detectors.conf"
-	@install -m0600 "$(CONFIG_DIR)/kernsec.conf"        "$(PKGROOT)/etc/cfm/kernsec.conf"
-	@install -m0600 "$(CONFIG_DIR)/lsm.conf"            "$(PKGROOT)/etc/cfm/lsm.conf"
-	@install -m0640 "$(CONFIG_DIR)/notify.conf"      "$(PKGROOT)/etc/cfm/notify.conf"
-	@install -m0640 "$(CONFIG_DIR)/cfm.allow"     "$(PKGROOT)/etc/cfm/cfm.allow"
-	@install -m0640 "$(CONFIG_DIR)/cfm.deny"      "$(PKGROOT)/etc/cfm/cfm.deny"
-	@install -m0640 "$(CONFIG_DIR)/cfm.blocklists" "$(PKGROOT)/etc/cfm/cfm.blocklists"
-	@install -m0640 "$(CONFIG_DIR)/cfm.ignore" "$(PKGROOT)/etc/cfm/cfm.ignore"
-	@install -m0600 "$(CONFIG_DIR)/cfm.dnat_bypass" "$(PKGROOT)/etc/cfm/cfm.dnat_bypass"
-	@install -m0600 "$(CONFIG_DIR)/cfm.dnat_cpanel_bypass" "$(PKGROOT)/etc/cfm/cfm.dnat_cpanel_bypass"
-	@install -m0640 "$(CONFIG_DIR)/cfm.dyndns"    "$(PKGROOT)/etc/cfm/cfm.dyndns"
-	@install -m0640 "$(CONFIG_DIR)/cfm-admin.htpasswd" "$(PKGROOT)/etc/cfm/cfm-admin.htpasswd"
-	@install -m0640 "$(CONFIG_DIR)/webdetector_malpaths.txt"      "$(PKGROOT)/etc/cfm/webdetector_malpaths.txt"
-	@install -m0640 "$(CONFIG_DIR)/webdetector_challenge_exclude.txt"      "$(PKGROOT)/etc/cfm/webdetector_challenge_exclude.txt"
-
-
+	# /etc/cfm is seeded by postinst from /usr/share/cfm/configs/ (the list:
+	# packaging/etc-cfm-files.list), never shipped there: a dpkg conffile stops
+	# an upgrade to ask, which apt -y cannot answer and unattended-upgrades skips.
+	@install -m0644 packaging/etc-cfm-files.list "$(PKGROOT)/usr/share/cfm/etc-cfm-files.list"
 
 	@rsync -a --delete --exclude "lua/" "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/cfm/configs/"
 	@rsync -a --delete "$(CONFIG_DIR)/lua/" "$(PKGROOT)/var/lib/cfm/lua/"

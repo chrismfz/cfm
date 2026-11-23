@@ -205,7 +205,7 @@ them), or an edge proxy listening only on `127.0.0.1`.
 
 | File | Role |
 |---|---|
-| `configs/cfm.dnat_bypass`, `configs/cfm.dnat_cpanel_bypass` | Packaged files (`/etc/cfm/`, conffiles, `0600 root:root`) |
+| `configs/cfm.dnat_bypass`, `configs/cfm.dnat_cpanel_bypass` | Packaged files (`/etc/cfm/`, `%config(noreplace)` / seeded by the .deb's postinst, `0600 root:root`) |
 | `internal/firewall/dnat_bypass.go` | Paths, parsing, scopes, `nft` rule text |
 | `internal/firewall/nft/dnat.go`, `nft/panel_dnat.go` | `nft` engine: web / panel table scripts |
 | `internal/firewall/nftlib/dnat_bypass.go` | `nftlib` engine: bypass expressions |
