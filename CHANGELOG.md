@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.23
+
 ### Fixed
 - **`cfm dnat cpanel on/off` (`cfm edge panel …`) no longer restarts the edge
   when its reload fails.** The listener reload fell back to `systemctl
