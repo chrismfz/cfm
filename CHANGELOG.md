@@ -21,6 +21,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **sslcollector: edge workers hand the memory of replaced certificates back
+  to the OS.** The full collect after each ingest frees the old pairs, but
+  glibc kept their pages: with traffic allocations in between it could not
+  reuse them whole, so a worker's RSS climbed to the peak of an ingest and
+  stayed there (titan, 3500 names: 118 → 440 MB over three hourly ingests). A
+  `malloc_trim(0)` now follows the collect (~25-40 ms, in the background
+  timer); in a container it brought the settled RSS from 227 to 165 MB. The
+  `[sslcollector] gc` line reports it as `trim_ms=` (`-` where glibc's
+  malloc_trim is absent).
 - **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**
   Every `/etc/cfm` file was a dpkg conffile, and CFM edits several of them
   itself (`cfm allow` / `cfm block`, the WebUI's notify and detectors editors,
