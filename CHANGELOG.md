@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.23
+
 ### Fixed
 - **`cfm webtop` no longer takes a flag for a host.** `cfm webtop challenge
   add --help` armed manual challenges for `--help` and `www.--help`, and
@@ -80,8 +84,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   fleet's snapshots, 2026-11-23: 4181 of virgo's 4193 key files were bundles;
   `dump.json` 56 to ~32 MB on virgo, 101 to ~58 MB on earth. Offline check on
   virgo's real snapshot: every key byte-identical and every pair still loads.
-
-## 2026.11.23
 
 ### Fixed
 - **`cfm dnat cpanel on/off` (`cfm edge panel …`) no longer restarts the edge
