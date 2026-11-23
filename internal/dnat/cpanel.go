@@ -307,12 +307,12 @@ func reloadPanelListenerService() error {
 		}
 	}
 	if fallbackSucceeded {
-		return fmt.Errorf("reload/restart listener service for active service %q failed despite fallback service success from an unconfirmed fallback service", primary)
+		return fmt.Errorf("reloading the listener service for active service %q failed despite fallback service success from an unconfirmed fallback service", primary)
 	}
 	if lastErr == nil {
 		return fmt.Errorf("no edge service (%s) command candidates", edgeengine.NameList())
 	}
-	return fmt.Errorf("reload/restart listener service failed: %w", lastErr)
+	return fmt.Errorf("reloading the listener service failed (the running edge is left as it is; nothing was restarted): %w", lastErr)
 }
 
 var panelListenerServiceDetector = detectActiveEdgeService
@@ -432,12 +432,18 @@ func panelListenerServiceCandidates(active string) [][]string {
 	if active == panelListenerServiceAmbiguous || active == "" {
 		return nil
 	}
+	// Reload only, never restart. A reload fails when the edge refuses the
+	// config (its -t), and a restart then stops the live edge and fails the
+	// same -t on start: every site down while the web DNAT still points at
+	// it. Even a restart that works refuses new connections while the old
+	// edge drains (up to TimeoutStopSec). virgo, 2026-11-23: a failed reload
+	// under `cfm edge panel off` fell through to `systemctl restart
+	// cfm-edge`, which outlived the caller's 60 s timeout. A failed reload
+	// leaves the running edge as it is and returns the error.
 	serviceCommands := func(service string) [][]string {
 		return [][]string{
 			{"systemctl", "reload", service},
 			{"service", service, "reload"},
-			{"systemctl", "restart", service},
-			{"service", service, "restart"},
 		}
 	}
 	if edgeengine.IsEdge(active) {

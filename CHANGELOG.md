@@ -21,6 +21,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **`cfm dnat cpanel on/off` (`cfm edge panel …`) no longer restarts the edge
+  when its reload fails.** The listener reload fell back to `systemctl
+  restart` (and `service … restart`). A reload fails when the edge refuses
+  the config, so the restart stopped the live edge and failed the same
+  config test on start: every site down while the web DNAT still pointed at
+  it. Even a working restart refuses new connections while the old edge
+  drains. virgo, 2026-11-23: a failed reload under `panel off` restarted
+  `cfm-edge` and outlived the caller's 60 s timeout. A failed reload now
+  leaves the running edge as it is and is reported as the error.
 - **An upgrade restarts the cfm daemon once, not twice.** The rpm's `%post`
   stops and starts it, and `%systemd_postun_with_restart` asked for a second
   restart: on EL9/EL10 at the end of the transaction, after every

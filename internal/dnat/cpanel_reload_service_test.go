@@ -64,15 +64,48 @@ func TestReloadPanelListenerService_PrimaryFailureDoesNotStartInactivePeer(t *te
 
 	err := reloadPanelListenerService()
 	if err == nil {
-		t.Fatal("expected Angie reload/restart failure to be returned")
+		t.Fatal("expected the Angie reload failure to be returned")
 	}
 	for _, call := range calls {
 		if strings.Contains(call, "openresty") {
 			t.Fatalf("must not start/reload inactive peer after Angie failure, got %v", calls)
 		}
 	}
-	if len(calls) != 4 {
-		t.Fatalf("expected only the four Angie reload/restart candidates, got %v", calls)
+	if len(calls) != 2 {
+		t.Fatalf("expected only the two Angie reload candidates, got %v", calls)
+	}
+}
+
+// virgo, 2026-11-23: a reload the edge refused fell through to
+// `systemctl restart`, which stops the live edge (and, with a config the edge
+// refuses, leaves it down while the web DNAT still points at it). A failed
+// reload must be the error, never a restart.
+func TestReloadPanelListenerService_FailedReloadNeverRestarts(t *testing.T) {
+	origExec := execCommand
+	origDetect := panelListenerServiceDetector
+	t.Cleanup(func() {
+		execCommand = origExec
+		panelListenerServiceDetector = origDetect
+	})
+	for _, engine := range edgeengine.Names() {
+		panelListenerServiceDetector = func() string { return engine }
+		var calls []string
+		execCommand = func(name string, args ...string) *exec.Cmd {
+			call := strings.TrimSpace(name + " " + strings.Join(args, " "))
+			calls = append(calls, call)
+			if strings.Contains(call, "restart") || strings.Contains(call, "stop") || strings.Contains(call, "start") {
+				return exec.Command("sh", "-c", "exit 0") // would "work" if tried
+			}
+			return exec.Command("sh", "-c", "exit 1") // the reload is refused
+		}
+		if err := reloadPanelListenerService(); err == nil {
+			t.Fatalf("%s: a refused reload must be returned as an error", engine)
+		}
+		for _, call := range calls {
+			if strings.Contains(call, "restart") || strings.Contains(call, " stop") || strings.Contains(call, " start") {
+				t.Fatalf("%s: a failed reload must never restart/stop/start the edge, got %v", engine, calls)
+			}
+		}
 	}
 }
 
@@ -99,7 +132,7 @@ func TestReloadPanelListenerService_NoAuthoritativeServiceFailsWithoutGuessing(t
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(calls) != 0 {
-		t.Fatalf("expected no reload/restart commands when service is unknown, got %v", calls)
+		t.Fatalf("expected no reload commands when service is unknown, got %v", calls)
 	}
 }
 
