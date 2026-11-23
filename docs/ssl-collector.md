@@ -182,6 +182,15 @@ payload is written entry by entry and is never whole in the daemon's memory;
 its header carries `version`, `generated_at`, `exact_n`, `wild_n` and
 `complete` ahead of the entries.
 
+Each entry's `key_pem` holds only the PRIVATE KEY block(s) of its key file
+(`privateKeyBlocksOnly`), `/cert` too. Panels write key files as bundles
+(cPanel's combined key+leaf+chain, DirectAdmin `.combined`, Virtualmin
+`ssl.combined`), and the chain is already in `cert_pem` (with any key
+scrubbed from a chain file, `stripPrivateKeyBlocks`): sent whole, every chain
+went twice (on virgo, 2026-11-23, 4181 of 4193 key files were bundles, and
+`dump.json` shrank from 56 to ~32 MB). A key file with no key block is sent
+as it is.
+
 ---
 
 ## Socket endpoints
