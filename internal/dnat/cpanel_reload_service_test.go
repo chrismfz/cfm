@@ -276,3 +276,48 @@ func TestDetectActivePanelListenerService_NoSystemdFallsBackToProcess(t *testing
 		t.Fatalf("service=%q, want angie process fallback", got)
 	}
 }
+
+// `service <edge> reload` working after `systemctl reload` failed is a reload
+// done: the old loop compared c[2] ("reload") with the service and reported it
+// failed.
+func TestReloadPanelListenerService_ServiceReloadFallbackCounts(t *testing.T) {
+	origExec := execCommand
+	origDetect := panelListenerServiceDetector
+	t.Cleanup(func() {
+		execCommand = origExec
+		panelListenerServiceDetector = origDetect
+	})
+	panelListenerServiceDetector = func() string { return "cfm-edge" }
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		if name == "service" {
+			return exec.Command("sh", "-c", "exit 0")
+		}
+		return exec.Command("sh", "-c", "exit 1")
+	}
+	if err := reloadPanelListenerService(); err != nil {
+		t.Fatalf("a working `service cfm-edge reload` must count as the reload: %v", err)
+	}
+}
+
+// A stopped (only enabled) edge cannot reload: the error says so, and nothing
+// starts it.
+func TestReloadPanelListenerService_StoppedEdgeSaysNotRunning(t *testing.T) {
+	origExec := execCommand
+	origDetect := panelListenerServiceDetector
+	origProbe := panelSystemdUnitProbe
+	origProc := panelListenerProcessDetector
+	t.Cleanup(func() {
+		execCommand = origExec
+		panelListenerServiceDetector = origDetect
+		panelSystemdUnitProbe = origProbe
+		panelListenerProcessDetector = origProc
+	})
+	panelListenerServiceDetector = func() string { return "cfm-edge" }
+	panelSystemdUnitProbe = func(string) (systemdunit.Status, bool) { return systemdunit.Status{}, true }
+	panelListenerProcessDetector = func() string { return "" }
+	execCommand = func(name string, args ...string) *exec.Cmd { return exec.Command("sh", "-c", "exit 1") }
+	err := reloadPanelListenerService()
+	if err == nil || !strings.Contains(err.Error(), "cfm-edge is not running") {
+		t.Fatalf("want a not-running error, got %v", err)
+	}
+}
