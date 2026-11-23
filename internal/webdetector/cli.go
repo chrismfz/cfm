@@ -1255,6 +1255,10 @@ type chalEvent struct {
 }
 
 func runChallengeWebTop(baseURL string, args []string) error {
+	if len(args) > 0 && isCLIHelpArg(args[0]) {
+		printWebTopHelp() // the challenge commands are listed there
+		return nil
+	}
 
 	// subcommands
 	if len(args) > 0 && args[0] == "add" {
@@ -1309,7 +1313,7 @@ func runChallengeWebTop(baseURL string, args []string) error {
 	}
 
 	if len(args) > 1 && args[0] == "host" {
-		host, ok, err := cliHostArg(args[1], "usage: cfm webtop challenge host <vhost>")
+		host, ok, err := cliExistingHostArg(args[1], "usage: cfm webtop challenge host <vhost>")
 		if !ok {
 			return err
 		}
@@ -1433,6 +1437,9 @@ func runAttackWebTop(baseURL string, args []string) error {
 	}
 	var on bool
 	switch strings.ToLower(args[0]) {
+	case "-h", "--help", "help":
+		fmt.Println("usage: cfm webtop attack [on <vhost> [--ttl 6h] | off <vhost>]")
+		return nil
 	case "on":
 		on = true
 	case "off":
@@ -1444,7 +1451,12 @@ func runAttackWebTop(baseURL string, args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("usage: cfm webtop attack %s <vhost>", strings.ToLower(args[0]))
 	}
-	host, ok, err := cliHostArg(args[1], usage)
+	// on arms the vhost (hostname grammar); off clears an existing record.
+	check := cliHostArg
+	if !on {
+		check = cliExistingHostArg
+	}
+	host, ok, err := check(args[1], usage)
 	if !ok {
 		return err
 	}
@@ -1714,7 +1726,7 @@ func runChallengeRemove(baseURL string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
-	host, ok, err := cliHostArg(args[0], usage)
+	host, ok, err := cliExistingHostArg(args[0], usage)
 	if !ok {
 		return err
 	}
@@ -1741,7 +1753,7 @@ func runChallengeStatus(baseURL string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("%s", usage)
 	}
-	host, ok, err := cliHostArg(args[0], usage)
+	host, ok, err := cliExistingHostArg(args[0], usage)
 	if !ok {
 		return err
 	}

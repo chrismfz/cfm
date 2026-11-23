@@ -118,20 +118,22 @@ func runGenericExclude(baseURL, prefix, resource string, args []string) error {
 			return fmt.Errorf("unknown flag %q", args[i])
 		}
 	}
-	// A host value or --scope host goes through the shared host check (glob:
-	// the stores match these as globs); a path value was only refused above
-	// when it looks like a flag.
+	// A host value or --scope host goes through the shared host check: on add
+	// the hostname grammar with the stores' glob metacharacters, on remove only
+	// "not a flag" (an existing entry may predate the grammar). A path value
+	// was only refused above when it looks like a flag.
+	kind := cliHostGlob
+	if action != "add" {
+		kind = cliHostExisting
+	}
 	if typ == "host" {
-		if _, ok, err := cliHostArgGlob(value, usage, true); !ok {
-			return err
+		if err := validateCLIHostKind(value, kind); err != nil {
+			return fmt.Errorf("invalid host %q: %v\n%s", value, err, usage)
 		}
 	}
 	for _, sc := range scopes {
-		if _, ok, err := cliHostArgGlob(sc, usage, true); !ok {
-			if err == nil {
-				err = fmt.Errorf("--scope needs a host")
-			}
-			return err
+		if err := validateCLIHostKind(sc, kind); err != nil {
+			return fmt.Errorf("invalid --scope host %q: %v\n%s", sc, err, usage)
 		}
 	}
 	var endpoint string

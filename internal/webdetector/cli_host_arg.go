@@ -7,11 +7,21 @@ import (
 
 // The ONE check for a `cfm webtop` positional host argument (challenge
 // add/remove/status/host/tier/lockdown, attack on|off, site-cache
-// get/set/off/remove/purge, the exclude/override value and --scope hosts).
+// get/set/off/remove/purge/stats, the exclude/override value and --scope
+// hosts).
 //
 // Without it a flag in the host position was taken as the host: on a live node
 // `cfm webtop challenge add --help` armed manual challenges for "--help" and
 // "www.--help", and `challenge remove -- --help` removed host "--".
+//
+// Two strengths. A command that CREATES or changes state for a host (add, set,
+// tier, lockdown, attack on, exclude add) checks the hostname grammar. A
+// command that reads or clears an EXISTING record (remove, status, host, get,
+// off, purge, stats, attack off, exclude remove) refuses only a help word, an
+// empty value and a flag: those records can carry keys the grammar refuses
+// (an automatic vhost challenge is keyed on the client's Host header, which
+// nginx accepts with an underscore), and the CLI must still be able to clear
+// them.
 
 // isCLIHelpArg reports whether a positional argument asks for usage.
 func isCLIHelpArg(s string) bool {
@@ -22,8 +32,16 @@ func isCLIHelpArg(s string) bool {
 	return false
 }
 
-// cliHostArg checks the positional host argument of a subcommand whose usage
-// line is usage. It returns ok=true with the host when arg is a valid hostname.
+type cliHostKind int
+
+const (
+	cliHostNew      cliHostKind = iota // hostname grammar, optional leading "*."
+	cliHostGlob                        // the grammar plus glob metacharacters (exclude values)
+	cliHostExisting                    // not a flag, not empty: a record that may already exist
+)
+
+// cliHostArg checks the host argument of a command that creates or changes
+// state for it. It returns ok=true with the host when arg is a valid hostname.
 // On a help request it prints usage and returns ok=false, err=nil (the caller
 // returns nil without calling the API); on an invalid host it returns
 // ok=false and a usage error. The caller always does:
@@ -33,27 +51,50 @@ func isCLIHelpArg(s string) bool {
 //		return err
 //	}
 func cliHostArg(arg, usage string) (string, bool, error) {
-	return cliHostArgGlob(arg, usage, false)
+	return checkCLIHostArg(arg, usage, cliHostNew)
 }
 
-// cliHostArgGlob is cliHostArg for an exclude/override host value or a
-// --scope host, which the stores match as a glob: '*' and '?' are accepted in
-// any label there (scopedExcludeHostAllowed / filepath.Match).
-func cliHostArgGlob(arg, usage string, glob bool) (string, bool, error) {
+// cliExistingHostArg is cliHostArg for a command that reads or clears an
+// existing record: it refuses only a help word (usage), an empty value and a
+// flag.
+func cliExistingHostArg(arg, usage string) (string, bool, error) {
+	return checkCLIHostArg(arg, usage, cliHostExisting)
+}
+
+func checkCLIHostArg(arg, usage string, kind cliHostKind) (string, bool, error) {
 	if isCLIHelpArg(arg) {
 		fmt.Println(usage)
 		return "", false, nil
 	}
-	if err := validateCLIHost(arg, glob); err != nil {
+	if err := validateCLIHostKind(arg, kind); err != nil {
 		return "", false, fmt.Errorf("invalid host %q: %v\n%s", arg, err, usage)
 	}
 	return arg, true, nil
 }
 
+// validateCLIHostKind is the check behind checkCLIHostArg, without the help
+// branch: a help word is just an invalid host here (a --scope value).
+func validateCLIHostKind(h string, kind cliHostKind) error {
+	if kind == cliHostExisting {
+		if strings.TrimSpace(h) == "" {
+			return fmt.Errorf("empty")
+		}
+		if strings.HasPrefix(h, "-") {
+			return fmt.Errorf("looks like a flag (the host comes first)")
+		}
+		return nil
+	}
+	if isCLIHelpArg(h) {
+		return fmt.Errorf("looks like a flag (the host comes first)")
+	}
+	return validateCLIHost(h, kind == cliHostGlob)
+}
+
 // validateCLIHost accepts letters, digits, dots and hyphens in dot-separated
 // labels (1-63 chars, none starting or ending with a hyphen, 253 chars in
 // all), an optional leading "*." wildcard and an optional trailing dot. glob
-// also accepts '*' and '?' anywhere in a label.
+// also accepts filepath.Match's metacharacters ('*', '?', '[', ']', '^') in
+// any label, as the exclude stores match these values with it.
 func validateCLIHost(h string, glob bool) error {
 	if h == "" {
 		return fmt.Errorf("empty")
@@ -87,7 +128,7 @@ func validateCLIHost(h string, glob bool) error {
 			c := label[i]
 			switch {
 			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-':
-			case glob && (c == '*' || c == '?'):
+			case glob && strings.IndexByte("*?[]^", c) >= 0:
 			default:
 				return fmt.Errorf("character %q not allowed (letters, digits, dots, hyphens, a leading *.)", c)
 			}

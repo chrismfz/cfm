@@ -24,12 +24,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **`cfm webtop` no longer takes a flag for a host.** `cfm webtop challenge
   add --help` armed manual challenges for `--help` and `www.--help`, and
   `challenge remove -- --help` removed a host named `--`. Every subcommand
-  that takes a host (`challenge add/remove/status/host/tier/lockdown`,
-  `attack on|off`, `site-cache get/set/off/remove/purge`, and the
-  challenge/WAF/clam exclude value and `--scope`) now prints its usage for
-  `-h`, `--help` or `help` and refuses a host that starts with `-` or is not
-  a hostname (letters, digits, dots, hyphens, an optional leading `*.`;
-  exclude values keep their `*`/`?` globs), before calling the API.
+  that takes a host now prints its usage for `-h`, `--help` or `help` and
+  refuses a host that starts with `-`, before calling the API. The commands
+  that create state (`challenge add/tier/lockdown`, `attack on`,
+  `site-cache set`, `exclude add`) also refuse a value that is not a hostname
+  (letters, digits, dots, hyphens, an optional leading `*.`; exclude values
+  keep their `*`/`?`/`[…]` globs). The commands that read or clear an existing
+  record (`challenge remove/status/host`, `attack off`,
+  `site-cache get/off/remove/purge/stats`, `exclude remove`) refuse only a
+  flag, so they can still clear one keyed on an odd host: `cfm webtop
+  challenge remove www.--help` cleans up after the bug. `cfm webtop challenge
+  --help` and `cfm webtop attack --help` print the usage instead of calling
+  the API.
 
 ## 2026.11.23
 

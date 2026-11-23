@@ -48,7 +48,7 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache get <vhost>")
 		}
-		host, ok, err := cliHostArg(args[1], "usage: cfm webtop site-cache get <vhost>")
+		host, ok, err := cliExistingHostArg(args[1], "usage: cfm webtop site-cache get <vhost>")
 		if !ok {
 			return err
 		}
@@ -66,7 +66,7 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache off <vhost>")
 		}
-		host, ok, err := cliHostArg(args[1], "usage: cfm webtop site-cache off <vhost>")
+		host, ok, err := cliExistingHostArg(args[1], "usage: cfm webtop site-cache off <vhost>")
 		if !ok {
 			return err
 		}
@@ -75,7 +75,7 @@ func runSiteCacheWebTop(baseURL string, args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: cfm webtop site-cache remove <vhost>")
 		}
-		host, ok, err := cliHostArg(args[1], "usage: cfm webtop site-cache remove <vhost>")
+		host, ok, err := cliExistingHostArg(args[1], "usage: cfm webtop site-cache remove <vhost>")
 		if !ok {
 			return err
 		}
@@ -206,9 +206,11 @@ func siteCacheTierCLI(t SiteCacheTier) string {
 func runSiteCacheStats(baseURL string, args []string) error {
 	u := strings.TrimRight(baseURL, "/") + "/api/v1/site-cache/stats"
 	if len(args) > 0 {
-		if h := strings.TrimSpace(args[0]); h != "" && !strings.HasPrefix(h, "-") {
-			u += "?host=" + url.QueryEscape(h)
+		host, ok, err := cliExistingHostArg(args[0], "usage: cfm webtop site-cache stats [vhost]")
+		if !ok {
+			return err
 		}
+		u += "?host=" + url.QueryEscape(host)
 	}
 	resp, err := clihttp.Get(u)
 	if err != nil {
@@ -431,7 +433,7 @@ func runSiteCachePurge(baseURL string, args []string) error {
 		q.Set("all", "1")
 		msg = "✓ purged ALL vhost caches\n"
 	default:
-		host, ok, err := cliHostArg(args[0], "usage: cfm webtop site-cache purge <vhost> | --all")
+		host, ok, err := cliExistingHostArg(args[0], "usage: cfm webtop site-cache purge <vhost> | --all")
 		if !ok {
 			return err
 		}

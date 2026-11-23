@@ -35,6 +35,8 @@ func TestValidateCLIHost(t *testing.T) {
 		{"*.example.com", false, true},
 		{"localhost", false, true},
 		{"shop*.example.?r", true, true},
+		{"shop[12].example.gr", true, true},
+		{"shop[12].example.gr", false, false},
 		{"*", true, true},
 		{"--help", true, false},
 		{"www.--help", true, false},
@@ -48,10 +50,13 @@ func TestValidateCLIHost(t *testing.T) {
 }
 
 // Every host-taking subcommand runs the shared check before any API call: a
-// help word prints the usage and returns nil, a bad host is a usage error, and
+// help word prints the usage and returns nil, a flag is a usage error, and
 // neither reaches the daemon. The incident: `challenge add --help` armed
 // challenges for "--help" and "www.--help"; `challenge remove -- --help`
-// removed host "--".
+// removed host "--". A command that creates state also refuses a
+// non-hostname; one that reads or clears an existing record does not (it must
+// still clear the incident's "www.--help", or an automatic challenge keyed on
+// a Host header with an underscore).
 func TestWebtopHostArgGuard(t *testing.T) {
 	var calls atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -61,70 +66,121 @@ func TestWebtopHostArgGuard(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	cmds := map[string]func(args []string) error{
-		"challenge add":    func(a []string) error { return runChallengeWebTop(ts.URL, append([]string{"add"}, a...)) },
-		"challenge remove": func(a []string) error { return runChallengeWebTop(ts.URL, append([]string{"remove"}, a...)) },
-		"challenge status": func(a []string) error { return runChallengeWebTop(ts.URL, append([]string{"status"}, a...)) },
-		"challenge host":   func(a []string) error { return runChallengeWebTop(ts.URL, append([]string{"host"}, a...)) },
-		"challenge tier": func(a []string) error {
-			return runChallengeWebTop(ts.URL, append([]string{"tier"}, append(a, "v1")...))
-		},
-		"challenge lockdown": func(a []string) error {
-			return runChallengeWebTop(ts.URL, append([]string{"lockdown"}, append(a, "on")...))
-		},
-		"challenge exclude add": func(a []string) error {
-			return runChallengeWebTop(ts.URL, append([]string{"exclude", "add"}, a...))
-		},
-		"attack on":         func(a []string) error { return runAttackWebTop(ts.URL, append([]string{"on"}, a...)) },
-		"attack off":        func(a []string) error { return runAttackWebTop(ts.URL, append([]string{"off"}, a...)) },
-		"site-cache get":    func(a []string) error { return runSiteCacheWebTop(ts.URL, append([]string{"get"}, a...)) },
-		"site-cache set":    func(a []string) error { return runSiteCacheWebTop(ts.URL, append([]string{"set"}, a...)) },
-		"site-cache off":    func(a []string) error { return runSiteCacheWebTop(ts.URL, append([]string{"off"}, a...)) },
-		"site-cache remove": func(a []string) error { return runSiteCacheWebTop(ts.URL, append([]string{"remove"}, a...)) },
-		"site-cache purge":  func(a []string) error { return runSiteCacheWebTop(ts.URL, append([]string{"purge"}, a...)) },
+	type cmd struct {
+		run      func(args []string) error
+		existing bool // reads/clears an existing record: only a flag is refused
+	}
+	chal := func(sub string, tail ...string) func([]string) error {
+		return func(a []string) error {
+			return runChallengeWebTop(ts.URL, append(append([]string{sub}, a...), tail...))
+		}
+	}
+	cache := func(sub string, tail ...string) func([]string) error {
+		return func(a []string) error {
+			return runSiteCacheWebTop(ts.URL, append(append([]string{sub}, a...), tail...))
+		}
+	}
+	attack := func(sub string) func([]string) error {
+		return func(a []string) error { return runAttackWebTop(ts.URL, append([]string{sub}, a...)) }
+	}
+	cmds := map[string]cmd{
+		"challenge add":            {chal("add"), false},
+		"challenge tier":           {chal("tier", "v1"), false},
+		"challenge lockdown":       {chal("lockdown", "on"), false},
+		"challenge exclude add":    {func(a []string) error { return runChallengeWebTop(ts.URL, append([]string{"exclude", "add"}, a...)) }, false},
+		"attack on":                {attack("on"), false},
+		"site-cache set":           {cache("set", "--micro", "off"), false},
+		"challenge remove":         {chal("remove"), true},
+		"challenge status":         {chal("status"), true},
+		"challenge host":           {chal("host"), true},
+		"challenge exclude remove": {func(a []string) error { return runChallengeWebTop(ts.URL, append([]string{"exclude", "remove"}, a...)) }, true},
+		"attack off":               {attack("off"), true},
+		"site-cache get":           {cache("get"), true},
+		"site-cache off":           {cache("off"), true},
+		"site-cache remove":        {cache("remove"), true},
+		"site-cache purge":         {cache("purge"), true},
+		"site-cache stats":         {cache("stats"), true},
 	}
 
 	cases := []struct {
-		name    string
-		args    []string
-		wantErr bool
+		name string
+		args []string
+		// wantErr for a create command; an existing-record command errs only
+		// when flagErr.
+		wantErr, flagErr bool
 	}{
-		{"--help", []string{"--help"}, false},
-		{"-h", []string{"-h"}, false},
-		{"help", []string{"help"}, false},
-		{"--", []string{"--", "--help"}, true},
-		{"-x", []string{"-x"}, true},
-		{"www.--help", []string{"www.--help"}, true},
-		{"underscore", []string{"bad_host.example"}, true},
+		{"--help", []string{"--help"}, false, false},
+		{"-h", []string{"-h"}, false, false},
+		{"help", []string{"help"}, false, false},
+		{"--", []string{"--", "--help"}, true, true},
+		{"-x", []string{"-x"}, true, true},
+		{"www.--help", []string{"www.--help"}, true, false},
+		{"underscore", []string{"bad_host.example"}, true, false},
 	}
-	for cmd, run := range cmds {
-		for _, c := range cases {
+	for name, c := range cmds {
+		for _, tc := range cases {
 			calls.Store(0)
-			err := run(c.args)
-			if (err != nil) != c.wantErr {
-				t.Errorf("%s %v: err=%v, wantErr=%v", cmd, c.args, err, c.wantErr)
+			err := c.run(tc.args)
+			wantErr := tc.wantErr
+			if c.existing {
+				wantErr = tc.flagErr
 			}
-			if c.wantErr && err != nil && !strings.Contains(err.Error(), "usage:") {
-				t.Errorf("%s %v: error %q carries no usage line", cmd, c.args, err)
-			}
-			if n := calls.Load(); n != 0 {
-				t.Errorf("%s %v: reached the API %d time(s)", cmd, c.args, n)
+			reached := calls.Load() != 0
+			switch {
+			case wantErr:
+				// Refused by the guard: a usage error, no API call.
+				if err == nil || !strings.Contains(err.Error(), "usage:") {
+					t.Errorf("%s %v: err=%v, want a usage error", name, tc.args, err)
+				}
+				if reached {
+					t.Errorf("%s %v: reached the API", name, tc.args)
+				}
+			case isCLIHelpArg(tc.args[0]):
+				if err != nil || reached {
+					t.Errorf("%s %v: err=%v reached=%v, want usage only", name, tc.args, err, reached)
+				}
+			default:
+				// Accepted: the call reaches the API (the fake server's
+				// answer may not fit the command; that error is not ours).
+				if !reached {
+					t.Errorf("%s %v: accepted but never reached the API (err=%v)", name, tc.args, err)
+				}
 			}
 		}
-	}
-
-	// A valid host still reaches the API.
-	for _, cmd := range []string{"challenge add", "challenge remove", "site-cache purge", "attack off"} {
+		// A valid host reaches the API on every command.
 		calls.Store(0)
-		_ = cmds[cmd]([]string{"example.com"})
+		_ = c.run([]string{"example.com"})
 		if calls.Load() == 0 {
-			t.Errorf("%s example.com: never reached the API", cmd)
+			t.Errorf("%s example.com: never reached the API", name)
 		}
 	}
 }
 
-// The exclude --scope host goes through the same check; a path value only
-// must not look like a flag.
+// The dispatchers answer a help word with usage, without calling the API.
+func TestWebtopDispatcherHelp(t *testing.T) {
+	var calls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer ts.Close()
+	for _, h := range []string{"--help", "-h", "help"} {
+		if err := runChallengeWebTop(ts.URL, []string{h}); err != nil {
+			t.Errorf("challenge %s: %v", h, err)
+		}
+		if err := runAttackWebTop(ts.URL, []string{h}); err != nil {
+			t.Errorf("attack %s: %v", h, err)
+		}
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("help reached the API %d time(s)", n)
+	}
+}
+
+// The exclude value and --scope hosts: add checks the grammar (with the
+// stores' glob metacharacters), remove refuses only a flag; a --scope help
+// word is a plain error, never a usage print; a path value only must not look
+// like a flag.
 func TestGenericExcludeHostGuard(t *testing.T) {
 	var calls atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -134,8 +190,12 @@ func TestGenericExcludeHostGuard(t *testing.T) {
 	defer ts.Close()
 	bad := [][]string{
 		{"add", "/p/", "--type", "path", "--scope", "--help"},
+		{"add", "/p/", "--type", "path", "--scope", "help"},
 		{"add", "/p/", "--type", "path", "--scope", "www.--help"},
+		{"remove", "/p/", "--type", "path", "--scope", "--help"},
 		{"add", "-x", "--type", "path"},
+		{"add", "bad_host.example"},
+		{"remove", "-x"},
 	}
 	for _, a := range bad {
 		calls.Store(0)
@@ -146,14 +206,23 @@ func TestGenericExcludeHostGuard(t *testing.T) {
 			t.Errorf("%v: reached the API", a)
 		}
 	}
-	calls.Store(0)
-	if err := runGenericExclude(ts.URL, "challenge", "exclude", []string{"add", "/images/.tmb/", "--type", "path", "--scope", "example.gr"}); err != nil {
-		t.Fatalf("valid path exclude: %v", err)
+	good := []struct {
+		prefix string
+		args   []string
+	}{
+		{"challenge", []string{"add", "/images/.tmb/", "--type", "path", "--scope", "example.gr"}},
+		{"waf", []string{"add", "*.example.gr"}},
+		{"waf", []string{"add", "shop[12].example.?r"}},
+		{"waf", []string{"remove", "bad_host.example"}},
+		{"challenge", []string{"remove", "/p/", "--type", "path", "--scope", "old_host.example"}},
 	}
-	if err := runGenericExclude(ts.URL, "waf", "exclude", []string{"add", "*.example.gr"}); err != nil {
-		t.Fatalf("valid wildcard host exclude: %v", err)
-	}
-	if calls.Load() != 2 {
-		t.Fatalf("valid excludes: %d API calls, want 2", calls.Load())
+	for _, g := range good {
+		calls.Store(0)
+		if err := runGenericExclude(ts.URL, g.prefix, "exclude", g.args); err != nil {
+			t.Errorf("%s %v: %v", g.prefix, g.args, err)
+		}
+		if calls.Load() != 1 {
+			t.Errorf("%s %v: %d API calls, want 1", g.prefix, g.args, calls.Load())
+		}
 	}
 }
