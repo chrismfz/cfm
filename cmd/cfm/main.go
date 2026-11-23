@@ -23,7 +23,6 @@ import (
 	status "cfm/internal/status"
 	"cfm/internal/sysctl"
 	"context"
-	"flag"
 	"fmt"
 	"os"
 	"os/user"
@@ -256,7 +255,7 @@ func main() {
 	case "-v", "--version", "version":
 		fmt.Printf("cfm v%s (built %s)\n", Version, BuildTime)
 	case "test":
-		cli.RunTest()
+		os.Exit(cli.RunTest(os.Args[2:]))
 	case "block":
 		be := mustBackend()
 		clihttp.SetToken(apiAuthToken())
@@ -570,10 +569,11 @@ func runDaemon(args []string) {
 		}
 	}
 
-	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
-	interval := fs.Duration("interval", 20*time.Second, "tick interval")
-	cfgFlag := fs.String("c", "", "config directory (contains cfm.allow / cfm.deny)")
-	_ = fs.Parse(args)
+	opts, rc, stop := parseDaemonArgs(args, os.Stdout, os.Stderr)
+	if stop {
+		os.Exit(rc)
+	}
+	interval, cfgFlag := &opts.interval, &opts.cfgDir
 
 	cfgDir, _ := cli.ResolveConfigDir(*cfgFlag)
 

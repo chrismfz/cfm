@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -25,8 +26,14 @@ type ripeAnnouncedPrefixesResponse struct {
 func RunASN(args []string) int {
 	fs := flag.NewFlagSet("asn", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
-	_ = fs.Parse(args)
+	if !clihelp.First(args) {
+		_ = fs.Parse(args)
+	}
 
+	if clihelp.First(args) || clihelp.Any(fs.Args()) { // `asn AS1 --help` too
+		fmt.Println("usage: cfm asn <AS12345> [--json]")
+		return 0
+	}
 	if fs.NArg() < 1 {
 		fmt.Fprintln(os.Stderr, "usage: cfm asn <AS12345> [--json]")
 		return 2

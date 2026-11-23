@@ -1,6 +1,7 @@
 package healthcli
 
 import (
+	"cfm/internal/clihelp"
 	"cfm/internal/clihttp"
 	"cfm/internal/edgeengine"
 	"cfm/internal/healthmodel"
@@ -188,6 +189,12 @@ func Run(baseURL string, args []string) error {
 	opts, argv := parseGlobalFlags(args)
 	if len(argv) == 0 {
 		return runSummary(baseURL, opts)
+	}
+	// A help word anywhere is usage, before the snapshot fetch (`health watch
+	// 5 help` ran the watch loop). Its values are numbers and --flags.
+	if clihelp.Any(argv) {
+		printHelp()
+		return nil
 	}
 
 	switch argv[0] {

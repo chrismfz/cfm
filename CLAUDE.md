@@ -255,6 +255,15 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   CLI runtime code are rejected by `check_cli_transport.sh`. The only escape
   is an inline `clihttp-exception: <reason>` comment on the same line — use
   it sparingly and justify it.
+- **A help word never runs a command.** `-h`, `--help` and `help` print the
+  usage and do nothing else, after any subcommand; the one matcher is
+  `internal/clihelp` (`NoArgs` for a no-argument command, `Parse` for a
+  flags-only flag set, `Sub`/`Any` under a dispatcher). Never write another
+  `case "help", "-h"` list as the only guard: `cfm reset --help` emptied the
+  table, `cfm flush --help` freed every TTL ban and `cfm kernsec apply help`
+  applied (the flag package stops at a positional). A new command gets a row
+  in its package's `cli_help_args_test.go` / `help_args_test.go`, whose fakes
+  fail on any backend or API call.
 - **Lua validation gate before reloading the edge proxy.** Any change to
   `configs/lua/*` must pass `luac -p` and a LuaJIT `require` smoke-test of all
   modules. Follow `docs/challenge-waf-release-checklist.md` to the letter —

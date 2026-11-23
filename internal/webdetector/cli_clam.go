@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -84,6 +85,11 @@ func clamAPIPost(baseURL, path string) error {
 // RunClamSigIgnore drives `cfm clam sigignore …`.
 func RunClamSigIgnore(baseURL string, args []string) error {
 	usage := "usage: cfm clam sigignore [list|add|remove] <pattern> [--host <vhost>]"
+	// A help word is usage, never a pattern (`sigignore add help` added "help").
+	if clihelp.Sub(args) {
+		fmt.Println(usage)
+		return nil
+	}
 	action := "list"
 	if len(args) > 0 {
 		action = strings.ToLower(strings.TrimSpace(args[0]))
@@ -154,6 +160,10 @@ func RunClamSigIgnore(baseURL string, args []string) error {
 // RunClamInfections drives `cfm clam infections` — the CLI view of the scoped
 // clam_infected history (what the ClamAV page's tables show).
 func RunClamInfections(baseURL string, args []string) error {
+	if clihelp.Sub(args) {
+		fmt.Println("usage: cfm clam infections [--host <vhost>] [--limit N]")
+		return nil
+	}
 	flags, pos, err := clamCLIFlags(args, map[string]bool{"host": true, "limit": true})
 	if err != nil {
 		return err

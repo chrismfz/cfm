@@ -3,6 +3,8 @@ package webdetector
 import (
 	"fmt"
 	"strings"
+
+	"cfm/internal/clihelp"
 )
 
 // The ONE check for a `cfm webtop` positional host argument (challenge
@@ -23,14 +25,9 @@ import (
 // nginx accepts with an underscore), and the CLI must still be able to clear
 // them.
 
-// isCLIHelpArg reports whether a positional argument asks for usage.
-func isCLIHelpArg(s string) bool {
-	switch s {
-	case "-h", "--help", "help":
-		return true
-	}
-	return false
-}
+// isCLIHelpArg is clihelp.IsHelpArg, the one help-word matcher of every cfm
+// command.
+var isCLIHelpArg = clihelp.IsHelpArg
 
 type cliHostKind int
 

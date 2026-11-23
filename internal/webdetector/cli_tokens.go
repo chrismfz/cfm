@@ -2,6 +2,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,12 @@ import (
 )
 
 func runTokensWebTop(baseURL string, args []string) error {
+	// A help word anywhere is usage (`tokens revoke --help` POSTed a revoke);
+	// token values are ids and host lists.
+	if clihelp.Any(args) {
+		printWebTopHelp()
+		return nil
+	}
 	if len(args) == 0 || args[0] == "list" {
 		return runTokensList(baseURL)
 	}

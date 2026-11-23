@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"flag"
 	"fmt"
 	"net"
@@ -12,10 +13,25 @@ import (
 	"cfm/internal/firewall"
 )
 
+const (
+	allowUsage   = "usage: cfm allow <IP|CIDR> [--ttl 1h]"
+	unallowUsage = "usage: cfm unallow <IP|CIDR>"
+)
+
 func RunAllow(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	fs := flag.NewFlagSet("allow", flag.ExitOnError)
 	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
 	flagArgs, posArgs := SplitFlagsAndPositionals(args, map[string]bool{"--ttl": true})
+	// A help word anywhere is usage, and the target is the only positional:
+	// `cfm allow 1.2.3.4 help` allowed 1.2.3.4 permanently.
+	if clihelp.Any(args) {
+		fmt.Println(allowUsage)
+		return 0
+	}
+	if len(posArgs) > 1 {
+		fmt.Fprintf(os.Stderr, "allow: unexpected argument %q\n%s\n", posArgs[1], allowUsage)
+		return 2
+	}
 	_ = fs.Parse(flagArgs)
 
 	target := ""
@@ -28,7 +44,7 @@ func RunAllow(args []string, be firewall.Backend, cfgDir string, tableExists fun
 		}
 	}
 	if target == "" {
-		fmt.Fprintln(os.Stderr, "usage: cfm allow <IP|CIDR> [--ttl 1h]")
+		fmt.Fprintln(os.Stderr, allowUsage)
 		return 2
 	}
 
@@ -107,8 +123,16 @@ func RunAllow(args []string, be firewall.Backend, cfgDir string, tableExists fun
 }
 
 func RunUnallow(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
+	if clihelp.Any(args) { // `cfm unallow 1.2.3.4 --help` removed the allow
+		fmt.Println(unallowUsage)
+		return 0
+	}
+	if len(args) > 1 {
+		fmt.Fprintf(os.Stderr, "unallow: unexpected argument %q\n%s\n", args[1], unallowUsage)
+		return 2
+	}
 	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: cfm unallow <IP|CIDR>")
+		fmt.Fprintln(os.Stderr, unallowUsage)
 		return 2
 	}
 	raw := strings.TrimSpace(args[0])

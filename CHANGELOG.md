@@ -36,6 +36,38 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   challenge remove www.--help` cleans up after the bug. `cfm webtop challenge
   --help` and `cfm webtop attack --help` print the usage instead of calling
   the API.
+- **Every `cfm` command prints its usage for `-h`, `--help` or `help` and does
+  nothing else.** Several never read their arguments, or ran when the flag
+  parser stopped at a positional `help`:
+  - `cfm reset --help` emptied table `inet cfm`, `cfm disable --help` deleted
+    it, and `cfm flush --help` freed every TTL ban and discarded the saved
+    ones. These three now take no argument at all: any other argument is
+    refused before nft is touched.
+  - `cfm kernsec init|apply|disable|rollback help` and `cfm lsm
+    init|enable|disable|restart help` ran the command with its defaults
+    (`cfm lsm init --help` ran the whole bring-up). `cfm realip fix --help`
+    rewrote the origin's config. `cfm daemon help` started a second daemon.
+  - `cfm clam enable|disable|hook …|scan on|off --help` rewrote `cfm.conf`.
+  - API writes with the help word as the target or ignored: `cfm bots block
+    --help` (an emergency UA rule for `--help`), `webtop history prune
+    --help` and `mysqltop history prune --help` (30 days pruned), `mysqltop
+    user-kill --id=N help` (killed the connection), `webtop waf clear`,
+    `http3 enable|disable`, `rules remove`, `challenge-access remove`, `tokens
+    revoke`, `clam sigignore add help`.
+  - A help word after the target: `cfm unblock|unallow <IP> --help` and
+    `cfm allow <IP> help` acted on the IP, and `cfm dnat [cpanel] bypass
+    add|remove <IP> --help` edited the bypass list. They now print usage, and
+    refuse any argument after the target.
+  - `cfm auth session purge help` and `cfm auth log purge help` purged:
+    every `cfm auth` leaf is now flags-only.
+  - Harmless but wrong: `cfm test --help` ran the checks, `cfm debug help`
+    wrote a one-minute bundle, `cfm htpasswd help` asked for a password,
+    `cfm list|status|allow-list|php-inventory help` and the webtop/bots/
+    health/mysqltop views ran, and `cfm ssl --help`, `webtop waf|rules
+    --help` said "unknown subcommand".
+  The help-word check is one shared package (`internal/clihelp`); a test per
+  command package runs every subcommand with each help word against a
+  backend and an API server that fail on any call.
 
 ## 2026.11.23
 

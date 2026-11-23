@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"fmt"
 	"cfm/internal/clihttp"
@@ -12,6 +13,12 @@ import (
 )
 
 func runHistoryWebTop(baseURL string, args []string) error {
+	// A help word anywhere is usage (`history prune --help` pruned 30 days);
+	// history values are numbers and --flags, never a bare "help".
+	if clihelp.Any(args) {
+		printWebTopHelp()
+		return nil
+	}
 	rest := []string{}
 	if len(args) > 1 {
 		rest = args[1:]

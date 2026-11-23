@@ -24,6 +24,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,13 @@ import (
 )
 
 func runSiteCacheWebTop(baseURL string, args []string) error {
+	// A help word right after the subcommand gets that subcommand's usage
+	// line; anywhere else it is the site-cache usage, never a run
+	// (`site-cache purge example.com --help` purged).
+	if clihelp.Sub(args) && !(len(args) > 1 && isCLIHelpArg(args[1])) {
+		printSiteCacheHelp()
+		return nil
+	}
 	if len(args) == 0 || args[0] == "list" {
 		return runSiteCacheList(baseURL)
 	}

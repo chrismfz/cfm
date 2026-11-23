@@ -178,9 +178,10 @@ func TestWebtopDispatcherHelp(t *testing.T) {
 }
 
 // The exclude value and --scope hosts: add checks the grammar (with the
-// stores' glob metacharacters), remove refuses only a flag; a --scope help
-// word is a plain error, never a usage print; a path value only must not look
-// like a flag.
+// stores' glob metacharacters), remove refuses only a flag; a bare --scope
+// help word is the scope's value (a plain error), while a -h/--help flag
+// anywhere is a help request (usage, clihelp.Sub); neither reaches the API. A
+// path value only must not look like a flag.
 func TestGenericExcludeHostGuard(t *testing.T) {
 	var calls atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -188,11 +189,18 @@ func TestGenericExcludeHostGuard(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer ts.Close()
-	bad := [][]string{
+	for _, a := range [][]string{
 		{"add", "/p/", "--type", "path", "--scope", "--help"},
+		{"remove", "/p/", "--type", "path", "--scope", "--help"},
+	} {
+		calls.Store(0)
+		if err := runGenericExclude(ts.URL, "challenge", "exclude", a); err != nil || calls.Load() != 0 {
+			t.Errorf("%v: err=%v calls=%d, want the usage and no API call", a, err, calls.Load())
+		}
+	}
+	bad := [][]string{
 		{"add", "/p/", "--type", "path", "--scope", "help"},
 		{"add", "/p/", "--type", "path", "--scope", "www.--help"},
-		{"remove", "/p/", "--type", "path", "--scope", "--help"},
 		{"add", "-x", "--type", "path"},
 		{"add", "bad_host.example"},
 		{"remove", "-x"},

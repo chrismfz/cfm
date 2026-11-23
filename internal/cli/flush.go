@@ -5,11 +5,23 @@ import (
 	"fmt"
 	"os"
 
+	"cfm/internal/clihelp"
 	"cfm/internal/firewall"
 	"cfm/internal/ttlban"
 )
 
+const flushUsage = `usage: cfm flush
+  Empty the block sets (every TTL ban, the IPv6 client /64s included) and
+  discard the saved TTL bans, so a restart does not restore them. Takes no
+  argument.`
+
+// RunFlush is `cfm flush`. It takes no argument: a help word prints the usage
+// and any other argument is refused, before the backend is touched (it never
+// read args, so `cfm flush --help` freed every TTL ban).
 func RunFlush(args []string, be firewall.Backend, tableExists func() bool) int {
+	if rc, done := clihelp.NoArgs("flush", flushUsage, args); done {
+		return rc
+	}
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
 		return 1

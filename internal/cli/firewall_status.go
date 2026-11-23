@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -192,6 +193,10 @@ func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, sour
 		fmt.Fprintln(os.Stderr, "usage: cfm firewall {status|path} ...")
 		return 2
 	}
+	if clihelp.First(args) {
+		fmt.Println("usage: cfm firewall {status|path} ...")
+		return 0
+	}
 	if args[0] == "path" {
 		return RunNetfilterPath(args[1:], cfgDir)
 	}
@@ -203,7 +208,16 @@ func RunFirewall(args []string, be firewall.Backend, cfgDir string, engine, sour
 	verbose := fs.Bool("verbose", false, "include extra probes")
 	jsonOut := fs.Bool("json", false, "output JSON")
 	strict := fs.Bool("strict", true, "exit non-zero on fail findings")
-	_ = fs.Parse(args[1:])
+	rest := args[1:]
+	if clihelp.First(rest) {
+		rest = rest[:1] // answered by NoArgs below, not by the flag package's os.Exit
+	} else {
+		_ = fs.Parse(rest)
+		rest = fs.Args()
+	}
+	if rc, done := clihelp.NoArgs("firewall status", "usage: cfm firewall status [--verbose] [--json] [--strict=false]", rest); done {
+		return rc
+	}
 
 	report := collectFirewallStatus(be, cfgDir, engine, source, *verbose)
 	if *jsonOut {
