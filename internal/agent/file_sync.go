@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"cfm/internal/logging"
 )
@@ -37,12 +38,21 @@ func ownerOf(fi os.FileInfo) *fileOwner {
 	return nil
 }
 
+// staleTempAge is how old a leftover temp file of ours must be before
+// atomicWrite deletes it: older than any write in progress.
+const staleTempAge = time.Minute
+
 // atomicWrite replaces path with data: a unique temp file in the same dir,
 // given perm (exactly — not masked by the umask) and, when owner is set, that
 // owner, then renamed over path. A reader sees the old file or the new one,
-// never a half-written one or one with the wrong mode.
+// never a half-written one or one with the wrong mode. A failed chown is
+// logged, not fatal: the content still lands, owned by the agent, as it
+// always did (an NFS root_squash mount or a non-root agent can't chown).
+// Temp files a crashed earlier write left behind are removed first.
 func atomicWrite(path string, data []byte, perm os.FileMode, owner *fileOwner) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	dir, pattern := filepath.Dir(path), "."+filepath.Base(path)+".tmp*"
+	removeStaleTemps(dir, pattern)
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}
@@ -65,7 +75,7 @@ func atomicWrite(path string, data []byte, perm os.FileMode, owner *fileOwner) e
 	}
 	if owner != nil {
 		if err := os.Chown(tmp, owner.uid, owner.gid); err != nil {
-			return err
+			logging.LogfAPI("[files] chown %s to %d:%d: %v (writing it as the agent's)", path, owner.uid, owner.gid, err)
 		}
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -73,6 +83,17 @@ func atomicWrite(path string, data []byte, perm os.FileMode, owner *fileOwner) e
 	}
 	ok = true
 	return nil
+}
+
+// removeStaleTemps deletes temp files matching pattern in dir that are older
+// than staleTempAge: what a write killed between CreateTemp and Rename leaves.
+func removeStaleTemps(dir, pattern string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, pattern))
+	for _, m := range matches {
+		if fi, err := os.Lstat(m); err == nil && fi.Mode().IsRegular() && time.Since(fi.ModTime()) > staleTempAge {
+			os.Remove(m)
+		}
+	}
 }
 
 // startConfigSync runs syncConfigs on its own goroutine, so a SpamAssassin lint

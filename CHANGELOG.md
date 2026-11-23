@@ -31,8 +31,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   owner, a SpamAssassin file is always made group/other readable (so one an
   older agent left at 0600 is repaired by the next sync), and a new file under
   `/etc/mail/spamassassin/` gets 0644 (0600 elsewhere). The temp file is
-  unique and gets its mode and owner before the rename, so a failed
-  chmod/chown fails the update instead of leaving an unreadable file.
+  unique and gets its mode before the rename, so a failed chmod fails the
+  update instead of leaving an unreadable file (a failed chown is logged and
+  the file is written as the agent's, as before). A rollback restores the old
+  content but keeps a SpamAssassin file readable, a directory created under
+  the SpamAssassin dir is 0755, and temp files a killed write left behind are
+  removed by the next write.
 - **sslcollector: edge workers no longer grow with every certificate
   reload.** The certificates and keys a worker had replaced were freed only
   when LuaJIT's garbage collector next ran a full cycle, which it rarely did,

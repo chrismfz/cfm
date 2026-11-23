@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -226,6 +227,87 @@ func TestApplyUpdatesKeepsOrSetsTheFileMode(t *testing.T) {
 	}
 	if left, _ := filepath.Glob(filepath.Join(f.saDir, ".*.tmp*")); len(left) != 0 {
 		t.Errorf("temp files left behind: %v", left)
+	}
+	// The owner is kept (the test runs as one user, so this pins the path,
+	// not a uid change).
+	fi, _ := os.Stat(f.saDir + "myip.cf")
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() || int(st.Gid) != os.Getgid() {
+		t.Errorf("owner changed: %+v", fi.Sys())
+	}
+}
+
+// A rollback puts the old content back but keeps a SpamAssassin file
+// readable: restoring the 0600 an older agent left would unload it again.
+func TestRollbackKeepsSpamassassinFileReadable(t *testing.T) {
+	f := newSyncFixture(t)
+	f.seed(t, f.saDir+"mailfromfilters.cf", "old filters\n", 0o600)
+	f.lint = func(n int) (string, error) {
+		if n == 1 {
+			return badRuleLint, &exitError
+		}
+		return "", nil
+	}
+	var st fileSyncState
+	res := st.applyUpdates(context.Background(), []ConfigUpdate{
+		f.update(f.saDir+"mailfromfilters.cf", "body __CFM_ID_7_1 /(unclosed/\n", "systemctl restart spamd"),
+	}, f.allowed())
+	if len(res.RolledBack) != 1 {
+		t.Fatalf("not rolled back: %+v", res)
+	}
+	if got := readFile(t, f.saDir+"mailfromfilters.cf"); got != "old filters\n" {
+		t.Fatalf("old content not restored: %q", got)
+	}
+	if fi, _ := os.Stat(f.saDir + "mailfromfilters.cf"); fi.Mode().Perm() != 0o644 {
+		t.Fatalf("rolled back to mode %o, want 0644", fi.Mode().Perm())
+	}
+}
+
+// A directory the sync creates under the SpamAssassin dir is traversable by
+// spamd (0755); elsewhere it stays private (0750).
+func TestWritePendingCreatesReadableSpamassassinDir(t *testing.T) {
+	f := newSyncFixture(t)
+	var st fileSyncState
+	st.applyUpdates(context.Background(), []ConfigUpdate{
+		f.update(f.saDir+"cfm/keywords.cf", "rules\n", ""),
+		f.update(f.other+"sub/x.conf", "x=1\n", ""),
+	}, f.allowed())
+	for dir, want := range map[string]os.FileMode{f.saDir + "cfm": 0o755, f.other + "sub": 0o750} {
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != want {
+			t.Errorf("%s: mode %o, want %o", dir, got, want)
+		}
+	}
+}
+
+// Temp files a killed write left behind are removed by the next write; a
+// fresh one (a write in progress) is left alone.
+func TestAtomicWriteRemovesStaleTemps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "myip.cf")
+	stale, fresh := filepath.Join(dir, ".myip.cf.tmp111"), filepath.Join(dir, ".myip.cf.tmp222")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * staleTempAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(path, []byte("new\n"), 0o644, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("stale temp not removed: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp removed: %v", err)
+	}
+	if got := readFile(t, path); got != "new\n" {
+		t.Errorf("content %q", got)
 	}
 }
 
