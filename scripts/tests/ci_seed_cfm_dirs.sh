@@ -6,7 +6,7 @@
 # saved over it on every node, while CI's empty /etc/cfm showed nothing.
 #
 # Seeds, each list derived from its source in the tree (no hand-kept copy):
-#   - every packaged /etc/cfm conffile (packaging/debian/DEBIAN/conffiles),
+#   - every /etc/cfm file the package seeds (packaging/etc-cfm-files.list),
 #     copied from configs/ as the package does;
 #   - the shared Lua modules under /var/lib/cfm/lua (configs/lua/*.lua);
 #   - each CFM log the Go sources name — a "/var/log/cfm/….log" literal or a
@@ -28,8 +28,8 @@ for tool in grep sed sort tr cut uniq install mktemp; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
 done
 
-CONFFILES=packaging/debian/DEBIAN/conffiles
-[ -f "$CONFFILES" ] || fail "$CONFFILES not found"
+ETC_LIST=packaging/etc-cfm-files.list
+[ -f "$ETC_LIST" ] || fail "$ETC_LIST not found"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -45,12 +45,15 @@ g() { # <out-file> <grep args...>
 
 # ── the plan: "<dst>\t<src>" lines; src "-" = placeholder ──────────────────────
 : >"$tmp/plan"
-while IFS= read -r dst; do
-  case "$dst" in /etc/cfm/*) ;; *) continue ;; esac
-  src="configs/${dst#/etc/cfm/}"
-  [ -f "$src" ] || fail "$CONFFILES lists $dst but $src does not exist"
-  printf '%s\t%s\n' "$dst" "$src" >>"$tmp/plan"
-done <"$CONFFILES"
+n=0
+while read -r name _mode; do
+  case "$name" in ''|'#'*) continue ;; esac
+  src="configs/$name"
+  [ -f "$src" ] || fail "$ETC_LIST lists $name but $src does not exist"
+  printf '%s\t%s\n' "/etc/cfm/$name" "$src" >>"$tmp/plan"
+  n=$((n + 1))
+done <"$ETC_LIST"
+[ "$n" -gt 0 ] || fail "$ETC_LIST lists no file — refusing to report OK"
 for src in configs/lua/*.lua; do
   printf '%s\t%s\n' "/var/lib/cfm/lua/${src##*/}" "$src" >>"$tmp/plan"
 done

@@ -11,6 +11,20 @@ fi
 # would outlive it, and an edge on a host that later loses IPv6 would fail to
 # start. The edge picks the removal up at its next start or reload.
 case "$1" in
+    purge)
+        # The /etc/cfm files postinst seeded (they are not dpkg conffiles, so
+        # dpkg's purge does not know them): drop them, and the .dpkg-dist
+        # beside them, as purge did when they were conffiles.
+        if [ -f /var/lib/cfm/etc-cfm-files.sha256 ]; then
+            awk '{ print $2 }' /var/lib/cfm/etc-cfm-files.sha256 | while read -r name; do
+                case "$name" in ''|*/*) continue ;; esac
+                rm -f "/etc/cfm/$name" "/etc/cfm/$name.dpkg-dist"
+            done
+            rm -f /var/lib/cfm/etc-cfm-files.sha256
+        fi
+        ;;
+esac
+case "$1" in
     remove|purge)
         rm -f /etc/systemd/system/cfm-edge-listen-v6.service \
         /etc/systemd/system/openresty.service.d/cfm-listen-v6.conf \

@@ -1,0 +1,29 @@
+# The /etc/cfm files the package seeds: "<name> <mode>", one per line.
+#
+# The .deb seeds them from /usr/share/cfm/configs/ in postinst and never
+# overwrites one: an existing file is kept, and a shipped default that differs
+# from it lands beside it as <name>.dpkg-dist, the .rpmnew of the rpm's
+# %config(noreplace). They are deliberately NOT dpkg conffiles: dpkg stops an
+# upgrade to ask about a conffile both sides changed, `apt -y` cannot answer
+# it, and unattended-upgrades skips the whole package for it. CFM writes
+# several of these files itself (cfm allow / block, the WebUI's notify and
+# detectors editors, cfm edge ipv6, cfm kernsec), so that was every node.
+#
+# The rpm spec's %config(noreplace) list must name the same files
+# (scripts/tests/check_deb_config_seed.sh); scripts/tests/ci_seed_cfm_dirs.sh
+# seeds CI's /etc/cfm from this list.
+cfm.conf 0640
+detectors.conf 0640
+kernsec.conf 0600
+lsm.conf 0600
+notify.conf 0640
+cfm.allow 0640
+cfm.deny 0640
+cfm.blocklists 0640
+cfm.ignore 0640
+cfm.dnat_bypass 0600
+cfm.dnat_cpanel_bypass 0600
+cfm.dyndns 0640
+cfm-admin.htpasswd 0640
+webdetector_malpaths.txt 0640
+webdetector_challenge_exclude.txt 0640

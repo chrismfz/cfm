@@ -20,7 +20,19 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**
+  Every `/etc/cfm` file was a dpkg conffile, and CFM edits several of them
+  itself (`cfm allow` / `cfm block`, the WebUI's notify and detectors editors,
+  `cfm edge ipv6`, `cfm kernsec`). So on every release that changed one,
+  `apt upgrade` stopped at "Configuration file '/etc/cfm/cfm.conf' … (Y/I/N/O/D/Z)":
+  `-y` cannot answer that, a broadcast multi-host session hung on every Debian
+  node, and unattended-upgrades skipped cfm altogether, so those nodes quietly
+  stayed on the old version. The .deb now does what the rpm's
+  `%config(noreplace)` always did: an edited file is kept and the new default is
+  written beside it as `<name>.dpkg-dist` (the `.rpmnew`), a file nobody changed
+  is updated, and nothing is asked. The first upgrade to this version already
+  runs without a question; your files are not touched.
 
 ## 2026.11.22
 

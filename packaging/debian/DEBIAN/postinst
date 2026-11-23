@@ -30,8 +30,84 @@ fi
 mkdir -p /etc/cfm
 chmod 0700 /etc/cfm
 
+# ---------------------------------------------------------------------------
+# /etc/cfm files: the rpm's %config(noreplace), done by hand.
+#
+# They are NOT dpkg conffiles (packaging/etc-cfm-files.list says why: dpkg
+# stopped every upgrade to ask, apt -y cannot answer it, and
+# unattended-upgrades skipped cfm). Per file of the list:
+#   - missing                       -> install the shipped default;
+#   - untouched since we installed  -> replace it with the new default;
+#   - edited (by hand or by CFM)    -> keep it, put the new default beside it
+#                                      as <name>.dpkg-dist (the .rpmnew).
+# "Untouched" is the sha256 recorded below when we last installed the file.
+# A node coming from the conffile packages has no record yet: dpkg's status
+# still lists each old conffile (now obsolete) with the md5 of the version it
+# shipped, and that answers the same question once.
+# ---------------------------------------------------------------------------
+CFM_ETC_LIST=/usr/share/cfm/etc-cfm-files.list
+CFM_ETC_SUMS=/var/lib/cfm/etc-cfm-files.sha256
+cfm_etc_recorded() { # <name> -> recorded sha256, or nothing
+    if [ -f "$CFM_ETC_SUMS" ]; then
+        awk -v n="$1" '$2 == n { print $1; exit }' "$CFM_ETC_SUMS"
+    fi
+}
+cfm_etc_dpkg_md5() { # <path> -> md5 dpkg recorded for the old conffile, or nothing
+    dpkg-query -W -f='${Conffiles}\n' cfm 2>/dev/null | awk -v p="$1" '$1 == p { print $2; exit }'
+}
+if [ -f "$CFM_ETC_LIST" ]; then
+    mkdir -p /var/lib/cfm
+    cfm_etc_new=$(mktemp /var/lib/cfm/.etc-cfm-files.sha256.XXXXXX)
+    grep -Ev '^[[:space:]]*(#|$)' "$CFM_ETC_LIST" | while read -r name mode; do
+        src=/usr/share/cfm/configs/$name
+        dst=/etc/cfm/$name
+        [ -f "$src" ] || continue
+        new_sum=$(sha256sum "$src" | cut -d' ' -f1)
+        if [ ! -e "$dst" ]; then
+            install -m "$mode" "$src" "$dst"
+            echo "$new_sum $name" >>"$cfm_etc_new"
+            continue
+        fi
+        cur_sum=$(sha256sum "$dst" | cut -d' ' -f1)
+        old_sum=$(cfm_etc_recorded "$name")
+        pristine=0
+        if [ "$cur_sum" = "$new_sum" ]; then
+            pristine=1
+        elif [ -n "$old_sum" ]; then
+            if [ "$cur_sum" = "$old_sum" ]; then pristine=1; fi
+        else
+            old_md5=$(cfm_etc_dpkg_md5 "$dst")
+            if [ -n "$old_md5" ] && [ "$(md5sum "$dst" | cut -d' ' -f1)" = "$old_md5" ]; then
+                pristine=1
+            fi
+        fi
+        if [ "$pristine" = 1 ]; then
+            if [ "$cur_sum" != "$new_sum" ]; then
+                # keep the operator's mode and owner, like dpkg / rpm do
+                cp "$src" "$dst.dpkg-new"
+                chmod --reference="$dst" "$dst.dpkg-new"
+                chown --reference="$dst" "$dst.dpkg-new"
+                mv -f "$dst.dpkg-new" "$dst"
+                echo "CFM config: updated /etc/cfm/$name to the new default"
+            fi
+            rm -f "$dst.dpkg-dist"
+            echo "$new_sum $name" >>"$cfm_etc_new"
+        else
+            if ! cmp -s "$src" "$dst.dpkg-dist" 2>/dev/null; then
+                install -m "$mode" "$src" "$dst.dpkg-dist"
+                echo "CFM config: kept your /etc/cfm/$name; the new default is /etc/cfm/$name.dpkg-dist"
+            fi
+            # Still edited: keep the hash of the last version we installed, so
+            # a later revert to it reads as untouched again ("-" = none known;
+            # the line also tells postrm's purge the file is ours).
+            echo "${old_sum:--} $name" >>"$cfm_etc_new"
+        fi
+    done
+    chmod 0644 "$cfm_etc_new" && mv -f "$cfm_etc_new" "$CFM_ETC_SUMS"
+fi
+
 # detectors.conf overlay directory (docs/detectors-config-unification.md par.4):
-# per-host overrides live here so the base conffile stays pristine and
+# per-host overrides live here so the base file stays pristine and
 # package-updateable. The package ships it EMPTY and never installs files
 # into it — operator (and, later, the WebUI editor) content only.
 mkdir -p /etc/cfm/detectors.d
