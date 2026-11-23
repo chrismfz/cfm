@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.23
+
 ### Fixed
 - **agent config sync: spamd no longer skips the files we push.** Every
   synced file was written with mode 0600, whatever it had before. spamd reads
@@ -46,8 +50,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   3000 pairs, in the background timer, never on a handshake), and logs a
   `[sslcollector] gc src=… gc_ms= lua_kb= rss_mb=` line: the collect's time,
   the Lua heap and the worker's RSS.
-
-## 2026.11.23
 
 ### Fixed
 - **`cfm webtop` no longer takes a flag for a host.** `cfm webtop challenge
