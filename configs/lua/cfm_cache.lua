@@ -1145,8 +1145,10 @@ end
 -- nor gzip is never stored). It is about the request, not the page: marking
 -- the key would let any client without Accept-Encoding switch micro off for
 -- that URL for everyone, so such a fetch reads storable and is not marked.
-local function micro_storable(status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
+local function micro_storable(status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr, too_big)
     if status ~= "200" then return false end
+    -- $cfm_micro_too_big on the micro locations' proxy_no_cache (5 MB+)
+    if too_big == "1" then return false end
     -- "" only: nil (the filter never ran) or anything else counts as unsafe,
     -- as nginx reads the variable's fail-closed default
     if sc_unsafe ~= "" then return false end
@@ -1165,7 +1167,7 @@ end
 -- or nil to not mark it (see the rules above). cache_status is
 -- $upstream_cache_status; status is $upstream_status, whose LAST entry is the
 -- answer (a retried fetch lists every attempt).
-local function micro_mark_ttl(cache_status, status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
+local function micro_mark_ttl(cache_status, status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr, too_big)
     if cache_status ~= "MISS" and cache_status ~= "EXPIRED" then return nil end
     local code = tonumber(type(status) == "string" and status:match("(%d%d%d)%s*$") or nil)
     if not code then return nil end
@@ -1173,7 +1175,7 @@ local function micro_mark_ttl(cache_status, status, sc_unsafe, cc_nostore, xae_n
         if cache_status == "MISS" then return MICRO_UNCACHEABLE_SHORT_TTL end
         return nil
     end
-    if micro_storable(status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr) then return nil end
+    if micro_storable(status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr, too_big) then return nil end
     if cache_status == "EXPIRED" then return MICRO_UNCACHEABLE_STALE_TTL end
     return MICRO_UNCACHEABLE_TTL
 end
@@ -1217,7 +1219,8 @@ function _M.micro_note()
     end
     local ttl = micro_mark_ttl(st, v.upstream_status, sc,
                                v.cfm_cc_nostore, v.cfm_xae_nocache, v.upstream_http_vary,
-                               v.upstream_http_x_accel_buffering, session_token_header(v))
+                               v.upstream_http_x_accel_buffering, session_token_header(v),
+                               v.cfm_micro_too_big)   -- nil on an older conf: not too big
     if ttl then dict:set(micro_mark_key(), true, ttl) end
 end
 
