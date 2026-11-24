@@ -261,7 +261,7 @@ function _M.compile_scope(scope)
 end
 
 -- takes(c, host): compiled scope c (nil = every host) takes the lowercased
--- host, or host is the www. alias of a literal scope host (Go wafScopeTakes:
+-- host, or host is the www. alias of a literal scope host (Go scopeTakes:
 -- cPanel lists a domain without its www. name, and a tenant's exclude written
 -- before the token's vhosts carried web aliases holds only the bare domain).
 local function takes(c, host)

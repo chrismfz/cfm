@@ -412,9 +412,14 @@ func (s *excludeStore) MatchChallenge(host string) bool {
 	return false
 }
 
-// challengeHostCovers is MatchChallenge's per-entry test.
+// challengeHostCovers is MatchChallenge's per-entry test (and so
+// FirstChallengeHostMatch's and ChallengeEntriesForHost's): the entry's scope
+// takes host (scopeTakes: a literal scope host also takes its www. alias) and
+// its value matches host. A tenant's exclude on example.com, written with
+// scope_hosts=[example.com], so covers www.example.com, never
+// shop.example.com (the value matches it, the scope does not).
 func (e compiledExcludeEntry) challengeHostCovers(host string) bool {
-	return e.Scope.Match(host) && e.Value.Match(host)
+	return e.scopeTakes(host) && e.Value.Match(host)
 }
 
 // MatchWAF reports whether the (host, path) request should skip the WAF
@@ -497,13 +502,18 @@ func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
 	return "", false
 }
 
-// wafScopeTakes is the WAF excludes' scope test (MatchWAFRules, the vhost
-// controls' WAF column, the vhost profile; the edge's cfm_waf_excl.lua
-// scope_takes): the scope takes host, or host is the www. alias of a literal
-// scope host. The alias is challengePathScopeCovers': cPanel lists a domain
-// without its www. name, and a tenant's exclude written before the token's
-// vhosts carried web aliases (2026-11-19) holds only the bare domain.
-func (e compiledExcludeEntry) wafScopeTakes(host string) bool {
+// scopeTakes is the ONE scope test of every exclude matcher: WAF excludes
+// (MatchWAFRules, the vhost controls' WAF column, the vhost profile; the
+// edge's cfm_waf_excl.lua takes), challenge host excludes
+// (challengeHostCovers) and challenge path excludes (challengePathScopeCovers,
+// which also requires a scoped entry). The scope takes host, or host is the
+// www. alias of a LITERAL scope host (a glob gets no alias): cPanel lists a
+// domain without its www. name, so a tenant's token cannot name it, nginx
+// serves both, and a tenant's exclude written before the token's vhosts
+// carried web aliases (2026-11-19) holds only the bare domain. Only "www."
+// plus a host the scope names literally, so the alias never reaches a host the
+// tenant does not own.
+func (e compiledExcludeEntry) scopeTakes(host string) bool {
 	if e.Scope.Match(host) {
 		return true
 	}
@@ -514,7 +524,7 @@ func (e compiledExcludeEntry) wafScopeTakes(host string) bool {
 // wafCovers is MatchWAFRules' per-entry test: the entry's scope takes host,
 // and its value matches host (a host entry) or path (a path entry).
 func (e compiledExcludeEntry) wafCovers(host, path string) bool {
-	if !e.wafScopeTakes(host) {
+	if !e.scopeTakes(host) {
 		return false
 	}
 	switch e.Type {
@@ -531,14 +541,7 @@ func (e compiledExcludeEntry) wafCovers(host, path string) bool {
 // (cPanel lists a domain without it, a tenant's token cannot name it, and
 // nginx serves both).
 func (e compiledExcludeEntry) challengePathScopeCovers(host string) bool {
-	if !e.Scoped {
-		return false
-	}
-	if e.Scope.Match(host) {
-		return true
-	}
-	apex, ok := strings.CutPrefix(host, "www.")
-	return ok && apex != "" && e.Scope.matchExact(apex)
+	return e.Scoped && e.scopeTakes(host)
 }
 
 // WAFEntriesForHost lists the WAF excludes the in-path WAF applies to a
@@ -556,7 +559,7 @@ func (s *excludeStore) WAFEntriesForHost(host string) []excludeEntry {
 	defer s.mu.RUnlock()
 	var out []excludeEntry
 	for _, e := range s.wafEntries {
-		if !e.wafScopeTakes(host) {
+		if !e.scopeTakes(host) {
 			continue
 		}
 		if e.Type == "path" || (e.Type == "host" && e.Value.Match(host)) {
@@ -625,7 +628,7 @@ func (s *excludeStore) FirstWAFHostMatch(host string) (excludeEntry, bool) {
 	var best excludeEntry
 	found := false
 	for _, e := range s.wafEntries {
-		if e.Type != "host" || len(e.RuleIDs) > 0 || !e.wafScopeTakes(host) || !e.Value.Match(host) {
+		if e.Type != "host" || len(e.RuleIDs) > 0 || !e.scopeTakes(host) || !e.Value.Match(host) {
 			continue
 		}
 		if !found || excludeEntryLess(e.Entry, best) {
