@@ -828,6 +828,12 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 	}
 	sort.Slice(out.Clients, func(i, j int) bool {
 		a, b := out.Clients[i], out.Clients[j]
+		// A class's summed tail (_other: every client past the bucket cap)
+		// is never ranked against named clients: by requests or IPs it
+		// would head the list. It trails, as the vhosts' does.
+		if ao, bo := a.Client == tmOtherKey, b.Client == tmOtherKey; ao != bo {
+			return bo
+		}
 		if ka, kb := key(a), key(b); ka != kb {
 			return ka > kb
 		}
