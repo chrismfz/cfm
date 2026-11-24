@@ -371,7 +371,11 @@ const (
 // addresses made, hourReq / hourEv every request and those with evidence.
 // Requests per IP come from the sample (all requests over a capped IP count
 // would overstate it and hide exactly the biggest populations); the evidence
-// share comes from every request.
+// share comes from every request. The sample can only UNDERSTATE requests
+// per IP (an address kept in one bucket loses its requests in a later bucket
+// that was full when it came back), which leans toward flagging a big
+// population: what keeps real visitors out there is the evidence share,
+// counted over every request (TestTrafficMix_DistributedTellBusyVisitors).
 func distributedTell(ips int, sampled, hourReq, hourEv int64) *TrafficMixDistributed {
 	if hourReq < tmDistMinRequests || ips < tmDistMinIPs || sampled <= 0 {
 		return nil

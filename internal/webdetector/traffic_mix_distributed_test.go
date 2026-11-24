@@ -116,3 +116,29 @@ func TestDistributedTellThresholds(t *testing.T) {
 		}
 	}
 }
+
+// A busy visitor population saturates the per-bucket IP cap, so its sampled
+// requests per IP read low; its evidence share keeps it unflagged.
+func TestTrafficMix_DistributedTellBusyVisitors(t *testing.T) {
+	s := newTrafficMixStore()
+	end := time.Now().Truncate(5 * time.Minute)
+	start := end.Add(-time.Hour)
+	n := 0
+	for b := 0; b < 12; b++ { // 150 new visitors every 5 minutes, 40 requests each, 3 in 4 static
+		for v := 0; v < 150; v++ {
+			ip := fmt.Sprintf("10.%d.%d.9", b, v)
+			for j := 0; j < 40; j++ {
+				uri := "/wp-content/x.css"
+				if j%4 == 0 {
+					uri = fmt.Sprintf("/p/%d", j)
+				}
+				tmFeed(s, tmOrigin(ip, "a.gr", "GET", uri, tmAndroid157, 200, 0.1), start.Add(time.Duration(b)*5*time.Minute+time.Duration(n%290)*time.Second))
+				n++
+			}
+		}
+	}
+	c := tmFindClient(s.SnapshotSorted(end, time.Hour, "", false, 10, 10, ""), tmAndroid157)
+	if c == nil || c.Distributed != nil {
+		t.Fatalf("busy visitors flagged: %+v", c)
+	}
+}
