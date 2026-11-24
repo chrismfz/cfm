@@ -10,7 +10,10 @@
 //     UA-keyed throttle or block: every real Chrome 152 on Windows sends the
 //     exact same string, so a UA rule would hit customers. A browser-looking
 //     scraper is acted on by its IPs (a per-IP challenge), never its UA.
-//   - "human" clients are offered nothing.
+//   - "human" clients are offered nothing, unless the node's distributed tell
+//     fired on one (`distributed`: one browser UA from many addresses, a few
+//     pages each, almost no static / XHR / POST): then its IPs only, as for
+//     automation. A label, never automatic; the UA is still never a target.
 //   - A deny or throttle is an expiring traffic rule (emergency-model.js),
 //     keyed on a UA FAMILY (crawler / bot classes) or on the client's IPs;
 //     never an nft ban here (D1).
@@ -153,7 +156,7 @@ export const CLIENT_SORTS = Object.freeze({
   requests: { param: "requests", label: "requests" },
   rate: { param: "requests", label: "request rate" },
   bytes: { param: "bytes", label: "traffic" },
-  ips: { param: "ips", label: "distinct IPs (last hour; bot and automation clients only)" },
+  ips: { param: "ips", label: "distinct IPs (last hour)" },
 });
 export const DEFAULT_CLIENT_SORT = "origin";
 
@@ -169,7 +172,7 @@ export function clientActions(client) {
   const cls = client.class;
   const hasIPs = Array.isArray(client.top_ips_last_hour) && client.top_ips_last_hour.length > 0;
   const out = [];
-  if ((cls === "automation" || cls === "bot") && hasIPs) {
+  if ((cls === "automation" || cls === "bot" || (cls === "human" && client.distributed)) && hasIPs) {
     out.push({ id: "challenge_ips", label: "Challenge its IPs…", kind: "primary" });
   }
   if (targetsFor(client).length) {

@@ -31,6 +31,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   window there instead of now, so a finished hour (`window=1h&until=<10:00>`)
   reads exactly 09:00-09:59 every time. cfm-web's hourly traffic history uses
   it.
+- **Web Traffic: browser-UA scrapers spread over many addresses are
+  labelled.** A "likely human" client (one exact browser UA) whose last hour
+  came from 50+ addresses, under 3 requests each, with under 10% static /
+  XHR / POST is marked **distributed** (IPs, requests per IP, static share)
+  and offered "Challenge its IPs" / Deny / Throttle on those addresses (up to
+  500; never on the UA, which real visitors send too). On titan on
+  2026-11-24 three such Mac Chrome 131/133/136 populations (~460 IPs each,
+  0-8% static, 3-5 s of origin per page) were a quarter of the origin time
+  and read as humans. A label only: nothing acts on it. Every browser-UA row
+  now shows its IP count and its static/XHR share (API: `evidence_share`,
+  `distributed`); a visitor population's addresses are never listed.
 - **The Web Traffic page keeps its 24 h across a restart.** The traffic mix
   is saved every 5 minutes and on shutdown (with the TTL bans) to
   `/var/lib/cfm/traffic_mix.json.gz` (root-only: the last hour's client IPs

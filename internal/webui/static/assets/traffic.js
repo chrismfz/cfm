@@ -184,8 +184,10 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
       const acts = clientActions(c).map((a) =>
         `<button type="button" class="${a.kind === "danger" ? "btn-sm btn-danger" : "btn-quiet btn-sm"}" data-act="${a.id}" data-i="${i}">${escapeHTML(a.label)}</button>`).join(" ");
       const ips = c.ips_last_hour ? fmtCount(c.ips_last_hour) : "—";
+      const d = c.distributed;
+      const tell = d ? ` <span class="pill warn" title="${escapeHTML(`The node's distributed tell (a label, nothing acts on it): this exact browser UA came from ${d.ips} addresses in the last hour, ${Number(d.req_per_ip).toFixed(1)} requests each, ${fmtPct(d.evidence_share)} of them static files / XHR / POST (real visitors: most). A scraper spread over residential proxies, under every per-IP limit.`)}">distributed: ${escapeHTML(fmtCount(d.ips))} IPs · ${escapeHTML(Number(d.req_per_ip).toFixed(1))}/IP · ${escapeHTML(fmtPct(d.evidence_share, 0))} static/XHR</span>` : "";
       return `<tr>
-        <td><div style="font-weight:600">${swatch(c.class)}${escapeHTML(CLASS_LABELS[c.class] || c.class)}</div>
+        <td><div style="font-weight:600">${swatch(c.class)}${escapeHTML(CLASS_LABELS[c.class] || c.class)}${tell}</div>
             <div class="muted" style="font-family:ui-monospace,monospace;font-size:.78rem;word-break:break-all">${escapeHTML(truncate(name, 200))}</div></td>
         <td>${escapeHTML(fmtCount(c.requests))}</td>
         <td>${escapeHTML(fmtRate(Number(c.requests || 0) / secs))}</td>

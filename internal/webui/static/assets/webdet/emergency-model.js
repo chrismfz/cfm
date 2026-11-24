@@ -79,7 +79,9 @@ export function uaPattern(client) {
 // ipTargets is the client's busiest addresses (last hour), at most n: IPv4
 // addresses and IPv6 /64s, as the traffic mix counts them.
 export function ipTargets(client, n) {
-  if (!client || !IP_TARGET_CLASSES.includes(client.class)) return [];
+  // A browser-UA ("human") client is an IP target only when the node's
+  // distributed tell fired on it (a scraper population, not visitors).
+  if (!client || !(IP_TARGET_CLASSES.includes(client.class) || (client.class === "human" && client.distributed))) return [];
   const list = Array.isArray(client.top_ips_last_hour) ? client.top_ips_last_hour : [];
   const cap = Math.min(Math.max(0, n | 0), LIMITS.ipsPerRule);
   return list.slice(0, cap).map((r) => String(r.ip || "").trim()).filter(Boolean);
