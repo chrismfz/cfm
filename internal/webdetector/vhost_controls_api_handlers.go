@@ -147,6 +147,8 @@ type vhostControlInputs struct {
 	// it to the ones the caller may list) and the instant they are judged at.
 	rules []TrafficRule
 	now   time.Time
+	// Site Cache policies this build cannot load (siteCacheFrozenSet).
+	siteCacheFrozen map[string]struct{}
 }
 
 func (e *Engine) vhostControlInputs() vhostControlInputs {
@@ -166,6 +168,7 @@ func (e *Engine) vhostControlInputs() vhostControlInputs {
 	in.clamInline = clamInlineDefault()
 	in.rules = e.TrafficRuleList()
 	in.now = time.Now()
+	in.siteCacheFrozen = e.siteCacheFrozenSet()
 	return in
 }
 
@@ -208,7 +211,7 @@ func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhost
 
 	// Under-Attack override state (reflects a just-issued force immediately).
 	underAttack, _, _ := e.VhostAttackState(host)
-	static, micro := e.siteCacheTiers(host)
+	static, micro := e.siteCacheTiers(host, in.siteCacheFrozen)
 	tier := e.challengeV2VhostTier(host)
 
 	return webdetVhostControlRow{
@@ -389,10 +392,24 @@ func readHostsFromUserDomains() map[string]struct{} {
 	return out
 }
 
+// siteCacheFrozenSet is the set of Site Cache policies this build cannot
+// load (FrozenHosts), read once per table rather than once per row.
+func (e *Engine) siteCacheFrozenSet() map[string]struct{} {
+	out := map[string]struct{}{}
+	if e == nil || e.siteCache == nil {
+		return out
+	}
+	for _, h := range e.siteCache.FrozenHosts() {
+		out[h] = struct{}{}
+	}
+	return out
+}
+
 // siteCachePolicy is the Site Cache policy that decides host at the edge
 // (siteCacheStore.PolicyFor) and whether it is a row this build cannot load,
 // which the edge treats as an opt-out. ok=false: no policy decides host.
-func (e *Engine) siteCachePolicy(host string) (key string, entry SiteCacheEntry, unloadable, ok bool) {
+// frozen is siteCacheFrozenSet (nil: read it now).
+func (e *Engine) siteCachePolicy(host string, frozen map[string]struct{}) (key string, entry SiteCacheEntry, unloadable, ok bool) {
 	if e == nil || e.siteCache == nil {
 		return "", SiteCacheEntry{}, false, false
 	}
@@ -400,17 +417,16 @@ func (e *Engine) siteCachePolicy(host string) (key string, entry SiteCacheEntry,
 	if !ok {
 		return "", SiteCacheEntry{}, false, false
 	}
-	for _, h := range e.siteCache.FrozenHosts() {
-		if h == key {
-			return key, entry, true, true
-		}
+	if frozen == nil {
+		frozen = e.siteCacheFrozenSet()
 	}
-	return key, entry, false, true
+	_, unloadable = frozen[key]
+	return key, entry, unloadable, true
 }
 
 // siteCacheTiers is which Site Cache tiers the edge applies to host.
-func (e *Engine) siteCacheTiers(host string) (static, micro bool) {
-	_, entry, unloadable, ok := e.siteCachePolicy(host)
+func (e *Engine) siteCacheTiers(host string, frozen map[string]struct{}) (static, micro bool) {
+	_, entry, unloadable, ok := e.siteCachePolicy(host, frozen)
 	if !ok || unloadable {
 		return false, false
 	}

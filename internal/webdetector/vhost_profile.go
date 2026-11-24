@@ -128,7 +128,7 @@ func (e *Engine) VhostProfile(host string, now time.Time) VhostProfile {
 	}
 
 	p.SiteCache.Switches = publishedSiteCacheSwitches.Load()
-	if key, entry, unloadable, ok := e.siteCachePolicy(host); ok {
+	if key, entry, unloadable, ok := e.siteCachePolicy(host, nil); ok {
 		p.SiteCache.Key = key
 		p.SiteCache.Inherited = key != host
 		p.SiteCache.Unloadable = unloadable
