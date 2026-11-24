@@ -215,7 +215,7 @@ local CFG = {
   rule_js_proto         = "block",  -- JS __proto__ / constructor.prototype pollution. Promoted challenge_v2→block 2026-11-17: 18 916 hits / 5 786 IPs in 7 days on 8 nodes, the React2Shell sweep (POST / with __proto__, Google Cloud / aiohttp), not one IP solved a challenge. Ban held per rule (HoldAutoblock, RULE_303 = 0): at threshold 1 that is ~830 bans and alerts a day. Recorded late, with the held rules.
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
-  rule_xxe              = "block",  -- XXE DOCTYPE/ENTITY SYSTEM in request body. Promoted challenge_v2→block 2026-11-17 (85 hits / 55 IPs in 7 days, all datacenter scanners). Ban held per rule (HoldAutoblock, RULE_307 = 0) through a burn-in. Recorded late, with the held rules.
+  rule_xxe              = "block",  -- XXE DOCTYPE/ENTITY SYSTEM in request body. Promoted challenge_v2→block 2026-11-17 (85 hits / 55 IPs in 7 days, all datacenter scanners). Ban held through a burn-in, armed 2026-11-24 (220 hits / 91 IPs in 5.5 days, all datacenter, 0 GR/CY): RULE_307 = 1.
   rule_crlf_injection   = "challenge_v2", -- CRLF / HTTP response-splitting in args or body.
                                         -- content-type/content-length are the FP-prone, low-impact tags:
                                         -- they appear legitimately in request BODIES (multipart part
@@ -277,7 +277,7 @@ local CFG = {
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
-  rule_php_file_body = "block", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Promoted logonly→block 2026-11-17 (burn-in: 289 hits / 269 IPs in 7 days, the PHPUnit eval-stdin.php sweep and a PUT dropper, 0 FP); family WAF_PHP_WEBSHELL_BODY, ban held per rule (HoldAutoblock, RULE_416 = 0): ~40 bans a day. Recorded late, with the held rules.
+  rule_php_file_body = "block", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Promoted logonly→block 2026-11-17 (burn-in: 289 hits / 269 IPs in 7 days, the PHPUnit eval-stdin.php sweep and a PUT dropper, 0 FP); family WAF_PHP_WEBSHELL_BODY, ban held through a burn-in, armed 2026-11-24 (74 hits / 66 IPs in 5.5 days, all datacenter, 0 GR/CY): RULE_416 = 1.
   rule_upload_content_deep = "block", -- rule 415: 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole, where 402 reads only its head (added 2026-10-09). Promoted logonly→block 2026-11-24 (burn-in: one hit in 7 days on 8 nodes, a `.png` carrying `<?php` through Bricksforge's form_file_upload on novamotors.sa; the two admin media uploads of the first burn-in did not recur; 0 FP); ban held per rule (HoldAutoblock, RULE_415 = 0), since WAF_UPLOAD_CONTENT is armed by 402. Recorded late, with the held rules: a held block rule shadows armed ones.
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
@@ -1901,8 +1901,26 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- (22, XXE, runs late with the held block rules: see "XXE (307)" before
-  -- traversal.)
+  -- ── 22) XXE (307, block, armed) ───────────────────────────────────────────
+  -- Block since 2026-11-17; its ban was held through a burn-in (2026-11-17 to
+  -- 2026-11-24, in the late group then) and is armed since 2026-11-24: 220 hits
+  -- / 91 IPs in 5.5 days on 8 nodes, every one XXE_SYSTEM from datacenter
+  -- scanners, 0 GR/CY. Armed, it runs here again, before every held block rule.
+  do
+    local mode = rule_mode(CFG.rule_xxe, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_xxe(body, headers)
+      -- The detector is loose (a DOCTYPE and the word `system` anywhere; an
+      -- ENTITY and `public` anywhere): an Illustrator SVG's internal
+      -- entities match it. A block needs an external entity declaration
+      -- (`<!ENTITY x SYSTEM "…">` / `PUBLIC "…"`); the rest stays challenge_v2.
+      if tag and mode == "block" and not det.xxe_external_entity(body) then mode = "challenge_v2" end
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
+      end
+    end
+  end
 
   -- ── 23) CRLF / HTTP response splitting ───────────────────────────────────
   do
@@ -2666,8 +2684,49 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- (60e, a PHP file as the raw body (416), runs late with the held block
-  -- rules: see "A PHP file as the raw body (416)" before traversal.)
+  -- ── 60e) A PHP file as the raw body (416, block, armed) ───────────────────
+  -- Block since 2026-11-17; its ban was held through a burn-in (in the late
+  -- group then) and is armed since 2026-11-24: 74 hits / 66 IPs in 5.5 days on
+  -- 8 nodes, webshell / PHPUnit uploads from datacenters, 0 GR/CY. Armed, it
+  -- runs here again, before the held 10019 / 10020 and every other held rule.
+  -- The body a php://input dropper writes to disk, which 402 (multipart)
+  -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
+  -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
+  -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
+  -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
+  -- /remote.php/webdav): a sync client uploads a user's .php files there
+  -- as their raw body.
+  -- Nor a PUT / PATCH on a cPanel Web Disk host (webdisk.<domain>, Apache to
+  -- cpdavd): the customer's own WebDAV client uploads their .php files. The
+  -- Host is the client's, so it counts only under cfm.lua Step 0d's gates:
+  -- a registrable-domain name (cfm_panel_hosts.is_proxy_panel_host, asked
+  -- about the same name under `cpanel.`) and proxysubdomains=1 with
+  -- proxysubdomainsoverride=0, which route every webdisk.* Host to cpdavd.
+  -- Elsewhere a spoofed `Host: webdisk.x` could reach a docroot dropper.
+  do
+    local mode = rule_mode(CFG.rule_php_file_body, "logonly")
+    local webdav = false
+    if m_lower == "put" or m_lower == "patch" then
+      local h = lower(ctx.host or "")
+      if lower(uri or ""):find("/remote%.php/") then
+        webdav = true
+      elseif h:find("^webdisk%.") then
+        local okp, ph = pcall(require, "cfm_panel_hosts")
+        webdav = okp and type(ph) == "table" and ph.is_proxy_panel_host
+          and ph.proxy_hosts_reach_panel
+          and ph.is_proxy_panel_host("cpanel." .. h:sub(9))
+          and ph.proxy_hosts_reach_panel() or false
+      end
+    end
+    if mode ~= "disabled" and (body or "") ~= "" and not webdav
+       and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
+      local tag = det.detect_php_file_body(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_PHP_WEBSHELL_BODY:BODY_IS_" .. tag, ttl, mode, RULE_IDS.rule_php_file_body) then goto done end
+      end
+    end
+  end
 
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
@@ -2834,69 +2893,6 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_JS_PROTO:" .. tag, ttl, mode, RULE_IDS.rule_js_proto) then goto done end
-      end
-    end
-  end
-
-  -- ── XXE (307) — block, ban held, so late ─────────────────────────────────
-  -- Block since 2026-11-17 with its ban held per rule (HoldAutoblock,
-  -- RULE_307 = 0) through a burn-in; late for the same reason as 303. It was
-  -- step 22.
-  do
-    local mode = rule_mode(CFG.rule_xxe, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_xxe(body, headers)
-      -- The detector is loose (a DOCTYPE and the word `system` anywhere; an
-      -- ENTITY and `public` anywhere): an Illustrator SVG's internal
-      -- entities match it. A block needs an external entity declaration
-      -- (`<!ENTITY x SYSTEM "…">` / `PUBLIC "…"`); the rest stays challenge_v2.
-      if tag and mode == "block" and not det.xxe_external_entity(body) then mode = "challenge_v2" end
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
-      end
-    end
-  end
-
-  -- ── A PHP file as the raw body (416) — block, ban held, so late ─────────
-  -- Block since 2026-11-17 with its ban held per rule (HoldAutoblock,
-  -- RULE_416 = 0); a held block rule shadows armed ones (CLAUDE.md §6), so it
-  -- runs here, after every armed block family.
-  -- The body a php://input dropper writes to disk, which 402 (multipart)
-  -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
-  -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
-  -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
-  -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
-  -- /remote.php/webdav): a sync client uploads a user's .php files there
-  -- as their raw body.
-  -- Nor a PUT / PATCH on a cPanel Web Disk host (webdisk.<domain>, Apache to
-  -- cpdavd): the customer's own WebDAV client uploads their .php files. The
-  -- Host is the client's, so it counts only under cfm.lua Step 0d's gates:
-  -- a registrable-domain name (cfm_panel_hosts.is_proxy_panel_host, asked
-  -- about the same name under `cpanel.`) and proxysubdomains=1 with
-  -- proxysubdomainsoverride=0, which route every webdisk.* Host to cpdavd.
-  -- Elsewhere a spoofed `Host: webdisk.x` could reach a docroot dropper.
-  do
-    local mode = rule_mode(CFG.rule_php_file_body, "logonly")
-    local webdav = false
-    if m_lower == "put" or m_lower == "patch" then
-      local h = lower(ctx.host or "")
-      if lower(uri or ""):find("/remote%.php/") then
-        webdav = true
-      elseif h:find("^webdisk%.") then
-        local okp, ph = pcall(require, "cfm_panel_hosts")
-        webdav = okp and type(ph) == "table" and ph.is_proxy_panel_host
-          and ph.proxy_hosts_reach_panel
-          and ph.is_proxy_panel_host("cpanel." .. h:sub(9))
-          and ph.proxy_hosts_reach_panel() or false
-      end
-    end
-    if mode ~= "disabled" and (body or "") ~= "" and not webdav
-       and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
-      local tag = det.detect_php_file_body(body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WEBSHELL_BODY:BODY_IS_" .. tag, ttl, mode, RULE_IDS.rule_php_file_body) then goto done end
       end
     end
   end

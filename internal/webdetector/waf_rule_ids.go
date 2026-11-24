@@ -107,8 +107,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "block"},
 	{ID: 306, Name: "rule_serialize", ReasonFamily: "WAF_SERIALIZE", DefaultMode: "challenge_v2"},
 	// 307: XXE DOCTYPE / ENTITY SYSTEM. Block since 2026-11-17 (85 hits a
-	// week, all datacenter scanners), ban held through a burn-in.
-	{ID: 307, Name: "rule_xxe", ReasonFamily: "WAF_XXE", DefaultMode: "block", HoldAutoblock: true},
+	// week, all datacenter scanners); its ban, held through a burn-in, is
+	// armed since 2026-11-24 (220 hits / 91 IPs in 5.5 days on 8 nodes, all
+	// datacenter, 0 GR/CY).
+	{ID: 307, Name: "rule_xxe", ReasonFamily: "WAF_XXE", DefaultMode: "block"},
 	{ID: 308, Name: "rule_shellshock", ReasonFamily: "WAF_SHELLSHOCK", DefaultMode: "challenge_v2"},
 	{ID: 310, Name: "rule_cmd_params", ReasonFamily: "WAF_CMD_PARAM", DefaultMode: "challenge_v2"},
 	{ID: 311, Name: "rule_cmd_payload", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge_v2"},
@@ -159,8 +161,9 @@ var wafRuleIDs = []WAFRule{
 	// yavuzshell.php as application/octet-stream), which 402 (multipart)
 	// and 404 (textual types, 2 KB) miss. Block since 2026-11-17 (7-day
 	// burn-in: 289 hits, the PHPUnit eval-stdin.php sweep and a PUT
-	// dropper); its ban is held through a burn-in (~40 bans a day).
-	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block", HoldAutoblock: true},
+	// dropper); its ban, held through a burn-in, is armed since 2026-11-24
+	// (74 hits / 66 IPs in 5.5 days on 8 nodes, all datacenter, 0 GR/CY).
+	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block"},
 	// 404's scorer over the whole body the edge read (32 KB), when 404's
 	// 2 KB head scored nothing: PHP saved through a form field (a plugin
 	// editor, a file manager's put, a webshell's own editor) past the head

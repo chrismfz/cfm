@@ -138,17 +138,17 @@ func TestWAFSecurityRuleHolds(t *testing.T) {
 	if _, ok := wafSecurityRuleOverrides(KV{})["10019"]; ok {
 		t.Errorf("RULE_10019 is armed since 2026-11-17: it must carry no code hold")
 	}
-	// Promoted to block 2026-11-17 with their bans held per rule: 303 (the
-	// React2Shell sweep, ~830 bans a day armed), 307 (XXE) and 416 (a PHP
-	// file as the body) through a burn-in. Each family is armed by its block
-	// rule, so the hold is what keeps them from banning.
-	for _, id := range []string{"303", "307", "416"} {
-		if got, ok := wafSecurityRuleOverrides(KV{})[id]; !ok || got != 0 {
-			t.Errorf("RULE_%s should default to the code hold 0, got %d (present=%v)", id, got, ok)
-		}
+	// Promoted to block 2026-11-17 with its ban held per rule: 303 (the
+	// React2Shell sweep, a one-request-per-IP Google Cloud spray: ~830 bans
+	// a day armed, for IPs that do not come back). Its family is armed by its
+	// block rule, so the hold is what keeps it from banning.
+	if got, ok := wafSecurityRuleOverrides(KV{})["303"]; !ok || got != 0 {
+		t.Errorf("RULE_303 should default to the code hold 0, got %d (present=%v)", got, ok)
 	}
-	// 332 (WAF_RCE) and 438 (WAF_BACKDOOR) are armed with their families.
-	for _, id := range []string{"332", "438"} {
+	// 332 (WAF_RCE) and 438 (WAF_BACKDOOR) are armed with their families;
+	// 307 (XXE) and 416 (a PHP file as the body) since 2026-11-24, after
+	// their burn-in (all datacenter, 0 GR/CY).
+	for _, id := range []string{"332", "438", "307", "416"} {
 		if _, ok := wafSecurityRuleOverrides(KV{})[id]; ok {
 			t.Errorf("RULE_%s is armed: it must carry no code hold", id)
 		}

@@ -317,7 +317,8 @@ are placed in the late group like traversal.
 
 The late group, in evaluation order: the TranslatePress / PHP multipart /
 Magento PolyShell / PixelYourSite CVE legs (10018-10020, 10022, 10028,
-10026), then 511, 201, 440, 303, 307, 416, then traversal 101 / 103. A held
+10026), then 511, 201, 440, 303, 415, then traversal 101 / 103 (and the
+held 417 after them). A held
 block rule must go there; an armed rule there is merely late.
 
 **Rule 201's block joins the late group (2026-10-09).** `WAF_BAD_UA` has no
@@ -378,6 +379,18 @@ ahead of the armed 10018. They now run in the late group before traversal
 headline over each). 332 (`WAF_RCE`) and 438 (`WAF_BACKDOOR`), promoted the
 same day, are armed and stay where they are; 10019 was un-held (armed) and
 stays in the late group.
+
+**307 and 416 armed (2026-11-24).** The burn-in on the 8 edge nodes
+(2026-11-19 to 11-24, 5.5 days): 307 220 hits from 91 IPs, every one
+`XXE_SYSTEM` from datacenter scanners (TechTies, Tc Datacenter), some IPs
+back up to 22 times; 416 74 hits from 66 IPs, webshell and PHPUnit uploads
+from datacenters (DigitalOcean, Oracle). Neither had a GR/CY hit, a panel
+hit or a false positive. Both drop `HoldAutoblock` and return to their old
+places (307 step 22, 416 step 60e): an armed rule in the late group would
+lose the headline, and the ban, to a held rule evaluated before it (511,
+201, 440, 303). 303 stays held: its sweep is one request per Google Cloud
+IP, so a ban would add ~2 800 nft elements a week for IPs that do not come
+back, and the edge 403 already stops each request.
 
 ## Edge ban — clients behind a trusted proxy (2026-10-10)
 
