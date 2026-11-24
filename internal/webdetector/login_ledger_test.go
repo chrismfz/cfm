@@ -355,8 +355,8 @@ func TestLoginLedgerSitesAreRegistrableDomains(t *testing.T) {
 	if c := l.ips["198.51.100.30"]; c.nsites != 1 {
 		t.Fatalf("sites: %d", c.nsites)
 	}
-	if loginSiteKey("shop.example.com.gr") != "example.com.gr" || loginSiteKey("a.b.gr") != "b.gr" {
-		t.Fatalf("public-suffix aware: %q %q", loginSiteKey("shop.example.com.gr"), loginSiteKey("a.b.gr"))
+	if siteKey("shop.example.com.gr") != "example.com.gr" || siteKey("a.b.gr") != "b.gr" {
+		t.Fatalf("public-suffix aware: %q %q", siteKey("shop.example.com.gr"), siteKey("a.b.gr"))
 	}
 }
 
