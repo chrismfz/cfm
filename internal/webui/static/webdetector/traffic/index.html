@@ -10,6 +10,10 @@
        inside), and a link styled as a button looks like one. */
     .layout > .card { min-width: 0; }
     a.btn-quiet { display: inline-block; text-decoration: none; }
+    /* Sortable column headers: look like the header text, act like buttons. */
+    .th-sort { background: none; border: 0; padding: 0; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; }
+    .th-sort:hover { text-decoration: underline; }
+    th[aria-sort="descending"] .th-sort::after { content: " ▼"; }
   </style>
   <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
   <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
@@ -77,17 +81,17 @@
 
       <section class="card wide">
         <h2>Clients to act on</h2>
-        <p class="muted">Sorted by origin time. Browser-UA clients show the raw User-Agent; IPs are the last hour's.</p>
+        <p class="muted"><span id="clientsSortNote">Top clients by origin time.</span> Click a column to rank by it (the node picks the top clients by that column, not just reorders these). Browser-UA clients show the raw User-Agent; IPs are the last hour's.</p>
         <div class="table-wrap wide-table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Client</th>
-                <th>Requests</th>
-                <th>Rate</th>
-                <th>Traffic</th>
-                <th>Origin time</th>
-                <th>IPs (1 h)</th>
+                <th aria-sort="none"><button type="button" class="th-sort" data-sort="requests">Requests</button></th>
+                <th aria-sort="none"><button type="button" class="th-sort" data-sort="rate">Rate</button></th>
+                <th aria-sort="none"><button type="button" class="th-sort" data-sort="bytes">Traffic</button></th>
+                <th aria-sort="descending"><button type="button" class="th-sort" data-sort="origin">Origin time</button></th>
+                <th aria-sort="none"><button type="button" class="th-sort" data-sort="ips">IPs (1 h)</button></th>
                 <th>Actions</th>
               </tr>
             </thead>

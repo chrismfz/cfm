@@ -21,6 +21,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **Web Traffic: rank the clients by any column.** Click Requests, Rate,
+  Traffic, Origin time or IPs: the node picks the top clients by that column
+  (the traffic mix API's new `sort=origin|requests|bytes|ips`, also on the MCP
+  `traffic_mix` tool), so "by requests" shows the busiest clients, not the
+  costliest ones reordered. The choice is remembered per browser.
+- **Traffic mix: a window that ends in the past.** `until=<unix>` (a 5-minute
+  boundary within the last 24 h; also on the MCP `traffic_mix` tool) ends the
+  window there instead of now, so a finished hour (`window=1h&until=<10:00>`)
+  reads exactly 09:00-09:59 every time. cfm-web's hourly traffic history uses
+  it.
 - **The Web Traffic page keeps its 24 h across a restart.** The traffic mix
   is saved every 5 minutes and on shutdown (with the TTL bans) to
   `/var/lib/cfm/traffic_mix.json.gz` (root-only: the last hour's client IPs

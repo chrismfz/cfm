@@ -97,3 +97,14 @@ test("a UA family gets deny/throttle; a bot with IPs also the per-IP challenge",
 test("challengeableIPs: an IPv6 /64 is not challengeable per IP", () => {
   assert.deepEqual(challengeableIPs(["203.0.113.1", "2001:db8:1:2::/64", "2001:db8::5"]), { ok: ["203.0.113.1", "2001:db8::5"], prefixes: ["2001:db8:1:2::/64"] });
 });
+
+test("client sorts map to the API's sort values; rate ranks as requests; anything else is origin", async () => {
+  const { CLIENT_SORTS, clientSort } = await import("./traffic-model.js");
+  assert.deepEqual(Object.keys(CLIENT_SORTS), ["origin", "requests", "rate", "bytes", "ips"]);
+  assert.equal(CLIENT_SORTS.rate.param, "requests");
+  assert.deepEqual([...new Set(Object.values(CLIENT_SORTS).map((s) => s.param))].sort(), ["bytes", "ips", "origin", "requests"]);
+  assert.equal(clientSort("bytes"), "bytes");
+  assert.equal(clientSort("nope"), "origin");
+  assert.equal(clientSort(null), "origin");
+  assert.equal(clientSort("__proto__"), "origin");
+});
