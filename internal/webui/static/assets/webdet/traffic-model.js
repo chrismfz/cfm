@@ -11,13 +11,14 @@
 //     exact same string, so a UA rule would hit customers. A browser-looking
 //     scraper is acted on by its IPs (a per-IP challenge), never its UA.
 //   - "human" clients are offered nothing.
-//   - A UA-keyed rule (cfm bots, /api/v1/webdet/ua-emergency) is offered
-//     only for a UA FAMILY (crawler / bot classes), box-wide, at most 60 m,
-//     the server's cap. Google's crawlers still need the server's confirm.
-//   - The per-IP challenge is the one action on IPs; never a ban here (D1).
+//   - A deny or throttle is an expiring traffic rule (emergency-model.js),
+//     keyed on a UA FAMILY (crawler / bot classes) or on the client's IPs;
+//     never an nft ban here (D1).
 //
 // The classes are labels (the API's note says so); an action is always the
 // operator's click.
+
+import { targetsFor } from "./emergency-model.js";
 
 export const CLASS_ORDER = Object.freeze(["automation", "crawler", "bot", "human"]);
 
@@ -37,7 +38,6 @@ export const CLASS_COLORS = Object.freeze({
 
 export const BOT_CLASSES = Object.freeze(["automation", "crawler", "bot"]);
 
-export const UA_RULE_MAX_SEC = 3600; // ua-emergency's server cap (UAEmergencyMaxTTL)
 export const OTHER_KEY = "_other";
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -145,7 +145,8 @@ export function topIPs(client, n) {
 }
 
 // clientActions lists what the page offers for one client row. Each action:
-// { id, label, kind: "primary"|"quiet"|"danger" }. See the guardrails above.
+// { id, label, kind: "primary"|"quiet"|"danger" }. See the guardrails above;
+// which targets a deny/throttle may use is emergency-model.js targetsFor.
 export function clientActions(client) {
   if (!client || client.client === OTHER_KEY) return [];
   const cls = client.class;
@@ -154,19 +155,20 @@ export function clientActions(client) {
   if ((cls === "automation" || cls === "bot") && hasIPs) {
     out.push({ id: "challenge_ips", label: "Challenge its IPs…", kind: "primary" });
   }
-  if (cls === "crawler" || cls === "bot") {
-    if (client.client && client.client !== "(no user-agent)") {
-      out.push({ id: "ua_throttle", label: "Throttle UA (≤60 m)", kind: "quiet" });
-      out.push({ id: "ua_block", label: "Block UA (≤60 m)", kind: "danger" });
-    }
+  if (targetsFor(client).length) {
+    out.push({ id: "throttle", label: "Throttle…", kind: "quiet" });
+    out.push({ id: "deny", label: "Deny…", kind: "danger" });
   }
   return out;
 }
 
-// uaRuleAllowed is the same rule as a guard for the action handler (a stale
-// row or a hand-made call must not slip a browser UA into a UA rule).
-export function uaRuleAllowed(client) {
-  return !!client && (client.class === "crawler" || client.class === "bot") &&
-    !!client.client && client.client !== OTHER_KEY && client.client !== "(no user-agent)" &&
-    client.client.toLowerCase() !== "mozilla";
+// challengeableIPs splits the client's top IPs for the per-IP challenge,
+// which keys on an exact address: an IPv6 client is counted as its /64 by
+// the traffic mix, and a /64 cannot be challenged per IP (a deny or throttle
+// rule takes it).
+export function challengeableIPs(ips) {
+  const ok = [];
+  const prefixes = [];
+  for (const ip of Array.isArray(ips) ? ips : []) (String(ip).includes("/") ? prefixes : ok).push(ip);
+  return { ok, prefixes };
 }

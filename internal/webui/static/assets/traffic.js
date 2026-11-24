@@ -5,25 +5,34 @@
 //
 //   GET  /api/v1/webdet/traffic-mix?window=      the classes, series, top vhosts, top clients
 //   GET  /api/v1/challenge/vhosts                which vhosts are under a challenge
-//   GET  /api/v1/webdet/ua-emergency             active box-wide UA rules
+//   GET  /api/v1/webdet/ua-emergency             active box-wide UA rules (cfm bots)
+//   GET  /api/v1/webdet/rules                    the emergency traffic rules among them
 //
 // Acts (each one a click, never automatic):
 //
 //   POST /api/v1/challenge/ip/add                per-IP challenge on a client's top IPs
-//   POST /api/v1/webdet/ua-emergency             box-wide UA throttle/block (UA families only, <=60 m)
-//   DELETE /api/v1/webdet/ua-emergency?ua=       undo one
+//   POST /api/v1/webdet/rules/add                emergency deny / throttle (an expiring traffic rule)
+//   POST /api/v1/webdet/rules/update?id=         extend one
+//   POST /api/v1/webdet/rules/remove?id=         end one now
+//   DELETE /api/v1/webdet/ua-emergency?ua=       undo a cfm bots UA rule
 //   POST /api/v1/challenge/vhost/remove          lift a vhost-wide challenge
 //
-// Which client is offered which action is traffic-model.js (clientActions,
-// tested): a browser UA never gets a UA rule. Every string from the API (UAs,
+// Which client is offered which action is traffic-model.js (clientActions)
+// and emergency-model.js (targets, the rule payload), both tested: a browser
+// UA is never a UA target. Every string from the API (UAs,
 // hosts, IPs) is attacker-controlled and goes through escapeHTML; rows are
 // addressed by index, never by putting a UA into an attribute.
 
 import {
-  CLASS_ORDER, CLASS_LABELS, CLASS_COLORS, OTHER_KEY, UA_RULE_MAX_SEC,
+  CLASS_ORDER, CLASS_LABELS, CLASS_COLORS, OTHER_KEY,
   share, fmtPct, fmtCount, fmtBytes, fmtMbps, fmtRate, fmtSeconds,
-  classMap, summary, segments, hostBotShare, topIPs, clientActions, uaRuleAllowed,
+  classMap, summary, segments, hostBotShare, topIPs, clientActions, challengeableIPs,
 } from "./webdet/traffic-model.js";
+import {
+  EMERGENCY_DURATIONS, EMERGENCY_DEFAULT_SEC, uaPattern, ipTargets, targetsFor, currentRate,
+  suggestTotalRate, throttleCut, buildEmergencyRule, extendedUntil, activeEmergencyRules, describeEmergency,
+} from "./webdet/emergency-model.js";
+import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
 
 (() => {
   const controller = window.CFMControllerBootstrap.initSharedController({});
@@ -38,12 +47,27 @@ import {
     rulesBody: $("rulesBody"), ipDialog: $("ipDialog"), ipDialogClient: $("ipDialogClient"),
     ipCount: $("ipCount"), ipTTL: $("ipTTL"), ipReason: $("ipReason"),
     ipDialogPreview: $("ipDialogPreview"), ipDialogApply: $("ipDialogApply"), ipDialogCancel: $("ipDialogCancel"),
-    undoBtn: $("undoBtn"),
+    undoBtn: $("undoBtn"), emergBody: $("emergBody"),
+    emDialog: $("emDialog"), emDialogTitle: $("emDialogTitle"), emDialogClient: $("emDialogClient"),
+    emTarget: $("emTarget"), emIPCount: $("emIPCount"), emKind: $("emKind"), emRate: $("emRate"),
+    emPer: $("emPer"), emProfile: $("emProfile"), emWhere: $("emWhere"), emVhosts: $("emVhosts"),
+    emVhostList: $("emVhostList"), emDuration: $("emDuration"), emReason: $("emReason"),
+    emPreview: $("emPreview"), emCaveat: $("emCaveat"), emApply: $("emApply"), emCancel: $("emCancel"),
+  };
+  // Rows of the emergency dialog, shown or hidden by the choices above them.
+  const emRows = {
+    ipCount: [$("emIPCountLabel"), el.emIPCount],
+    kind: [$("emKindLabel"), el.emKind],
+    rate: [$("emRateLabel"), $("emRateField")],
+    per: [$("emPerLabel"), el.emPer],
+    profile: [$("emProfileLabel"), el.emProfile],
+    vhosts: [$("emVhostsLabel"), el.emVhosts],
   };
 
   const st = {
     auto: true, timer: null, mix: null, challenged: new Map(), rules: [], chart: null, dialogClient: null, busy: false,
     opener: null, lastIPs: [], undoTimer: null,
+    trules: [], emClient: null, emAction: "", emOpener: null,
   };
 
   const REFRESH_MS = 30000;
@@ -207,6 +231,27 @@ import {
       <td><button type="button" class="btn-quiet btn-sm" data-undo="${i}">Undo</button></td></tr>`).join("");
   }
 
+  function renderEmergency() {
+    const list = activeEmergencyRules(st.trules);
+    st.emList = list;
+    if (!list.length) {
+      el.emergBody.innerHTML = '<tr><td colspan="6" class="muted">No active emergency rules.</td></tr>';
+      return;
+    }
+    el.emergBody.innerHTML = list.map((r, i) => {
+      const d = describeEmergency(r);
+      const ips = Array.isArray(r.match?.ip_any) ? r.match.ip_any : [];
+      const what = ips.length ? `<span title="${escapeHTML(ips.slice(0, 50).join(", ") + (ips.length > 50 ? ", …" : ""))}">${escapeHTML(d.what)}</span>` : escapeHTML(d.what);
+      return `<tr>
+        <td><strong>${what}</strong></td><td>${escapeHTML(d.how)}${r.enabled ? "" : ' <span class="pill">off</span>'}</td>
+        <td><code>${escapeHTML((r.scope?.vhosts || []).join(", "))}</code></td>
+        <td>${escapeHTML(fmtExpiresIn(r.match.until))}</td>
+        <td>${escapeHTML(String(r.note || "").replace(/^emergency:\s*/, ""))}</td>
+        <td class="actions-cell"><button type="button" class="btn-quiet btn-sm" data-extend="${i}">+1 h</button>
+          <button type="button" class="btn-quiet btn-sm btn-danger" data-end="${i}">End now</button></td></tr>`;
+    }).join("");
+  }
+
   function renderAll() {
     const mix = st.mix;
     if (!mix) return;
@@ -218,6 +263,7 @@ import {
     renderClients(mix);
     renderHosts(mix);
     renderRules();
+    renderEmergency();
   }
 
   // ── load ──────────────────────────────────────────────────────────────────
@@ -225,11 +271,15 @@ import {
   async function loadAll() {
     const win = el.windowSelect.value || "1h";
     try {
-      const [mix, vhosts, rules] = await Promise.all([
+      const [mix, vhosts, rules, trules] = await Promise.all([
         api(`/v1/webdet/traffic-mix?window=${encodeURIComponent(win)}&hosts=20&clients=25`),
         api("/v1/challenge/vhosts").catch(() => []),
         api("/v1/webdet/ua-emergency").catch(() => []),
+        api("/v1/webdet/rules").catch(() => null),
       ]);
+      // A failed rules read keeps the last list (and its priorities) rather
+      // than showing "none active".
+      if (trules && Array.isArray(trules.rows)) st.trules = trules.rows;
       st.mix = mix;
       st.challenged = new Map();
       for (const v of Array.isArray(vhosts) ? vhosts : []) {
@@ -259,7 +309,9 @@ import {
     if (!c) return;
     const n = Number(el.ipCount.value) || 50;
     const t = topIPs(c, n);
-    el.ipDialogPreview.innerHTML = `<strong>${escapeHTML(String(t.ips.length))}</strong> of the ${escapeHTML(fmtCount(t.total || t.known))} IPs seen in the last hour, carrying <strong>${escapeHTML(fmtPct(t.coverage))}</strong> of its last-hour requests.`;
+    const sp = challengeableIPs(t.ips);
+    el.ipDialogPreview.innerHTML = `<strong>${escapeHTML(String(t.ips.length))}</strong> of the ${escapeHTML(fmtCount(t.total || t.known))} IPs seen in the last hour, carrying <strong>${escapeHTML(fmtPct(t.coverage))}</strong> of its last-hour requests.` +
+      (sp.prefixes.length ? ` <span class="pill warn">${escapeHTML(String(sp.prefixes.length))} of them are IPv6 /64s</span>: a per-IP challenge cannot take a /64, so those are left out (Deny or Throttle can take them).` : "");
   }
 
   function openIPDialog(c, opener) {
@@ -282,13 +334,14 @@ import {
   // While the dialog is open: Escape closes it from anywhere, and Tab stays
   // inside it (the page behind holds UA block buttons).
   document.addEventListener("keydown", (ev) => {
-    if (el.ipDialog.style.display === "none") return;
-    if (ev.key === "Escape") { ev.preventDefault(); closeIPDialog(); return; }
+    const dlg = el.ipDialog.style.display !== "none" ? el.ipDialog : el.emDialog.style.display !== "none" ? el.emDialog : null;
+    if (!dlg) return;
+    if (ev.key === "Escape") { ev.preventDefault(); (dlg === el.ipDialog ? closeIPDialog : closeEmergency)(); return; }
     if (ev.key !== "Tab") return;
-    const f = [...el.ipDialog.querySelectorAll("button, select, input")].filter((x) => !x.disabled);
+    const f = [...dlg.querySelectorAll("button, select, input")].filter((x) => !x.disabled && x.offsetParent !== null);
     if (!f.length) return;
     const first = f[0], last = f[f.length - 1];
-    if (!el.ipDialog.contains(document.activeElement)) { ev.preventDefault(); first.focus(); }
+    if (!dlg.contains(document.activeElement)) { ev.preventDefault(); first.focus(); }
     else if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
     else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
   });
@@ -323,14 +376,18 @@ import {
     const c = st.dialogClient;
     if (!c || st.busy) return;
     const t = topIPs(c, Number(el.ipCount.value) || 50);
-    if (!t.ips.length) return;
+    const sp = challengeableIPs(t.ips);
+    if (!sp.ok.length) {
+      flash("✖ every one of these is an IPv6 /64: use Deny or Throttle for them", "danger");
+      return;
+    }
     st.busy = true;
     try {
       const r = await api("/v1/challenge/ip/add", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ips: t.ips,
+          ips: sp.ok,
           ttl_seconds: Number(el.ipTTL.value) || 3600,
           reason: el.ipReason.value.trim() || `web traffic: ${truncate(c.client, 80)}`,
         }),
@@ -340,6 +397,7 @@ import {
       const kept = Array.isArray(r.revoked_kept) ? r.revoked_kept.length : 0;
       const notRevoked = Array.isArray(r.not_revoked) ? r.not_revoked.length : 0;
       let text = `✓ challenged ${r.done ? r.done.length : 0} IP(s)`;
+      if (sp.prefixes.length) text += `; ${sp.prefixes.length} IPv6 /64(s) left out (not challengeable per IP)`;
       if (extended) text += `, extended ${extended} existing`;
       if (skipped) text += `, ${skipped} skipped (already challenged longer, blocked or never challenged here)`;
       if (kept) text += `. Undo will not restore the clearance of ${kept} already-challenged IP(s): it ends by itself at the chosen time`;
@@ -355,29 +413,152 @@ import {
     }
   }
 
-  async function applyUARule(c, action) {
-    if (!uaRuleAllowed(c)) {
-      flash("✖ a browser UA is never given a UA rule: challenge its IPs instead", "danger");
-      return;
+  // ── emergency deny / throttle ─────────────────────────────────────────────
+
+  function show(rows, on) {
+    for (const n of rows) if (n) n.style.display = on ? "" : "none";
+  }
+
+  function emVhosts() {
+    if (el.emWhere.value === "*") return ["*"];
+    return el.emVhosts.value.split(",").map((x) => x.trim()).filter(Boolean);
+  }
+
+  function emOpts() {
+    return {
+      client: st.emClient,
+      target: el.emTarget.value,
+      ipCount: Number(el.emIPCount.value) || 50,
+      action: st.emAction === "deny" ? "block" : el.emKind.value,
+      rate: Number(el.emRate.value),
+      per: el.emPer.value,
+      profile: el.emProfile.value,
+      durationSec: Number(el.emDuration.value),
+      vhosts: emVhosts(),
+      reason: el.emReason.value,
+      rules: st.trules,
+    };
+  }
+
+  function updateEmergency() {
+    const c = st.emClient;
+    if (!c) return;
+    const deny = st.emAction === "deny";
+    const ips = el.emTarget.value === "ips";
+    const total = !deny && el.emKind.value === "throttle_total";
+    show(emRows.ipCount, ips);
+    show(emRows.kind, !deny);
+    show(emRows.rate, total);
+    show(emRows.per, total);
+    show(emRows.profile, !deny && !total);
+    show(emRows.vhosts, el.emWhere.value === "list");
+
+    const o = emOpts();
+    const built = buildEmergencyRule(o);
+    const secs = Number(st.mix && st.mix.window_sec) || 0;
+    const rps = currentRate(c, secs);
+    const parts = [];
+    if (ips) {
+      const n = ipTargets(c, o.ipCount).length;
+      const t = topIPs(c, o.ipCount);
+      parts.push(`<strong>${escapeHTML(String(n))}</strong> IPs, carrying ${escapeHTML(fmtPct(t.coverage))} of its last-hour requests.`);
+    } else {
+      parts.push(`Every request whose User-Agent matches <code>${escapeHTML(uaPattern(c))}</code>${el.emWhere.value === "*" ? ", on every vhost" : ""}.`);
     }
-    const minutes = UA_RULE_MAX_SEC / 60;
-    if (!window.confirm(`${action === "block" ? "Block" : "Throttle"} the UA family "${c.client}" box-wide for ${minutes} minutes?`)) return;
-    const post = (confirm) => api("/v1/webdet/ua-emergency", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ua: c.client, action, ttl_seconds: UA_RULE_MAX_SEC, reason: `web traffic page (${CLASS_LABELS[c.class]})`, confirm: confirm || undefined }),
-    });
+    if (total) {
+      // The rate is the client's node-wide average: for the whole-node budget
+      // the cut reads directly; per vhost each vhost gets the rate, so the cut
+      // is at most this.
+      const cut = fmtPct(throttleCut(rps, o.rate), 0);
+      parts.push(`It does ${escapeHTML(fmtRate(rps))} on average now, all vhosts together. At ${escapeHTML(fmtRate(o.rate))} ${el.emPer.value === "node" ? "for the node" : "per vhost"}, about <strong>${el.emPer.value === "node" ? "" : "up to "}${escapeHTML(cut)}</strong> of it would get 429 (more in bursts).`);
+    }
+    if (built.error) parts.push(`<span class="pill danger">${escapeHTML(built.error)}</span>`);
+    el.emPreview.innerHTML = parts.join(" ");
+    el.emApply.disabled = !!built.error;
+
+    const cav = [];
+    if (deny && ips) cav.push("A deny returns 403 to everyone on those addresses: a real visitor behind the same carrier NAT or /64 is refused too. For residential addresses prefer the challenge.");
+    if (deny && !ips) cav.push("Every client sending that User-Agent gets 403, on every IP.");
+    if (!ips && c.class === "crawler") cav.push("A crawler whose IPs are on the static crawler bypass list (Google, Bing, Apple, DuckDuckGo, …) never reaches traffic rules: the rule will have no effect on it.");
+    cav.push("The rule runs before your own rules (including allows) and ends by itself; end or extend it under Active emergency rules. Clients holding a clearance cookie are not affected.");
+    el.emCaveat.textContent = cav.join(" ");
+  }
+
+  function openEmergency(c, action, opener) {
+    const targets = targetsFor(c);
+    if (!targets.length) return;
+    st.emClient = c;
+    st.emAction = action;
+    st.emOpener = opener || null;
+    el.emDialogTitle.textContent = action === "deny" ? "Deny (403) for a while" : "Throttle for a while";
+    el.emDialogClient.textContent = `${CLASS_LABELS[c.class] || c.class}: ${truncate(c.client, 240)}`;
+    el.emTarget.innerHTML = targets.map((t) => `<option value="${t}">${t === "ua" ? `its User-Agent (${escapeHTML(uaPattern(c))})` : "its top IPs (last hour)"}</option>`).join("");
+    el.emProfile.innerHTML = THROTTLE_PROFILES.map((p) => `<option value="${escapeHTML(p.key)}">${escapeHTML(p.label)}</option>`).join("");
+    el.emDuration.innerHTML = EMERGENCY_DURATIONS.map((d) => `<option value="${d.sec}"${d.sec === EMERGENCY_DEFAULT_SEC ? " selected" : ""}>${escapeHTML(d.label)}</option>`).join("");
+    el.emVhostList.innerHTML = ((st.mix && st.mix.hosts) || []).filter((h) => h.host !== OTHER_KEY).map((h) => `<option value="${escapeHTML(h.host)}"></option>`).join("");
+    el.emKind.value = "throttle_total";
+    el.emPer.value = "node";
+    el.emWhere.value = "*";
+    el.emVhosts.value = "";
+    el.emReason.value = "";
+    el.emRate.value = String(suggestTotalRate(currentRate(c, Number(st.mix && st.mix.window_sec) || 0)));
+    el.emApply.textContent = action === "deny" ? "Deny" : "Throttle";
+    el.emApply.className = action === "deny" ? "btn-danger" : "btn-quiet";
+    el.emDialog.style.display = "flex";
+    updateEmergency();
+    el.emTarget.focus();
+  }
+
+  function closeEmergency() {
+    st.emClient = null;
+    el.emDialog.style.display = "none";
+    if (st.emOpener && document.body.contains(st.emOpener)) st.emOpener.focus();
+    st.emOpener = null;
+  }
+
+  async function applyEmergency() {
+    if (!st.emClient || st.busy) return;
+    const built = buildEmergencyRule(emOpts());
+    if (built.error) { flash(`✖ ${built.error}`, "danger"); return; }
+    st.busy = true;
     try {
-      await post(false);
-      flash(`✓ ${action} ${c.client} for ${minutes} m`, "ok");
+      await api("/v1/webdet/rules/add", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(built.rule),
+      });
+      const d = describeEmergency(built.rule);
+      flash(`✓ ${d.how}: ${d.what}, until ${new Date(built.rule.match.until).toLocaleTimeString()}`, "ok");
+      closeEmergency();
     } catch (err) {
-      if (err.status === 409 && err.data && err.data.error === "google_verified_bot_requires_confirm") {
-        if (window.confirm(`"${c.client}" is a verified Google crawler: this can hurt every site's search presence for the rule's duration. Continue?`)) {
-          try { await post(true); flash(`✓ ${action} ${c.client} for ${minutes} m`, "ok"); } catch (e2) { flash(`✖ ${e2.message || e2}`, "danger"); }
-        }
-      } else {
-        flash(`✖ ${err.message || err}`, "danger");
-      }
+      flash(`✖ ${err.message || err}`, "danger");
+    } finally {
+      st.busy = false;
+    }
+    await loadAll();
+  }
+
+  async function extendEmergency(r) {
+    if (!r) return;
+    const next = { ...r, match: { ...r.match, until: extendedUntil(r, 3600) } };
+    try {
+      await api(`/v1/webdet/rules/update?id=${encodeURIComponent(r.id)}`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
+      });
+      flash(`✓ extended to ${new Date(next.match.until).toLocaleString()}`, "ok");
+    } catch (err) {
+      flash(`✖ ${err.message || err}`, "danger");
+    }
+    await loadAll();
+  }
+
+  async function endEmergency(r) {
+    if (!r) return;
+    const d = describeEmergency(r);
+    if (!window.confirm(`End now: ${d.how} on ${d.what}?`)) return;
+    try {
+      await api(`/v1/webdet/rules/remove?id=${encodeURIComponent(r.id)}`, { method: "POST" });
+      flash(`✓ ended: ${d.how} on ${d.what}`, "ok");
+    } catch (err) {
+      flash(`✖ ${err.message || err}`, "danger");
     }
     await loadAll();
   }
@@ -414,9 +595,22 @@ import {
     if (!c) return;
     const act = btn.getAttribute("data-act");
     if (act === "challenge_ips") openIPDialog(c, btn);
-    else if (act === "ua_throttle") applyUARule(c, "throttle");
-    else if (act === "ua_block") applyUARule(c, "block");
+    else if (act === "throttle") openEmergency(c, "throttle", btn);
+    else if (act === "deny") openEmergency(c, "deny", btn);
   });
+  el.emergBody.addEventListener("click", (ev) => {
+    const ext = ev.target.closest("button[data-extend]");
+    if (ext) { extendEmergency((st.emList || [])[Number(ext.getAttribute("data-extend"))]); return; }
+    const end = ev.target.closest("button[data-end]");
+    if (end) endEmergency((st.emList || [])[Number(end.getAttribute("data-end"))]);
+  });
+  for (const n of [el.emTarget, el.emIPCount, el.emKind, el.emRate, el.emPer, el.emProfile, el.emWhere, el.emVhosts, el.emDuration]) {
+    n.addEventListener("input", updateEmergency);
+    n.addEventListener("change", updateEmergency);
+  }
+  el.emApply.addEventListener("click", applyEmergency);
+  el.emCancel.addEventListener("click", closeEmergency);
+  el.emDialog.addEventListener("click", (ev) => { if (ev.target === el.emDialog) closeEmergency(); });
   el.hostsBody.addEventListener("click", (ev) => {
     const btn = ev.target.closest("button[data-lift]");
     if (!btn) return;
