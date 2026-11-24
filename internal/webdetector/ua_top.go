@@ -313,23 +313,33 @@ func topNFromMap(m map[string]int, n int) []TopKV {
 	return out
 }
 
-// IsGoogleVerifiedBot returns true for the normalized-UA strings that the
-// emergency control surface treats as "verified Google crawlers requiring
-// confirmation". This is consulted by the POST handler before applying a
-// throttle/block.
+// googleVerifiedBots are the normalized-UA strings that the emergency
+// control surface treats as "verified Google crawlers requiring
+// confirmation". The cfm-admin bots page mirrors it for its pre-click warning
+// (internal/webui/static/assets/bots.js GOOGLE_VERIFIED);
+// TestGoogleVerifiedBotsUIParity pins the two equal.
+var googleVerifiedBots = []string{
+	"googlebot",
+	"googlebot-image",
+	"googlebot-news",
+	"googlebot-video",
+	"adsbot-google",
+	"adsbot-google-mobile",
+	"mediapartners-google",
+	"storebot-google",
+	"feedfetcher-google",
+	"googleother",
+	"google-inspectiontool",
+}
+
+// IsGoogleVerifiedBot reports whether ua is in googleVerifiedBots. It is
+// consulted by the POST handler before applying a throttle/block.
 func IsGoogleVerifiedBot(ua string) bool {
-	switch strings.ToLower(strings.TrimSpace(ua)) {
-	case "googlebot",
-		"googlebot-image",
-		"googlebot-news",
-		"googlebot-video",
-		"adsbot-google",
-		"adsbot-google-mobile",
-		"mediapartners-google",
-		"storebot-google",
-		"feedfetcher-google",
-		"googleother":
-		return true
+	ua = strings.ToLower(strings.TrimSpace(ua))
+	for _, g := range googleVerifiedBots {
+		if ua == g {
+			return true
+		}
 	}
 	return false
 }
