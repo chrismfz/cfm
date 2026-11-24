@@ -282,6 +282,10 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
 
   async function loadAll() {
     const win = el.windowSelect.value || "1h";
+    // A reload started later (a new sort or window, the auto-refresh) wins:
+    // an older answer arriving after it must not paint the old order under
+    // the new header.
+    const seq = (st.loadSeq = (st.loadSeq || 0) + 1);
     try {
       const [mix, vhosts, rules, trules] = await Promise.all([
         api(`/v1/webdet/traffic-mix?window=${encodeURIComponent(win)}&hosts=20&clients=25&sort=${encodeURIComponent(CLIENT_SORTS[st.sort].param)}`),
@@ -289,6 +293,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
         api("/v1/webdet/ua-emergency").catch(() => []),
         api("/v1/webdet/rules").catch(() => null),
       ]);
+      if (seq !== st.loadSeq) return;
       // A failed rules read keeps the last list (and its priorities) rather
       // than showing "none active".
       if (trules && Array.isArray(trules.rows)) { st.trules = trules.rows; st.trulesLoaded = true; }
@@ -300,6 +305,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
       st.rules = Array.isArray(rules) ? rules : [];
       renderAll();
     } catch (err) {
+      if (seq !== st.loadSeq) return;
       flash(`✖ could not load the traffic mix: ${err.message || err}`, "danger");
     }
   }
