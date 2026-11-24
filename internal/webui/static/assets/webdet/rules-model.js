@@ -81,8 +81,8 @@ export const KNOWN_METHODS = Object.freeze(["GET", "POST", "HEAD", "PUT", "PATCH
 
 // Crawlers a `verified_bot` rule can match: the daemon's FCrDNS registry
 // (goodBotPTRSuffixes in internal/webdetector/abuse_shadow.go) minus the
-// generic "google" verdict, which covers Google's user-driven fetchers
-// (Translate proxy, AMP cache) and is deliberately excluded for rules.
+// generic "google" verdict (Google's special-case crawlers such as AdsBot),
+// which is deliberately excluded for rules.
 // TestVerifiedBotNamesListedInRulesModel asserts this list equals that set.
 // Matching is by reverse DNS that forward-confirms to the IP — never by
 // User-Agent string.

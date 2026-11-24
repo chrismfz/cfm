@@ -99,8 +99,9 @@ type ChallengeAccessInput struct {
 	QueryString string
 	// VerifiedBot is the FCrDNS good-bot name for the IP ("" = none). Unlike a
 	// traffic-rule allow, a challenge exemption KEEPS the generic "google"
-	// verdict (Translate/AMP/Feedfetcher proxies): they cannot solve a
-	// challenge and exempting them is safe — see verifiedBotForRules' comment.
+	// verdict (Google's special-case crawlers, rate-limited-proxy-*: AdsBot,
+	// APIs-Google), which cannot solve a challenge. Google's user-triggered
+	// fetchers (google-proxy-*) verify as nothing (goodbot.onlyPrefixes).
 	VerifiedBot string
 }
 

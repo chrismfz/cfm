@@ -115,7 +115,7 @@ package webdetector
 //     challenge at decision time — and ONLY under the grains that exemption
 //     already softens (challengeV2WaiverBar: geo, vhost). It typically reaches
 //     the gate there because no verdict existed when the challenge was served
-//     — the norm for Google-Read-Aloud's rotating first-seen IPs (a challenge
+//     — the norm for a crawler on rotating first-seen IPs (a challenge
 //     source that is never softened, e.g. a plain WAF challenge tier, is the
 //     other way in; the waiver then just restores an unarmed host's
 //     outcome) — so the waiver
@@ -125,7 +125,7 @@ package webdetector
 //     crawler operator's own DNS, never a zone the client controls. FCrDNS
 //     can't be forged. Google's user-triggered fetchers (google-proxy-*:
 //     Read Aloud, Translate, link previews) no longer verify at all
-//     (goodbot.notGoodBotPrefixes, 2026-11-24): a client routed through one
+//     (goodbot.onlyPrefixes, 2026-11-24): a client routed through one
 //     passed a geo or vhost arm, and ~440 of them walked a forum on orion for
 //     days. They are ordinary clients now; "google" still names Google's
 //     special-case crawlers (rate-limited-proxy-*). A fingerprint

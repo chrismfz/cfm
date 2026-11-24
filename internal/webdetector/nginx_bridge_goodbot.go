@@ -366,7 +366,7 @@ func (s *bridgeGoodBotState) verifiedSync(ctx context.Context, ip string, ptrFn 
 // first-seen IPs leaves no verdict behind (the decision had no PTR yet to
 // verify). The case it was built for, Google-Read-Aloud (73 challenge solves
 // from 48 IPs over 2026-09-16..23), no longer verifies: its google-proxy-*
-// PTR is not a good bot since 2026-11-24 (goodbot.notGoodBotPrefixes). So a cached
+// PTR is not a good bot since 2026-11-24 (goodbot.onlyPrefixes). So a cached
 // verdict answers when there is one, and otherwise a candidate PTR is
 // forward-confirmed INLINE through verifiedSync (same verifier, same syncSem
 // bound, the verdict cached for the decision path as well).

@@ -84,8 +84,8 @@ def test_thresholds() -> None:
     # No source may bring Google's user-triggered fetchers back: they fetch
     # whatever URL a user hands Google (google-proxy-*), a free WAF bypass.
     check("google-all" not in blp.SOURCES, "google-all includes the user-triggered fetchers")
-    check(not any(s.startswith("google:user-triggered") for s in blp.SOURCES),
-          "a google:user-triggered-* feed must not be a bypass source")
+    check(not any("user-triggered" in s for s in blp.SOURCES),
+          "a user-triggered Google feed (any source spelling) must not be a bypass source")
 
 
 # ── 1c. oneline: config-injection defense on metadata ────────────────────────

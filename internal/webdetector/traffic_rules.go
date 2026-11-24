@@ -66,8 +66,8 @@ type TrafficRuleMatch struct {
 	IPAny []string `json:"ip_any,omitempty"`
 	// VerifiedBot restricts the rule to requests from an FCrDNS-verified
 	// CRAWLER (the goodBotPTRSuffixes registry — Googlebot, Bing, Yahoo,
-	// Applebot, Yandex, Meta — minus the generic "google" verdict that also
-	// covers Translate/AMP proxies; see verifiedBotForRules). "Verified" means the PTR forward-confirmed to the
+	// Applebot, Yandex, Meta — minus the generic "google" verdict, Google's
+	// special-case crawlers; see verifiedBotForRules). "Verified" means the PTR forward-confirmed to the
 	// requesting IP — a User-Agent string earns nothing. On the decision hot
 	// path the verdict is CACHE-ONLY (a first-seen crawler IP kicks a bounded
 	// async forward-confirm and matches on a later request), so a
@@ -142,7 +142,7 @@ type TrafficRuleEvalResult struct {
 	// request was not treated as a verified crawler), so the simulator can say
 	// why a verified_bot rule did or did not match. VerifiedBotExcluded carries
 	// a verdict that forward-confirmed but is deliberately NOT a crawler for
-	// rules (the generic "google" — Translate/AMP proxies), so the UI can say
+	// rules (the generic "google": Google's special-case crawlers), so the UI can say
 	// "verified, but excluded" instead of "did not forward-confirm".
 	VerifiedBot         string `json:"verified_bot,omitempty"`
 	VerifiedBotExcluded string `json:"verified_bot_excluded,omitempty"`
@@ -225,7 +225,7 @@ func (s *trafficRuleStore) recountLocked() {
 // Google's special-case crawlers (rate-limited-proxy-*: AdsBot, APIs-Google)
 // and other Google hosts; as an ALLOW a rule must not trust them as Googlebot.
 // The user-triggered fetchers (google-proxy-*, which fetch any URL a user
-// hands Google) no longer verify at all (goodbot.notGoodBotPrefixes).
+// hands Google) no longer verify at all (goodbot.onlyPrefixes).
 var verifiedBotExcludedForRules = map[string]bool{"google": true}
 
 func verifiedBotForRules(name string) string {

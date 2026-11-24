@@ -8,6 +8,8 @@ import (
     "os"
     "strings"
     "time"
+
+    "cfm/internal/goodbot"
 )
 
 // ChallengeExclude: suppress challenges for known-good/verified crawlers or trusted partners.
@@ -260,6 +262,17 @@ func (ce *ChallengeExclude) eval(ip, host, ua string, lz *excludeLookup, ruleNam
             continue
         }
         if (r.modeAny && matched) || (!r.modeAny && !failed) {
+            // A rule that names a CLIENT (ua / asn / ptr) never exempts one
+            // of Google's user-triggered fetchers (goodbot.NotGoodBotPTR):
+            // they fetch whatever URL a user hands Google, with the user's
+            // own UA, from Google's own ASN, so `ptr=*.google.com` or
+            // `asn=as15169; ua=*…*` would let anyone through them. A host-only
+            // rule (a per-vhost free pass) is about the site, not the client,
+            // and stays. The PTR is the lazy one the rule already uses (the
+            // enrich cache on the serve path): an unknown PTR cannot refuse.
+            if (r.ua != "" || r.asn != "" || r.ptr != "") && goodbot.NotGoodBotPTR(lz.ptr()) {
+                continue
+            }
             return r, true
         }
     }
@@ -370,7 +383,7 @@ func (ce *ChallengeExclude) VerifiedGoodBotName(ip, ptr string, budget *int) (st
         return "", false
     }
     ptrL := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(ptr, ".")))
-    if ptrL == "" {
+    if ptrL == "" || goodbot.NotGoodBotPTR(ptrL) {
         return "", false
     }
     // Cheap glob pre-filter (NO DNS): does ANY verify_fcrdns PTR rule match? Once one

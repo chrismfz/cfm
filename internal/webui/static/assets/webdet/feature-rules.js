@@ -232,7 +232,7 @@ export const rulesMixin = {
       }
       if (r.verified_bot_inconclusive === "not_checked") return "";
       if (r.verified_bot_excluded) {
-        return `Reverse DNS forward-confirmed as "${r.verified_bot_excluded}", which is deliberately NOT a crawler for rules (Google's user-driven fetchers: Translate / AMP proxies). verified_bot rules do not match it — by design, not a DNS problem.`;
+        return `Reverse DNS forward-confirmed as "${r.verified_bot_excluded}", which is deliberately NOT a crawler for rules (the generic google verdict: Google's special-case crawlers such as AdsBot). verified_bot rules do not match it — by design, not a DNS problem.`;
       }
       if (r.verified_bot_inconclusive) {
         const why = {

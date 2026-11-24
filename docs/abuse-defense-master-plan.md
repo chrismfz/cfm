@@ -667,12 +667,15 @@ already opened.
         no static asset: ~2M requests from 11-21 (80k → 223k per log, 671k on
         the 11-24 morning), up to ~58 concurrent origin requests at the 08-09
         peak, about 40 % of orion's origin time then; 46k challenges served
-        that day, no solve logged. They skipped the WAF and challenge twice
-        over: Google's three user-triggered feeds were in the bypass list
-        (`google-all`), and the PTR verified as the good bot "google". Both
-        are gone: the bypass list takes Google's common and special-case
+        that day, no solve logged. Three things exempted them: Google's three
+        user-triggered feeds were in the bypass list (`google-all`), the PTR
+        verified as the good bot "google", and the shipped challenge-exclude
+        file had `ptr=*.google.com; verify_fcrdns=1` and an
+        `asn=as15169; ua=*google-read-aloud*` rule (the proxies pass the
+        user's own UA through). All three are gone: the bypass list takes Google's common and special-case
         crawlers only, and `internal/goodbot` never verifies a
-        `google-proxy-*` PTR (`notGoodBotPrefixes`). Elsewhere on the fleet the
+        `google-proxy-*` PTR (`onlyPrefixes`: under `.google.com` only `rate-limited-proxy-*` verifies), nor
+        does a challenge-exclude rule exempt one (`goodbot.NotGoodBotPTR`). Elsewhere on the fleet the
         same proxies sent 0-31 requests per node that day (Maps link opens,
         the Google app); those are ordinary clients now. Cost: Read Aloud and
         Translate see a challenge on a vhost that is challenging, and are
