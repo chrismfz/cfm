@@ -115,7 +115,7 @@ package webdetector
 //     challenge at decision time — and ONLY under the grains that exemption
 //     already softens (challengeV2WaiverBar: geo, vhost). It typically reaches
 //     the gate there because no verdict existed when the challenge was served
-//     — the norm for Google-Read-Aloud's rotating first-seen IPs (a challenge
+//     — the norm for a crawler on rotating first-seen IPs (a challenge
 //     source that is never softened, e.g. a plain WAF challenge tier, is the
 //     other way in; the waiver then just restores an unarmed host's
 //     outcome) — so the waiver
@@ -123,10 +123,12 @@ package webdetector
 //     solve about to be rejected, and only when the solve's PTR is already
 //     known and ends in a crawler's domain, so the lookup goes to the
 //     crawler operator's own DNS, never a zone the client controls. FCrDNS
-//     can't be forged, but "google" covers Google's user-driven fetchers
-//     (Read Aloud, Translate): a client routed through one passes a geo or
-//     vhost arm, exactly as it already skips those challenges once verified.
-//     Accepted — the same trust the decision path extends. A fingerprint
+//     can't be forged. Google's user-triggered fetchers (google-proxy-*:
+//     Read Aloud, Translate, link previews) no longer verify at all
+//     (goodbot.onlyPrefixes, 2026-11-24): a client routed through one
+//     passed a geo or vhost arm, and ~440 of them walked a forum on orion for
+//     days. They are ordinary clients now; "google" still names Google's
+//     special-case crawlers (rate-limited-proxy-*). A fingerprint
 //     policy or a traffic-rule / WAF mark stays strict: the decision path
 //     never softens those for good bots, and traffic rules deliberately
 //     distrust the generic "google" name (verifiedBotForRules). A verify that

@@ -15,6 +15,18 @@ func TestSuffixName(t *testing.T) {
 		{"fwdproxy-frc-011.fbsv.net.", "meta", true},
 		{"FWDPROXY-NCG-014.FBSV.NET", "meta", true},
 		{"crawl-66-249-66-1.googlebot.com", "googlebot", true},
+		// Google's special-case crawlers (AdsBot) stay verified; its
+		// user-triggered fetchers, which fetch any URL a user hands Google,
+		// never match (case and trailing dot normalised first).
+		{"rate-limited-proxy-66-249-90-77.google.com", "google", true},
+		{"google-proxy-192-178-8-41.google.com", "", false},
+		{"GOOGLE-PROXY-66-249-82-238.GOOGLE.COM.", "", false},
+		// An allow-list: any other google.com host never matches either, so
+		// a new Google naming scheme does not verify silently.
+		{"something-new-66-249-1-1.google.com", "", false},
+		{"google.com", "", false},
+		// The prefixes only apply under their own suffix.
+		{"google-proxy-1.googlebot.com", "googlebot", true},
 		{"fbsv.net.evil.example", "", false},
 		{"evilfbsv.net", "", false},
 		{"", "", false},
@@ -64,5 +76,35 @@ func TestSuffixesIsACopy(t *testing.T) {
 	m[".example.net"] = "evil"
 	if _, _, ok := SuffixName("x.example.net"); ok {
 		t.Error("a write to the Suffixes() copy widened the registry")
+	}
+}
+
+// Verify never forward-confirms a google-proxy-* PTR: no DNS, no verdict.
+func TestVerifyGoogleProxyNotGoodBot(t *testing.T) {
+	name, cacheable := Verify("google-proxy-192-178-8-41.google.com", "192.178.8.41")
+	if name != "" || !cacheable {
+		t.Errorf("Verify(google-proxy) = %q,%t want \"\",true", name, cacheable)
+	}
+}
+
+func TestNotGoodBotPTR(t *testing.T) {
+	for ptr, want := range map[string]bool{
+		"google-proxy-192-178-8-41.google.com":       true,
+		"GOOGLE-PROXY-66-249-82-238.GOOGLE.COM.":     true,
+		"rate-limited-proxy-66-249-90-77.google.com": false,
+		"crawl-66-249-66-1.googlebot.com":            false,
+		"ppp089044094244.access.hol.gr":              false,
+		"fwdproxy-frc-011.fbsv.net":                  false,
+		"":                                           false,
+	} {
+		if got := NotGoodBotPTR(ptr); got != want {
+			t.Errorf("NotGoodBotPTR(%q) = %v, want %v", ptr, got, want)
+		}
+	}
+	// Every onlyPrefixes key must be a registry suffix, or it restricts nothing.
+	for suf := range onlyPrefixes {
+		if _, ok := ptrSuffixes[suf]; !ok {
+			t.Errorf("onlyPrefixes key %q is not a ptrSuffixes suffix", suf)
+		}
 	}
 }

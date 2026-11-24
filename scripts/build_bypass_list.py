@@ -78,7 +78,8 @@ MIN_SOURCE_COUNT_FOR_SHRINK = 10         # tiny feeds legitimately swing by a fe
 # SOURCES — edit this list to add/remove bypass sources.
 #
 # Types:
-#   google-all          All official Google crawler JSON feeds
+#   google-all          All official Google crawler JSON feeds (NOT used: it
+#                       includes the user-triggered fetchers, see SOURCES)
 #   google:<feed>       One Google feed (common-crawlers, special-crawlers,
 #                       user-triggered-fetchers, user-triggered-fetchers-google,
 #                       user-triggered-agents)
@@ -89,7 +90,18 @@ MIN_SOURCE_COUNT_FOR_SHRINK = 10         # tiny feeds legitimately swing by a fe
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SOURCES = [
-    "google-all",
+    # Google's crawlers only: common (Googlebot, PTR *.googlebot.com) and
+    # special-case (AdsBot, APIs-Google; rate-limited-proxy-*.google.com).
+    # The three user-triggered feeds (user-triggered-fetchers, -google,
+    # user-triggered-agents; PTR google-proxy-*.google.com) were here until
+    # 2026-11-24 via "google-all". They fetch whatever URL a user hands
+    # Google, which is the "NEVER" rule below: through them ~440 Google proxy
+    # IPs walked www.mathematica.gr's phpBB forum on orion with no static
+    # asset and no WAF or challenge, ~2M requests from 11-21 to 11-24, up to
+    # ~58 concurrent origin requests at the 11-24 peak. internal/goodbot
+    # stopped verifying google-proxy-* PTRs in the same change.
+    "google:common-crawlers",
+    "google:special-crawlers",
     "bing-all",
     "txt:https://tools.koalityengine.com/ip.txt",
     "asn:AS202042",
@@ -457,7 +469,7 @@ def shrunk_sources(results: list[SourceResult], previous: dict[str, int]) -> lis
     return out
 
 
-def check_thresholds(new_count: int, existing_count: int) -> str | None:
+def check_thresholds(new_count: int, existing_count: int, allow_shrink: bool = False) -> str | None:
     """Return an abort reason if the new list is unsafe to write, else None.
 
     Guards against a partial-feed run silently gutting the list (which for a
@@ -467,7 +479,7 @@ def check_thresholds(new_count: int, existing_count: int) -> str | None:
         return f"only {new_count} prefixes (< MIN_PREFIXES_TOTAL={MIN_PREFIXES_TOTAL})"
     if new_count > MAX_PREFIXES_TOTAL:
         return f"{new_count} prefixes (> MAX_PREFIXES_TOTAL={MAX_PREFIXES_TOTAL})"
-    if existing_count > 0 and new_count < existing_count * (1.0 - MAX_SHRINK_FRACTION):
+    if not allow_shrink and existing_count > 0 and new_count < existing_count * (1.0 - MAX_SHRINK_FRACTION):
         return (f"{new_count} prefixes is a >{int(MAX_SHRINK_FRACTION * 100)}% shrink "
                 f"vs the existing {existing_count} (partial-feed failure?)")
     return None
@@ -545,6 +557,9 @@ def main() -> int:
                         "outage can't drop that feed's ranges")
     p.add_argument("--allow-growth", action="store_true",
                    help="skip the address-space growth guard (a reviewed manual run that adds a source)")
+    p.add_argument("--allow-shrink", action="store_true",
+                   help="skip the >50%% total-shrink guard (a reviewed manual run that removes a source); "
+                        "the prefix-count floor and every per-source check still apply")
     args = p.parse_args()
 
     results: list[SourceResult] = []
@@ -592,7 +607,7 @@ def main() -> int:
 
     # Fail-safe: never replace a good list with a suspiciously small/large one.
     existing = existing_prefixes(args.output)
-    reason = check_thresholds(len(union), len(existing))
+    reason = check_thresholds(len(union), len(existing), args.allow_shrink)
     if reason is None and not args.allow_growth:
         reason = check_space_growth(union, existing)
     if reason is not None:

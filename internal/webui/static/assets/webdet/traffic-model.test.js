@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CLASS_ORDER, CLASS_COLORS, share, fmtPct, fmtBytes, fmtMbps, fmtRate, classMap, summary,
-  segments, hostBotShare, topIPs, clientActions, uaRuleAllowed, OTHER_KEY,
+  segments, hostBotShare, topIPs, clientActions, challengeableIPs, OTHER_KEY,
 } from "./traffic-model.js";
 
 const CHROME152 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
@@ -79,20 +79,21 @@ test("topIPs: coverage of the picked IPs", () => {
 // The guardrails.
 test("a browser UA is never offered a UA rule; humans get nothing", () => {
   const auto = clientActions(MIX.clients[0]).map((a) => a.id);
-  assert.deepEqual(auto, ["challenge_ips"], "automation: its IPs only");
+  assert.deepEqual(auto, ["challenge_ips", "throttle", "deny"], "automation: on its IPs (the dialog offers no UA target)");
   assert.deepEqual(clientActions(MIX.clients[2]), [], "human: nothing");
-  assert.equal(uaRuleAllowed(MIX.clients[0]), false);
-  assert.equal(uaRuleAllowed(MIX.clients[2]), false);
-  assert.equal(uaRuleAllowed({ class: "bot", client: "mozilla" }), false);
-  assert.equal(uaRuleAllowed({ class: "bot", client: OTHER_KEY }), false);
   assert.deepEqual(clientActions({ class: "automation", client: CHROME152 }), [], "no IPs known: nothing to act on");
+  assert.deepEqual(clientActions({ class: "human", client: CHROME152, top_ips_last_hour: [{ ip: "203.0.113.1", requests: 9 }] }), [], "human with IPs: still nothing");
 });
 
-test("a UA family gets the box-wide UA rules; a bot with IPs also the per-IP challenge", () => {
-  assert.deepEqual(clientActions(MIX.clients[1]).map((a) => a.id), ["ua_throttle", "ua_block"]);
-  assert.equal(uaRuleAllowed(MIX.clients[1]), true);
+test("a UA family gets deny/throttle; a bot with IPs also the per-IP challenge", () => {
+  assert.deepEqual(clientActions(MIX.clients[1]).map((a) => a.id), ["throttle", "deny"]);
   const bot = { class: "bot", client: "python-requests", top_ips_last_hour: [{ ip: "203.0.113.1", requests: 9 }] };
-  assert.deepEqual(clientActions(bot).map((a) => a.id), ["challenge_ips", "ua_throttle", "ua_block"]);
-  assert.deepEqual(clientActions({ class: "bot", client: "(no user-agent)" }).map((a) => a.id), []);
+  assert.deepEqual(clientActions(bot).map((a) => a.id), ["challenge_ips", "throttle", "deny"]);
+  assert.deepEqual(clientActions({ class: "bot", client: "(no user-agent)" }).map((a) => a.id), ["throttle", "deny"], "no UA: ua_any [\"-\"]");
+  assert.deepEqual(clientActions({ class: "bot", client: "mozilla" }), []);
   assert.deepEqual(clientActions({ class: "bot", client: OTHER_KEY }), []);
+});
+
+test("challengeableIPs: an IPv6 /64 is not challengeable per IP", () => {
+  assert.deepEqual(challengeableIPs(["203.0.113.1", "2001:db8:1:2::/64", "2001:db8::5"]), { ok: ["203.0.113.1", "2001:db8::5"], prefixes: ["2001:db8:1:2::/64"] });
 });
