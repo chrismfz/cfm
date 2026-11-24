@@ -16,6 +16,7 @@
     '/cfm-admin/mail',               // Mail queue — box-wide queue report (admin-only endpoint)
     '/cfm-admin/firewall',           // Firewall topology + global block state
     '/cfm-admin/webdetector/bots',   // Web Bots — global UA emergency controls
+    '/cfm-admin/webdetector/traffic', // Web Traffic — box-wide traffic mix + per-IP / UA actions
     '/cfm-admin/webdetector/tokens', // API tokens — admin-only issuance/revocation
     '/cfm-admin/notifier',
     '/cfm-admin/detectors',

@@ -40,7 +40,7 @@ const MENU_GROUPS = [
     { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },
     { label: "Vhost live", href: "/cfm-admin/webdetector/vhost/", icon: "globe" },
     { label: "Forensics", href: "/cfm-admin/webdetector/forensics/", icon: "search" },
-    { label: "Web Bots", href: "/cfm-admin/webdetector/bots/", icon: "bot" },
+    { label: "Web Traffic", href: "/cfm-admin/webdetector/traffic/", icon: "bot" },
   ]},
   { title: "Rules & engine", items: [
     { label: "Firewall", href: "/cfm-admin/firewall/", icon: "ban" },
