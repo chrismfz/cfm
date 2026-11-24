@@ -26,13 +26,20 @@ func startTrafficMixPersist(ctx context.Context) {
 	go func() {
 		t := time.NewTicker(webdet.TrafficMixSaveEvery)
 		defer t.Stop()
+		failing := false // log the first failure and the recovery, not every repeat
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if err := webdet.SaveTrafficMix(); err != nil {
-					logging.Logf("[traffic_mix] save failed: %v", err)
+				err := webdet.SaveTrafficMix()
+				switch {
+				case err != nil && !failing:
+					failing = true
+					logging.Logf("[traffic_mix] save failed (retried every %s, logged again on recovery): %v", webdet.TrafficMixSaveEvery, err)
+				case err == nil && failing:
+					failing = false
+					logging.Logf("[traffic_mix] save works again")
 				}
 			}
 		}

@@ -9,7 +9,9 @@ package webdetector
 // TrafficMixPath, gzipped JSON, and loaded once at startup: buckets older than
 // 24 h are dropped, and a bucket the daemon already counted into since its
 // start is ADDED to (the saved counts are requests before the stop, the live
-// ones after it: no request is counted twice). The per-IP behaviour state
+// ones after it). In MODE=file the tailer resumes from the offset its last
+// tick saved, so at most that one tick's lines can be counted twice; the
+// socket ingest replays nothing. The per-IP behaviour state
 // (10 minutes) is not saved: a restarted daemon re-learns it, as before.
 //
 // Reporting data only: a missing, unreadable or foreign file starts the ring
