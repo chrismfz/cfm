@@ -894,6 +894,7 @@ local function check_impl(ctx, st)
   -- their own broader /wp-admin/ carve-out, with 438's pre-auth admin-ajax/
   -- admin-post logonly exception — see rule 59 / audit F11.)
   local legit_archive_upload = is_known_legit_php_upload_endpoint(uri, args)
+    or det.wp_rest_editor_query(uri, args)
   -- Rule 414 (php-inside-zip) fires ONLY on media-asset upload endpoints (see
   -- is_php_hostile_asset_upload) — a positive allowlist, so legit plugin / theme
   -- / extension / backup `.zip` uploads (which contain PHP by design) are never

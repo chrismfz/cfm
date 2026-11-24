@@ -299,7 +299,7 @@ do
   -- The same editors without pretty permalinks (?rest_route=), on WP's
   -- front controller only, the field read as PHP fills $_GET.
   local util = require("cfm_waf_util")
-  local L = util.is_known_legit_php_upload_endpoint
+  local function L(u, a) return util.is_known_legit_php_upload_endpoint(u, a) or det.wp_rest_editor_query(u, a) end
   check(L("/index.php", "rest_route=/code-snippets/v1/snippets") == true, "rest_route Code Snippets on /index.php")
   check(L("/", "rest_route=%2Fstring-locator%2Fv1%2Fsave") == true, "rest_route String Locator, encoded, on /")
   check(L("/", "rest%2Eroute=/Code-Snippets/v1/x") == true, "rest.route decoded and case-folded as PHP / WP do")
@@ -310,6 +310,21 @@ do
   check(L("/index.php", "rest_route=/code-snippets/x&rest_route[]=a") == false, "an array rest_route beside it: not exempt")
   check(L("/index.php", "rest_route[]=/code-snippets/x") == false, "only an array rest_route: not exempt")
   check(L("/index.php", "x=1&foo_rest_route=/code-snippets/") == false, "a longer field name: not exempt")
+  check(L("/index.php", "rest_route=/code-snippets/v1/snippets&_locale=user") == true, "apiFetch's _locale beside it: exempt")
+  -- Another app that owns /index.php routes on its own query field: never exempt.
+  for _, q in ipairs({ "route=tool/upload&rest_route=/code-snippets/x", "option=com_media&rest_route=/code-snippets/x",
+                       "q=node/add&rest_route=/code-snippets/x", "rest_route=/code-snippets/x&controller=attachment" }) do
+    check(L("/index.php", q) == false, "rest_route beside another router field: not exempt (" .. q .. ")")
+  end
+  -- And the upload rules still run there: OpenCart's upload with a shell.php.
+  local oc = req("--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shell.php\"\r\nContent-Type: application/octet-stream\r\n\r\n<?php system($_GET[c]); ?>\r\n--b--\r\n",
+                 "/index.php", "multipart/form-data; boundary=b")
+  oc.args = "route=tool/upload&rest_route=/code-snippets/x"; oc.raw_uri = "/index.php?" .. oc.args
+  local saved = waf.get_config().rule_upload_filename
+  waf.set_rule("rule_upload_filename", "block")
+  hit, reason, _, action, _, rid = waf.check(oc)
+  waf.set_rule("rule_upload_filename", saved)
+  check(hit and action == "block", "OpenCart upload + rest_route decoy: still blocked (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
   local rr = req('{"code":"' .. string.rep("x", 2500) .. '<?php system($_GET[c]);"}', "/index.php", "application/json")
   rr.args = "rest_route=/code-snippets/v1/snippets"; rr.raw_uri = "/index.php?rest_route=/code-snippets/v1/snippets"
   hit, reason, _, _, _, rid = waf.check(rr)

@@ -724,6 +724,43 @@ function _M.php_request_fields(method, args, body, headers, want)
   return f
 end
 
+-- The REST editors is_known_legit_php_upload_endpoint allowlists by path
+-- (Code Snippets, String Locator), on a site without pretty permalinks:
+-- WordPress takes the route from the `rest_route` query field there
+-- (`/index.php?rest_route=/code-snippets/v1/...`). Exempt only when:
+--   * the path is WP's front controller (`/` or `/index.php`);
+--   * every query field, as PHP registers it, is one WP's REST client sends
+--     (_M.WP_REST_QUERY_FIELDS; a module field: this chunk is at Lua's
+--     200-local limit). Any other field may route another app that owns
+--     `/index.php` (OpenCart `route=`, Joomla `option=`, Drupal `q=`), and
+--     keyed on rest_route alone that app's upload would skip the body-PHP
+--     rules;
+--   * rest_route has exactly one value (PHP keeps the last of several), whose
+--     lowercased start is one of the editors' routes (WP matches routes
+--     case-insensitively).
+-- Query only: a body rest_route that differs from the query makes WP answer
+-- 400.
+_M.WP_REST_QUERY_FIELDS = { rest_route = true, _locale = true, _wpnonce = true,
+  _method = true, _envelope = true, _fields = true, _embed = true, context = true }
+function _M.wp_rest_editor_query(uri, args)
+  local u = lower(uri or "")
+  if (u ~= "/" and u ~= "/index.php") or not args or args == "" then return false end
+  -- An array field (`rest_route[]=`, `rest_route[x]=`) registers under its
+  -- base name, so php_request_fields would hand back one value; WP gets an
+  -- array there and routes nowhere. Any bracket in a field name ends it
+  -- (WP's REST client sends none of these fields as an array). A rejection
+  -- only, so the plain scan can only make it stricter.
+  if args:find("[", 1, true) or lower(args):find("%5b", 1, true) then return false end
+  local f = _M.php_request_fields("get", args, nil, nil, nil)
+  for name in pairs(f) do
+    if not _M.WP_REST_QUERY_FIELDS[name] then return false end
+  end
+  local r = f.rest_route
+  if not r or #r ~= 1 then return false end
+  local v = lower(r[1] or "")
+  return v:find("^/code%-snippets/") ~= nil or v:find("^/string%-locator/") ~= nil
+end
+
 -- get_fields is cfm_waf.check's lazy php_request_fields getter, so the
 -- field-keyed rules share one parse; a standalone caller passes nil.
 local function request_fields(method, args, body, headers, get_fields)
