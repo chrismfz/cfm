@@ -20,7 +20,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **The Web Traffic page keeps its 24 h across a restart.** The traffic mix
+  is saved every 5 minutes and on shutdown (with the TTL bans) to
+  `/var/lib/cfm/traffic_mix.json.gz` (root-only: the last hour's client IPs
+  are inside) and restored at start, so an upgrade or a `systemctl reload
+  cfm` no longer empties it. A crash loses at most 5 minutes; a file from
+  another version or a corrupt one starts the page empty, as before.
 
 ## 2026.11.24
 

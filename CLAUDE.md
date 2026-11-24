@@ -832,7 +832,8 @@ cPanel — every rule here exists because of that. Design + as-built:
   0, then restore it (runbook §8); reloading after the restore leaves a
   window of the old generation.
 - **`detectors.conf` edits apply without a reload** (the manager polls it).
-  SIGHUP ends the daemon (its only handler saves the TTL bans, then re-raises),
+  SIGHUP ends the daemon (its only handler saves the TTL bans and the traffic
+  mix, then re-raises),
   so `systemctl reload cfm` restarts it (systemd `Restart=always`). A config
   reload builds a new webdetector Engine, which empties the in-memory Site
   Cache stats view; it follows any save (file mtime) and the rotation of a

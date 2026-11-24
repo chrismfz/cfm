@@ -177,6 +177,9 @@ func watchTTLBanShutdown(s *ttlban.Store, be firewall.Backend) {
 		case <-time.After(ttlBanShutdownBudget):
 			logging.Logf("[ttlban] shutdown snapshot timed out after %s (%s); the last periodic one stands", ttlBanShutdownBudget, sig)
 		}
+		// The traffic mix rides the same handler (the daemon's one catch of
+		// the stop signals): after the bans, bounded.
+		saveTrafficMixOnShutdown(sig.String())
 		if ss, ok := sig.(syscall.Signal); ok {
 			_ = syscall.Kill(os.Getpid(), ss)
 		}
