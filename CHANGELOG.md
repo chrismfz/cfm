@@ -21,6 +21,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
+  current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
+  Chrome/145 … (compatible; meta-externalagent/1.1 (+https://…))`, the UA
+  normalizer (Go `NormalizeUA` and its edge twin `cfm_ua_emergency.lua`)
+  looked only at the first `(...)` group and keyed the crawler as `mozilla`,
+  so the rule never hit (titan, 2026-11-24: 0 hits a minute). Every group is
+  scanned now, which also names Googlebot smartphone (`googlebot`) in
+  `cfm bots top`, and `indexer` joins the bot markers (`meta-webindexer`
+  had none). Browser UAs still read `mozilla`.
 - **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**
   Every `/etc/cfm` file was a dpkg conffile, and CFM edits several of them
   itself (`cfm allow` / `cfm block`, the WebUI's notify and detectors editors,

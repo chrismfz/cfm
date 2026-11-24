@@ -29,6 +29,13 @@ func TestNormalizeUA(t *testing.T) {
 		{"Mozilla/5.0 (compatible; Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot)", "amazonbot"},
 		{"Mozilla/5.0 (compatible; meta-externalagent/1.1; +https://developers.facebook.com)", "meta-externalagent"},
 
+		// Bot declared in a LATER "(...)" group (Meta Chrome-145 crawler,
+		// Googlebot smartphone); an unclosed group stays "mozilla".
+		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))", "meta-externalagent"},
+		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-webindexer/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))", "meta-webindexer"},
+		{"Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "googlebot"},
+		{"Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (compatible; FooBot/1.0", "mozilla"},
+
 		// Real browsers — keep generic "mozilla" identifier.
 		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36", "mozilla"},
 		{"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605", "mozilla"},

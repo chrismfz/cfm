@@ -71,7 +71,7 @@ local _refresh_in_progress = false  -- dedupes the async refresh timer (F48)
 -- Bot markers — keep aligned with internal/webdetector/ua_norm.go.
 local _BOT_MARKERS = {
   "bot", "spider", "crawl", "agent", "fetch", "externalhit",
-  "scrap", "preview", "embed", "monitor", "checker",
+  "scrap", "preview", "embed", "monitor", "checker", "indexer",
 }
 
 local function has_bot_marker(tok)
@@ -107,22 +107,26 @@ function _M.normalize_ua(ua)
   if head == "" then return "-" end
   if head ~= "mozilla" then return head end
 
-  -- Mozilla envelope: scan inside the first "(...)".
-  local lp = string.find(ua, "(", 1, true)
-  if not lp then return "mozilla" end
-  local rp = string.find(ua, ")", lp, true)
-  if not rp or rp <= lp then return "mozilla" end
-  local inner = string.sub(ua, lp + 1, rp - 1)
-
-  for part in string.gmatch(inner, "[^;,]+") do
-    part = string.gsub(part, "^%s+", "")
-    part = string.gsub(part, "%s+$", "")
-    local tok = first_token(part)
-    if tok ~= "" and has_bot_marker(tok) then
-      return tok
+  -- Mozilla envelope: scan every "(...)" group in order, not only the
+  -- first (Meta's Chrome-145 crawler UA and Googlebot smartphone declare
+  -- themselves in a trailing "(compatible; ...)" group). Same walk as Go.
+  local pos = 1
+  while true do
+    local lp = string.find(ua, "(", pos, true)
+    if not lp then return "mozilla" end
+    local rp = string.find(ua, ")", lp, true)
+    if not rp then return "mozilla" end
+    local inner = string.sub(ua, lp + 1, rp - 1)
+    for part in string.gmatch(inner, "[^;,]+") do
+      part = string.gsub(part, "^%s+", "")
+      part = string.gsub(part, "%s+$", "")
+      local tok = first_token(part)
+      if tok ~= "" and has_bot_marker(tok) then
+        return tok
+      end
     end
+    pos = rp + 1
   end
-  return "mozilla"
 end
 
 -- Read + parse the rule file, updating _rules / _last_content. No timing logic:

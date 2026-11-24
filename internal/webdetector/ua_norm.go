@@ -8,10 +8,10 @@
 //     the first token before '/', ';' or whitespace, lowered. This catches
 //     "curl/7.88", "python-requests/2.31", "ahrefsbot/7.0",
 //     "facebookexternalhit/1.1" directly.
-//   - If the UA starts with "mozilla", scan the first "(...)" envelope and
+//   - If the UA starts with "mozilla", scan each "(...)" group in order and
 //     return the first inner token that contains a bot-family marker
 //     substring (bot, spider, crawl, agent, fetch, externalhit, scrap,
-//     preview, embed, monitor). This catches Googlebot, Bingbot, SemrushBot,
+//     preview, embed, monitor, checker, indexer). This catches Googlebot, Bingbot, SemrushBot,
 //     AhrefsBot, meta-externalagent, facebookexternalhit, etc. while
 //     leaving real browsers untouched.
 //   - Real browsers (Mozilla envelope with no bot marker) → "mozilla".
@@ -36,6 +36,7 @@ var botMarkers = []string{
 	"embed",
 	"monitor",
 	"checker",
+	"indexer", // meta-webindexer
 }
 
 // NormalizeUA returns a stable short identifier for a User-Agent string.
@@ -58,29 +59,38 @@ func NormalizeUA(ua string) string {
 		return head
 	}
 
-	// Mozilla envelope: look inside the first "(...)" for a bot identifier.
-	lp := strings.IndexByte(s, '(')
-	if lp < 0 {
-		return "mozilla"
-	}
-	rp := strings.IndexByte(s[lp:], ')')
-	if rp <= 0 {
-		return "mozilla"
-	}
-	inner := s[lp+1 : lp+rp]
-	parts := strings.FieldsFunc(inner, func(r rune) bool {
-		return r == ';' || r == ','
-	})
-	for _, p := range parts {
-		tok := firstUAToken(strings.TrimSpace(p))
-		if tok == "" {
-			continue
+	// Mozilla envelope: look inside every "(...)" group, in order, for a bot
+	// identifier. Not only the first: Meta's crawler (since 2026-11, Chrome
+	// 145) and Googlebot smartphone put a full browser UA first and declare
+	// themselves in a trailing "(compatible; …)" group, so a first-group-only
+	// scan read them as "mozilla" and `cfm bots block meta-externalagent`
+	// never matched. A nested "(" inside a group ("(+https://…)") ends the
+	// scan at the first ")", which still leaves the bot token in the group.
+	rest := s
+	for {
+		lp := strings.IndexByte(rest, '(')
+		if lp < 0 {
+			return "mozilla"
 		}
-		if hasAnySubstring(tok, botMarkers) {
-			return tok
+		rp := strings.IndexByte(rest[lp:], ')')
+		if rp < 0 {
+			return "mozilla"
 		}
+		inner := rest[lp+1 : lp+rp]
+		parts := strings.FieldsFunc(inner, func(r rune) bool {
+			return r == ';' || r == ','
+		})
+		for _, p := range parts {
+			tok := firstUAToken(strings.TrimSpace(p))
+			if tok == "" {
+				continue
+			}
+			if hasAnySubstring(tok, botMarkers) {
+				return tok
+			}
+		}
+		rest = rest[lp+rp+1:]
 	}
-	return "mozilla"
 }
 
 // firstUAToken returns the substring of `in` up to the first '/', ';',
