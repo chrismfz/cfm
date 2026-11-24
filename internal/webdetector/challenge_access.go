@@ -425,6 +425,16 @@ func normalizeChallengeAccess(in ChallengeAccessEntry, generateID bool) (Challen
 	if err != nil {
 		return ChallengeAccessEntry{}, err
 	}
+	// The embedded grammar grew two traffic-rule-only things: an expiry
+	// (traffic rules prune and show it; an access entry would silently stop
+	// exempting) and the emergency rules' 500-entry ip_any. An exemption keeps
+	// the old bounds.
+	if m.Until != "" {
+		return ChallengeAccessEntry{}, errors.New("until: not supported on a Challenge Access entry")
+	}
+	if len(m.IPAny) > maxPatternsPerField {
+		return ChallengeAccessEntry{}, fmt.Errorf("ip_any: too many values (max %d)", maxPatternsPerField)
+	}
 	r.Match.TrafficRuleMatch = m
 
 	asns, err := normalizeASNList(r.Match.AsnIn, maxPatternsPerField)

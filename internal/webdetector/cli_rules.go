@@ -149,7 +149,7 @@ func runRulesList(baseURL string) error {
 			r.Enabled,
 			r.Priority,
 			r.Action.Type,
-			r.Action.Profile,
+			rulesActionDetail(r.Action),
 			strings.Join(r.Scope.Vhosts, ","),
 			rulesMatchSummary(r.Match),
 		)
@@ -331,6 +331,15 @@ func rulesShortList(xs []string, max int) string {
 	return fmt.Sprintf("%s,+%d more", strings.Join(xs[:max], ","), len(xs)-max)
 }
 
+// rulesActionDetail is the PROFILE column: a throttle's profile, or a total
+// throttle's rate and what it is a total of.
+func rulesActionDetail(a TrafficRuleAction) string {
+	if a.Type == TrafficActionThrottleTotal {
+		return strconv.FormatFloat(a.RateRPS, 'g', -1, 64) + "r/s/" + a.Per
+	}
+	return a.Profile
+}
+
 func rulesMatchSummary(m TrafficRuleMatch) string {
 	parts := []string{}
 	if len(m.CountryIn) > 0 {
@@ -340,7 +349,7 @@ func rulesMatchSummary(m TrafficRuleMatch) string {
 		parts = append(parts, "cc!="+rulesShortList(m.CountryNotIn, 8))
 	}
 	if len(m.IPAny) > 0 {
-		parts = append(parts, "ip="+strings.Join(m.IPAny, ","))
+		parts = append(parts, "ip="+rulesShortList(m.IPAny, 8))
 	}
 	if m.VerifiedBot {
 		parts = append(parts, "verified_bot")
@@ -355,7 +364,10 @@ func rulesMatchSummary(m TrafficRuleMatch) string {
 		parts = append(parts, "path="+strconv.Itoa(len(m.PathAny)))
 	}
 	if len(parts) == 0 {
-		return "(none)"
+		parts = append(parts, "(none)") // matches every request: say so even with an expiry
+	}
+	if m.Until != "" {
+		parts = append(parts, "until="+m.Until)
 	}
 	return strings.Join(parts, " ")
 }

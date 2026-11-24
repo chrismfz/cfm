@@ -236,6 +236,11 @@ func planTrafficRuleImport(existing []TrafficRule, doc TrafficRulesExportDoc, di
 		case err != nil:
 			item.Status, item.Error = "invalid", err.Error()
 			item.Rule = in
+		case norm.Match.Expired(time.Now()):
+			// As rules/add: an export taken before an emergency rule expired
+			// must not bring it back (inert, then pruned) on another node.
+			item.Status, item.Error = "invalid", "match.until is in the past"
+			item.Rule = norm
 		case inScope != nil && !inScope(norm.Scope.Vhosts):
 			item.Status, item.Error = "invalid", "vhost not in scope"
 			item.Rule = norm
@@ -415,6 +420,7 @@ func (s *trafficRuleStore) AddMany(in []TrafficRule) ([]TrafficRule, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(time.Now())
 	if len(s.rules)+len(norms) > maxRulesGlobal {
 		return nil, fmt.Errorf("too many rules (max %d)", maxRulesGlobal)
 	}

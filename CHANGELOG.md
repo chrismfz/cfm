@@ -21,6 +21,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **Traffic rules: an expiry and a total throttle, for incidents.** A rule can
+  carry `match.until` (RFC3339): past it the rule matches nothing, and it is
+  deleted a day later; cfm-admin's editor offers 1 h / 6 h / 24 h / 7 d. The
+  new `throttle_total` action gives ALL matching clients one budget
+  (`rate_rps`, per vhost or for the whole node) instead of a per-client limit,
+  which a crawler spread over hundreds of IPs walks past (on titan a per-IP
+  limit cut 0–4% of Meta's load, a 5 r/s node total cut 65%). `ip_any` now
+  takes up to 500 entries (a scraper's top IPs). **Downgrade:** an older cfm
+  never enforces a rule with an expiry or a total throttle (it lists it
+  unsupported and keeps it), and an older edge applies the per-client
+  `soft_bot` throttle for a total one; this build also freezes a stored rule
+  whose action carries a key it does not know.
 - **cfm-admin: Web Traffic page** (`/cfm-admin/webdetector/traffic/`, in the
   nav in place of Web Bots, whose UA console stays reachable from it). Built
   on the traffic mix: the bots' share of the origin time, requests vs origin
