@@ -37,7 +37,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `site_cache_static` / `site_cache_micro` and `rules` (for a cPanel user,
   only the rules they can see are counted).
 
+### Changed
+- **Vhost controls: switches instead of upper-case buttons.** Each
+  protection is a switch with a short state (On, Off, Inline, Async, N/A)
+  and a muted line saying what decided it ("excluded here", "by *.gr",
+  "node default", "override · upload waits"). A protection turned OFF is the
+  red one; an opt-in left at its default is grey; a state a wider pattern
+  or the node decides has a dashed track (the tooltip says where to change
+  it).
+- **cfm-admin: no colour emoji in the interface.** They rendered differently
+  on every OS and ignored the theme: "UNDER ATTACK", "Emergency challenge",
+  the lockdown buttons, the MySQL governor's risk (now pills) and the mail
+  queue's frozen mark (a pill) are plain text or theme pills.
+
 ### Fixed
+- **cfm-admin pages fit a phone.** 14 of the 23 pages were wider than a
+  400px screen (up to 705px) and scrolled sideways: the shared card grid
+  kept a column as wide as its widest child. Every page now fits.
 - **Vhost controls: an OFF toggle no longer looks like the most important
   button on the page.** The HTTP/3 and ClamAV OFF / not-scanned buttons used
   a style that was never defined and fell back to the solid blue primary

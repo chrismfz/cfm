@@ -145,7 +145,7 @@
   function renderAnomalies(items) {
     if (!el.anomaliesBody) return;
     if (!items.length) {
-      el.anomaliesBody.innerHTML = '<tr><td colspan="9" class="muted">no anomalies in window 🎉</td></tr>';
+      el.anomaliesBody.innerHTML = '<tr><td colspan="9" class="muted">no anomalies in window</td></tr>';
       return;
     }
     const rows = items.slice(-300).reverse().map((a) => {

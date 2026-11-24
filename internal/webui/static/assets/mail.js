@@ -107,7 +107,7 @@
       `<tr><td>${Number(d.count) || 0}</td><td>${escapeHTML(d.category)}</td><td>${escapeHTML(d.reason)}</td></tr>`);
     rows(el.oldestBody, rep.oldest, (m) =>
       `<tr><td>${formatAge(m.age_sec)}</td><td>${formatSize(m.size_bytes)}</td>` +
-      `<td>${m.frozen ? '❄' : ''}</td><td>${escapeHTML(m.sender || '<>')}</td>` +
+      `<td>${m.frozen ? '<span class="pill info">frozen</span>' : ''}</td><td>${escapeHTML(m.sender || '<>')}</td>` +
       `<td>${Number(m.recipients) || 0}</td><td>${escapeHTML(m.id)}</td></tr>`);
   }
 
