@@ -35,7 +35,7 @@
 
       <!-- 0. Emergency challenge (panic button, arm-surfaces slice D) -->
       <section class="card wide" v-if="shouldShow('controls')">
-        <h2>🛡 Emergency challenge</h2>
+        <h2>Emergency challenge</h2>
         <p class="muted">
           Under attack? Arm the interactive challenge for <strong>every visitor</strong> of a vhost, right now, for a limited time.
           Real browsers pass with an invisible check; bots don't. This is different from the table's
@@ -57,7 +57,7 @@
             <option value="6h">6 hours</option>
             <option value="24h">24 hours</option>
           </select>
-          <button class="btn-danger" @click="panicArm" :disabled="loading">🚨 Arm challenge</button>
+          <button class="btn-danger" @click="panicArm" :disabled="loading">Arm challenge</button>
           <button class="btn-quiet" @click="panicSwitchTier" v-if="panicSwitchTarget()" :disabled="loading" :title="panicSwitchIsPin() ? 'Pin this vhost\'s AUTOMATIC challenges to ' + (panicSwitchTarget() === 'v2' ? 'strict (v2)' : 'standard (v1)') + ' — stays until you unpin it (a customer\'s pin expires after 24h)' : 'Switch the ACTIVE challenge on this vhost to ' + (panicSwitchTarget() === 'v2' ? 'strict (v2)' : 'standard (v1)') + ' without re-arming it — the expiry stays as it is'">{{ (panicSwitchTarget() === 'v2' ? 'Switch to Strict (v2)' : 'Switch to Standard (v1)') + (panicSwitchIsPin() ? ' · pin' : '') }}</button>
           <button class="btn-quiet" @click="panicUnpin" v-if="panicTierPinned()" :disabled="loading" title="Remove the tier pin: the node default (CHALLENGE_V2_AUTO_VHOST) decides this vhost's automatic tier again">↺ Unpin (auto)</button>
           <button class="btn-quiet" @click="panicDisarm" :disabled="loading || !(panicStatus && panicStatus.manual_active)">Disarm</button>
@@ -67,12 +67,12 @@
           <select class="input" v-model="panicLockdownTTL" :disabled="panicLockdownOn()">
             <option v-for="c in lockdownTTLChoices" :key="c.value" :value="c.value">{{ c.label }}</option>
           </select>
-          <button :class="panicLockdownOn() ? 'btn-quiet' : 'btn-danger'" @click="panicLockdownToggle" :disabled="loading || !panicHost">{{ panicLockdownOn() ? 'Lift lockdown' : '⛔ Lockdown (no exemptions)' }}</button>
+          <button :class="panicLockdownOn() ? 'btn-quiet' : 'btn-danger'" @click="panicLockdownToggle" :disabled="loading || !panicHost">{{ panicLockdownOn() ? 'Lift lockdown' : 'Lockdown (no exemptions)' }}</button>
           <span class="muted">Nothing gets past the challenge — crawlers and verified bots too (they can't solve it). For a crawler storm; ends on its own, at most 6h.</span>
         </div>
         <p class="statusline" v-if="panicMsg">{{ panicMsg }}</p>
         <p class="muted" v-if="panicStatus" :title="panicStatusTitle()">{{ panicStatusLine() }}</p>
-        <p class="statusline" v-if="panicLockdownOn()" :title="lockdownHelp"><strong>⛔ {{ panicLockdownLine() }}</strong> — no client exemption on {{ panicHost }}: crawlers, verified bots and excluded clients all get the challenge.</p>
+        <p class="statusline" v-if="panicLockdownOn()" :title="lockdownHelp"><strong>{{ panicLockdownLine() }}</strong> — no client exemption on {{ panicHost }}: crawlers, verified bots and excluded clients all get the challenge.</p>
       </section>
 
       <!-- 1. Security Overview -->
@@ -174,25 +174,30 @@
                   <div class="ctl-chips"><span v-for="c in controlsChips(row)" :key="c.key" class="pill" :class="c.tone">{{ c.text }}</span></div>
                 </td>
                 <td>
-                  <button :class="vhostControlEnabled(row, 'challenge') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')">{{ vhostControlButtonLabel(row, 'challenge') }}</button>
+                  <button type="button" class="tgl" :class="['tone-' + vhostControlState(row, 'challenge').tone, { locked: vhostControlState(row, 'challenge').locked }]" role="switch" :aria-checked="vhostControlState(row, 'challenge').on ? 'true' : 'false'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')" :aria-label="'Challenge for ' + row.host"><span class="tgl-track" aria-hidden="true"><span class="tgl-knob"></span></span><span class="tgl-word">{{ vhostControlState(row, 'challenge').word }}</span></button>
+                  <div class="tgl-cap" v-if="vhostControlState(row, 'challenge').caption">{{ vhostControlState(row, 'challenge').caption }}</div>
                 </td>
                 <td>
-                  <button :class="row.under_attack ? 'btn-danger' : 'btn-quiet'" @click="toggleUnderAttack(row)" :disabled="loading || !row.under_attack_toggleable" :title="underAttackButtonTitle(row)">{{ row.under_attack ? '🚨 UNDER ATTACK' : 'AUTO' }}</button>
+                  <button :class="row.under_attack ? 'btn-danger' : 'btn-quiet'" @click="toggleUnderAttack(row)" :disabled="loading || !row.under_attack_toggleable" :title="underAttackButtonTitle(row)">{{ row.under_attack ? 'UNDER ATTACK' : 'AUTO' }}</button>
                   <button class="btn-quiet btn-sm" v-if="row.under_attack && row.challenge_rung === 'v2'" @click="selectPanicHost(row.host)" :disabled="loading" :title="rowTierTitle(row)">strict v2 ✓</button>
                   <button class="btn-danger btn-sm" v-if="row.under_attack && row.challenge_rung !== 'v2'" @click="quickStrict(row.host)" :disabled="loading" :title="'Under attack = the plain challenge is being solved. Arm a strict (v2) challenge on this vhost for ' + panicTTL + ' (or switch its existing manual arm to v2, keeping the expiry). Status and Disarm in the Emergency challenge card above.'">→ Strict v2</button>
-                  <button class="btn-danger btn-sm" v-if="rowLockdownLabel(row)" @click="selectPanicHost(row.host)" :disabled="loading" :title="lockdownHelp + ' — click to manage it in the Emergency challenge card above.'">⛔ {{ rowLockdownLabel(row) }}</button>
+                  <button class="btn-danger btn-sm" v-if="rowLockdownLabel(row)" @click="selectPanicHost(row.host)" :disabled="loading" :title="lockdownHelp + ' — click to manage it in the Emergency challenge card above.'">{{ rowLockdownLabel(row) }}</button>
                 </td>
                 <td>
-                  <button :class="vhostControlEnabled(row, 'waf') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')">{{ vhostControlButtonLabel(row, 'waf') }}</button>
+                  <button type="button" class="tgl" :class="['tone-' + vhostControlState(row, 'waf').tone, { locked: vhostControlState(row, 'waf').locked }]" role="switch" :aria-checked="vhostControlState(row, 'waf').on ? 'true' : 'false'" @click="toggleVhostProtection(row, 'waf')" :disabled="loading || !vhostControlToggleable(row, 'waf')" :title="vhostControlButtonTitle(row, 'waf')" :aria-label="'WAF for ' + row.host"><span class="tgl-track" aria-hidden="true"><span class="tgl-knob"></span></span><span class="tgl-word">{{ vhostControlState(row, 'waf').word }}</span></button>
+                  <div class="tgl-cap" v-if="vhostControlState(row, 'waf').caption">{{ vhostControlState(row, 'waf').caption }}</div>
                 </td>
                 <td>
-                  <button :class="vhostControlEnabled(row, 'http3') ? 'btn-quiet' : 'btn-muted'" @click="toggleVhostProtection(row, 'http3')" :disabled="loading || !vhostControlToggleable(row, 'http3')" :title="vhostControlButtonTitle(row, 'http3')">{{ vhostControlButtonLabel(row, 'http3') }}</button>
+                  <button type="button" class="tgl" :class="['tone-' + vhostControlState(row, 'http3').tone, { locked: vhostControlState(row, 'http3').locked }]" role="switch" :aria-checked="vhostControlState(row, 'http3').on ? 'true' : 'false'" @click="toggleVhostProtection(row, 'http3')" :disabled="loading || !vhostControlToggleable(row, 'http3')" :title="vhostControlButtonTitle(row, 'http3')" :aria-label="'HTTP/3 for ' + row.host"><span class="tgl-track" aria-hidden="true"><span class="tgl-knob"></span></span><span class="tgl-word">{{ vhostControlState(row, 'http3').word }}</span></button>
+                  <div class="tgl-cap" v-if="vhostControlState(row, 'http3').caption">{{ vhostControlState(row, 'http3').caption }}</div>
                 </td>
                 <td>
-                  <button :class="vhostControlEnabled(row, 'clam') ? 'btn-quiet' : 'btn-muted'" @click="toggleVhostProtection(row, 'clam')" :disabled="loading || !vhostControlToggleable(row, 'clam')" :title="vhostControlButtonTitle(row, 'clam')">{{ vhostControlButtonLabel(row, 'clam') }}</button>
+                  <button type="button" class="tgl" :class="['tone-' + vhostControlState(row, 'clam').tone, { locked: vhostControlState(row, 'clam').locked }]" role="switch" :aria-checked="vhostControlState(row, 'clam').on ? 'true' : 'false'" @click="toggleVhostProtection(row, 'clam')" :disabled="loading || !vhostControlToggleable(row, 'clam')" :title="vhostControlButtonTitle(row, 'clam')" :aria-label="'ClamAV scanning for ' + row.host"><span class="tgl-track" aria-hidden="true"><span class="tgl-knob"></span></span><span class="tgl-word">{{ vhostControlState(row, 'clam').word }}</span></button>
+                  <div class="tgl-cap" v-if="vhostControlState(row, 'clam').caption">{{ vhostControlState(row, 'clam').caption }}</div>
                 </td>
                 <td>
-                  <button :class="vhostControlEnabled(row, 'clammode') ? 'btn-quiet' : 'btn-muted'" @click="toggleVhostProtection(row, 'clammode')" :disabled="loading || !vhostControlToggleable(row, 'clammode')" :title="vhostControlButtonTitle(row, 'clammode')">{{ vhostControlButtonLabel(row, 'clammode') }}</button>
+                  <button type="button" class="tgl" :class="['tone-' + vhostControlState(row, 'clammode').tone, { locked: vhostControlState(row, 'clammode').locked }]" role="switch" :aria-checked="vhostControlState(row, 'clammode').on ? 'true' : 'false'" @click="toggleVhostProtection(row, 'clammode')" :disabled="loading || !vhostControlToggleable(row, 'clammode')" :title="vhostControlButtonTitle(row, 'clammode')" :aria-label="'ClamAV inline mode for ' + row.host"><span class="tgl-track" aria-hidden="true"><span class="tgl-knob"></span></span><span class="tgl-word">{{ vhostControlState(row, 'clammode').word }}</span></button>
+                  <div class="tgl-cap" v-if="vhostControlState(row, 'clammode').caption">{{ vhostControlState(row, 'clammode').caption }}</div>
                 </td>
               </tr>
               <tr v-if="!vhostControlsFiltered.length"><td colspan="7" class="muted">No vhosts matched current scope/filter.</td></tr>

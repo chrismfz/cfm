@@ -22,6 +22,7 @@ import {
   lockdownRequest,
 } from "./challenge-lockdown.js";
 import { hostSet, chips, without, weight } from "./vhost-picker-model.js";
+import { enabled as controlEnabled, toggleable as controlToggleable, matched as controlMatched, state as controlState } from "./controls-model.js";
 
 // The chips the table already shows as its own columns (Challenge, Under
 // Attack + lockdown, WAF, HTTP/3, Clam mode): the host cell carries the rest.
@@ -175,58 +176,11 @@ export const controlsMixin = {
     },
 
     // ── Per-vhost protection toggles ───────────────────────────────────
-    vhostControlEnabled(row, kind) {
-      let key;
-      if (kind === "challenge") key = "challenge_enabled";
-      else if (kind === "waf") key = "waf_enabled";
-      else if (kind === "http3") key = "http3_enabled";
-      else if (kind === "clam") key = "clam_enabled";
-      else if (kind === "clammode") key = "clam_mode_inline";
-      else return false;
-      return Boolean(row?.[key]);
-    },
-    vhostControlToggleable(row, kind) {
-      let key;
-      if (kind === "challenge") key = "challenge_toggleable";
-      else if (kind === "waf") key = "waf_toggleable";
-      else if (kind === "http3") key = "http3_toggleable";
-      else if (kind === "clam") key = "clam_toggleable";
-      else if (kind === "clammode") key = "clam_mode_toggleable";
-      else return false;
-      return Boolean(row?.[key]);
-    },
-    vhostControlMatchedExclude(row, kind) {
-      let key;
-      if (kind === "challenge") key = "challenge_matched_exclude";
-      else if (kind === "waf") key = "waf_matched_exclude";
-      else if (kind === "http3") key = "http3_matched_optin";
-      else return ""; // clam/clammode: exact-match only, no pattern to surface
-      return String(row?.[key] || "").trim();
-    },
-    vhostControlButtonLabel(row, kind) {
-      const enabled = this.vhostControlEnabled(row, kind);
-      const toggleable = this.vhostControlToggleable(row, kind);
-      // HTTP/3 uses opt-in semantics: default is OFF, presence = ON.
-      // The labels reflect the actual state — same wording as WAF/Challenge.
-      if (kind === "http3") {
-        if (enabled) return "ON / ENABLED";
-        return toggleable ? "OFF / DEFAULT" : "ON / MATCHED BY PATTERN";
-      }
-      // ClamAV: XOR of global default and per-vhost override. Not-toggleable
-      // means ClamAV is globally off (there is no per-vhost pattern lock).
-      if (kind === "clam") {
-        if (enabled) return "ON / SCANNING";
-        return toggleable ? "OFF / NOT SCANNED" : "OFF / GLOBALLY OFF";
-      }
-      // ClamAV mode: inline blocks an infected upload (fail-open); async only
-      // notifies. Not-toggleable = the vhost isn't scanned at all.
-      if (kind === "clammode") {
-        if (enabled) return "INLINE / BLOCKING";
-        return toggleable ? "ASYNC / NOTIFY" : "N/A / NOT SCANNED";
-      }
-      if (enabled) return "ON / ENABLED";
-      return toggleable ? "OFF / DISABLED" : "OFF / MATCHED BY PATTERN";
-    },
+    // The row's per-kind fields and the switch wording: controls-model.js.
+    vhostControlEnabled(row, kind) { return controlEnabled(row, kind); },
+    vhostControlToggleable(row, kind) { return controlToggleable(row, kind); },
+    vhostControlMatchedExclude(row, kind) { return controlMatched(row, kind); },
+    vhostControlState(row, kind) { return controlState(row, kind); },
     vhostControlButtonTitle(row, kind) {
       const enabled = this.vhostControlEnabled(row, kind);
       const matched = this.vhostControlMatchedExclude(row, kind);

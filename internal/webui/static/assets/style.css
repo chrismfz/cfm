@@ -289,6 +289,39 @@ button:focus-visible, a:focus-visible, .input:focus-visible {
   background: var(--accent-soft);
 }
 .btn-sm { padding: .22rem .5rem; font-size: .78rem; border-radius: 6px; }
+
+/* ── Switch (Vhost controls' per-host toggles; controls-model.js) ─────────
+   A track + knob + a short state word, with a muted caption under it saying
+   what decided the state. The tone says how loud the cell is: a protection
+   turned OFF is "danger", an opt-in left off is "muted". */
+.tgl {
+  display: inline-flex; align-items: center; gap: .45rem;
+  background: transparent; color: var(--fg); border: none; padding: .15rem .1rem;
+  font-size: .82rem; font-weight: 600;
+}
+.tgl:hover { filter: none; }
+.tgl:hover .tgl-track { border-color: var(--accent); }
+.tgl:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.tgl-track {
+  position: relative; width: 30px; height: 17px; flex: none; border-radius: 999px;
+  background: var(--bg-inset); border: 1px solid var(--border); transition: background .12s ease, border-color .12s ease;
+}
+.tgl-knob {
+  position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--muted); transition: transform .12s ease, background .12s ease;
+}
+.tgl[aria-checked="true"] .tgl-knob { transform: translateX(13px); background: #fff; }
+.tgl.tone-ok[aria-checked="true"] .tgl-track { background: var(--ok); border-color: var(--ok); }
+.tgl.tone-info[aria-checked="true"] .tgl-track { background: var(--accent); border-color: var(--accent); }
+.tgl.tone-warn[aria-checked="true"] .tgl-track { background: var(--warn); border-color: var(--warn); }
+.tgl.tone-danger .tgl-track { background: var(--danger-soft); border-color: var(--danger); }
+.tgl.tone-danger .tgl-knob { background: var(--danger); }
+.tgl.tone-danger .tgl-word { color: var(--danger); }
+.tgl.tone-muted .tgl-word { color: var(--muted); font-weight: 500; }
+.tgl.locked .tgl-track { border-style: dashed; }
+.tgl:disabled { cursor: not-allowed; opacity: 1; }
+.tgl-cap { font-size: .72rem; color: var(--muted); margin-top: .1rem; max-width: 16ch; overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { .tgl-track, .tgl-knob { transition: none; } }
 .btn-danger {
   background: var(--danger-soft);
   border: 1px solid var(--danger);
@@ -795,17 +828,21 @@ code {
 @media (max-width: 1000px) {
   .topbar { flex-wrap: wrap; gap: .6rem; }
   .meta { width: 100%; justify-content: flex-start; }
-  .layout { grid-template-columns: 1fr; padding: 1rem; }
-  .exclude-grid { grid-template-columns: 1fr; }
+  /* minmax(0, 1fr), not 1fr (= minmax(auto, 1fr)): a wide child (a toolbar,
+     a long host) must not push the one column past a phone's width. */
+  .layout { grid-template-columns: minmax(0, 1fr); padding: 1rem max(16px, env(safe-area-inset-right, 0px)) 1rem max(16px, env(safe-area-inset-left, 0px)); }
+  .layout > * { min-width: 0; }
+  .exclude-grid { grid-template-columns: minmax(0, 1fr); }
   .drill-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "metrics"
       "ips"
       "paths"
       "agents";
   }
-  .live-chart-grid { grid-template-columns: 1fr; }
+  .live-chart-grid { grid-template-columns: minmax(0, 1fr); }
+  .exclude-grid > *, .drill-grid > *, .live-chart-grid > * { min-width: 0; }
   .truncate { max-width: 180px; }
   .notifier-history-layout { grid-template-columns: 1fr; }
 }

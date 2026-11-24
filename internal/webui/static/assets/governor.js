@@ -194,9 +194,10 @@
   }
 
   function riskLabel(row) {
-    if ((row.locked || 0) > 0) return '🔴 locked';
-    if ((row.max_idle || 0) > 300) return '🟡 stale';
-    return '🟢 ok';
+    // A pill, not a coloured emoji: the theme's tones, the same in every OS.
+    if ((row.locked || 0) > 0) return '<span class="pill danger">locked</span>';
+    if ((row.max_idle || 0) > 300) return '<span class="pill warn">stale</span>';
+    return '<span class="pill ok">ok</span>';
   }
 
   function waitPct(cpuSec, busySec) {
