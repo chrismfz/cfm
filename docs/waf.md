@@ -1376,6 +1376,39 @@ the `fbsv.net` forward proxies) never take this key. The rates are in the
 confs (`meta_ext_node_rps`, `meta_ext_node_conn`), so a change is a conf
 change.
 
+**meta-webindexer takes the same node cap, under its own key (since
+2026-11-24).** Meta AI's search indexer was in no Meta budget at all, per
+vhost or per node. A read of 7 nodes on 2026-11-23/24 put the origin cost
+of each Meta crawler at:
+
+| Crawler | Average concurrent origin requests | Budget |
+|---|---|---|
+| meta-externalagent | ~21 across the fleet (5.3 on titan, 5.6 on orion) | node cap |
+| meta-webindexer | ~8 (2.1 on titan, 1.8 on orion), mostly at night | node cap (new) |
+| facebookexternalhit (link previews) | ~3.5 | per vhost |
+| meta-externalads (ads) | ~0.45 | per vhost |
+| facebookcatalog | ~0 | per vhost |
+
+On titan the Meta crawlers together kept ~8 origin requests busy, against
+12–25 for the whole node at a normal hour. meta-webindexer now counts as a
+Meta crawler on the per-vhost budgets (`$is_meta_crawler` 2), and on the node
+gets 2 pages/s, burst 10, 6 connections of its own: the two crawlers' keys
+share the zones, never a budget. Link previews, ads and the catalog keep
+their per-vhost budgets only: they are the paid side, and cost little. The
+in-app browsers (real users) take no crawler budget at all.
+
+Two things to know:
+- **Visibility in Meta AI search.** The indexer's night runs will now meet
+  429s, and Meta may crawl less or drop pages that keep answering 429. After
+  a deploy, count meta-webindexer's 429s in `throttle.log` (it logs only
+  429s) against its requests in the access log, across the fleet for a few
+  days. If the share is high, raise its rate.
+- **A spoofed UA can starve the real crawler.** Each crawler has one key per
+  node, so anyone sending that UA at 2 pages/s or more from any address keeps
+  the real crawler at 429 on that node. This was already true of
+  meta-externalagent. It is acceptable for a soft throttle; if it matters,
+  the fix is a key gated on Meta's ASN (AS32934), not a map change.
+
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
 Family `WAF_AUTH_BURST`, all `block`: 510 `system.multicall`, 511

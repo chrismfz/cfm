@@ -141,10 +141,13 @@ func TestCrawlerThrottleStaticBudgetCoversStaticLocation(t *testing.T) {
 	}
 }
 
-// The node-wide meta-externalagent cap (2026-11-24): one key for the whole
-// node, pages only, meta-externalagent only, applied wherever the per-vhost
-// page limits are.
-func TestMetaExternalAgentNodeCap(t *testing.T) {
+// The node-wide caps (2026-11-24): one key per crawler for the whole node,
+// pages only, applied wherever the per-vhost page limits are. Two crawlers
+// take one: meta-externalagent and meta-webindexer, each under its own key
+// (neither spends the other's budget). Link previews, ads, the catalog and
+// the in-app browsers never do. meta-webindexer is a Meta crawler (2) on the
+// per-vhost budgets too: it was in none.
+func TestMetaCrawlerNodeCaps(t *testing.T) {
 	for _, path := range append(crawlerThrottleConfs, "../../configs/cfm-edge.conf") {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -152,8 +155,11 @@ func TestMetaExternalAgentNodeCap(t *testing.T) {
 		}
 		conf := string(raw)
 		for _, want := range []string{
-			`"~*meta-externalagent" 1;`,
-			`"1|0|0" "meta-externalagent";`,
+			`"~*meta-externalagent" "meta-externalagent";`,
+			`"~*meta-webindexer"    "meta-webindexer";`,
+			`"meta-externalagent|0|0" "meta-externalagent";`,
+			`"meta-webindexer|0|0"    "meta-webindexer";`,
+			`"~*meta-webindexer"      2;`,
 			`limit_req_zone  $meta_ext_node_key zone=meta_ext_node_rps:1m rate=2r/s;`,
 			`limit_conn_zone $meta_ext_node_key zone=meta_ext_node_conn:1m;`,
 		} {
@@ -165,7 +171,25 @@ func TestMetaExternalAgentNodeCap(t *testing.T) {
 		if m == nil {
 			t.Fatalf("%s: $is_meta_ext_agent map not found", path)
 		}
-		for _, other := range []string{"facebookexternalhit", "meta-externalads", "facebookcatalog", "FB_IAB"} {
+		// The in-app browsers map to "" (users, never capped), and come before
+		// every crawler line: nginx takes the first regex that matches, so an
+		// in-app UA carrying a crawler token must not reach a crawler line.
+		if !regexp.MustCompile(`(?m)^\s*default\s+"";`).MatchString(m[1]) {
+			t.Errorf("%s: $is_meta_ext_agent must default to \"\" (no key)", path)
+		}
+		firstCrawler := len(m[1])
+		for _, c := range []string{`"~*meta-externalagent"`, `"~*meta-webindexer"`} {
+			if i := strings.Index(m[1], c); i >= 0 && i < firstCrawler {
+				firstCrawler = i
+			}
+		}
+		for _, inApp := range []string{"FB_IAB", "FBAV", "Instagram", "IABMV"} {
+			loc := regexp.MustCompile(`"~\*` + inApp + `"\s+"";`).FindStringIndex(m[1])
+			if loc == nil || loc[0] > firstCrawler {
+				t.Errorf("%s: in-app %s must map to \"\" before every crawler line in $is_meta_ext_agent", path, inApp)
+			}
+		}
+		for _, other := range []string{"facebookexternalhit", "meta-externalads", "facebookcatalog"} {
 			if strings.Contains(m[1], other) {
 				t.Errorf("%s: %s must not take the node cap", path, other)
 			}
