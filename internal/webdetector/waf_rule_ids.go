@@ -107,8 +107,10 @@ var wafRuleIDs = []WAFRule{
 	{ID: 305, Name: "rule_php_wrappers", ReasonFamily: "WAF_PHP_WRAPPER", DefaultMode: "block"},
 	{ID: 306, Name: "rule_serialize", ReasonFamily: "WAF_SERIALIZE", DefaultMode: "challenge_v2"},
 	// 307: XXE DOCTYPE / ENTITY SYSTEM. Block since 2026-11-17 (85 hits a
-	// week, all datacenter scanners), ban held through a burn-in.
-	{ID: 307, Name: "rule_xxe", ReasonFamily: "WAF_XXE", DefaultMode: "block", HoldAutoblock: true},
+	// week, all datacenter scanners); its ban, held through a burn-in, is
+	// armed since 2026-11-24 (220 hits / 91 IPs in 5.5 days on 8 nodes, all
+	// datacenter, 0 GR/CY).
+	{ID: 307, Name: "rule_xxe", ReasonFamily: "WAF_XXE", DefaultMode: "block"},
 	{ID: 308, Name: "rule_shellshock", ReasonFamily: "WAF_SHELLSHOCK", DefaultMode: "challenge_v2"},
 	{ID: 310, Name: "rule_cmd_params", ReasonFamily: "WAF_CMD_PARAM", DefaultMode: "challenge_v2"},
 	{ID: 311, Name: "rule_cmd_payload", ReasonFamily: "WAF_CMD_PAYLOAD", DefaultMode: "challenge_v2"},
@@ -149,21 +151,27 @@ var wafRuleIDs = []WAFRule{
 	// (option=com_ + task=asset.upload*), where a php-bearing zip is never
 	// legitimate — so it ships at `block`.
 	{ID: 414, Name: "rule_upload_archive_php", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
-	{ID: 415, Name: "rule_upload_content_deep", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "logonly"},
+	// 415: 402's openers in each uploaded file, whole. Block since 2026-11-24
+	// (7-day burn-in: one hit, a .png carrying <?php through Bricksforge's
+	// upload; 0 FP), ban held: WAF_UPLOAD_CONTENT is armed by 402.
+	{ID: 415, Name: "rule_upload_content_deep", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "block", HoldAutoblock: true},
 	// A non-multipart POST / PUT / PATCH body that is a PHP file (opens with
 	// <?php / <?=, or a GIF header and one), whatever its Content-Type
 	// says. A php://input dropper's upload (dmkomotinis.gr's up.php took
 	// yavuzshell.php as application/octet-stream), which 402 (multipart)
 	// and 404 (textual types, 2 KB) miss. Block since 2026-11-17 (7-day
 	// burn-in: 289 hits, the PHPUnit eval-stdin.php sweep and a PUT
-	// dropper); its ban is held through a burn-in (~40 bans a day).
-	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block", HoldAutoblock: true},
+	// dropper); its ban, held through a burn-in, is armed since 2026-11-24
+	// (74 hits / 66 IPs in 5.5 days on 8 nodes, all datacenter, 0 GR/CY).
+	{ID: 416, Name: "rule_php_file_body", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block"},
 	// 404's scorer over the whole body the edge read (32 KB), when 404's
 	// 2 KB head scored nothing: PHP saved through a form field (a plugin
 	// editor, a file manager's put, a webshell's own editor) past the head
-	// (orion 2026-11-15, rigel 2026-11-17). Logonly through burn-in: a whole
-	// legitimate plugin file saved through an editor is scored too.
-	{ID: 417, Name: "rule_php_webshell_body_deep", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "logonly"},
+	// (orion 2026-11-15, rigel 2026-11-17). A whole legitimate plugin file
+	// saved through an editor is scored too. Block since 2026-11-24 (7-day
+	// burn-in: 5 hits, every one an attacker; 0 FP), ban held so such a save
+	// is a 403, never a 6 h ban.
+	{ID: 417, Name: "rule_php_webshell_body_deep", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
@@ -322,6 +330,17 @@ var wafRuleIDs = []WAFRule{
 	// #access_callback). Drupal builds those keys server-side; a 7-day read of
 	// all 8 edge nodes found them only in attacks. Armed.
 	{ID: 10030, Name: "rule_cve_drupal_render_callback", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
+	// 10031 / 10032 / 10033: the request shapes of the php-src advisories of
+	// 2026-11-19, logonly burn-in (a promotion decides the autoblock intent
+	// in the same change). 10031 = CVE-2026-129289, a FastCGI request or
+	// length-prefixed FastCGI parameter name in a POST body (PHP-FPM request
+	// smuggling through an unread body). 10032 = CVE-2026-129496, an
+	// Authorization header over nginx's default 8 KB per-header limit.
+	// 10033 = CVE-2026-129289's first leg: a multipart body that leaves bytes
+	// PHP never reads (a garbled part, no boundary, a boundary too large).
+	{ID: 10031, Name: "rule_cve_php_fpm_smuggle", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	{ID: 10032, Name: "rule_cve_php_oversized_auth", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	{ID: 10033, Name: "rule_cve_php_multipart_desync", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

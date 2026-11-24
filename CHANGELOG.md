@@ -20,7 +20,399 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Changed
+- **WAF rules 307 (XXE) and 416 (a PHP file as the request body) now ban.**
+  Both block since 2026-11-17 with their `waf_security` ban held for a
+  burn-in. On 8 nodes from 2026-11-19 to 11-24 (5.5 days), 307 had 220 hits
+  from 91 IPs and 416 had 74 from 66. Every hit came from a datacenter
+  scanner or webshell uploader. None came from GR/CY, none hit a panel port,
+  and none was a false positive. A hit now gives the usual soft 6 h ban
+  (15 min for GR/CY under leniency). `RULE_307 = 0` / `RULE_416 = 0` in
+  `[waf_security]` hold one again. Both rules move back to their earlier
+  place in the WAF: in the late group, rule 303 (still held) could take the
+  hit, and with it the ban. Rule 303 stays held: its sweep sends one request
+  per Google Cloud IP, so a ban would add thousands of addresses that never
+  return.
+- **WooCommerce add-to-cart from a declared crawler now gets a 301, and
+  meta-externalagent has a node-wide cap.** On 2026-11-24 Meta's AI /
+  indexing crawler (meta-externalagent) sent titan ~530 pages a minute for
+  three hours at ~1.5 s of PHP each, ~27 000 of them `?add-to-cart=` cart
+  writes; titan and orion hit 100% CPU. Two changes:
+  - Rule 530's `CRAWLER` tag (a declared crawler UA) is answered with a 301
+    to the same URL without `add-to-cart`, so the shop writes no cart. Not
+    behind Cloudflare (a CDN could cache the 301 for shoppers), and only
+    when nothing stronger matched. `NO_REFERER` / `XSITE` stay logonly.
+    `wc_cart_crawl_redirect = false` in `cfm_waf_config.lua` turns it off.
+  - The edge gives meta-externalagent one budget for the whole node: 2
+    pages/s (burst 10) and 6 connections, then 429. The per-vhost Meta
+    budgets never bound it, since it spreads over every shop. Link previews
+    (facebookexternalhit), ads (meta-externalads), the in-app browsers and
+    its images are not affected.
+  See `docs/waf.md`, "Rule 530".
+
+### Changed
+- **WAF rules 415 and 417 block (bans held).** Rule 417 (PHP source in the
+  whole POST body, past rule 404's 2 KB) and rule 415 (PHP in an uploaded
+  file, past rule 402's head) move from logonly to block after a 7-day
+  read on 8 nodes. 417 had 5 hits, every one an attacker: a Joomla tool
+  writing `system($_GET…)` into each template's `error.php` through the
+  template editor (twice, on one site), and an eval spray. 415 had 1, a
+  `.png` carrying `<?php` posted to a WordPress form-upload endpoint. No
+  false positives. Neither bans: their autoblock is held per rule
+  (`RULE_415 = 0`, `RULE_417 = 0`), because a real plugin file saved
+  through an editor, or a real file quoting PHP, still scores, and that
+  must be a 403 rather than a 6 h ban. 415 now runs late with the other
+  held rules, so a request an armed rule also catches keeps that rule's ban.
+  417 now stands down, like the other body-PHP rules, on the code-editor and
+  installer endpoints (Code Snippets, String Locator, the plugin / theme
+  installer). On a site without pretty permalinks
+  (`/index.php?rest_route=/code-snippets/...`) they are not exempt, since any
+  other app's index.php could be reached that way: such a site needs a
+  rule-scoped exclude. Webmail is not exempt: an email over 2 KB quoting PHP gets a
+  403 there. See `docs/waf.md`, "Rule 415" and "Rule 417".
 ### Added
+- **A per-IP challenge that is loaded again and again but never solved can
+  now be held instead of running out** (`[webdetector]
+  CHALLENGE_UNSOLVED_HOLD`, default `log`). On titan a facet scraper on Greek
+  residential IPs was challenged per IP, reached the origin with 0 pages while
+  the challenge lived, loaded the challenge page ~80 times a minute without
+  solving, then waited out the 20-minute TTL and, under the 45-minute
+  `CHALLENGE_COOLDOWN`, went back to full rate for over an hour. With
+  `enforce`, 20 unsolved page loads in 10 minutes hold the challenge for an
+  hour, renewed while they continue (at most 24 h). It only extends a live
+  per-IP challenge (never starts one, never over a block, no vhost-wide
+  effect), and a solve on the address ends it. `log` writes
+  `[challenge] unsolved_hold verdict=would_hold` lines to the challenge log for
+  a burn-in; review by 2026-12-08 (`docs/abuse-defense-master-plan.md` §5).
+
+### Fixed
+- **sslcollector: edge workers hand the memory of replaced certificates back
+  to the OS.** The full collect after each ingest frees the old pairs, but
+  glibc kept their pages: with traffic allocations in between it could not
+  reuse them whole, so a worker's RSS climbed to the peak of an ingest and
+  stayed there (titan, 3500 names: 118 → 440 MB over three hourly ingests). A
+  `malloc_trim(0)` now follows the collect (~25-40 ms, in the background
+  timer); in a container it brought the settled RSS from 227 to 165 MB. The
+  `[sslcollector] gc` line reports it as `trim_ms=` (`-` where glibc's
+  malloc_trim is absent).
+- **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
+  current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
+  Chrome/145 … (compatible; meta-externalagent/1.1 (+https://…))`, the UA
+  normalizer (Go `NormalizeUA` and its edge twin `cfm_ua_emergency.lua`)
+  looked only at the first `(...)` group and keyed the crawler as `mozilla`,
+  so the rule never hit (titan, 2026-11-24: 0 hits a minute). Every group is
+  scanned now (a group ends at its matching `)`, an unclosed one runs to the
+  end), and `indexer`, `googleother` and `google-inspectiontool` join the bot
+  markers (none of those names matched one). Browser UAs still read
+  `mozilla`. **Review your active rules before upgrading (`cfm bots list`):**
+  Googlebot smartphone now keys as `googlebot` and Bingbot mobile as
+  `bingbot`, so an existing `googlebot` / `bingbot` rule starts covering the
+  mobile crawler too. `google-inspectiontool` (Search Console) joins the
+  Google crawlers that need `--confirm`. The two normalizers are now
+  ASCII-only on both sides (they keyed a UA with NBSP or non-ASCII letters
+  differently) and run one shared fixture. The edge's UA trim is linear
+  now: while any `cfm bots` rule was active, one request with a long run of
+  spaces inside its User-Agent cost ~200 ms of worker CPU (8 KB header).
+- **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**
+  Every `/etc/cfm` file was a dpkg conffile, and CFM edits several of them
+  itself (`cfm allow` / `cfm block`, the WebUI's notify and detectors editors,
+  `cfm edge ipv6`, `cfm kernsec`). So on every release that changed one,
+  `apt upgrade` stopped at "Configuration file '/etc/cfm/cfm.conf' … (Y/I/N/O/D/Z)":
+  `-y` cannot answer that, a broadcast multi-host session hung on every Debian
+  node, and unattended-upgrades skipped cfm altogether, so those nodes quietly
+  stayed on the old version. The .deb now does what the rpm's
+  `%config(noreplace)` always did: an edited file is kept and the new default is
+  written beside it as `<name>.dpkg-dist` (the `.rpmnew`), a file nobody changed
+  is updated, and nothing is asked. The first upgrade to this version already
+  runs without a question; your files are not touched. As on the rpm, a
+  listed `/etc/cfm` file you deleted is installed again from the default.
+
+## 2026.11.23
+
+### Fixed
+- **agent config sync: spamd no longer skips the files we push.** Every
+  synced file was written with mode 0600, whatever it had before. spamd reads
+  its config without root, so on 2026-11-22 `myip.cf` and
+  `mailfromfilters.cf` were rewritten 0600 on every cPanel node and spamd
+  dropped them ("cannot open … Permission denied"): no `*_MYIP` RBL tests, no
+  Mail From Filters, and no `dns_server` line (Spamhaus answered the public
+  resolver with `*_BLOCKED_OPENDNS`). A rewrite now keeps the file's mode and
+  owner, a SpamAssassin file is always made group/other readable (so one an
+  older agent left at 0600 is repaired by the next sync), and a new file under
+  `/etc/mail/spamassassin/` gets 0644 (0600 elsewhere). The temp file is
+  unique and gets its mode before the rename, so a failed chmod fails the
+  update instead of leaving an unreadable file (a failed chown is logged and
+  the file is written as the agent's, as before). A rollback restores the old
+  content but keeps a SpamAssassin file readable, every directory level
+  created under the SpamAssassin dir is 0755, and temp files a killed write
+  left behind are removed by the next write.
+- **sslcollector: edge workers no longer grow with every certificate
+  reload.** The certificates and keys a worker had replaced were freed only
+  when LuaJIT's garbage collector next ran a full cycle, which it rarely did,
+  because it does not see the OpenSSL memory behind them; on titan (3513
+  names) workers reached 410-530 MB. Each fetch or snapshot load that changes
+  the store now runs a full collect once the payload is released (~50 ms for
+  3000 pairs, in the background timer, never on a handshake), and logs a
+  `[sslcollector] gc src=… gc_ms= lua_kb= rss_mb=` line: the collect's time,
+  the Lua heap and the worker's RSS.
+
+### Fixed
+- **`cfm webtop` no longer takes a flag for a host.** `cfm webtop challenge
+  add --help` armed manual challenges for `--help` and `www.--help`, and
+  `challenge remove -- --help` removed a host named `--`. Every subcommand
+  that takes a host now prints its usage for `-h`, `--help` or `help` and
+  refuses a host that starts with `-`, before calling the API. The commands
+  that create state (`challenge add/tier/lockdown`, `attack on`,
+  `site-cache set`, `exclude add`) also refuse a value that is not a hostname
+  (letters, digits, dots, hyphens, an optional leading `*.`; exclude values
+  keep their `*`/`?`/`[…]` globs). The commands that read or clear an existing
+  record (`challenge remove/status/host`, `attack off`,
+  `site-cache get/off/remove/purge/stats`, `exclude remove`) refuse only a
+  flag, so they can still clear one keyed on an odd host: `cfm webtop
+  challenge remove www.--help` cleans up after the bug. `cfm webtop challenge
+  --help` and `cfm webtop attack --help` print the usage instead of calling
+  the API.
+- **Every `cfm` command prints its usage for `-h`, `--help` or `help` and does
+  nothing else.** Several never read their arguments, or ran when the flag
+  parser stopped at a positional `help`:
+  - `cfm reset --help` emptied table `inet cfm`, `cfm disable --help` deleted
+    it, and `cfm flush --help` freed every TTL ban and discarded the saved
+    ones. These three now take no argument at all: any other argument is
+    refused before nft is touched.
+  - `cfm kernsec init|apply|disable|rollback help` and `cfm lsm
+    init|enable|disable|restart help` ran the command with its defaults
+    (`cfm lsm init --help` ran the whole bring-up). `cfm realip fix --help`
+    rewrote the origin's config. `cfm daemon help` started a second daemon.
+  - `cfm clam enable|disable|hook …|scan on|off --help` rewrote `cfm.conf`.
+  - API writes with the help word as the target or ignored: `cfm bots block
+    --help` (an emergency UA rule for `--help`), `webtop history prune
+    --help` and `mysqltop history prune --help` (30 days pruned), `mysqltop
+    user-kill --id=N help` (killed the connection), `webtop waf clear`,
+    `http3 enable|disable`, `rules remove`, `challenge-access remove`, `tokens
+    revoke`, `clam sigignore add help`.
+  - A help word after the target: `cfm unblock|unallow <IP> --help` and
+    `cfm allow <IP> help` acted on the IP, and `cfm dnat [cpanel] bypass
+    add|remove <IP> --help` edited the bypass list. They now print usage, and
+    refuse any argument after the target.
+  - `cfm auth session purge help` and `cfm auth log purge help` purged:
+    every `cfm auth` leaf is now flags-only.
+  - Harmless but wrong: `cfm test --help` ran the checks, `cfm debug help`
+    wrote a one-minute bundle, `cfm htpasswd help` asked for a password,
+    `cfm list|status|allow-list|php-inventory help` and the webtop/bots/
+    health/mysqltop views ran, and `cfm ssl --help`, `webtop waf|rules
+    --help` said "unknown subcommand".
+  The help-word check is one shared package (`internal/clihelp`); a test per
+  command package runs every subcommand with each help word against a
+  backend and an API server that fail on any call.
+
+### Changed
+- **The SSL Collector sends each key without the chain its file may carry.**
+  Panels write key files as bundles (cPanel's combined key+leaf+chain,
+  DirectAdmin's `.combined`, Virtualmin's `ssl.combined`), and the whole file
+  went out as `key_pem`: every chain twice in `/dumpall`, in `/cert` and in the
+  on-disk snapshot, decoded again by every edge worker. Only the key blocks go
+  now (the chain is in `cert_pem`; nothing read it from `key_pem`); a file with
+  no key block is sent as it is. Discovery is unchanged. Measured on the
+  fleet's snapshots, 2026-11-23: 4181 of virgo's 4193 key files were bundles;
+  `dump.json` 56 to ~32 MB on virgo, 101 to ~58 MB on earth. Offline check on
+  virgo's real snapshot: every key byte-identical and every pair still loads.
+
+### Fixed
+- **`cfm dnat cpanel on/off` (`cfm edge panel …`) no longer restarts the edge
+  when its reload fails.** The listener reload fell back to `systemctl
+  restart` (and `service … restart`). A reload fails when the edge refuses
+  the config, so the restart stopped the live edge and failed the same
+  config test on start: every site down while the web DNAT still pointed at
+  it. Even a working restart refuses new connections while the old edge
+  drains. virgo, 2026-11-23: a failed reload under `panel off` restarted
+  `cfm-edge` and outlived the caller's 60 s timeout. A failed reload now
+  leaves the running edge as it is and is reported as the error.
+
+## 2026.11.22
+
+### Fixed
+- **An upgrade restarts the cfm daemon once, not twice.** The rpm's `%post`
+  stops and starts it, and `%systemd_postun_with_restart` asked for a second
+  restart: on EL9/EL10 at the end of the transaction, after every
+  `%posttrans`, where it landed in the middle of cfm-edge's post-upgrade
+  restart (rigel, 2026-11-23: the starting daemon put the panel DNAT back while
+  the edge was being taken out of the path). On an upgrade the OLD package's
+  `%postun` runs, so the change takes effect from the upgrade after next.
+- **`cfm edge panel off` reports a redirect it could not remove.** The nft
+  engine dropped the delete's error and the panel-off path dropped it again,
+  so the command returned 0 with the panel DNAT still in place. Now the error
+  reaches the exit code (an absent table is still "already off"), and the off
+  stops there: it no longer removes the panel allowlist under a live redirect
+  (that would drop the panel traffic it still sends to the edge) or persists
+  OFF. When the panel failsafe's own off fails, it now records FAILED health
+  and an ON transition (`failsafe-off-failed`) instead of AUTO_FAILSAFE and an
+  OFF transition, which reported the panel auto-disabled while its DNAT was
+  still on.
+
+_Nothing yet._
+
+### Fixed
+- **The firewall's base rules: two cases where the input chain could be left
+  open while EnsureBase reported success.**
+  - **A missing plain block drop was never put back.** The "is this base rule
+    already there?" check matched a rule inside a longer one, so a missing
+    `ip saddr @block_v4 drop` (or any plain allow/block rule) read present
+    inside its `ct state established,related …` twin. That twin drops only
+    connections already open: new connections from banned addresses reached
+    the ports policy's accepts, and EnsureBase never re-added the rule. A
+    rule inside another base rule no longer counts (both engines). A missing
+    early rule now goes back right after the nearest early rule above it
+    that the chain holds (in the early part of the chain, never a late
+    copy), not at the top: there, a re-added drop would sit
+    above the allow accepts and drop an allowlisted address that is also in
+    a block set.
+  - **An unreadable chain whose existence was unknown read as success.** When
+    neither `nft list chains inet` nor the input chain's rules could be read
+    (two timeouts in a row), the exec engine declared the chain blind and
+    reported success: on a cold boot or after `cfm reset` that chain could be
+    new and empty, with policy accept and no allow/block rule, and no repair
+    acts on a chain whose table exists. EnsureBase now fails there, so the
+    daemon's start fails and systemd starts it again. nftlib took the same
+    case for a new chain and added every rule blind (duplicates); it now
+    fails the same way. A repair that knows the table was absent (the tick
+    loop's, or `cfm reset` on nftlib) takes the chain for the new one it is
+    and writes the rules. A chain that was listed and cannot be read is
+    still left as it is (best effort), as before.
+- **On EL8 nodes, the ports policy (TCP_IN/UDP_IN/TCP_OUT/UDP_OUT, on every
+  start and config reload) no longer times out reading the firewall.** Its
+  two reads of `inet cfm input` / `output` ran under nft's 10 s default,
+  which also covers the wait for one of the four nft slots, and EL8's nft
+  1.0.4 takes 4–12 s for any `list chain` (earth, mars, virgo, idle,
+  2026-11-22). A timed-out apply changed nothing, so the extra
+  `ct state established,related accept` copies EnsureBase now leaves to the
+  ports policy stayed in place. Both reads and the policy's one `nft -f`
+  transaction now get 30 s, on both engines; the output chain is not read at
+  all when `nft list chains inet` (3–10 ms) shows it does not exist (a node
+  without TCP_OUT/UDP_OUT). A failed read is still an error: nothing is
+  planned from an unread chain.
+- **On a node running the nftlib engine, EnsureBase now deletes every extra
+  copy of each base rule in the `inet cfm input` chain, as the nft engine's
+  does (below).** An old exec-engine bug re-added the whole base
+  layer whenever its read of the chain failed (141–268 copies of each rule on
+  earth, mars and virgo, 2026-11-22); nftlib removed only the loopback accept,
+  the flood jump and the ICMP jumps, so a node switched to `nftlib` before its
+  first restart on the fixed nft engine kept every other copy, and its flood
+  meters counted each packet once per leftover `jump flood`. The extras go in
+  the same `nft -f` transaction as the missing rules, the top-most copy of
+  each kept, and the ports policy's own established/related accept is left
+  alone. Both engines now write and deduplicate ONE list of base rules.
+  nftlib's read of the input chain now gets the nft engine's 30 s (it had
+  10 s, and EL8's `list chain` takes 4–12 s: a timed-out read leaves the
+  chain, duplicates included, as it is), and on both engines the run that
+  deletes the duplicates starts from 30 s, not 10 s, plus 1 s per 1000.
+- **On EL8 nodes running the nft engine, the flood-counter dump that runs on
+  every 20 s tick no longer holds an nft slot for seconds.** It read the
+  counters with `nft list counters table inet cfm`, which on EL8's nft 1.0.4
+  loads every set element of the table first: 2.8–18.5 s per run, idle
+  (earth, mars, virgo, orion, 2026-11-22). Every other nft run waited behind
+  it, and the wait counted against its own deadline. The counters now come
+  from one netlink object dump, filtered by the kernel to the table's counters
+  (0.3–1.2 ms on the same nodes, the same counters and values). The CLI
+  listing is kept only as a fallback when netlink fails, at most once every
+  5 minutes (the netlink error is logged when it changes and hourly). A
+  failed read, or an empty answer, still repairs the table only when the cheap
+  `list chains inet` probe says it is absent. The `[flood]` log lines are
+  unchanged, except that they are now sorted by counter name.
+- **On nodes running the nftlib engine, a failed table lookup no longer
+  rebuilds the firewall base.** The flood-counter dump (every tick) ran
+  EnsureBase on any error looking up the `inet cfm` table, and the flood-rules
+  apply did the same: a netlink failure, ENOBUFS or a read deadline on an
+  already slow kernel started a full repair. Both now repair only when the
+  kernel answers that the table does not exist (ENOENT), as the nft engine
+  does; any other error is logged and retried next tick. The portscan loop's
+  table probe uses the same test. After an out-of-band wipe (`nft flush
+  ruleset`, a panel firewall reload) the dump no longer keeps logging
+  "cannot list counters" against a stale cached table handle: it drops the
+  cache, so the next tick asks the kernel. The counter dump's failure also no
+  longer skips that tick's throttle autoblock pass on this engine (the
+  counters are log-only, the throttle bans are not).
+- **A failed flood-counter read no longer skips that tick's throttle
+  autoblock pass.** The dump returned before evaluating the throttle sets
+  (`th_syn_v4`, …) whenever the log-only counters could not be read, so a
+  slow or failing `nft list counters` also stopped throttle bans.
+- **A cfm restart no longer leaves the edge without its bridge and ingest
+  sockets for ~30 s; the nft engine no longer re-runs EnsureBase every minute
+  or two, and no longer piles copies of its base rules into the input chain.**
+  On EL8 (nft 1.0.4) with the fleet's large ban and feed sets, many nft
+  listings load every set element first (measured idle: `list tables` 3.3–12.3
+  s, `list chain inet cfm <chain>` 4–12 s, even for a chain that does not
+  exist; EL9/EL10's nft answers in ms). EnsureBase ran several, plus one nft
+  run per self-set statement: 28.9 s on virgo's 2026.11.22 upgrade, during
+  which every bridge lookup failed open and the access-log lines meant for the
+  webdetector were lost (66 `[crit] connect() … No such file` lines in the edge
+  error log). Its `list tables` probe also ran past its 5 s deadline, read as
+  "no table" and re-ran EnsureBase (20–30 s each) from the 20 s tick all day on
+  earth, mars and virgo. Each re-run whose read of the input chain failed added
+  every base rule again: mars's input chain held ~268 copies of each (7,546
+  rules every packet walks), earth's and virgo's 141.
+  - Table and chain existence, and the input chain's priority, now come from
+    one `nft list chains inet` (3–10 ms on every node); a probe that times out
+    or fails is "unknown", and only a definite absence starts a repair
+    (portscan load, flood rules, counters dump). `cfm reset` / `cfm disable`
+    try their flush / delete on an unknown instead of reporting success.
+  - An input chain whose rules cannot be read gets no rules added (logged);
+    the next EnsureBase removes every extra copy of each base rule in one
+    transaction, keeping the top-most one, so the first restart after this
+    upgrade brings those chains back to one copy of each rule (7,531 deletes
+    on mars, 0.67 s in nft's check mode). **Expect flood limits to look
+    looser on those nodes afterwards:** each copy of `jump flood` (and of the
+    ICMP jumps) ran the flood chain again, so its per-IP meters counted every
+    packet ~141–268 times. They now act at their configured values; retune
+    nothing that was set against the old effective strictness without
+    looking at it first.
+  - The self sets are compared with the kernel's and left alone when
+    unchanged (every restart); a change is one transaction, and if nft refuses
+    it each set is retried alone, then with loopback and link-local only.
+  - EnsureBase on a restart: on EL8 about the one input-chain read left (~4 s
+    on mars, idle), was ~30 s; ~0.6 s on nft 1.0.9 in a netns with a 200k-entry
+    feed set, was 10 s. nft engine only; nftlib already wrote the self sets
+    over netlink.
+
+### Changed
+- **CFM's cfm-edge config no longer sets the `pid` path; the cfm-edge package
+  owns it.** Nothing changes on a node today: the package's built-in default
+  is the same `/run/cfm-edge.pid` its unit watches. It lets a later cfm-edge
+  release move the pid file into its own runtime directory (so its sandbox no
+  longer needs all of `/run` writable) without a CFM release in lockstep: a
+  `pid` line here that disagreed with the unit's `PIDFile=` would get the
+  edge killed at start. The render and its CI check now fail on a `pid`
+  directive.
+
+### Fixed
+- **`install-edge.sh`, `install-openresty.sh` and `install-angie.sh` started
+  with `sh` no longer fail half-way.**
+  - **What happened:** they are bash scripts. Run as `sh install-edge.sh`, a
+    shell that is not plain bash (bash 4.4 in POSIX mode on EL8, dash on
+    Debian) ran the first steps, then stopped on a line only bash parses
+    (EL8: `syntax error near unexpected token '<'`, then `command not found`).
+    The script had stopped part-way through.
+  - **Now:** each one re-runs itself under bash, outside POSIX mode, before
+    its first step (it drops `POSIXLY_CORRECT` / `SHELLOPTS` for that). Read
+    from stdin or `sh -c`, there is no file to re-run, so it stops at once
+    with "This script needs bash".
+  - `bash scripts/install-edge.sh` is still the documented way to run them.
+
+## 2026.11.21
+
+### Added
+- **Three logonly WAF rules for the PHP advisories of 2026-11-19.** They
+  measure, for a burn-in, the request shapes three of those php-src
+  advisories describe: 10031 (CVE-2026-129289) a FastCGI request or
+  FastCGI parameter inside a POST body, the PHP-FPM request smuggling
+  payload; 10032 (CVE-2026-129496) an Authorization header past nginx's
+  default 8 KB line, which this edge's 64 KB header buffers let through;
+  10033 (the first leg of CVE-2026-129289, and the class of PHP multipart
+  parser desyncs) a multipart body that leaves bytes PHP never reads. They
+  log only (`cfm.waf.log`, reason `WAF_CVE:CVE_2026_…`), block nothing and
+  feed no ban; the fleet read decides any promotion. Of the other advisories
+  triaged, the session upload-progress one is already blocked by 10024 and
+  the rest have no request shape a proxy can see. Not a substitute for the
+  PHP update. Details: `WAF_CVE.md`.
 - **A host-scoped PATH exclude for the malpath checks.**
   `cfm webtop challenge exclude add /images/.tmb/ --type path --scope example.gr`
   stops the malpath challenge (`CHALLENGE_PATHS`) and the `MALPATH` ban from

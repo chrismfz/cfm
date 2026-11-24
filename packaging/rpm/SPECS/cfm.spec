@@ -315,7 +315,15 @@ fi
 %systemd_preun cfm.service
 
 %postun
-%systemd_postun_with_restart cfm.service
+# No restart here: %%post already stops and starts the daemon on an upgrade.
+# %%systemd_postun_with_restart asked for a second one: on EL8 a try-restart
+# right after %%post, on EL9/EL10 a needs-restart marker that systemd honours
+# at the END of the transaction, after every %%posttrans. That second restart
+# landed in the middle of cfm-edge's post-upgrade restart (rigel,
+# 2026-11-23: the starting daemon put the panel DNAT back while the edge was
+# being taken out of the path). This %%postun is the OLD package's on an
+# upgrade, so the second restart stops from the upgrade after next.
+%systemd_postun cfm.service
 # Package removed, not upgraded ($1 is 0): drop the edge IPv6 listen guard and
 # what it generated (docs/edge-ipv6.md), so a leftover IPv6 listen never
 # outlives it. The edge picks the removal up at its next start or reload.

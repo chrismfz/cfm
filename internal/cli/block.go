@@ -3,6 +3,7 @@ package cli
 
 import (
 	"bytes"
+	"cfm/internal/clihelp"
 	"flag"
 	"fmt"
 	"net"
@@ -82,18 +83,24 @@ func LoadConfigWithAPIOverride(cfgDir string, baseBytes []byte) (*cfgpkg.Config,
 	return cfg, nil
 }
 
+const blockUsage = "usage: cfm block <IP|CIDR> [-r REASON] [--ttl 1h]"
+
 func RunBlock(args []string, be firewall.Backend, cfgDir string, tableExists func() bool) int {
 	fs := flag.NewFlagSet("block", flag.ExitOnError)
 	reasonFlag := fs.String("r", "", "reason/comment")
 	ttlFlag := fs.String("ttl", "", "optional TTL (e.g. 90s, 5m, 1h)")
 	flagArgs, posArgs := SplitFlagsAndPositionals(args, map[string]bool{"--ttl": true, "-r": true})
+	if clihelp.First(args) || clihelp.First(posArgs) {
+		fmt.Println(blockUsage)
+		return 0
+	}
 	_ = fs.Parse(flagArgs)
 
 	if len(posArgs) == 0 && len(fs.Args()) > 0 {
 		posArgs = append(posArgs, fs.Args()...)
 	}
 	if len(posArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cfm block <IP|CIDR> [-r REASON] [--ttl 1h]")
+		fmt.Fprintln(os.Stderr, blockUsage)
 		return 2
 	}
 

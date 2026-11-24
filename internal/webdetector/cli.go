@@ -2,6 +2,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"cfm/internal/clihttp"
 	"encoding/json"
 	"fmt"
@@ -160,9 +161,27 @@ func printWebTopHelp() {
 
 }
 
+// webTopOwnHelp lists the `cfm webtop` families that answer a help word
+// themselves (each with its subcommand's usage line); RunWebTop answers it
+// for every other view and family.
+var webTopOwnHelp = map[string]bool{
+	"challenge": true, "attack": true, "site-cache": true, "cache": true,
+	"waf": true, "http3": true, "h3": true, "rules": true,
+	"challenge-access": true, "access": true, "history": true, "tokens": true,
+}
+
 // RunWebTop is the CLI entrypoint for `cfm webtop`.
 // baseURL is something like "http://127.0.0.1:9070".
 func RunWebTop(baseURL string, args []string) error {
+
+	// A help word on a view or a family without usage text of its own prints
+	// the webtop usage, never a target: `analyze --help` analysed host
+	// "--help", `ip help` drilled into IP "help". The families that answer
+	// their own help (with the subcommand's usage line) are left to it.
+	if len(args) > 0 && !webTopOwnHelp[args[0]] && clihelp.Sub(args) {
+		printWebTopHelp()
+		return nil
+	}
 
 	// 🔥 Offline analyze mode: cfm webtop analyze <ip>|<host>
 	if len(args) > 0 && args[0] == "analyze" {
@@ -1255,6 +1274,14 @@ type chalEvent struct {
 }
 
 func runChallengeWebTop(baseURL string, args []string) error {
+	// A help word right after the subcommand gets that subcommand's usage
+	// line (its host check prints it); anywhere else on the line it is the
+	// webtop usage, never a run: `challenge add example.com --help` armed
+	// the challenge and `challenge remove example.com --help` removed it.
+	if clihelp.Sub(args) && !(len(args) > 1 && isCLIHelpArg(args[1])) {
+		printWebTopHelp() // the challenge commands are listed there
+		return nil
+	}
 
 	// subcommands
 	if len(args) > 0 && args[0] == "add" {
@@ -1280,6 +1307,10 @@ func runChallengeWebTop(baseURL string, args []string) error {
 
 	// subcommands
 	if len(args) > 0 && args[0] == "events" {
+		if clihelp.Sub(args) {
+			printWebTopHelp()
+			return nil
+		}
 		limit := 50
 		if len(args) > 1 {
 			if n, err := strconv.Atoi(args[1]); err == nil && n > 0 {
@@ -1309,7 +1340,10 @@ func runChallengeWebTop(baseURL string, args []string) error {
 	}
 
 	if len(args) > 1 && args[0] == "host" {
-		host := args[1]
+		host, ok, err := cliExistingHostArg(args[1], "usage: cfm webtop challenge host <vhost>")
+		if !ok {
+			return err
+		}
 		base := strings.TrimRight(baseURL, "/")
 		u1 := fmt.Sprintf("%s/api/v1/challenge/vhost?host=%s", base, url.QueryEscape(host))
 		u2 := fmt.Sprintf("%s/api/v1/challenge/events?host=%s&limit=50", base, url.QueryEscape(host))
@@ -1429,7 +1463,13 @@ func runAttackWebTop(baseURL string, args []string) error {
 		return runAttackStatus(baseURL)
 	}
 	var on bool
+	if clihelp.Sub(args) { // `attack on example.com --help` too
+		args = []string{"help"}
+	}
 	switch strings.ToLower(args[0]) {
+	case "-h", "--help", "help":
+		fmt.Println("usage: cfm webtop attack [on <vhost> [--ttl 6h] | off <vhost>]")
+		return nil
 	case "on":
 		on = true
 	case "off":
@@ -1437,10 +1477,19 @@ func runAttackWebTop(baseURL string, args []string) error {
 	default:
 		return fmt.Errorf("usage: cfm webtop attack [on|off <vhost>]")
 	}
+	usage := "usage: cfm webtop attack on <vhost> [--ttl 6h] | attack off <vhost>"
 	if len(args) < 2 {
 		return fmt.Errorf("usage: cfm webtop attack %s <vhost>", strings.ToLower(args[0]))
 	}
-	host := args[1]
+	// on arms the vhost (hostname grammar); off clears an existing record.
+	check := cliHostArg
+	if !on {
+		check = cliExistingHostArg
+	}
+	host, ok, err := check(args[1], usage)
+	if !ok {
+		return err
+	}
 	ttl := ""
 	for i := 2; i < len(args); i++ {
 		switch {
@@ -1585,11 +1634,14 @@ func runAttackStatus(baseURL string) error {
 // Without --rung a NEW arm gets the node default (CHALLENGE_V2_MANUAL, v2) and
 // a re-arm keeps the arm's tier; the daemon decides, so no rung is sent.
 func runChallengeAdd(baseURL string, args []string) error {
+	const usage = "usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text] [--rung v1|v2] [--lockdown[=on|off]] [--lockdown-ttl 30m]"
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cfm webtop challenge add <vhost> [--ttl 30m] [--reason text] [--rung v1|v2] [--lockdown[=on|off]] [--lockdown-ttl 30m]")
+		return fmt.Errorf("%s", usage)
 	}
-
-	host := args[0]
+	host, ok, err := cliHostArg(args[0], usage)
+	if !ok {
+		return err
+	}
 	ttlStr := "30m"
 	reason := "manual"
 	rung := ""
@@ -1700,10 +1752,14 @@ func runChallengeAdd(baseURL string, args []string) error {
 
 // runChallengeRemove handles: cfm webtop challenge remove <vhost>
 func runChallengeRemove(baseURL string, args []string) error {
+	const usage = "usage: cfm webtop challenge remove <vhost>"
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cfm webtop challenge remove <vhost>")
+		return fmt.Errorf("%s", usage)
 	}
-	host := args[0]
+	host, ok, err := cliExistingHostArg(args[0], usage)
+	if !ok {
+		return err
+	}
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/remove?host=%s",
 		baseURL, url.QueryEscape(host))
 	resp, err := clihttp.Post(u, "application/json", nil)
@@ -1723,10 +1779,14 @@ func runChallengeRemove(baseURL string, args []string) error {
 
 // runChallengeStatus handles: cfm webtop challenge status <vhost>
 func runChallengeStatus(baseURL string, args []string) error {
+	const usage = "usage: cfm webtop challenge status <vhost>"
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cfm webtop challenge status <vhost>")
+		return fmt.Errorf("%s", usage)
 	}
-	host := args[0]
+	host, ok, err := cliExistingHostArg(args[0], usage)
+	if !ok {
+		return err
+	}
 	u := fmt.Sprintf("%s/api/v1/challenge/vhost/status?host=%s",
 		baseURL, url.QueryEscape(host))
 	resp, err := clihttp.Get(u)
@@ -1803,11 +1863,18 @@ func printLockdownLine(result map[string]interface{}) {
 // (POST /api/v1/challenge/vhost/lockdown); with no manual challenge it says
 // how to arm one with the lockdown (add --lockdown).
 func runChallengeLockdown(baseURL string, args []string) error {
-	usage := fmt.Errorf("usage: cfm webtop challenge lockdown <vhost> on|off [--ttl 30m]")
+	const usageLine = "usage: cfm webtop challenge lockdown <vhost> on|off [--ttl 30m]"
+	usage := fmt.Errorf("%s", usageLine)
+	if len(args) == 0 {
+		return usage
+	}
+	host, ok, err := cliHostArg(args[0], usageLine)
+	if !ok {
+		return err
+	}
 	if len(args) < 2 {
 		return usage
 	}
-	host := args[0]
 	var on string
 	switch strings.ToLower(args[1]) {
 	case "on", "1", "true":
@@ -1928,10 +1995,15 @@ func runChallengeTier(baseURL string, args []string) error {
 		fmt.Println("\nUsage: cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h]")
 		return nil
 	}
-	if len(args) < 2 {
-		return fmt.Errorf("usage: cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h]")
+	const usage = "usage: cfm webtop challenge tier <vhost> v1|v2|auto [--ttl 24h]"
+	host, ok, err := cliHostArg(args[0], usage)
+	if !ok {
+		return err
 	}
-	host, rung, ttl := args[0], args[1], ""
+	if len(args) < 2 {
+		return fmt.Errorf("%s", usage)
+	}
+	rung, ttl := args[1], ""
 	for i := 2; i < len(args); i++ {
 		switch {
 		case args[i] == "--ttl" || args[i] == "-t":

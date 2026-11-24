@@ -3,11 +3,20 @@
 package nftlib
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+
+	"cfm/internal/firewall"
+	"cfm/internal/firewall/bantest"
+
+	"github.com/mdlayher/netlink"
+	"github.com/mdlayher/netlink/nltest"
+	"golang.org/x/sys/unix"
 )
 
 // fakeNFTChain puts an `nft` script first in PATH that prints chain for
@@ -75,13 +84,13 @@ func readNFTLog(t *testing.T, p string) string {
 // node with large feed sets — ~70s per EnsureBase in production.
 func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 	log := fakeNFTChain(t, "table inet cfm {\n\tchain input {\n\t\ttype filter hook input priority -50; policy accept;\n\t}\n}\n", 0)
-	_ = (&Backend{}).applyBaseInputRules(false)
+	_ = (&Backend{}).applyBaseInputRules(inputChainExisted)
 	got := readNFTLog(t, log)
 	if n := strings.Count(got, "ARGS "); n != 2 {
 		t.Fatalf("%d nft processes, want 2 (one read, one write):\n%s", n, got)
 	}
 	first := strings.Index(got, `insert rule inet cfm input position 0 ip6 saddr @block_v6_clients drop`)
-	last := strings.Index(got, `insert rule inet cfm input position 0 iif "lo" accept`)
+	last := strings.Index(got, `insert rule inet cfm input position 0 iif lo accept`)
 	flood := strings.Index(got, "add rule inet cfm input jump flood")
 	if first < 0 || last < 0 || first > last || flood < last {
 		t.Errorf("want the early rules inserted bottom-up (so iif lo ends on top), then the adds, jump flood last:\n%s", got)
@@ -101,7 +110,7 @@ func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 		full += "\t\t" + strings.TrimPrefix(st, "add rule inet cfm input ") + "\n"
 	}
 	log = fakeNFTChain(t, full+"\t}\n}\n", 0)
-	_ = (&Backend{}).applyBaseInputRules(false)
+	_ = (&Backend{}).applyBaseInputRules(inputChainExisted)
 	if got := readNFTLog(t, log); strings.Count(got, "ARGS ") != 1 || strings.Contains(got, "ARGS -f -") {
 		t.Errorf("want the one read and no write when every rule is present:\n%s", got)
 	}
@@ -111,7 +120,7 @@ func TestApplyBaseInputRules_OneReadOneWrite(t *testing.T) {
 func allBaseRules(t *testing.T) []string {
 	t.Helper()
 	log := fakeNFTChain(t, "", 0)
-	_ = (&Backend{}).applyBaseInputRules(false)
+	_ = (&Backend{}).applyBaseInputRules(inputChainExisted)
 	var out []string
 	for _, line := range strings.Split(readNFTLog(t, log), "\n") {
 		line = strings.TrimSuffix(strings.TrimPrefix(line, "SCRIPT "), ";") // nftExec ends the script with ";"
@@ -128,7 +137,7 @@ func allBaseRules(t *testing.T) []string {
 // can't keep the others out (as before, each rule was its own run).
 func TestApplyBaseInputRules_FallsBackPerStatement(t *testing.T) {
 	log := fakeNFTChain(t, "", 1)
-	_ = (&Backend{}).applyBaseInputRules(false)
+	_ = (&Backend{}).applyBaseInputRules(inputChainExisted)
 	got := readNFTLog(t, log)
 	if n := strings.Count(got, "ARGS -f -"); n != 1+33 {
 		t.Errorf("%d nft -f runs, want the failed script + 33 single statements", n)
@@ -141,8 +150,11 @@ func TestBaseRulesScript(t *testing.T) {
 		[]string{`ip saddr @block_v4 drop`, `iif "lo" accept`, `ip saddr @self_v4 accept`},
 		[]string{`ip saddr @self_v4 accept`, `jump flood`, `jump flood`})
 	want := []string{
-		// `ip saddr @block_v4 drop` is inside the established/related rule's
-		// text: present, as the substring check always had it.
+		// `ip saddr @block_v4 drop` is inside its established/related twin's
+		// text, but the twin drops only connections already open: the plain
+		// drop is missing and goes back in (the substring check took the
+		// twin for it, and new connections from banned addresses got through).
+		"insert rule inet cfm input position 0 ip saddr @block_v4 drop",
 		"insert rule inet cfm input position 0 ip saddr @self_v4 accept",
 		"add rule inet cfm input jump flood",
 	}
@@ -151,22 +163,11 @@ func TestBaseRulesScript(t *testing.T) {
 	}
 }
 
-func TestSelfSetElems(t *testing.T) {
-	v4, v6 := selfSetElems([]string{"192.0.2.10", "fe80::1234", "2001:db8::5", "192.0.2.10", "::ffff:198.51.100.7", "junk"})
-	if got := strings.Join(v4, " "); got != "127.0.0.0/8 192.0.2.10/32 198.51.100.7/32" {
-		t.Errorf("v4 = %s", got)
-	}
-	// fe80::1234 lies inside fe80::/10: an interval set refuses the overlap.
-	if got := strings.Join(v6, " "); got != "::1/128 2001:db8::5/128 fe80::/10" {
-		t.Errorf("v6 = %s", got)
-	}
-}
-
 // Rules are only ever added, so a chain that can't be read must not be taken
 // for an empty one — that would add every rule a second time.
 func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
 	log := fakeNFTChainOpts(t, "", 0, "readfail")
-	err := (&Backend{}).applyBaseInputRules(false)
+	err := (&Backend{}).applyBaseInputRules(inputChainExisted)
 	if got := readNFTLog(t, log); strings.Contains(got, "ARGS -f -") || err == nil {
 		t.Errorf("err=%v; want an error and no write without knowing the chain:\n%s", err, got)
 	}
@@ -174,10 +175,10 @@ func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
 	// Unless EnsureBase just created the chain: it is empty, and leaving it so
 	// would leave the node without its allow/block rules.
 	log = fakeNFTChainOpts(t, "", 0, "readfail")
-	if err := (&Backend{}).applyBaseInputRules(true); err != nil {
+	if err := (&Backend{}).applyBaseInputRules(inputChainNew); err != nil {
 		t.Fatalf("applyBaseInputRules on a new chain: %v", err)
 	}
-	if got := readNFTLog(t, log); strings.Count(got, "ARGS -f -") != 1 || !strings.Contains(got, `iif "lo" accept`) {
+	if got := readNFTLog(t, log); strings.Count(got, "ARGS -f -") != 1 || !strings.Contains(got, `iif lo accept`) {
 		t.Errorf("want the rules written to the new chain in one run:\n%.300s", got)
 	}
 }
@@ -185,7 +186,7 @@ func TestApplyBaseInputRules_UnreadChainWritesNothing(t *testing.T) {
 // A failed run whose chain can't be re-read is reported, not retried blind.
 func TestApplyBaseInputRules_FailedRunUnreadChainReports(t *testing.T) {
 	log := fakeNFTChainOpts(t, "", 1, "rereadfail")
-	err := (&Backend{}).applyBaseInputRules(false)
+	err := (&Backend{}).applyBaseInputRules(inputChainExisted)
 	if err == nil || !strings.Contains(err.Error(), "can't re-read") {
 		t.Errorf("err = %v, want the failed run and the failed re-read reported", err)
 	}
@@ -198,7 +199,7 @@ func TestApplyBaseInputRules_FailedRunUnreadChainReports(t *testing.T) {
 // replayed statement by statement: the fallback re-reads the chain first.
 func TestApplyBaseInputRules_FallbackRereadsTheChain(t *testing.T) {
 	log := fakeNFTChainOpts(t, "", 1, "commitfail")
-	_ = (&Backend{}).applyBaseInputRules(false)
+	_ = (&Backend{}).applyBaseInputRules(inputChainExisted)
 	got := readNFTLog(t, log)
 	if n := strings.Count(got, "ARGS -f -"); n != 1 {
 		t.Errorf("%d nft -f runs, want just the one that committed (no replay):\n%.300s", n, got)
@@ -219,7 +220,7 @@ func TestBaseRulesScript_JumpFloodAndDuplicates(t *testing.T) {
 		"\t\tip protocol icmp icmp type echo-request jump flood # handle 9\n" +
 		"\t\tiif \"lo\" accept # handle 10\n" +
 		"\t}\n}\n"
-	got := baseRulesScript(chain, []string{`iif "lo" accept`, icmpFloodJumps[0]}, []string{"jump flood"})
+	got := baseRulesScript(chain, []string{`iif "lo" accept`, firewall.ICMPFloodJumps[0]}, []string{"jump flood"})
 	want := []string{
 		"delete rule inet cfm input handle 10",
 		"delete rule inet cfm input handle 9",
@@ -253,5 +254,129 @@ func TestBaseRulesScriptAnchorsTheClientDrops(t *testing.T) {
 	fresh := baseRulesScript("", []string{`ip6 saddr @block_v6_clients drop`}, nil)
 	if len(fresh) != 1 || fresh[0] != "insert rule inet cfm input position 0 ip6 saddr @block_v6_clients drop" {
 		t.Fatalf("a new chain: %v", fresh)
+	}
+}
+
+// Engine parity: on the chain one blind re-add of the base layer leaves,
+// nftlib deletes exactly the handles the nft backend does (the same fixture
+// and answer, bantest.DuplicatedBaseChain; nft's twin is
+// TestEnsureBase_DedupeParity), every one in the run that adds nothing, and
+// the established accept the ports policy positions is never touched.
+func TestApplyBaseInputRules_DedupeParity(t *testing.T) {
+	chain, want := bantest.DuplicatedBaseChain()
+	log := fakeNFTChain(t, chain, 0)
+	if err := (&Backend{}).applyBaseInputRules(inputChainExisted); err != nil {
+		t.Fatalf("applyBaseInputRules: %v", err)
+	}
+	got := readNFTLog(t, log)
+	if n := strings.Count(got, "ARGS -f -"); n != 1 {
+		t.Errorf("%d nft -f runs, want the deletes in ONE transaction:\n%s", n, got)
+	}
+	if strings.Contains(got, "insert rule") || strings.Contains(got, "add rule") {
+		t.Errorf("re-added a rule the chain already holds:\n%s", got)
+	}
+	sort.Strings(want)
+	if d := bantest.DeletedHandles(got); strings.Join(d, " ") != strings.Join(want, " ") {
+		t.Errorf("deleted handles\n%v\nwant\n%v", d, want)
+	}
+}
+
+// A failed run's fallback keeps the deletes in one transaction (a node can
+// hold thousands; one nft run each costs seconds on EL8) and runs only the
+// rules to add one by one.
+func TestApplyBaseInputRules_FallbackKeepsDeletesInOneRun(t *testing.T) {
+	chain, _ := bantest.DuplicatedBaseChain()
+	// Drop the flood jumps so the script also adds one rule.
+	chain = strings.NewReplacer("\t\tjump flood # handle", "\t\tudp dport 9 drop # handle").Replace(chain)
+	log := fakeNFTChain(t, chain, 1)
+	_ = (&Backend{}).applyBaseInputRules(inputChainExisted)
+	got := readNFTLog(t, log)
+	if n := strings.Count(got, "ARGS -f -"); n != 3 {
+		t.Errorf("%d nft -f runs, want the failed script, the deletes, the one add:\n%s", n, got)
+	}
+	last := got[strings.LastIndex(got, "SCRIPT "):]
+	if !strings.HasPrefix(last, "SCRIPT add rule inet cfm input jump flood") {
+		t.Errorf("last run %q, want the flood jump alone", last)
+	}
+}
+
+// When the fallback's delete run fails too, the error says so in its own
+// words, not as one statement among the rest.
+func TestApplyBaseInputRules_FallbackReportsFailedDeletes(t *testing.T) {
+	chain, want := bantest.DuplicatedBaseChain()
+	fakeNFTChain(t, chain, 2) // the whole script, then the delete run
+	err := (&Backend{}).applyBaseInputRules(inputChainExisted)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("the run deleting %d duplicate base rules failed too", len(want))) {
+		t.Errorf("err = %v, want the failed delete run named with its %d deletes", err, len(want))
+	}
+}
+
+// The chain list failed, so EnsureBase declared the input chain without
+// knowing whether it existed: it may be new and empty (policy accept, no
+// allow/block rule). An unread chain then is not best effort, as for a chain
+// that was listed: the error is errInputChainUnknown, which EnsureBase
+// returns (the daemon's start fails and systemd retries it), and nothing is
+// written blind.
+func TestApplyBaseInputRules_UnknownChainUnreadIsAnError(t *testing.T) {
+	log := fakeNFTChainOpts(t, "", 0, "readfail")
+	err := (&Backend{}).applyBaseInputRules(inputChainUnknown)
+	if !errors.Is(err, errInputChainUnknown) {
+		t.Errorf("err = %v, want errInputChainUnknown", err)
+	}
+	if got := readNFTLog(t, log); strings.Contains(got, "ARGS -f -") {
+		t.Errorf("rules written blind into a chain that may already hold them:\n%s", got)
+	}
+
+	// A listed chain that cannot be read stays best effort (left as is).
+	fakeNFTChainOpts(t, "", 0, "readfail")
+	if err := (&Backend{}).applyBaseInputRules(inputChainExisted); err == nil || errors.Is(err, errInputChainUnknown) {
+		t.Errorf("listed chain, unread: err = %v, want a best-effort error, not errInputChainUnknown", err)
+	}
+
+	// Unknown but readable: the rules are read, so the missing ones are added.
+	log = fakeNFTChainOpts(t, "", 0, "")
+	if err := (&Backend{}).applyBaseInputRules(inputChainUnknown); err != nil {
+		t.Fatalf("unknown but readable chain: %v", err)
+	}
+	if got := readNFTLog(t, log); !strings.Contains(got, "iif lo accept") {
+		t.Errorf("want the missing base rules added to the read (empty) chain:\n%.300s", got)
+	}
+}
+
+// existingInputChain tells a chain list it could not read from one without
+// the chain: only the second makes the chain "new" (empty for sure).
+func TestExistingInputChain_ListFailureIsUnknown(t *testing.T) {
+	var st nlStats
+	b := &Backend{conn: nlTestConn(t, &st, func(req []netlink.Message) ([]netlink.Message, error) {
+		return nltest.Error(int(unix.EBUSY), req)
+	})}
+	if ch, listed := b.existingInputChain(); ch != nil || listed {
+		t.Errorf("failed list: got (%v, %v), want (nil, false)", ch, listed)
+	}
+	b = &Backend{conn: nlTestConn(t, &st, func(req []netlink.Message) ([]netlink.Message, error) {
+		return nil, nil // an empty dump: no chain at all
+	})}
+	if ch, listed := b.existingInputChain(); ch != nil || !listed {
+		t.Errorf("empty list: got (%v, %v), want (nil, true)", ch, listed)
+	}
+}
+
+// A repair that knows the table was absent (ENOENT, or the table ResetTable
+// just deleted) takes an unlisted chain for the new one it is: its base rules
+// are written, not given up on (no daemon restart retries a tick's repair).
+func TestInputStateOf(t *testing.T) {
+	for _, tc := range []struct {
+		listed, found, absent bool
+		want                  inputChainState
+	}{
+		{true, true, false, inputChainExisted},
+		{true, false, false, inputChainNew},
+		{false, false, false, inputChainUnknown},
+		{false, false, true, inputChainNew},
+		{true, true, true, inputChainExisted}, // the listing wins: someone recreated it
+	} {
+		if got := inputStateOf(tc.listed, tc.found, tc.absent); got != tc.want {
+			t.Errorf("inputStateOf(listed=%v, found=%v, absent=%v) = %v, want %v", tc.listed, tc.found, tc.absent, got, tc.want)
+		}
 	}
 }

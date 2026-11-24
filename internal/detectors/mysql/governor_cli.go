@@ -2,6 +2,7 @@
 package mysql
 
 import (
+	"cfm/internal/clihelp"
 	"bufio"
 	"cfm/internal/clihttp"
 	"encoding/json"
@@ -27,6 +28,13 @@ func RunMySQLTop(baseURL string, args []string) error {
 		return runMySQLLive(baseURL, nil)
 	}
 
+	// A help word anywhere is usage: `history prune --help` pruned 30 days
+	// and `user-kill --id=5 help` killed connection 5. Every mysqltop value
+	// is a number, a window or a --flag=value, never a bare word "help".
+	if clihelp.Any(args) {
+		printMySQLTopHelp()
+		return nil
+	}
 	switch args[0] {
 	case "text":
 		return runMySQLTopDefault(baseURL)

@@ -82,6 +82,35 @@ func stripPrivateKeyBlocks(pemData []byte) []byte {
 	return out.Bytes()
 }
 
+// privateKeyBlocksOnly returns the PRIVATE KEY blocks of a key file, the
+// mirror of stripPrivateKeyBlocks for chain files. Panels write key files as
+// bundles too (cPanel's combined key+leaf+chain, DirectAdmin's .combined,
+// Virtualmin's ssl.combined), and the whole file used to go out as key_pem:
+// every chain twice in the payload and on disk (rigel, 2026-11-23: 1952 of the
+// snapshot's 3940 certificates sat inside key_pem), decoded again by every
+// worker on every /dumpall. Nothing reads a certificate from key_pem: the edge
+// (ngx.ssl.parse_pem_priv_key) and tls.X509KeyPair take the key from it and
+// the chain from cert_pem. A file with no PRIVATE KEY block is returned as it
+// is, so what is sent never gets less parseable than the file.
+func privateKeyBlocksOnly(pemData []byte) []byte {
+	rest := pemData
+	var out bytes.Buffer
+	for {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		if strings.Contains(blk.Type, "PRIVATE KEY") {
+			_ = pem.Encode(&out, blk)
+		}
+	}
+	if out.Len() == 0 {
+		return pemData
+	}
+	return out.Bytes()
+}
+
 // dumpAllAfterStatsHook runs between writePayload's version read and its
 // copy of the index. Tests only (a Refresh landing in that window).
 var dumpAllAfterStatsHook func()
@@ -185,7 +214,7 @@ func (c *Collector) writePayload(w io.Writer, at io.WriterAt) (payloadResult, er
 		if !hasPEMBlock(certPEM) || !hasPEMBlock(keyPEM) {
 			return "", "", false
 		}
-		cert, key := string(certPEM), string(keyPEM)
+		cert, key := string(certPEM), string(privateKeyBlocksOnly(keyPEM))
 		pemByFP[e.Fingerprint] = pemPair{cert: cert, key: key}
 		return cert, key, true
 	}

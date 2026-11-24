@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,8 +40,23 @@ func runNetfilterPath(args []string, cfgDir string, collect netfilterPathCollect
 	})
 	jsonOut := fs.Bool("json", false, "output JSON")
 	strict := fs.Bool("strict", false, "exit non-zero on warning or critical findings")
+	usage := func() int {
+		fs.SetOutput(out)
+		fmt.Fprintln(out, "usage: cfm firewall path [flags]")
+		fs.PrintDefaults()
+		return 0
+	}
+	if clihelp.First(args) {
+		return usage()
+	}
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) { // a later -h: the flag package printed it
+			return 0
+		}
 		return 2
+	}
+	if clihelp.First(fs.Args()) {
+		return usage()
 	}
 	if fs.NArg() != 0 {
 		fmt.Fprintln(errOut, "firewall path: unexpected arguments:", strings.Join(fs.Args(), " "))

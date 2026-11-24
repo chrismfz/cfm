@@ -102,6 +102,49 @@ The history behind each rule below is in the code comments it names.
   behind the daemon's back; the same probe answers IP lookups
   (`setprobe.Lookup`, via `ipquery.FindMany`), and an interval-boundary answer
   the 4.18 kernel can get wrong is reported as ambiguous (the caller dumps).
+- **Some nft CLI runs load every set element of the table first**: `list
+  tables`, `list table`, `list sets` (without `-t`), `list counters`, `list
+  chain <chain>` (with or without `-t`, even for an absent chain), and `add
+  element` next to a large interval set. It bites on EL8's nft 1.0.4:
+  measured 2026-11-22 on the fleet's EL8 nodes (26k–85k `block_v4`, 307k feed
+  hosts), idle, `list tables` 3.3–12.3 s, `list chain` 4–12 s and `list
+  counters` 3.9–11 s, while `list chains inet` and `-j list set <one>` took
+  3–10 ms. EL9/EL10 (nft
+  1.0.9 / 1.1.5) answered all of them in ms with the same sets; nft 0.9.x
+  loads the cache on every `list`. The exec
+  EnsureBase once ran one per self-set statement, which held the bridge and
+  ingest sockets 28.9 s on a restart. EnsureBase also re-ran every minute or
+  two on the EL8 nodes: its `list tables` existence probe ran past its 5 s
+  deadline (12 s on mars; the wait for one of the 4 nft slots counts too) and
+  the timeout read as "no table"; each re-run whose input-chain read failed
+  added every base rule again (~268 copies of each on mars). Probe with `list
+  chains inet` (`probeTable`, `chainExists`, `cfmChains`), and read counters
+  over netlink (`internal/firewall/nlcounters`: the per-tick flood dump's
+  `list counters` took 2.8–18.5 s on EL8, the netlink dump 0.3–1.2 ms;
+  `flood_counters_cost_test.go` pins it); the daemon's repairs
+  (EnsureBase from the tick loop, a flush, a delete) act only on
+  `tableAbsent`, never on `tableUnknown` (on nftlib: an error marked
+  `errTableAbsent`, the kernel's ENOENT to GETTABLE, via
+  `repairIfTableAbsent`; the one-shot CLI still runs
+  EnsureBase when `tableExists` is false, which is safe but not cheap); an unread chain is never taken for an empty one (no rule is
+  added blind), and never for a full one either: when the chain list failed
+  too, the chain was declared blind and may be new and empty (policy accept),
+  so EnsureBase FAILS (the daemon's start fails and systemd retries it)
+  rather than report success with no allow/block rule and nothing to repair
+  it. "Is this base rule there?" is `ChainRules.Present`: a rule inside
+  another BASE rule does not count (the plain block drop inside its
+  `ct state established,related …` twin, which drops only open connections,
+  read present and was never re-added); `Has`'s substring match stays for
+  everything else. A missing early rule on a chain that holds the rest goes
+  right after the nearest early rule above it that is listed
+  (`ChainRules.EarlyAnchorHandle`, both engines), never at position 0: at the
+  top, a re-added drop would beat the allow accepts (live:
+  `-run LiveNFTRestoresAPlainDrop`, both engines). The ports policy's two chain reads and its transaction get
+  `firewall.PortsPolicyNFTTimeout` (30 s) on both engines, and the
+  output chain is read only when the chain listing has it
+  (`PortsPolicyReads.Chains`; `nft/ports_cost_test.go`). Compare before you
+  write (`firewall.SameSetElems`), and put a write in one script. `ensurebase_cost_test.go` pins EnsureBase's profile,
+  the unknown probe and the dedupe (live: `-run LiveNFTDedupe`).
 - **A base input rule added after the rest needs an anchor.** Both engines'
   EnsureBase insert a missing early rule at position 0 and append a missing
   late one: on a node's existing chain a new drop would land above the self /
@@ -109,6 +152,14 @@ The history behind each rule below is in the code comments it names.
   `firewall.BaseRuleAnchors` (rule + the rule it follows): a missing one is
   then added right after its anchor (`add rule … position <handle>`), and the
   live `LiveNFTClientSlash64` test pins the upgrade case.
+- **The base input rules are ONE list for both engines**
+  (`internal/firewall/base_rules.go`: `BaseEarlyRules`, `BaseLateRules`,
+  `BaseFloodJump`, and `BaseDedupeExprs`, every one but the ports policy's
+  established accept). Each EnsureBase deletes every extra copy of each
+  (top-most kept) in one transaction, through nft text on nftlib too; the
+  parity pins are `TestEnsureBase_DedupeParity` / `TestApplyBaseInputRules_DedupeParity`
+  (one fixture, `bantest.DuplicatedBaseChain`) and live `-run LiveNFTDedupe`
+  on both engines.
 - **A change here gets a live run in an isolated netns** (the fleet's kernels,
   4.18 and 5.14, are older than a dev box's):
   `unshare -rn env CFM_NFT_INTEGRATION=1 go test -p 1 ./internal/firewall/... -run 'LiveNFT|ApplyPortsPolicyIsAtomic'`;
@@ -145,6 +196,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_edge_listen_v6.sh          # edge IPv6 listen: script <-> conf ports/glob includes, default (script = Go) + EDGE_LISTEN_V6, the decision, deploy hook
 ./scripts/tests/check_install_edge.sh            # install-edge.sh prepares only: no systemctl switch / cfm dnat, adoption line = deploy's, -t before install
 ./scripts/tests/check_rpm_spec_macros.sh         # no unescaped %macro in rpm spec comments + build-dated top %changelog entry (see §5)
+./scripts/tests/check_deb_config_seed.sh         # the .deb ships no dpkg conffile; postinst seeds /etc/cfm like %config(noreplace) (see §5)
 ./scripts/tests/check_site_cache_config.sh       # Site Cache bypass-by-default: every proxy_cache location gated on $cfm_cache_skip (see §6)
 ./scripts/tests/stamp_changelog_test.sh          # CHANGELOG date-stamper (make release) regression test
 ./scripts/tests/release_notes_test.sh            # release-notes extractor (make release) regression test
@@ -204,6 +256,15 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   CLI runtime code are rejected by `check_cli_transport.sh`. The only escape
   is an inline `clihttp-exception: <reason>` comment on the same line — use
   it sparingly and justify it.
+- **A help word never runs a command.** `-h`, `--help` and `help` print the
+  usage and do nothing else, after any subcommand; the one matcher is
+  `internal/clihelp` (`NoArgs` for a no-argument command, `Parse` for a
+  flags-only flag set, `Sub`/`Any` under a dispatcher). Never write another
+  `case "help", "-h"` list as the only guard: `cfm reset --help` emptied the
+  table, `cfm flush --help` freed every TTL ban and `cfm kernsec apply help`
+  applied (the flag package stops at a positional). A new command gets a row
+  in its package's `cli_help_args_test.go` / `help_args_test.go`, whose fakes
+  fail on any backend or API call.
 - **Lua validation gate before reloading the edge proxy.** Any change to
   `configs/lua/*` must pass `luac -p` and a LuaJIT `require` smoke-test of all
   modules. Follow `docs/challenge-waf-release-checklist.md` to the letter —
@@ -280,6 +341,19 @@ Runtime/generated artifacts (incl. rendered Lua) live under `/var/lib/cfm/`.
   `check_package_lua_delivery.sh` pins it. A hand-edit under
   `/var/lib/cfm/lua/` is overwritten on upgrade with no backup; the operator
   edit surface is `/etc/cfm/*`.
+- **The .deb ships NO dpkg conffile.** dpkg stops an upgrade to ask about a
+  conffile both sides changed, `apt -y` cannot answer it, and
+  unattended-upgrades skips the whole package; CFM edits several `/etc/cfm`
+  files itself (`cfm allow`/`block`, the WebUI editors, `cfm edge ipv6`,
+  `cfm kernsec`), so it hit every Debian node. The `/etc/cfm` files are listed
+  once, in `packaging/etc-cfm-files.list`, and postinst seeds them from
+  `/usr/share/cfm/configs/` the way the rpm's `%config(noreplace)` does: an
+  edited file is kept and the new default lands as `<name>.dpkg-dist`; one
+  untouched since postinst installed it (its sha256 in
+  `/var/lib/cfm/etc-cfm-files.sha256`) is replaced. A new `/etc/cfm` file goes
+  into that list AND the spec's `%config(noreplace)`;
+  `check_deb_config_seed.sh` pins both, and that the deb target writes nothing
+  under `/etc/cfm`.
 - **Never write a bare `%macro` in an rpm spec COMMENT — escape it `%%`.** On
   EL, `/usr/lib/rpm/redhat/macros` makes rpm expand macros inside comments, so
   a comment mentioning `%install` injects a real section header (`error: line

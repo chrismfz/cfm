@@ -447,13 +447,29 @@ Save POSTs the whole edited file (`functions.php` …), which starts with
 **Fix (in code, unlike case 6):** `is_known_legit_php_upload_endpoint`
 (`cfm_waf_util.lua`) matches `^/wp%-json/string%-locator/`. Like every entry
 there it stands down the body-PHP scanners on that path: 401, 402, 403, the
-431-436 and 439 `WAF_BACKDOOR` body rules. Every URI rule still runs, as do
+431-436 and 439 `WAF_BACKDOOR` body rules, 415 and 417. Every URI rule still runs, as do
 414 (its own media allowlist) and 437/438 (their own `/wp-admin/` carve-out).
 
+A site without pretty permalinks sends the same REST call as
+`/index.php?rest_route=/string-locator/v1/save`. That form is **not** exempt:
+`/index.php` is also the front controller of any other app on the account,
+which may route on its own query or body fields (OpenCart `route=`, Joomla's
+`option` / `task`, read from POST too). Keyed on `rest_route`, that app's
+upload would skip every body-PHP and upload rule. A matching rule was built
+and removed in review (2026-11-24). Such a site gets a rule-scoped exclude
+(`--type path --rule <id> --scope host`).
+
+**Residual of the path form.** An app that rewrites unknown paths to
+`index.php` (Joomla with SEF URLs, Laravel, OpenCart with SEO URLs) answers
+`/wp-json/string-locator/...` too, and can route that request on its own
+fields with these rules off. Not closed yet: the allowlist would have to
+exclude foreign routing fields, which it cannot name for every app.
+
 **Why it is safe here and not in case 6:**
-1. *Routing key.* The REST path is what routes the request; no body field
-   makes PHP dispatch another handler, and it is in the request line, never
-   past the body window.
+1. *Routing key.* On WordPress the REST path is what routes the request; no
+   body field makes WP dispatch another handler, and it is in the request
+   line, never past the body window. (Another app that answers the same path
+   can route on its own fields: the residual above.)
 2. *Reachability.* `/save` sits behind the plugin's `permission_callback`
    (`edit_themes` / `manage_options`), the same trust boundary as the
    installer and Code Snippets. admin-ajax also serves pre-auth `nopriv`
@@ -774,7 +790,8 @@ of evasion. Modes: 430-436 `logonly`, 437 `challenge_v2`, 438 `block` (armed,
 
 ### Rule 415 — `rule_upload_content_deep`
 
-Family `WAF_UPLOAD_CONTENT`, `logonly`. 402's PHP / JSP openers (`<?php`, `<?=`
+Family `WAF_UPLOAD_CONTENT`, **`block`** since 2026-11-24, its ban held per
+rule (`HoldAutoblock`, `RULE_415 = 0`). 402's PHP / JSP openers (`<?php`, `<?=`
 with a PHP expression after it, `<jsp:`) in uploaded **file** parts (a
 `filename=`) past 402's 2 KB window: a webshell after 2 KB of image data, or
 in a second file. Each part is read from its start, to the multipart budget
@@ -789,12 +806,21 @@ attribute; `<?xml:` is a goto label and counts; or `<script
 language="php">`). So `$_POST` in a ticket or an attached `error.log` is no
 402 FP; `<?php` / `<?=` alone still block anywhere in the window.
 
-**Why logonly:** these bytes were never scanned before, and a text attachment
-quoting PHP would be a 6 h ban at block. 14-day fleet read (2026-11-17): 2
-hits, both media-library uploads by Greek admins. Promote with
-`rule_upload_content_deep = "block"` after a clean burn-in; the family is armed
-through 402, so the promotion arms 415 too. Exempt on the same legit-archive
-endpoints as 402.
+**Promotion (2026-11-24).** Logonly from 2026-10-09: these bytes were never
+scanned before, and a text attachment quoting PHP would be a 6 h ban at block.
+Two fleet reads before the promotion:
+- 14 days to 2026-11-17: 2 hits, both media-library uploads by Greek admins,
+  which the log could not name (hence the extension tag);
+- the 7 days after: 1 hit, a `.png` carrying `<?php` POSTed to Bricksforge's
+  `/wp-json/bricksforge/v1/form_file_upload` on novamotors.sa (orion), from
+  Venezuela. Nothing landed (no new file under uploads, no Imunify hit).
+
+At `block` the edge answers 403. The ban is held: `WAF_UPLOAD_CONTENT` is
+armed by 402, and a ban for a real file that quotes PHP would be 6 h;
+`RULE_415 = 1` arms it. Held, it runs late with the other held rules
+(after every armed block rule), so a request 402 or an armed rule also catches
+keeps that rule's headline and ban. Exempt on the same legit-archive
+endpoints as 402. Why straight to block, and the panel ports: "Rule 417".
 
 ### Rule 430 — `rule_htaccess_poisoning`
 
@@ -983,10 +1009,11 @@ nodes:
   `TEMPLATE=…<?php system('id')`, Magento `/paypal/transparent/response/?<?=eval(…)`).
   `WAF_RCE` is armed: a 332 hit bans (6 h).
 - 416: 289 hits from 269 IPs, every one an exploit (the PHPUnit
-  `eval-stdin.php` sweep, a PUT dropper). Its ban is held per rule
-  (`HoldAutoblock`, `RULE_416 = 0`; ~40 bans a day if armed), so the armed
-  `WAF_PHP_WEBSHELL_BODY` family bans nothing through 416. It runs with the
-  late (held) group.
+  `eval-stdin.php` sweep, a PUT dropper). Its ban was held per rule
+  through a second burn-in and is armed since 2026-11-24 (74 hits from 66
+  IPs in 5.5 days, all datacenter, 0 GR/CY): a 416 hit bans (6 h).
+  `RULE_416 = 0` holds it again. Armed, it runs at step 60e again, before
+  the held rules.
 
 ### Rule 332 — `rule_php_code_args`
 
@@ -1056,7 +1083,8 @@ matched only dmkomotinis.gr in 7 days. The burn-in above was the measurement.
 
 ### Rule 417 — `rule_php_webshell_body_deep`
 
-Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, `logonly`. 404 scores PHP in
+Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, **`block`** since
+2026-11-24, its ban held per rule (`HoldAutoblock`, `RULE_417 = 0`). 404 scores PHP in
 a textual POST body over its first 2 KB only (`php_webshell_max_scan_len`).
 Two compromises passed beyond it: a plugin-editor save with an eval of a
 request header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), and a
@@ -1081,18 +1109,52 @@ urlencoded body with `multipart/form-data` in a Content-Type parameter was
 read by neither rule), and its early-out admits `assert` / `popen` /
 `proc_open`.
 
-**Order.** Runs late, after every rule but 612 and 530: earlier, it took the
-headline (and the push) from the logonly body rules after it (a
-`wget || curl` dropper reported 417 instead of 331). It shows in
-`also_rule_ids` instead.
+**Order.** Runs late, after every armed block rule (a held block evaluated
+earlier would end the check before an armed rule's ban) and after the logonly
+body rules (at step 15 it took the headline and the push from 331 on a
+`wget || curl` dropper).
 
 **Cost.** ~0.17 ms on a 20 KB form with no marker; nothing on a short body
 404 already read; ~+0.4 ms on a 30 KB post with HTML; ~+5 ms on a 30 KB PHP
 file saved through an editor (rare).
 
-**Why logonly.** A whole legitimate plugin file saved through an editor is
-scored too (a global `exec(` / `system(` plus a superglobal reaches 5). Read
-its hits fleet-wide before any promotion.
+**Promotion (2026-11-24).** Logonly for a 7-day fleet burn-in on 8 nodes: 5
+hits, every one an attacker, 0 false positives:
+- kspk.gr (earth), twice: a Joomla tool posting `system($_GET…)` into each
+  template's `error.php` through the template editor, then fetching
+  `error_<rand>.php`. It had no admin session (every POST 302), and the
+  files are unchanged;
+- 2001.gr (earth): an `eval` POST to `com_ajax&plugin=helix3` from AWS, on a
+  WordPress site (a blind spray).
+
+The template-editor tool shows why logonly was not enough: with stolen
+credentials its POST would have written the file. At `block` the edge answers
+403. The ban is held, because a whole legitimate plugin file saved through an
+editor still scores (a global `exec(` / `system(` plus a superglobal reaches
+5), and that save must cost a 403, not a 6 h ban. Remedy for such a site: a
+rule-scoped exclude on the editor path (`cfm webtop waf exclude add <path>
+--type path --rule 417 --scope host`). `RULE_417 = 1` arms the ban. The code-editor and installer
+endpoints the other body-PHP rules stand down for
+(`is_known_legit_php_upload_endpoint`: Code Snippets and String Locator saves,
+the plugin / theme installer) are exempt.
+
+**Why straight to block, not challenge first** (the ladder is logonly →
+challenge → block; 416, 332 and 10029 took the same exception on the same
+kind of evidence), for 417 and 415 alike:
+- every hit in the burn-in was an exploit tool, and none was a person;
+- the requests are POSTs from scripts or XHR (an editor save, a form upload).
+  A challenge page answers a script with HTML it never solves, and an XHR
+  editor shows it as a failed save, so a challenge tier would not reveal a
+  false positive any better than a 403 does;
+- the ban is held, so a false positive costs one 403 on one request, never a
+  6 h ban.
+
+**Panel ports.** Block tier is enforced on `:2083/:2087/:2096` too
+(`cfm_panel.lua`). cPanel File Manager saves and uploads pass without the WAF
+(`is_panel_api_or_sso`; on `cpanel.X:443`, Step 0d). Roundcube is not on that
+list, so an email over 2 KB that quotes PHP, or an attachment with PHP past
+402's head, gets a 403. The 7-day read saw no hit on a webmail host; watch for
+it, and remedy one with a rule-scoped exclude on the webmail host.
 
 ### Fleet read of 702, 10029 and 415 (2026-11-17, 14 days, 8 nodes)
 
@@ -1100,7 +1162,7 @@ its hits fleet-wide before any promotion.
 |---|---:|---|---|
 | 10029 Fabrik `[eval]` | 10 | all `EVAL_ZERO` (`[eval]=0`) from Greek users on three Fabrik sites (Fabrik's own form); `EVAL_ARG` only from the dmkomotinis attacker | **block**, armed (WAF_CVE): the first probe bans |
 | 702 C2 tunnel | 355 | 176 `RENTRY` on `zort.me/shorten` (a URL shortener we host, the known FP source of 611); the rest comment spam with tunnel links, a Joomla `component/ajax` poller, `/wp-22.php?sfilecontent=<?php` writers | stays `challenge_v2`; `zort.me` needs a rule-scoped exclude (operator) |
-| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stays logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`) |
+| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stayed logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`). Promoted to block (ban held) on 2026-11-24, see "Rule 415" |
 
 ## Rule 501 — `rule_auth_burst` (login submissions)
 
@@ -1272,10 +1334,47 @@ in the push key and the window is an hour (`PUSH_COOLDOWN_FAMILY`, logonly
 tier only): at ~1 request per IP per minute a 60 s window pushed ~80 k history
 rows a day on mars. The burn-in counts clients per hour, not requests.
 
-**Next.** After the burn-in (`waf_activity` / `cfm.waf.log`, `node="all"`),
-the likely `CRAWLER` action is an answer that skips the cart write (a 403, or
-a redirect without `add-to-cart`), not a block, shipped per tag. No family
-block rule is planned, so `waf_security` never arms the family.
+**The `CRAWLER` redirect (since 2026-11-24).** After the burn-in (~416 000
+hits in 96 h on seven nodes, meta-externalagent the top source on every one),
+a request tagged `CRAWLER` gets a **301 to the same URL without
+`add-to-cart`** (`cfm.lua`, right after the WAF): the shop writes no session
+and cart, and the page stays reachable. On 2026-11-24 meta-externalagent
+alone made ~27 000 such writes on titan in three hours. The hit is still
+logged and pushed as logonly (`X-CFM-Action: cart_crawl_redirect`, `up=cfm_redirect`
+in the access log). The redirect:
+- only follows a logonly verdict: a stronger hit keeps its own answer;
+- never applies behind a trusted proxy (Cloudflare): a CDN cache rule that
+  ignores `Cache-Control` could serve it to shoppers on the same URL (the
+  anastasiadi.gr incident, CLAUDE.md §6). It carries `Cache-Control:
+  no-store` and `Vary: User-Agent` for any other cache. **Residual:** a CDN
+  the edge does not trust (Bunny, Fastly, a customer's Varnish) looks like a
+  direct client, so a "cache everything, ignore origin headers" rule there
+  could still cache the 301. That is WebShield parity P4's question ("never
+  treat a CDN node as a client", `docs/imunify360-gap-analysis.md`);
+  `wc_cart_crawl_redirect = false` is the switch if it happens;
+- answers before Step 3: a crawler the daemon blocks or challenges gets the
+  301 first, and the block or challenge on the URL it is sent to;
+- strips every field PHP registers as `add-to-cart` (an array form, an
+  encoded name) through the same reader that found it, keeps the other
+  fields as sent, and sends a path with leading slashes collapsed (`//x/`
+  would be another site's URL).
+
+`NO_REFERER` and `XSITE` stay logonly: real shoppers from ad campaigns may be
+among them. `wc_cart_crawl_redirect = false` in `cfm_waf_config.lua` turns
+the redirect off (next edge reload). No family block rule is planned, so
+`waf_security` never arms the family.
+
+**meta-externalagent's node cap (since 2026-11-24).** The per-vhost Meta
+budgets (10 pages/s, 30 connections per vhost) never bound it: it spreads over
+every shop on a node, ~0.4 pages/s each. On 2026-11-24 it sent titan ~530
+pages a minute for three hours at ~1.5 s of PHP each (~13 PHP workers, 16% of
+the origin's time), and titan and orion hit 100% CPU. The edge confs give it
+one budget for the whole node: **2 pages/s, burst 10, 6 connections**, then
+429 (in `throttle.log`). Pages only: its images / css / js keep the image
+budget. facebookexternalhit, meta-externalads and the in-app browsers (FB_IAB,
+the `fbsv.net` forward proxies) never take this key. The rates are in the
+confs (`meta_ext_node_rps`, `meta_ext_node_conn`), so a change is a conf
+change.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 

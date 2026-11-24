@@ -1,6 +1,7 @@
 package lsm
 
 import (
+	"cfm/internal/clihelp"
 	"errors"
 	"flag"
 	"fmt"
@@ -14,6 +15,18 @@ import (
 // adopt path then treats every pin as marker-absent and refreshes
 // once on first start after upgrade.
 var CLIBuild BuildMarker
+
+// The entry points RunCLI dispatches to. Tests swap them for fakes
+// (cli_help_args_test.go), so a help word that slipped past a guard fails the
+// test instead of attaching or detaching BPF programs on the test host.
+var (
+	cliInit    = RunInit
+	cliEnable  = RunEnable
+	cliDisable = RunDisable
+	cliStatus  = RunStatus
+	cliPreview = RunPreview
+	cliProbe   = RunProbe
+)
 
 // RunCLI is the entry point invoked from cmd/cfm/main.go for `cfm lsm`.
 //
@@ -57,7 +70,13 @@ func RunCLI(args []string) int {
 	case "restart":
 		return runRestartCmd(args[1:], os.Stdout)
 	case "init":
-		return RunInit(os.Stdout)
+		// init takes no argument: `lsm init --help` ran the bring-up.
+		fs := flag.NewFlagSet("lsm init", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		if rc, done := handleFlagErr("lsm init", clihelp.Parse(fs, args[1:]), os.Stdout); done {
+			return rc
+		}
+		return cliInit(os.Stdout)
 	case "help", "-h", "--help":
 		printUsage(os.Stdout)
 		return 0
@@ -72,19 +91,19 @@ func runEnableCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("lsm enable", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	yes := fs.Bool("yes", false, "skip the enforce-mode confirmation prompt (required for unattended runs)")
-	if rc, done := handleFlagErr("lsm enable", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("lsm enable", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	return RunEnable(w, EnableOptions{AssumeYes: *yes, Build: CLIBuild})
+	return cliEnable(w, EnableOptions{AssumeYes: *yes, Build: CLIBuild})
 }
 
 func runDisableCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("lsm disable", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if rc, done := handleFlagErr("lsm disable", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("lsm disable", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	return RunDisable(w)
+	return cliDisable(w)
 }
 
 // runRestartCmd is the operator convenience for reloading /etc/cfm/lsm.conf:
@@ -101,7 +120,7 @@ func runRestartCmd(args []string, w io.Writer) int {
 	fs.SetOutput(io.Discard)
 	yes := fs.Bool("yes", false, "skip the enforce-mode confirmation prompt (passed through to enable)")
 	short := fs.Bool("y", false, "shorthand for --yes")
-	if rc, done := handleFlagErr("lsm restart", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("lsm restart", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
 	fmt.Fprintln(w, "===== CFM lsm RESTART =====")
@@ -109,11 +128,11 @@ func runRestartCmd(args []string, w io.Writer) int {
 	// Disable first. If cfm-lsm isn't currently enabled, RunDisable
 	// is already idempotent (prints "Nothing to do." and returns 0) so
 	// `restart` doubles as "ensure enabled with current conf".
-	if rc := RunDisable(w); rc != 0 {
+	if rc := cliDisable(w); rc != 0 {
 		return rc
 	}
 	fmt.Fprintln(w)
-	return RunEnable(w, EnableOptions{AssumeYes: *yes || *short, Build: CLIBuild})
+	return cliEnable(w, EnableOptions{AssumeYes: *yes || *short, Build: CLIBuild})
 }
 
 func runStatusCmd(args []string, w io.Writer) int {
@@ -122,10 +141,10 @@ func runStatusCmd(args []string, w io.Writer) int {
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of text")
 	checkExit := fs.Bool("check", false, "exit non-zero when preflight FAILs or lsm.conf is unreadable (for monitoring)")
 
-	if rc, done := handleFlagErr("lsm status", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("lsm status", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	res := RunStatus(w, StatusOptions{JSON: *jsonOut})
+	res := cliStatus(w, StatusOptions{JSON: *jsonOut})
 	if *checkExit {
 		if !res.PreflightOK || res.ConfError != "" {
 			return 1
@@ -137,10 +156,10 @@ func runStatusCmd(args []string, w io.Writer) int {
 func runPreviewCmd(args []string, w io.Writer) int {
 	fs := flag.NewFlagSet("lsm preview", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	if rc, done := handleFlagErr("lsm preview", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("lsm preview", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
-	return RunPreview(w)
+	return cliPreview(w)
 }
 
 func runProbeCmd(args []string, w io.Writer) int {
@@ -153,13 +172,13 @@ func runProbeCmd(args []string, w io.Writer) int {
 	var verbose bool
 	fs.BoolVar(&verbose, "verbose", false, "include BTF-probe drift-variant picks in the report")
 	fs.BoolVar(&verbose, "v", false, "shorthand for --verbose")
-	if rc, done := handleFlagErr("lsm probe", fs.Parse(args), w); done {
+	if rc, done := handleFlagErr("lsm probe", clihelp.Parse(fs, args), w); done {
 		return rc
 	}
 	if !requireRoot(w, "probe") {
 		return 1
 	}
-	return RunProbe(w, verbose)
+	return cliProbe(w, verbose)
 }
 
 // handleFlagErr mirrors kernsec's pattern: --help renders usage to w

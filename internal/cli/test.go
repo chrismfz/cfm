@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"bufio"
 	"fmt"
 	"os"
@@ -12,7 +13,16 @@ import (
 	"cfm/internal/detectors"
 )
 
-func RunTest() {
+const testUsage = `usage: cfm test
+  Check the host for what CFM needs (nft/iptables binaries, kernel modules,
+  config drift). Read-only; takes no argument.`
+
+// RunTest is `cfm test`. It takes no argument (`cfm test --help` ran the
+// checks).
+func RunTest(args []string) int {
+	if rc, done := clihelp.NoArgs("test", testUsage, args); done {
+		return rc
+	}
 	fmt.Println("== cfm test ==")
 
 	type check struct {
@@ -41,6 +51,7 @@ func RunTest() {
 
 	fmt.Printf("\nDetected backend preference: %s\n", detectBackend())
 	runConfigDriftChecks()
+	return 0
 }
 
 func runConfigDriftChecks() {

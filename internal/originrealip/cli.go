@@ -1,6 +1,7 @@
 package originrealip
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,6 +58,12 @@ func runCLI(args []string, w io.Writer, l layout, edgeActive func() bool) int {
 	sub := "status"
 	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
 		sub, args = args[0], args[1:]
+	}
+	// A help word after the subcommand is usage too: `realip fix --help` was
+	// read as `realip fix` (the flags map ignores what it does not know) and
+	// rewrote the origin's config.
+	if clihelp.Any(args) {
+		sub = "help"
 	}
 	flags := map[string]bool{}
 	for _, a := range args {

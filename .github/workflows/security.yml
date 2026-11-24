@@ -75,6 +75,8 @@ jobs:
         run: ./scripts/tests/check_install_edge.sh
       - name: Reject unescaped RPM macros in spec comments; require build-dated top %changelog
         run: ./scripts/tests/check_rpm_spec_macros.sh
+      - name: The .deb seeds /etc/cfm like the rpm's %config(noreplace), no dpkg conffile
+        run: ./scripts/tests/check_deb_config_seed.sh
       - name: Enforce Site Cache bypass-by-default config invariant
         run: ./scripts/tests/check_site_cache_config.sh
       - name: CHANGELOG date-stamper regression test

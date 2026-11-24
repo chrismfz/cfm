@@ -1,6 +1,7 @@
 package sslcollector
 
 import (
+	"cfm/internal/clihelp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,10 +16,16 @@ import (
 	"time"
 )
 
+const sslUsage = "usage: cfm ssl <stats|scan|dump <host>|refresh> [--json] [--sock PATH] [--no-daemon-refresh]"
+
 func RunCLI(args []string, defaultSockPath, defaultToken string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: cfm ssl <stats|scan|dump|refresh> [args] [--json]")
+		fmt.Fprintln(os.Stderr, sslUsage)
 		os.Exit(2)
+	}
+	if clihelp.First(args) {
+		fmt.Println(sslUsage)
+		return
 	}
 
 	if strings.TrimSpace(defaultSockPath) == "" {
@@ -26,13 +33,30 @@ func RunCLI(args []string, defaultSockPath, defaultToken string) {
 	}
 
 	sub := args[0]
-	fs := flag.NewFlagSet("ssl "+sub, flag.ExitOnError)
+	fs := flag.NewFlagSet("ssl "+sub, flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
 	sockPath := fs.String("sock", defaultSockPath, "sslcollector unix socket path")
 	token := fs.String("token", defaultToken, "sslcollector socket token")
 	noDaemonRefresh := fs.Bool("no-daemon-refresh", false, "do not trigger daemon refresh before command")
 	cacheDir := fs.String("cache-dir", "/var/lib/cfm/sslcollector", "cache dir (metadata only)")
-	_ = fs.Parse(args[1:])
+	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) { // the flag package printed the flags
+			fmt.Println(sslUsage)
+			return
+		}
+		os.Exit(2)
+	}
+	// A help word after the subcommand is usage; scan/refresh/stats take no
+	// positional (`ssl refresh help` asked the daemon for a refresh).
+	if clihelp.Any(fs.Args()) { // `ssl dump example.com --help` too
+		fmt.Println(sslUsage)
+		return
+	}
+	if sub != "dump" {
+		if rc, done := clihelp.NoArgs("ssl "+sub, sslUsage, fs.Args()); done {
+			os.Exit(rc)
+		}
+	}
 
 	col := New(Config{
 		Enabled:        true,
@@ -254,7 +278,7 @@ func RunCLI(args []string, defaultSockPath, defaultToken string) {
 
 	default:
 		fmt.Fprintln(os.Stderr, "unknown ssl subcommand:", sub)
-		fmt.Fprintln(os.Stderr, "usage: cfm ssl <stats|scan|dump|refresh> [--json]")
+		fmt.Fprintln(os.Stderr, sslUsage)
 		os.Exit(2)
 	}
 }

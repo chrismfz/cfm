@@ -1561,6 +1561,14 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// X-Robots-Tag is the authoritative signal; the meta tag below is belt-and-suspenders.
 		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		host := trustedForwardedHost(r)
+		// A page served to an IP under a per-IP challenge is an unsolved view:
+		// enough of them, with no solve, hold the challenge instead of letting
+		// it run out (challenge_unsolved_hold.go). Here, after the cleared and
+		// exempt redirects above, so only a client actually shown the page
+		// counts. Web scope only (the hold is a web decision).
+		if s.bridge != nil && clearanceScope(r) == "web" {
+			s.bridge.NoteUnsolvedChallengeView(ip.String(), host, time.Now())
+		}
 
 		// token binds to IP+UA+cookie
 		//                tok := issueToken(ip.String(), r.UserAgent(), cookieVal)

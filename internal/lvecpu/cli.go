@@ -1,6 +1,7 @@
 package lvecpu
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,6 +39,10 @@ type cliResponse struct {
 func RunCLI(baseURL string, args []string) error {
 	top := 25
 	rawJSON := false
+	if clihelp.Sub(args) { // `lve top --help`: usage, not "needs a positive number"
+		printLVEHelp()
+		return nil
+	}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {

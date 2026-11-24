@@ -1,6 +1,7 @@
 package dnat
 
 import (
+	"errors"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -78,6 +79,36 @@ func TestPanelOffPerformsFullCleanup(t *testing.T) {
 	health := getPanelFirewallHealth()
 	if health.State != "OK" || health.LastReason != "" || !health.Attempted {
 		t.Fatalf("unexpected health after off: %+v", health)
+	}
+}
+
+// A redirect that could not be removed stops the off: no allowlist removal
+// under a live redirect (it would drop the panel traffic it still sends to the
+// edge), no persisted OFF, and an error the CLI's exit code carries (it used
+// to be dropped: `cfm edge panel off` returned 0 with the redirect in place).
+func TestPanelOffStopsWhenTheRedirectStays(t *testing.T) {
+	calls := withPanelOffFakes(t)
+	setPanelFirewallHealth("OK", "", true)
+	panelDeleteRedirectTableFn = func() error {
+		*calls = append(*calls, "delete table")
+		return errors.New("nft: Device or resource busy")
+	}
+	if _, err := panelOff(); err == nil || !strings.Contains(err.Error(), "resource busy") {
+		t.Fatalf("panelOff() err = %v, want the delete's error", err)
+	}
+	if want := []string{"delete table"}; !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("calls=%v want %v (nothing after a failed delete)", *calls, want)
+	}
+	if h := getPanelFirewallHealth(); h.State != "FAILED" || !strings.Contains(h.LastReason, "resource busy") {
+		t.Fatalf("health = %+v, want FAILED with the reason", h)
+	}
+
+	*calls = (*calls)[:0]
+	if _, err := panelOffPreserveIntent(true); err == nil {
+		t.Fatalf("panelOffPreserveIntent: want the delete's error")
+	}
+	if want := []string{"delete table"}; !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("failsafe off: calls=%v want %v", *calls, want)
 	}
 }
 

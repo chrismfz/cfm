@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"cfm/internal/logging"
 )
@@ -25,14 +27,83 @@ func sha1File(p string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-	tmp := filepath.Join(dir, "."+base+".tmp")
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+// fileOwner is the uid/gid a rewritten file keeps.
+type fileOwner struct{ uid, gid int }
+
+// ownerOf is fi's owner, or nil when the platform doesn't say.
+func ownerOf(fi os.FileInfo) *fileOwner {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return &fileOwner{uid: int(st.Uid), gid: int(st.Gid)}
+	}
+	return nil
+}
+
+// staleTempAge is how old a leftover temp file of ours must be before
+// atomicWrite deletes it: older than any write in progress.
+const staleTempAge = time.Minute
+
+// atomicWrite replaces path with data: a unique temp file in the same dir,
+// given perm (exactly — not masked by the umask) and, when owner is set, that
+// owner, then renamed over path. A reader sees the old file or the new one,
+// never a half-written one or one with the wrong mode. A failed chown is
+// logged, not fatal: the content still lands, owned by the agent, as it
+// always did (an NFS root_squash mount or a non-root agent can't chown).
+// Temp files a crashed earlier write left behind are removed first.
+func atomicWrite(path string, data []byte, perm os.FileMode, owner *fileOwner) error {
+	dir, prefix := filepath.Dir(path), "."+filepath.Base(path)+".tmp"
+	removeStaleTemps(dir, prefix)
+	// CreateTemp puts its random suffix at the LAST '*', which is ours, so a
+	// '*' in the file name itself is harmless.
+	f, err := os.CreateTemp(dir, prefix+"*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		return err
+	}
+	if owner != nil {
+		if err := os.Chown(tmp, owner.uid, owner.gid); err != nil {
+			logging.LogfAPI("[files] chown %s to %d:%d: %v (writing it as the agent's)", path, owner.uid, owner.gid, err)
+		}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
+}
+
+// removeStaleTemps deletes the files in dir whose name starts with prefix and
+// that are older than staleTempAge: what a write killed between CreateTemp and
+// Rename leaves. A prefix match, not a glob: a target name may hold '*', '?'
+// or '['.
+func removeStaleTemps(dir, prefix string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > staleTempAge {
+			os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 // startConfigSync runs syncConfigs on its own goroutine, so a SpamAssassin lint

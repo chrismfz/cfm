@@ -99,7 +99,9 @@ func (b *Backend) ApplyFloodRules(c *config.Config) (err error) {
 		_, tableErr := b.lookupTable()
 		b.mu.Unlock()
 		floodChainPresent := b.chainExistsCLI("flood")
-		if shouldSkipFloodRebuild(tableErr == nil, floodChainPresent, b.lastFloodRebuild, time.Now()) {
+		// An unknown lookup (not a definite absence) counts as present here,
+		// as the exec backend's `tbl != tableAbsent`.
+		if shouldSkipFloodRebuild(!tableAbsent(tableErr), floodChainPresent, b.lastFloodRebuild, time.Now()) {
 			return nil
 		}
 	}
@@ -108,10 +110,11 @@ func (b *Backend) ApplyFloodRules(c *config.Config) (err error) {
 	b.mu.Lock()
 	_, tableErr := b.lookupTable()
 	b.mu.Unlock()
-	if tableErr != nil {
-		if err = b.EnsureBase(); err != nil {
-			return err
-		}
+	// Repair only a definite absence: an unknown lookup (netlink error,
+	// ENOBUFS, deadline) must not start EnsureBase; the rebuild below goes on
+	// and its own writes report a real problem.
+	if _, rerr := b.repairIfTableAbsent(tableErr); rerr != nil {
+		return rerr
 	}
 
 	_ = b.nftExec("flush chain inet cfm flood")

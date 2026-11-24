@@ -1,9 +1,11 @@
 package dnat
 
 import (
+	"cfm/internal/clihelp"
 	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -353,12 +355,19 @@ func RunCLI(args []string, backend firewall.Backend) int {
 	}
 	if err := fs.Parse(args); err != nil {
 		help()
+		if errors.Is(err, flag.ErrHelp) { // -h / --help: usage, exit 0
+			return 0
+		}
 		return 2
 	}
 	// A word left after the flags (`cfm dnat --priority -99 on`) was silently
 	// dropped and the report printed instead: say where flags go. A word after
 	// a known subcommand (`cfm dnat on extra`) is refused too; an unknown
 	// subcommand gets its own error below.
+	if clihelp.First(fs.Args()) { // `cfm dnat on help`: usage, as for --help
+		help()
+		return 0
+	}
 	if fs.NArg() > 0 && (sub == "" || sub == "on" || sub == "off") {
 		if sub == "" {
 			fmt.Fprintf(os.Stderr, "dnat: unexpected %q: flags go after the subcommand (cfm dnat on --priority -101)\n", fs.Arg(0))
@@ -746,7 +755,14 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 	}
 	if err := fs.Parse(args); err != nil {
 		panelHelp()
+		if errors.Is(err, flag.ErrHelp) { // -h / --help: usage, exit 0
+			return 0
+		}
 		return 2
+	}
+	if clihelp.First(fs.Args()) { // `cfm dnat cpanel on help`: usage
+		panelHelp()
+		return 0
 	}
 	// `cfm dnat cpanel --priority -99 on`: the word after the flags was
 	// dropped and the status printed. Say where flags go instead.
@@ -863,7 +879,7 @@ func runPanelCLI(args []string, backend firewall.Backend) int {
 		res, err := panelOffWithBackend(backend)
 		changes := res.FirewallChanges
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "dnat cpanel off firewall failed:", err)
+			fmt.Fprintln(os.Stderr, "dnat cpanel off failed:", err)
 			return 1
 		}
 		LogTransition(ScopeCPanel, "OFF", "manual", "")

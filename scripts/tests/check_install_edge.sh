@@ -18,12 +18,20 @@
 # 4. It parses (bash -n).
 # 5. The empty cfm-edge logs its config tests create are dropped again, never
 #    while cfm-edge may run, a symlinked log dir included.
+# 6. The three installers (edge, openresty, angie) re-run themselves under
+#    bash when started with `sh`, before any step: under sh they used to run
+#    their first steps and fail half-way (EL8: bash 4.4 in POSIX mode refuses
+#    `<(...)`; Debian: dash). The guard is run here for real, with arguments
+#    and a path holding a space: dash, bash --posix, plain bash,
+#    POSIXLY_CORRECT and an inherited mark (re-run, POSIX dropped), POSIX
+#    forced again by BASH_ENV (one re-run, then an error, no loop) and stdin
+#    (no file to re-run: an error).
 # shellcheck disable=SC2016,SC2015  # literal $VAR patterns; fail-on-either tests
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
 # A guardrail that cannot run its matcher must FAIL, never report OK.
-for tool in awk grep bash; do
+for tool in awk grep bash dash; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: $tool is not installed" >&2; exit 1; }
 done
 
@@ -312,4 +320,54 @@ for fn in adopt_cfm_edge ensure_edge_listen_v6 print_next_steps; do
     || fail "$SCRIPT $fn: the cfm-edge config test must sit between snapshot_edge_logs and drop_test_created_logs"
 done
 
-echo "OK: install-edge.sh is prepare-only, adoption line matches the deploy, config tested before install, test-created empty logs dropped (never while cfm-edge may run)"
+# 6. sh -> bash re-exec guard in each installer, before any step.
+guard_tmp="$(mktemp -d)"
+trap 'rm -rf "${tmp:-}" "$guard_tmp"' EXIT   # keeps the earlier trap's cleanup
+mkdir "$guard_tmp/a dir"   # a path with a space: the re-run must quote it
+printf 'set -o posix\n' >"$guard_tmp/posix.env"
+for inst in scripts/install-edge.sh scripts/install-openresty.sh scripts/install-angie.sh; do
+  [ -f "$inst" ] || fail "$inst missing"
+  bash -n "$inst" || fail "$inst does not parse"
+  g_start="$(grep -n -m1 '^case "${BASH_VERSION:-}:${SHELLOPTS:-}" in$' "$inst" | cut -d: -f1 || true)"
+  [ -n "$g_start" ] || fail "$inst: no sh->bash re-exec guard (case \"\${BASH_VERSION:-}:\${SHELLOPTS:-}\" in)"
+  g_end="$(awk -v s="$g_start" 'NR > s && /^esac$/ {print NR; exit}' "$inst")"
+  [ -n "$g_end" ] || fail "$inst: the re-exec guard has no esac"
+  sed -n "$((g_end + 1))p" "$inst" | grep -qx 'unset CFM_BASH_REEXEC' || fail "$inst: the guard's mark must be cleared right after esac (no child inherits it)"
+  # Nothing but comments and blank lines before it: it must run first.
+  first_cmd="$(awk '!/^[[:space:]]*(#|$)/ {print NR; exit}' "$inst")"
+  [ "$first_cmd" = "$g_start" ] || fail "$inst: line $first_cmd runs before the re-exec guard (line $g_start)"
+  # Run the guard for real, followed by a bash-only line that reports the mode
+  # and the arguments it got.
+  t="$guard_tmp/a dir/$(basename "$inst")"
+  { echo '#!/bin/sh'; sed -n "${g_start},$((g_end + 1))p" "$inst"
+    echo 'cat < <(echo "ok bash=${BASH_VERSION:+y} posix=$(shopt -qo posix && echo y || echo n) mark=${CFM_BASH_REEXEC:-}")'
+    echo 'printf "[%s]" "$@"; echo'; } >"$t"
+  want='ok bash=y posix=n mark='
+  want_args='[a b][][c*]'
+  # A failing start must still reach the FAIL message below, with its output.
+  run() { out="$(timeout 10 "$@" "a b" "" "c*" 2>&1)" || true; }
+  run dash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: under dash the guard does not re-run it under bash with its args: $out"
+  run bash --posix "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: under bash --posix (EL8 sh) the guard does not re-run it: $out"
+  run bash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: under plain bash it must run as is: $out"
+  run env POSIXLY_CORRECT=1 bash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: with POSIXLY_CORRECT the re-run must drop it and run: $out"
+  run env SHELLOPTS=posix bash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: with an exported SHELLOPTS=posix the re-run must drop it and run: $out"
+  run env SHELLOPTS=braceexpand:hashall:posix dash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: sh with an exported posix SHELLOPTS: the re-run must drop it: $out"
+  run env CFM_BASH_REEXEC=1 dash "$t"; [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: an inherited CFM_BASH_REEXEC must not block the re-run: $out"
+  # Still POSIX after the re-run (BASH_ENV sets it): one re-run, then an error.
+  out="$(BASH_ENV="$guard_tmp/posix.env" timeout 10 dash "$t" 2>&1)" && fail "$inst: forced POSIX after the re-run must stop with an error, got: $out"
+  grep -q 'needs bash outside POSIX mode' <<<"$out" || fail "$inst: forced POSIX after the re-run: expected the needs-bash error, got: $out"
+  for sh_path in /bin/sh "$(command -v dash)"; do
+    out="$(timeout 10 "$sh_path" <"$t" 2>&1)" && fail "$inst: '$sh_path < script' must stop with an error, got: $out"
+    grep -q 'needs bash' <<<"$out" || fail "$inst: '$sh_path < script' ($sh_path is a file too): expected the needs-bash error, got: $out"
+  done
+  out="$(timeout 10 sh -c "$(cat "$t")" 2>&1)" && fail "$inst: sh -c must stop with an error, got: $out"
+  grep -q 'needs bash' <<<"$out" || fail "$inst: sh -c: expected the needs-bash error, got: $out"
+  # A script path starting with "-" is not an option to the re-run bash.
+  cp "$t" "$guard_tmp/-g.sh"
+  out="$(cd "$guard_tmp" && timeout 10 dash -- -g.sh "a b" "" "c*" 2>&1)" || true
+  [ "$out" = "$want"$'\n'"$want_args" ] || fail "$inst: a script path starting with '-' must re-run as a path (bash -- \"\$0\"): $out"
+  out="$(timeout 10 dash <"$t" 2>&1)" && fail "$inst: run from stdin the guard must stop with an error, got: $out"
+  grep -q 'needs bash' <<<"$out" || fail "$inst: from stdin, expected the needs-bash error, got: $out"
+done
+
+echo "OK: install-edge.sh is prepare-only, adoption line matches the deploy, config tested before install, test-created empty logs dropped (never while cfm-edge may run), installers re-run under bash from sh"

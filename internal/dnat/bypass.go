@@ -3,6 +3,7 @@ package dnat
 import (
 	"bufio"
 	"bytes"
+	"cfm/internal/clihelp"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,16 @@ func runBypassCLI(args []string, scope firewall.DNATBypassScope, backend firewal
 	}
 	sub := args[0]
 	rest := args[1:]
+	// A help word anywhere is usage, never a target (`bypass add <IP>
+	// --help` added the IP); the values are only IPs and CIDRs.
+	if clihelp.Any(rest) {
+		sub = "help"
+	}
+	if (sub == "add" || sub == "remove" || sub == "rm" || sub == "del" || sub == "delete") && len(rest) > 1 {
+		fmt.Fprintf(os.Stderr, "dnat bypass %s: unexpected argument %q\n", sub, rest[1])
+		printBypassUsage(scope)
+		return 2
+	}
 	switch sub {
 	case "help", "-h", "--help":
 		printBypassUsage(scope)

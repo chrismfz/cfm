@@ -2,6 +2,7 @@ package edgecli
 
 import (
 	"bytes"
+	"cfm/internal/clihelp"
 	"context"
 	"fmt"
 	"os"
@@ -171,6 +172,10 @@ to IPv4). docs/edge-ipv6.md.
 `
 
 func runIPv6(args []string, d deps) int {
+	if clihelp.Any(args) { // `edge ipv6 on --help`, `edge ipv6 status help`
+		fmt.Fprint(d.out, ipv6Usage)
+		return 0
+	}
 	if len(args) == 0 || args[0] == "status" {
 		if len(args) > 1 {
 			fmt.Fprintln(d.errOut, "edge ipv6: status takes no arguments")

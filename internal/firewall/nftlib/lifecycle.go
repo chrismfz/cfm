@@ -6,13 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
 	"strings"
 	"syscall"
 	"time"
 
 	"cfm/internal/firewall"
-	"cfm/internal/firewall/feedutil"
 	"cfm/internal/logging"
 	"github.com/google/nftables"
 )
@@ -20,7 +18,16 @@ import (
 // EnsureBase creates all core CFM-owned tables, chains, and sets using netlink.
 // The local set handle cache is invalidated so the next nftlib operation
 // re-fetches handles from the kernel.
-func (b *Backend) EnsureBase() (err error) {
+func (b *Backend) EnsureBase() (err error) { return b.ensureBase(false) }
+
+// ensureBaseAfterAbsent is EnsureBase for a repair that knows the table is
+// absent (the kernel's ENOENT to GETTABLE, or the table this backend just
+// deleted): the input chain is then new even when the chain list fails, so
+// its base rules are written rather than given up on (no daemon restart
+// would retry a tick's repair).
+func (b *Backend) ensureBaseAfterAbsent() error { return b.ensureBase(true) }
+
+func (b *Backend) ensureBase(tableWasAbsent bool) (err error) {
 	start := time.Now()
 	b.logPhase("EnsureBase", "start", 0, nil, "")
 	// Split the timing so the self-test can tell contention (lock_wait) from
@@ -81,8 +88,8 @@ func (b *Backend) EnsureBase() (err error) {
 	// it — would fail. The priority differs whenever this process has no
 	// config (a one-shot `cfm dnat on`, which builds its backend without one)
 	// or NFT_INPUT_PRIORITY changed after the chain was created.
-	cur := b.existingInputChain()
-	newChain := cur == nil
+	cur, listed := b.existingInputChain()
+	inputState := inputStateOf(listed, cur != nil, tableWasAbsent)
 	if cur == nil {
 		b.conn.AddChain(&nftables.Chain{
 			Table:    table,
@@ -196,28 +203,67 @@ func (b *Backend) EnsureBase() (err error) {
 
 	// Install base input chain rules (idempotent).
 	cliStart := time.Now()
-	rulesErr = b.applyBaseInputRules(newChain)
+	rulesErr = b.applyBaseInputRules(inputState)
 	cliWork = time.Since(cliStart)
+	// Unlisted chains AND unread rules: the chain may be new and empty
+	// (policy accept, no allow/block rule), and nothing repairs a chain
+	// whose table is there. That one is not best effort: fail, as the nft
+	// backend does, so the daemon's start fails and systemd retries it.
+	if errors.Is(rulesErr, errInputChainUnknown) {
+		err := rulesErr
+		rulesErr = nil
+		return err
+	}
 
 	return nil
 }
 
-// existingInputChain returns inet cfm's input chain, or nil when it doesn't
-// exist or the chain list can't be read (EnsureBase then declares it, as it
-// always did). Only chains are listed: never the input chain's rules, which
+// inputChainState is what EnsureBase knows of the input chain before it reads
+// the chain's rules.
+type inputChainState int
+
+const (
+	inputChainExisted inputChainState = iota // listed: it holds rules
+	inputChainNew                            // listed absent, created by this EnsureBase: empty
+	inputChainUnknown                        // the chain list failed: declared blind, may be either
+)
+
+// inputStateOf is what EnsureBase knows of the input chain: listed says the
+// chain list was read, found that it held the chain, tableWasAbsent that the
+// caller knows the table was absent (then the chain is new, listed or not).
+func inputStateOf(listed, found, tableWasAbsent bool) inputChainState {
+	switch {
+	case !listed && tableWasAbsent:
+		return inputChainNew
+	case !listed:
+		return inputChainUnknown
+	case !found:
+		return inputChainNew
+	}
+	return inputChainExisted
+}
+
+// errInputChainUnknown: neither the chain list nor the chain's rules could be
+// read, so the input chain may be new and empty.
+var errInputChainUnknown = errors.New("neither the chain list nor the input chain could be read; the input chain may be new and empty, so its base rules are unknown")
+
+// existingInputChain returns inet cfm's input chain (nil when it doesn't
+// exist) and whether the chain list was read at all (false: EnsureBase
+// declares the chain, as it always did, but cannot tell a new one from an
+// existing one). Only chains are listed: never the input chain's rules, which
 // google/nftables can't decode (see panel_dnat_accepts.go). Must be called
 // with b.mu held.
-func (b *Backend) existingInputChain() *nftables.Chain {
+func (b *Backend) existingInputChain() (*nftables.Chain, bool) {
 	chains, err := b.conn.ListChainsOfTableFamily(nftables.TableFamilyINet)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	for _, ch := range chains {
 		if ch.Table != nil && ch.Table.Name == cfmTableName && ch.Name == "input" {
-			return ch
+			return ch, true
 		}
 	}
-	return nil
+	return nil, true
 }
 
 // refreshSelfSets loads self_v4/self_v6 over netlink. They used to take one
@@ -226,133 +272,45 @@ func (b *Backend) existingInputChain() *nftables.Chain {
 // over a second (the CLI loads the whole ruleset, set elements included).
 func (b *Backend) refreshSelfSets() {
 	b.selfResolver.Refresh()
-	v4, v6 := selfSetElems(b.selfResolver.LocalIPs())
+	v4, v6 := firewall.SelfSetElems(b.selfResolver.LocalIPs())
 	_ = b.ReplaceSetFlushAdd("self_v4", v4, nil) // logs its own failure
 	_ = b.ReplaceSetFlushAdd("self_v6", v6, nil)
 }
 
-// selfSetElems is what self_v4/self_v6 hold: loopback, link-local and each
-// local address, as CIDRs with overlaps merged. The sets are interval sets,
-// which refuse overlapping elements, and a local link-local address lies
-// inside fe80::/10.
-func selfSetElems(local []string) (v4, v6 []string) {
-	v4 = []string{"127.0.0.0/8"}
-	v6 = []string{"::1/128", "fe80::/10"}
-	for _, s := range local {
-		ip := net.ParseIP(s)
-		switch {
-		case ip == nil:
-		case ip.To4() != nil:
-			v4 = append(v4, ip.To4().String()+"/32")
-		default:
-			v6 = append(v6, ip.String()+"/128")
-		}
-	}
-	return feedutil.NormalizeCIDRsV4(v4), feedutil.NormalizeCIDRsV6(v6)
-}
-
-// icmpFloodJumps send echo-requests through the flood chain when ICMP rate
-// limiting is on.
-var icmpFloodJumps = []string{
-	`ip protocol icmp icmp type echo-request jump flood`,
-	`ip6 nexthdr ipv6-icmp icmpv6 type echo-request jump flood`,
-}
-
 // applyBaseInputRules installs all permanent set-matching rules in the input chain.
 // Each rule is added only if it is not already present (idempotent): one read
-// of the chain, then the missing rules in one nft run (baseRulesScript).
-// newChain says the chain was created by this EnsureBase, so it holds no rules
-// yet. The error says the rules may be incomplete; they are best effort.
-func (b *Backend) applyBaseInputRules(newChain bool) error {
-	var ins, adds []string
-	insertRule := func(expr string) { ins = append(ins, expr) }
-	addRule := func(expr string) { adds = append(adds, expr) }
-
-	// Early rules inserted at position 0 in reverse order so the final
-	// top-down order matches the nft backend's EnsureBase:
-	//   1 iif lo accept
-	//   2 ip saddr @self_v4 accept
-	//   3 ip6 saddr @self_v6 accept
-	//   4-13 allow sets (manual, dyn, ext, nets)
-	//   14-21 block sets (manual, ext, nets)
-	//   (optional) ICMP → jump flood
-
-	icmpEnabled := b.cfg != nil && b.cfg.Hardening.ICMPRate > 0
-
-	early := []string{
-		`iif "lo" accept`,
-		`ip saddr @self_v4 accept`,
-		`ip6 saddr @self_v6 accept`,
-		`ip saddr @allow_v4 accept`,
-		`ip6 saddr @allow_v6 accept`,
-		`ip saddr @allow_dyn_v4 accept`,
-		`ip6 saddr @allow_dyn_v6 accept`,
-		`ip saddr @allow_ext_v4_hosts accept`,
-		`ip6 saddr @allow_ext_v6_hosts accept`,
-		`ip saddr @allow_ext_v4_nets accept`,
-		`ip6 saddr @allow_ext_v6_nets accept`,
-		`ip saddr @allow_v4_nets accept`,
-		`ip6 saddr @allow_v6_nets accept`,
-		`ip saddr @block_v4 drop`,
-		`ip6 saddr @block_v6 drop`,
-		`ip saddr @block_ext_v4_hosts drop`,
-		`ip6 saddr @block_ext_v6_hosts drop`,
-		`ip saddr @block_ext_v4_nets drop`,
-		`ip6 saddr @block_ext_v6_nets drop`,
-		`ip saddr @block_v4_nets drop`,
-		`ip6 saddr @block_v6_nets drop`,
-		`ip6 saddr @block_v6_clients drop`,
-	}
-	if icmpEnabled {
-		early = append(early, icmpFloodJumps...)
-	}
-
-	// Insert in reverse so the first item ends up at the top.
+// of the chain, then the missing rules in one nft run (baseRulesScript), with
+// the extra copies of every base rule deleted in the same run.
+// state says what EnsureBase knows of the chain: inputChainNew (created by
+// this EnsureBase, so it holds no rules yet), inputChainExisted, or
+// inputChainUnknown (the chain list failed). The error says the rules may be
+// incomplete; they are best effort, except errInputChainUnknown (an unread
+// chain that may be new and empty), which EnsureBase returns.
+//
+// The rules and their order are the nft backend's (firewall.BaseEarlyRules,
+// firewall.BaseLateRules, firewall.BaseFloodJump): the early group inserted
+// at position 0 in reverse so the first ends on top, the late group appended,
+// the flood jump last (before the ports policy's rules).
+func (b *Backend) applyBaseInputRules(state inputChainState) error {
+	early := firewall.BaseEarlyRules(b.cfg != nil && b.cfg.Hardening.ICMPRate > 0)
+	ins := make([]string, 0, len(early))
 	for i := len(early) - 1; i >= 0; i-- {
-		insertRule(early[i])
+		ins = append(ins, early[i])
 	}
-
-	// Established/related drops for blocked sets (before the general est/rel accept).
-	addRule(`ct state established,related ip saddr @block_v4 drop`)
-	addRule(`ct state established,related ip6 saddr @block_v6 drop`)
-	addRule(`ct state established,related ip saddr @block_ext_v4_hosts drop`)
-	addRule(`ct state established,related ip saddr @block_ext_v4_nets drop`)
-	addRule(`ct state established,related ip6 saddr @block_ext_v6_hosts drop`)
-	addRule(`ct state established,related ip6 saddr @block_ext_v6_nets drop`)
-	addRule(`ct state established,related ip saddr @block_v4_nets drop`)
-	addRule(`ct state established,related ip6 saddr @block_v6_nets drop`)
-	addRule(`ct state established,related ip6 saddr @block_v6_clients drop`)
-	addRule(`ct state established,related accept`)
-
-	// Duplicate allow/block rules appended (nft backend adds them both early and late).
-	addRule(`ip saddr @allow_v4 accept`)
-	addRule(`ip6 saddr @allow_v6 accept`)
-	addRule(`ip saddr @allow_dyn_v4 accept`)
-	addRule(`ip6 saddr @allow_dyn_v6 accept`)
-	addRule(`ip saddr @allow_ext_v4_hosts accept`)
-	addRule(`ip6 saddr @allow_ext_v6_hosts accept`)
-	addRule(`ip saddr @allow_ext_v4_nets accept`)
-	addRule(`ip6 saddr @allow_ext_v6_nets accept`)
-	addRule(`ip saddr @block_v4 drop`)
-	addRule(`ip6 saddr @block_v6 drop`)
-	addRule(`ip saddr @block_ext_v4_hosts drop`)
-	addRule(`ip6 saddr @block_ext_v6_hosts drop`)
-	addRule(`ip saddr @block_ext_v4_nets drop`)
-	addRule(`ip6 saddr @block_ext_v6_nets drop`)
-	addRule(`ip saddr @block_v4_nets drop`)
-	addRule(`ip6 saddr @block_v6_nets drop`)
-
-	// jump flood at the end of the base layer (before ports policy rules).
-	addRule("jump flood")
+	adds := append(firewall.BaseLateRules(), firewall.BaseFloodJump)
 
 	// Rules are added (only piled-up copies are ever deleted), so an unread
 	// chain must not be taken for an empty one — that would add every rule a
 	// second time — unless this
 	// EnsureBase just created it: then it is empty, and leaving it so would
 	// leave the node without its allow/block rules.
-	chain, err := b.chainTextCLI("input")
-	if err != nil && !newChain {
-		err = fmt.Errorf("can't read the input chain, left as is: %w", err)
+	chain, err := b.inputChainTextCLI()
+	if err != nil && state != inputChainNew {
+		if state == inputChainUnknown {
+			err = fmt.Errorf("%w (%v)", errInputChainUnknown, err)
+		} else {
+			err = fmt.Errorf("can't read the input chain, left as is: %w", err)
+		}
 		logging.Logf("[nftlib] base input rules: %v", err)
 		return err
 	}
@@ -360,7 +318,7 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	if len(stmts) == 0 {
 		return nil
 	}
-	err = b.nftExec(strings.Join(stmts, "\n"))
+	err = b.nftExecTimeout(strings.Join(stmts, "\n"), firewall.BaseScriptTimeout(len(stmts)))
 	if err == nil {
 		if n := countPrefix(stmts, "delete rule "); n > 0 {
 			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", n)
@@ -372,22 +330,37 @@ func (b *Backend) applyBaseInputRules(newChain bool) error {
 	// killed at its timeout), and running the statements again would
 	// duplicate them.
 	runErr := fmt.Errorf("one nft run of %d statements failed: %s", len(stmts), errTail(err, 300))
-	chain, err = b.chainTextCLI("input")
+	chain, err = b.inputChainTextCLI()
 	if err != nil {
 		err = fmt.Errorf("%v; can't re-read the input chain, left as is: %w", runErr, err)
 		logging.Logf("[nftlib] base input rules: %v", err)
 		return err
 	}
 	stmts = baseRulesScript(chain, ins, adds)
-	logging.Logf("[nftlib] base input rules: %v; applying %d one by one", runErr, len(stmts))
+	// The deletes stay one transaction (a node can hold thousands, and on EL8
+	// every nft run costs seconds); only the rules to add go one by one.
+	dels := countPrefix(stmts, "delete rule ") // baseRulesScript puts them first
+	logging.Logf("[nftlib] base input rules: %v; applying %d deletes in one run, %d statements one by one", runErr, dels, len(stmts)-dels)
+	var fails []string
+	if dels > 0 {
+		if err := b.nftExecTimeout(strings.Join(stmts[:dels], "\n"), firewall.BaseScriptTimeout(dels)); err != nil {
+			logging.Logf("[nftlib] EnsureBase: removing %d duplicate base rules failed: %s", dels, errTail(err, 300))
+			fails = append(fails, fmt.Sprintf("the run deleting %d duplicate base rules failed too", dels))
+		} else {
+			logging.Logf("[nftlib] EnsureBase: removed %d duplicate base rules", dels)
+		}
+	}
 	failed := 0
-	for _, st := range stmts {
+	for _, st := range stmts[dels:] {
 		if b.nftExec(st) != nil {
 			failed++
 		}
 	}
 	if failed > 0 {
-		return fmt.Errorf("%v; %d of %d single statements failed too", runErr, failed, len(stmts))
+		fails = append(fails, fmt.Sprintf("%d of %d single statements failed too", failed, len(stmts)-dels))
+	}
+	if len(fails) > 0 {
+		return fmt.Errorf("%v; %s", runErr, strings.Join(fails, "; "))
 	}
 	return nil
 }
@@ -418,7 +391,10 @@ func errTail(err error, n int) string {
 // counts as present per firewall.ChainRules, the rules queued before it
 // included — the check the one-nft-process-per-rule version made against the
 // chain as it grew, except that `jump flood` must be a whole rule. Extra
-// copies of the rules that check used to miss are deleted first.
+// copies of every base rule (firewall.BaseDedupeExprs: all but the ports
+// policy's established accept) are deleted first, the top-most of each kept,
+// so the whole script is one transaction: a packet sees all the copies or
+// one, never none.
 func baseRulesScript(chain string, ins, adds []string) []string {
 	have := firewall.ParseChainRules(chain)
 	missing := func(expr string) bool {
@@ -429,16 +405,26 @@ func baseRulesScript(chain string, ins, adds []string) []string {
 		return true
 	}
 	var stmts []string
-	for _, h := range have.DuplicateHandles(append([]string{`iif "lo" accept`, `jump flood`}, icmpFloodJumps...)...) {
+	dups := have.DuplicateHandles(firewall.BaseDedupeExprs()...)
+	for _, h := range dups {
 		stmts = append(stmts, "delete rule inet cfm input handle "+h)
 	}
+	have.Forget(dups)
 	// A rule written after the rest (firewall.BaseRuleAnchors) goes right
 	// after its anchor on a chain that already holds it: an insert at 0
 	// would put it above the self / allow accepts, an append below the ports
 	// policy's accepts.
+	// A missing early rule on a chain that holds the rest goes right after
+	// the nearest early rule above it (EarlyAnchorHandle): an insert at 0
+	// would put a re-added drop above the allow accepts. ins is the early
+	// group bottom-up; EarlyAnchorHandle wants it top-down.
+	early := make([]string, len(ins))
+	for i, e := range ins {
+		early[len(ins)-1-i] = e
+	}
 	for _, e := range ins {
 		if missing(e) {
-			if h := have.AnchorHandle(e); h != "" {
+			if h := have.EarlyAnchorHandle(e, early); h != "" {
 				stmts = append(stmts, "add rule inet cfm input position "+h+" "+e)
 			} else {
 				stmts = append(stmts, "insert rule inet cfm input position 0 "+e)
@@ -493,7 +479,7 @@ func (b *Backend) ResetTable() error {
 	dropDur := time.Since(dropStart)
 
 	ensureStart := time.Now()
-	if err := b.EnsureBase(); err != nil {
+	if err := b.ensureBaseAfterAbsent(); err != nil { // the table was just deleted
 		return fmt.Errorf("nftlib: reset table (ensure): %w", err)
 	}
 	ensureDur := time.Since(ensureStart)

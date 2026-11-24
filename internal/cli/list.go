@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,7 +16,15 @@ import (
 func RunList(args []string, be firewall.Backend, tableExists func() bool) int {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
-	_ = fs.Parse(args)
+	if clihelp.First(args) {
+		args = args[:1] // answered by NoArgs below, not by the flag package's os.Exit
+	} else {
+		_ = fs.Parse(args)
+		args = fs.Args()
+	}
+	if rc, done := clihelp.NoArgs("list", "usage: cfm list [--json]", args); done {
+		return rc
+	}
 
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")
@@ -68,7 +77,15 @@ func RunList(args []string, be firewall.Backend, tableExists func() bool) int {
 func RunAllowList(args []string, be firewall.Backend, tableExists func() bool) int {
 	fs := flag.NewFlagSet("allow-list", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "output JSON")
-	_ = fs.Parse(args)
+	if clihelp.First(args) {
+		args = args[:1] // answered by NoArgs below, not by the flag package's os.Exit
+	} else {
+		_ = fs.Parse(args)
+		args = fs.Args()
+	}
+	if rc, done := clihelp.NoArgs("allow-list", "usage: cfm allow-list [--json]", args); done {
+		return rc
+	}
 
 	if be == nil {
 		fmt.Fprintln(os.Stderr, "no firewall backend available")

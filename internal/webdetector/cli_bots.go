@@ -21,6 +21,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -82,10 +83,13 @@ func RunBots(baseURL string, args []string) error {
 		return runBotsLive(baseURL)
 	}
 
-	switch strings.ToLower(args[0]) {
-	case "help", "-h", "--help":
+	// A help word is usage, never a UA (`bots block --help` installed an
+	// emergency rule for UA "--help").
+	if clihelp.Sub(args) {
 		printBotsHelp()
 		return nil
+	}
+	switch strings.ToLower(args[0]) {
 
 	case "top":
 		limit := 20

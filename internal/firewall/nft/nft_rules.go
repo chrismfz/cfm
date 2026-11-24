@@ -5,6 +5,7 @@ import (
 	cfgpkg "cfm/internal/config"
 	"cfm/internal/firewall"
 	"cfm/internal/firewall/autoblock"
+	"cfm/internal/firewall/nlcounters"
 	"cfm/internal/logging"
 	"cfm/internal/notify"
 	"context"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -38,88 +40,145 @@ func (b *Backend) DumpFloodCounters() {
 	}()
 }
 
-func (b *Backend) dumpFloodCountersOnce() {
-	// Πάρε όλους τους counters του table (χωρίς sets/elements).
-	// Use a generous timeout so nft gets enough time under load, without stalling the daemon tick path.
+// readCounters is how the flood dump reads the table's named counters
+// (packets by name). It is nlcounters.Dump: one netlink GETOBJ dump, 0.3-1.2
+// ms on the EL8 nodes where `nft list counters table inet cfm` took 2.8-18.5 s
+// (nft 1.0.4 loads every set element first). Tests replace it.
+var readCounters = func() (map[string]uint64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cs, err := nlcounters.Dump(ctx, tableName)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]uint64, len(cs))
+	for name, c := range cs {
+		out[name] = c.Packets
+	}
+	return out, nil
+}
+
+// floodCounterWanted reports whether a named counter is one the flood dump
+// logs.
+func floodCounterWanted(name string) bool {
+	switch name {
+	case "badflags_drop", "newrate_v4", "newrate_v6", "icmp_v4", "icmp_v6":
+		return true
+	}
+	return strings.HasPrefix(name, "connlimit_") ||
+		strings.HasPrefix(name, "portflood_") ||
+		strings.HasPrefix(name, "synrate_") ||
+		strings.HasPrefix(name, "ppsrate_")
+}
+
+// floodCLIFallbackEvery bounds the CLI fallback while netlink keeps failing:
+// that listing loads every set element (seconds per run on EL8's nft 1.0.4,
+// holding one of the four nft slots), and the counters it feeds are log-only.
+// floodNLLogEvery repeats the netlink warning so a lasting failure stays
+// visible.
+var (
+	floodCLIFallbackEvery = 5 * time.Minute
+	floodNLLogEvery       = time.Hour
+)
+
+// errFloodCLISkipped is floodCounters' answer on a tick where netlink failed
+// and the CLI fallback already ran within floodCLIFallbackEvery.
+var errFloodCLISkipped = errors.New("netlink counter read failed; CLI fallback rate-limited")
+
+// floodCounters reads the table's counters: over netlink, and through the nft
+// CLI only when netlink fails, at most once per floodCLIFallbackEvery. An
+// error means unknown, never "no counters". Called from the overlap-guarded
+// dump goroutine only (the guard's mutex orders the runs).
+func (b *Backend) floodCounters() (map[string]uint64, error) {
+	cs, nlErr := readCounters()
+	if nlErr == nil {
+		return cs, nil
+	}
+	now := time.Now()
+	if msg := nlErr.Error(); msg != b.floodNLErr || now.Sub(b.floodNLLogAt) >= floodNLLogEvery {
+		b.floodNLErr, b.floodNLLogAt = msg, now
+		logging.Logf("[flood] netlink counter read failed (%v); falling back to `nft list counters` at most every %s", nlErr, floodCLIFallbackEvery)
+	}
+	if !b.floodCLIAt.IsZero() && now.Sub(b.floodCLIAt) < floodCLIFallbackEvery {
+		return nil, errFloodCLISkipped
+	}
+	b.floodCLIAt = now
 	out, err := b.runCmdOutputWithTimeout("list counters table inet cfm", 30*time.Second)
 	if err != nil {
-		// Προσπάθησε να επαναφέρεις τη βάση και βγες ήσυχα.
-		_ = b.EnsureBase()
-		logging.Logf("[flood] cannot list counters: %v", err)
-		return
+		return nil, err
 	}
+	return parseCounterListing(out), nil
+}
 
-	// Γρήγορο φίλτρο: counters που μας ενδιαφέρουν 1) ονομαστικά, 2) με prefixes
-	wantedExact := map[string]struct{}{
-		"badflags_drop": {},
-		"newrate_v4":    {},
-		"newrate_v6":    {},
-		"icmp_v4":       {},
-		"icmp_v6":       {},
-	}
-	hasWantedPrefix := func(name string) bool {
-		return strings.HasPrefix(name, "connlimit_") ||
-			strings.HasPrefix(name, "portflood_") ||
-			strings.HasPrefix(name, "synrate_") ||
-			strings.HasPrefix(name, "ppsrate_")
-	}
-	isWanted := func(name string) bool {
-		if _, ok := wantedExact[name]; ok {
-			return true
+// parseCounterListing reads `nft list counters` text output:
+//
+//	counter badflags_drop {
+//		packets 1234 bytes 5678
+//	}
+func parseCounterListing(out string) map[string]uint64 {
+	res := map[string]uint64{}
+	var cur string
+	scan := bufio.NewScanner(strings.NewReader(out))
+	for scan.Scan() {
+		s := strings.TrimSpace(scan.Text())
+		if strings.HasPrefix(s, "counter ") {
+			cur = ""
+			if f := strings.Fields(s); len(f) >= 2 {
+				cur = strings.TrimSuffix(f[1], "{")
+			}
+			continue
 		}
-		return hasWantedPrefix(name)
+		if cur != "" && strings.HasPrefix(s, "packets ") {
+			if f := strings.Fields(s); len(f) >= 2 {
+				if n, err := strconv.ParseUint(f[1], 10, 64); err == nil {
+					res[cur] = n
+				}
+			}
+			cur = ""
+		}
+	}
+	return res
+}
+
+func (b *Backend) dumpFloodCountersOnce() {
+	cs, err := b.floodCounters()
+	// Repair the base only if the table is really gone: a failed or timed-out
+	// read is unknown, not a missing table. An empty netlink answer is what an
+	// absent table gives (the dump filter matches nothing), but also a table
+	// with no counters, so it is checked the same way (`list chains inet`, ms).
+	// A skipped CLI fallback says nothing new about the table.
+	if (err != nil && !errors.Is(err, errFloodCLISkipped)) || (err == nil && len(cs) == 0) {
+		if b.probeTable() == tableAbsent {
+			_ = b.ensureBaseAfterAbsent()
+		}
+	}
+	if err != nil {
+		if !errors.Is(err, errFloodCLISkipped) {
+			logging.Logf("[flood] cannot list counters: %v", err)
+		}
+		// The counters are log-only; the throttle autoblock below is not, and
+		// must not stop because they could not be read.
+		cs = nil
 	}
 
 	if b.last == nil {
 		b.last = map[string]uint64{}
 	}
-
-	// Παράδειγμα output (text):
-	// counter badflags_drop { packets 1234 bytes 5678 }
-	// counter portflood_80_tcp { packets 42 bytes 1234 }
-	var cur string
-	scan := bufio.NewScanner(strings.NewReader(out))
-	for scan.Scan() {
-		s := strings.TrimSpace(scan.Text())
-		if s == "" {
-			continue
+	names := make([]string, 0, len(cs))
+	for name := range cs {
+		if floodCounterWanted(name) {
+			names = append(names, name)
 		}
-
-		// Νέα καταμέτρηση counter
-		if strings.HasPrefix(s, "counter ") {
-			// "counter <name> {"
-			f := strings.Fields(s)
-			if len(f) >= 2 {
-				name := strings.TrimSuffix(f[1], "{")
-				if isWanted(name) {
-					cur = name
-				} else {
-					cur = ""
-				}
-			}
-			continue
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		pkts := cs[name]
+		if prev := b.last[name]; pkts > prev {
+			logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
+				name, pkts, pkts-prev, autoblock.ReasonForName(name))
 		}
-
-		// Γραμμή πακέτων
-		if cur != "" && strings.HasPrefix(s, "packets ") {
-			// "packets <N> bytes <M>"
-			f := strings.Fields(s)
-			if len(f) >= 2 {
-				if pkts64, err := strconv.ParseUint(f[1], 10, 64); err == nil {
-
-					pkts := pkts64
-					prev := b.last[cur] // 0 αν δεν υπάρχει
-					if pkts > prev {
-						delta := pkts - prev
-						logging.Logf("[flood] %-24s packets %d (+%d) reason=%s",
-							cur, pkts, delta, autoblock.ReasonForName(cur))
-					}
-					// reset (pkts < prev) το χειρίζεσαι ήδη “σιωπηλά” ενημερώνοντας την τιμή
-					b.last[cur] = pkts
-
-				}
-			}
-		}
+		// A reset (pkts < prev) just updates the baseline.
+		b.last[name] = pkts
 	}
 
 	// Throttle IPs dump μόνο όταν είναι ενεργό.
@@ -729,11 +788,23 @@ func (b *Backend) loadPortScannerOnce() {
 	b.abMu.Lock()
 	defer b.abMu.Unlock()
 
-	// σιγουρέψου ότι υπάρχει η βάση
-	if !b.tableExists() {
-		if err := b.EnsureBase(); err != nil {
+	// Make sure the base exists, but repair only on a DEFINITE absence: a probe
+	// that timed out (nft slots busy on a loaded node) used to read as "no
+	// table" here and re-ran EnsureBase from every tick. On an unknown, skip
+	// this tick's load; the next tick asks again.
+	switch b.probeTable() {
+	case tableAbsent:
+		if err := b.ensureBaseAfterAbsent(); err != nil {
 			return
 		}
+	case tableUnknown:
+		// Say so, at most every 10 minutes: a node whose nft slots stay
+		// saturated would otherwise stop loading the portscan sets silently.
+		if time.Since(b.portscanSkipLogged) > 10*time.Minute {
+			b.portscanSkipLogged = time.Now()
+			logging.Logf("[portscan] skipped this tick's load: the nft table probe did not answer in time (nft busy); retrying next tick")
+		}
+		return
 	}
 	b.ensurePortscanSets()
 

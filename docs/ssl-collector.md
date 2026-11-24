@@ -156,6 +156,38 @@ current pair for that name. A held shrink logs `merged, not replaced` and
 sets `meta:last_error`. Every ingest logs one line,
 `ingest src=… mode=replace|merge_shrink|merge_incomplete|none`.
 
+**A full GC after every ingest that changed the store.** Each pair is OpenSSL
+memory (the parsed X509 chain and EVP_PKEY) behind a few bytes of cdata, so
+LuaJIT's GC, which counts only those bytes, ran rarely, and the stores an
+ingest let go of piled up: titan (3513 names, 2026-11-23) had workers at
+410-530 MB PSS. In a container, 20 loads of 3000 pairs took a worker from 51
+to 238 MB RSS without it, and a late collect still left 215 MB (the freed
+memory is not returned to the OS once fragmented); with a collect right after
+each swap it stayed at 92 MB. The collect (`collect_released`) runs in the
+ingest's caller, `do_dumpall` (after the shared lock is released) or the
+snapshot load, once `ingest_dumpall` has returned: inside it the raw body
+(~20 MB on titan) and the decoded payload were still referenced and survived
+it. It runs only when the payload stored at least one pair, in a timer, never
+on a handshake (~50 ms for 3000 pairs).
+
+**Then `malloc_trim(0)`** (glibc, through the FFI). The collect frees the
+pairs, but glibc keeps the freed pages, and the worker's traffic allocations
+living between them stop it from reusing them whole: on titan (collect only,
+2026-11-23) RSS climbed in steps to the peak of an ingest, 118 → 238 → 337 →
+440 MB over three hourly ingests. malloc_trim hands the free pages back to
+the OS, the middle of the heap included. In a container (3500 pairs, a 17.6 MB
+payload, live allocations between 16 ingests) collect only settled at 227 MB,
+collect + trim at 165 MB, for ~25-40 ms more. Where it does not exist (no
+glibc, no FFI) it is skipped. It is thread-safe, and CFM's edge config runs
+no thread pool on any engine (no `aio` / `thread_pool`), so the arena locks
+it takes contend with nothing.
+
+The collect logs its own line,
+`gc src=dumpall|snapshot gc_ms= trim_ms= lua_kb= rss_mb=`: the wall time of
+the collect and of the trim (`-` when none ran), the Lua heap after them, and
+the worker's resident set (from `/proc/self/status`), which is where the
+OpenSSL side shows.
+
 ---
 
 ## The snapshot and `/dumpall`
@@ -181,6 +213,15 @@ streams the payload to the worker as it is written (never `complete`). The
 payload is written entry by entry and is never whole in the daemon's memory;
 its header carries `version`, `generated_at`, `exact_n`, `wild_n` and
 `complete` ahead of the entries.
+
+Each entry's `key_pem` holds only the PRIVATE KEY block(s) of its key file
+(`privateKeyBlocksOnly`), `/cert` too. Panels write key files as bundles
+(cPanel's combined key+leaf+chain, DirectAdmin `.combined`, Virtualmin
+`ssl.combined`), and the chain is already in `cert_pem` (with any key
+scrubbed from a chain file, `stripPrivateKeyBlocks`): sent whole, every chain
+went twice (on virgo, 2026-11-23, 4181 of 4193 key files were bundles, and
+`dump.json` shrank from 56 to ~32 MB). A key file with no key block is sent
+as it is.
 
 ---
 

@@ -19,7 +19,7 @@ kept where they size a gap or justify a decision.
 | G1 global IP reputation | **mail part built**; public feeds open | dovecot `user_disabled` counting (`internal/detectors/dovecot/auth.go:151`, ban cap `:407`, defaults `internal/detectors/dovecot_register.go:70-73`). blocklist.de / Spamhaus DROP ship commented out in `configs/cfm.blocklists:2-12`; not measured |
 | G2 WooCommerce `add-to-cart` crawling | **built, logonly** | rule 530 `WAF_CART_CRAWL` (`configs/lua/cfm_waf.lua:125`, `internal/webdetector/waf_rule_ids.go:215`). Open: promotion, and whether the `CRAWLER` tag gets a 301 to the product page |
 | G3 attacks Imunify's ModSec saw past CFM | **re-scoped**, see G3b | webshell-path GET probes not built, by decision; headless-UA rule rejected; `?author=N` skipped |
-| G3b PHP uploaded past rule 404's 2 KB window | **built, logonly** | rule 417 (`cfm_waf.lua:116`, `waf_rule_ids.go:166`); rule 10029 at block, `WAF_CVE` armed (`cfm_waf.lua:263`, `waf_rule_ids.go:318`); rule 415's tag carries the file extension (`configs/lua/cfm_waf_detectors.lua:5870`); multipart media type read as PHP does (`cfm_waf_detectors.lua:734`) |
+| G3b PHP uploaded past rule 404's 2 KB window | **built; 417 and 415 block since 2026-11-24 (bans held)** | rules 417 and 415 (`rule_php_webshell_body_deep`, `rule_upload_content_deep` in `cfm_waf.lua` and `waf_rule_ids.go`); rule 10029 at block, `WAF_CVE` armed (`rule_cve_fabrik_listfilter_eval`); rule 415's tag carries the file extension (`configs/lua/cfm_waf_detectors.lua:5870`); multipart media type read as PHP does (`cfm_waf_detectors.lua:734`) |
 | G4 vulnerable code on disk | open | no `vulnerability_hits` collector in the tree |
 | G5 PHP runtime | open | design only: `docs/roadmaps/php-runtime-defense.md`, `docs/lsm-php-drop-detection.md` (FS-009) |
 | G6 malware at rest | open | ClamAV-vs-Imunify signature comparison not done |
@@ -126,7 +126,7 @@ plugin-editor save with an eval at line 32, orion 2026-11-15; a file manager's
 backdoors, outside the WAF.
 
 **Built:**
-- **rule 417** (`WAF_PHP_WEBSHELL_BODY:DEEP_*`, logonly): 404's scorer over the
+- **rule 417** (`WAF_PHP_WEBSHELL_BODY:DEEP_*`, block since 2026-11-24, ban held): 404's scorer over the
   whole body the edge reads (32 KB), multipart text fields and JSON escapes
   included (`docs/waf.md`, "Rule 417");
 - **rule 10029** (Fabrik list-filter eval, CVE-2026-67282) at block with

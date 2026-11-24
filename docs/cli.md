@@ -1,6 +1,18 @@
 # CFM CLI: the commands that have no doc of their own
 
 Every command prints its own help (`cfm <command> help`, `cfm webtop help`).
+`-h`, `--help` and `help` are the same everywhere, after any subcommand
+(`cfm webtop history prune --help`, `cfm kernsec apply help`): the command
+prints its usage and does nothing else, with no API call and no change to
+nft or a config file. Commands that take no argument (`cfm reset`, `cfm
+disable`, `cfm flush`, `cfm test`, `cfm kernsec init`, `cfm lsm init`) refuse
+any other argument instead of ignoring it. A target or value literally named
+`help` cannot be given where a help word is read: a bare `help` counts
+anywhere on the line except as the value of the flag right before it
+(`--reason help` stays a reason), and a flag `-h`/`--help` counts anywhere
+before `--`. The check lives in one place, `internal/clihelp`; a new command uses it
+(`clihelp.NoArgs`, `clihelp.Parse` for a flags-only command, `clihelp.Sub`
+under a dispatcher) rather than its own `case "help"` list.
 This page covers the ones no topic doc owns; the others live with their
 subsystem: `cfm clam` → `docs/clamav.md`, `cfm mysqltop` →
 `docs/mysql-governor.md`, `cfm kernsec` → `docs/kernsec.md`, `cfm lsm` →
@@ -60,6 +72,14 @@ vhost/IP, `cfm bots` is keyed on the **normalized User-Agent across all
 vhosts** — useful when one bot family (Facebook OG fetcher, SemrushBot,
 AhrefsBot, …) hammers many vhosts at once and per-vhost throttles don't
 catch the aggregate.
+
+The key is the UA's first token (`curl`, `facebookexternalhit`), or, for a
+`Mozilla/5.0 …` UA, the first token carrying a bot marker in any of its
+`(...)` groups (`meta-externalagent` from Meta's Chrome-UA crawler,
+`googlebot` from Googlebot desktop AND smartphone); a browser is `mozilla`.
+So a rule on `googlebot` or `bingbot` also covers that engine's mobile
+crawler. The daemon (`NormalizeUA`) and the edge (`cfm_ua_emergency.lua`)
+compute it the same way (`scripts/tests/fixtures/ua_norm.txt`).
 
 ```bash
 cfm bots                          # live two-pane TUI (top + active rules)

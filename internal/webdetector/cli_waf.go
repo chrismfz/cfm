@@ -29,6 +29,7 @@
 package webdetector
 
 import (
+	"cfm/internal/clihelp"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,6 +44,12 @@ import (
 
 // runWafWebTop is the entry point for `cfm webtop waf [subcommand]`.
 func runWafWebTop(baseURL string, args []string) error {
+	// A help word is usage, never a host/profile (`waf clear --help` cleared
+	// host "--help"). exclude answers its own help.
+	if clihelp.Any(args) && args[0] != "exclude" { // values: hosts, profiles, numbers
+		printWebTopHelp()
+		return nil
+	}
 	if len(args) == 0 {
 		return runWafList(baseURL)
 	}

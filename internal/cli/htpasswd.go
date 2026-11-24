@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"cfm/internal/clihelp"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -21,10 +23,22 @@ import (
 func RunHtpasswd(args []string) int {
 	fs := flag.NewFlagSet("htpasswd", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	const usage = "usage: cfm htpasswd <username> [password]"
+	if clihelp.First(args) {
+		fmt.Println(usage)
+		return 0
+	}
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 	rest := fs.Args()
+	if clihelp.First(rest) {
+		fmt.Println(usage)
+		return 0
+	}
 	if len(rest) < 1 || len(rest) > 2 {
 		fmt.Fprintln(os.Stderr, "usage: cfm htpasswd <username> [password]")
 		return 2

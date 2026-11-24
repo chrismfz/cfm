@@ -2038,6 +2038,42 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
         return ngx.exit(CFG.block_code)
       end
 
+      -- Rule 530's crawler redirect: a declared crawler (CRAWLER tag) that
+      -- asks for ?add-to-cart=<id> gets a 301 to the same URL without it, so
+      -- the shop writes no session and cart (meta-externalagent wrote ~27 000
+      -- on titan in three hours on 2026-11-24, at ~1.5 s of PHP each). The
+      -- page itself stays reachable. Only on a logonly verdict (a stronger
+      -- hit keeps its own answer), never behind a trusted proxy: a CDN cache
+      -- rule that ignores Cache-Control could serve the 301 to shoppers on
+      -- the same URL (docs/waf.md, "Rule 530"). The Location is a path,
+      -- leading slashes collapsed (`//host/` would be another site's URL).
+      -- It answers before Step 3: a blocked or challenged crawler gets the
+      -- 301 first, and its block or challenge on the URL it is sent to.
+      if waf_action == "logonly" and waf.cart_crawl_redirect and waf.cart_crawl_redirect(waf_hits) then
+        local okp, peer, addr = pcall(function() return ngx.var.realip_remote_addr, ngx.var.remote_addr end)
+        local proxied = okp and peer and peer ~= "" and addr and peer ~= addr
+        if not proxied then
+          local ruri = ngx.var.request_uri or uri or "/"
+          local path, q = ruri:match("^([^?]*)%??(.*)$")
+          path = (path or "/"):gsub("^[/\\]+", "/")
+          -- Always a local path: an absolute-form target loses its
+          -- scheme://host, anything else that is not a path becomes "/".
+          if path:sub(1, 1) ~= "/" then
+            path = path:match("^%a[%w+.-]*://[^/]*(/.*)$") or "/"
+            path = path:gsub("^[/\\]+", "/")
+          end
+          local nq = waf.query_without_field(q or "", "add-to-cart")
+          push_and_log_waf_hit()
+          log_route(ngx.INFO, "cart_crawl_redirect ip=" .. ip .. " host=" .. host ..
+            " waf_rule_id=" .. tostring(waf_rule_id))
+          ngx.header["X-CFM-Action"] = "cart_crawl_redirect"
+          ngx.header["Cache-Control"] = "no-store"
+          ngx.header["Vary"] = "User-Agent"
+          ngx.var.cfm_upstream = "cfm_redirect"; ngx.var.cfm_pass = ""
+          return ngx.redirect(path .. ((nq ~= "") and ("?" .. nq) or ""), 301)
+        end
+      end
+
       if waf_action == "logonly" then
         -- Not a decision: Steps 2b-4 decide (see waf_allow_action).
         -- The steps after this one set X-CFM-Action from it.

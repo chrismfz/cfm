@@ -22,6 +22,33 @@
 # This script mirrors the structure of install-openresty.sh for side-by-side
 # comparison.
 
+# bash only. Run as `sh install-*.sh`, this script would not stop at once: sh
+# (dash on Debian; bash 4.4 in POSIX mode on EL8, which refuses `<(...)`)
+# defines the functions as it reaches them, so it ran the first steps and
+# failed half-way (EL8, 2026-11-20: "syntax error near unexpected token `<'",
+# then "command not found"). Re-run under bash before any step; once only.
+# The re-run drops POSIXLY_CORRECT / SHELLOPTS (they would put bash back in
+# POSIX mode) and marks itself with this script's path, so a second POSIX
+# start of the same script errors instead of looping; the mark is cleared
+# after, so no child inherits it.
+case "${BASH_VERSION:-}:${SHELLOPTS:-}" in
+    :* | *posix*)
+        # From stdin or sh -c, $0 is the shell itself (sh, /bin/sh, dash),
+        # which is a file too: never re-run that.
+        case "${0##*/}" in sh | dash | bash | ash | ksh | mksh | zsh | -sh | -dash | -bash) cfm_no_file=1 ;; *) cfm_no_file= ;; esac
+        if [ -n "$cfm_no_file" ] || [ ! -f "$0" ]; then
+            echo "This script needs bash: run the file with bash (bash scripts/install-*.sh), not from stdin or sh -c" >&2
+            exit 1
+        fi
+        if [ "${CFM_BASH_REEXEC:-}" = "$0" ]; then
+            echo "This script needs bash outside POSIX mode: run it as  bash '$0'" >&2
+            exit 1
+        fi
+        CFM_BASH_REEXEC="$0" exec env -u POSIXLY_CORRECT -u SHELLOPTS bash -- "$0" "$@"
+        ;;
+esac
+unset CFM_BASH_REEXEC
+
 set -euo pipefail
 
 readonly CFM_SHARED_LUA_DIR="/var/lib/cfm/lua"

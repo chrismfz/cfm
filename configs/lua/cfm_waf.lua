@@ -113,7 +113,7 @@ local CFG = {
                                          --  multipart/binary CTs; 0 hits over 6 weeks ×
                                          --  5 servers — no legit traffic produces these bytes)
   rule_php_webshell_body = "challenge_v2",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
-  rule_php_webshell_body_deep = "logonly", -- rule 417: 404's scorer over the whole body the edge read (php_webshell_deep_scan_len, 32 KB), when 404's 2 KB head scored nothing. PHP source saved through a form field lands past 2 KB: a plugin-editor save with an eval of a header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), a file manager's cmd=put / a webshell editor saving a shell whose comment header fills the first 2 KB ("ANTI-BLANK & WAF BYPASS", zerooneoliveoil.gr, rigel, 2026-11-17). Logonly through burn-in: a whole legitimate plugin file saved through an editor is scored too.
+  rule_php_webshell_body_deep = "block", -- rule 417: 404's scorer over the whole body the edge read (php_webshell_deep_scan_len, 32 KB), when 404's 2 KB head scored nothing. PHP source saved through a form field lands past 2 KB: a plugin-editor save with an eval of a header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), a file manager's cmd=put / a webshell editor saving a shell whose comment header fills the first 2 KB ("ANTI-BLANK & WAF BYPASS", zerooneoliveoil.gr, rigel, 2026-11-17). Promoted logonly→block 2026-11-24 (burn-in: 5 hits in 7 days on 8 nodes, every one an attacker: a Joomla template-editor `system($_GET)` tool on kspk.gr twice, a Helix3 eval spray; 0 FP); ban held per rule (HoldAutoblock, RULE_417 = 0): a whole legitimate plugin file saved through an editor still scores, and that must be a 403, not a 6 h ban. Exempt, like the other body-PHP rules, on is_known_legit_php_upload_endpoint (Code Snippets, String Locator, the plugin / theme installer). Recorded late, with the held rules.
   rule_b64_injection     = "challenge_v2",  -- POST-body base64 decode heuristic scanner
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
@@ -122,7 +122,14 @@ local CFG = {
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
   rule_wp_admin_cross_screen = "logonly", -- rule 503: a logged-in WordPress privileged action (the user screens incl. users.php's GET role change, update.php upload-plugin/upload-theme, plugin activation, the admin-ajax file editor and plugin install/activate, REST writes to /wp/v2/users and /wp/v2/plugins) that did not come from its own form: a same-host Referer from another screen or the front end, Fetch Metadata of a script (fetch/XHR, iframe), cross-site, or a navigation no click started; and a GET of a nonce-bearing screen by fetch/XHR or into an iframe. The stored-XSS kill chain of tophair.gr (2026-10-06): the order screen's script created an administrator and uploaded a backdoor plugin from staff's own browser. Logonly through burn-in; the IP is the victim's, so a block promotion must hold the autoblock (HoldAutoblock).
-  rule_wc_cart_get_crawl  = "logonly", -- rule 530: a GET/HEAD with add-to-cart=<id> (WooCommerce adds to the cart and writes a session for it) from a crawler UA, or from a browser UA with no same-site Referer / Fetch Metadata and no WooCommerce session or login cookie (tags CRAWLER / NO_REFERER / XSITE). ~265k a day on six nodes (2026-11-17), mostly meta-externalagent; every tag is client-authored, so measurement only.
+  rule_wc_cart_get_crawl  = "logonly", -- rule 530: a GET/HEAD with add-to-cart=<id> (WooCommerce adds to the cart and writes a session for it) from a crawler UA, or from a browser UA with no same-site Referer / Fetch Metadata and no WooCommerce session or login cookie (tags CRAWLER / NO_REFERER / XSITE). ~265k a day on six nodes (2026-11-17), mostly meta-externalagent; every tag is client-authored, so no ban and no block: since 2026-11-24 the CRAWLER tag gets cfm.lua's 301 without add-to-cart (wc_cart_crawl_redirect below), the other tags stay measurement only.
+  -- Rule 530's CRAWLER tag (a declared crawler UA) answered with a 301 to the
+  -- same URL without add-to-cart, so the shop writes no session and cart for
+  -- it (cfm.lua, after the WAF; the hit is still logged and pushed as
+  -- logonly). Not behind a trusted proxy (Cloudflare): a CDN cache rule that
+  -- ignores Cache-Control could serve the 301 to shoppers on the same URL.
+  -- false turns it off (cfm_waf_config.lua, applied at the next edge reload).
+  wc_cart_crawl_redirect = true,
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body. Edge 403 only: autoblock held in code (RULE_511 = 0), WordPress's own pingback client sends it. Recorded late, after the armed families.
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
@@ -208,7 +215,7 @@ local CFG = {
   rule_js_proto         = "block",  -- JS __proto__ / constructor.prototype pollution. Promoted challenge_v2→block 2026-11-17: 18 916 hits / 5 786 IPs in 7 days on 8 nodes, the React2Shell sweep (POST / with __proto__, Google Cloud / aiohttp), not one IP solved a challenge. Ban held per rule (HoldAutoblock, RULE_303 = 0): at threshold 1 that is ~830 bans and alerts a day. Recorded late, with the held rules.
 
   -- [top-10] XXE + CRLF + HTTP request smuggling
-  rule_xxe              = "block",  -- XXE DOCTYPE/ENTITY SYSTEM in request body. Promoted challenge_v2→block 2026-11-17 (85 hits / 55 IPs in 7 days, all datacenter scanners). Ban held per rule (HoldAutoblock, RULE_307 = 0) through a burn-in. Recorded late, with the held rules.
+  rule_xxe              = "block",  -- XXE DOCTYPE/ENTITY SYSTEM in request body. Promoted challenge_v2→block 2026-11-17 (85 hits / 55 IPs in 7 days, all datacenter scanners). Ban held through a burn-in, armed 2026-11-24 (220 hits / 91 IPs in 5.5 days, all datacenter, 0 GR/CY): RULE_307 = 1.
   rule_crlf_injection   = "challenge_v2", -- CRLF / HTTP response-splitting in args or body.
                                         -- content-type/content-length are the FP-prone, low-impact tags:
                                         -- they appear legitimately in request BODIES (multipart part
@@ -263,12 +270,15 @@ local CFG = {
   rule_cve_fabrik_listfilter_eval = "block", -- CVE-2026-67282 (Fabrik for Joomla 1.0.0–4.6.7, fixed in 4.7.2 with CVE-2026-66915): unauth RCE through the list filter, which runs `<table>___<element>[value]` as PHP when the element also carries `[eval]` set. Fires on a request field (query, urlencoded or multipart POST) with an `[eval]` index on a Fabrik request (option=com_fabrik, `fabrik` in the path, or the element name's `___`): EVAL_ARG / EVAL_BODY for a set value, EVAL_ZERO (always logonly) for `=0`. Source: the dmkomotinis.gr compromise (earth, 2026-11-12). Fabrik's own filter form posts `[eval]=0` (POST bodies, which the access log does not carry). Promoted logonly→block 2026-11-17 (burn-in: a 14-day read of all 8 nodes' cfm.waf.log found EVAL_ZERO only, 10 hits from Greek users on three Fabrik sites, and EVAL_ARG / EVAL_BODY only from the attacker); WAF_CVE armed, so the first probe (`[value]=1;` with `[eval]=1`) bans, before any payload reaches rule 332.
   rule_cve_drupal_render_callback = "block", -- CVE-2026-108097 (SA-CORE-2026-014, Drupal Field UI, fixed 2026-10-14 in 10.6.19 / 11.3.19 / 11.4.10) and CVE-2018-7600 (Drupalgeddon2): a render-array callback key (#region_callback, #post_render, #pre_render, #lazy_builder, #access_callback) sent as a request-field NAME or a JSON object KEY (JSON body on POST / PUT / PATCH; in a field value that is a JSON document, #region_callback only), or in the query of Drupal 7's `destination` (never the words in a value). Runs right after 10027 and is enforced in the body burn-in (cfm.lua BURNIN_ENFORCE_IDS). Drupal builds those keys server-side, so no legitimate request carries one; a 7-day read of all 8 edge nodes (2026-11-18) found them only in attacks (the lab-route probe, a Drupalgeddon2 payload that got a 200). Block, WAF_CVE armed: three EOL Drupal sites on the fleet (8.6, 9.3) cannot take the core patch.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
+  rule_cve_php_fpm_smuggle = "logonly", -- CVE-2026-129289 (GHSA-qc49-hpvq-g2w6, php-src 2026-11-19, fixed 8.2.36/8.3.37/8.4.28/8.5.13): PHP-FPM request smuggling through an unread body on a kept-open backend connection (fastcgi_keep_conn, enablereuse, LSAPI): a malformed multipart stops PHP's parser and a FastCGI request in the body is read as the next one (SCRIPT_FILENAME, REMOTE_ADDR, PHP_ADMIN_VALUE). Fires on the raw POST body (any content type) holding a FastCGI BEGIN_REQUEST record followed by a PARAMS record (FCGI_BEGIN_REQUEST, read as fcgi_read_request accepts it: any version, reserved byte or request id, role 1-3), or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR parameter (FCGI_PARAMS). LOGONLY burn-in (2026-11-21), early in step 0 so the exploit's own request (which 305 blocks) still records it; a promotion decides the autoblock intent in the same change. Not a substitute for the PHP update.
+  rule_cve_php_oversized_auth = "logonly", -- CVE-2026-129496 (GHSA-gr4f-wgx5-jpfv, php-src 2026-11-19): ext/date use-after-free; the advisory's FPM code-execution proof used an HTTP Basic Authorization header larger than nginx's default per-header limit (8 KB), which this edge (64 KB) lets through. BASIC_OVERSIZE / OVERSIZE (any other scheme), with `:len=N`. LOGONLY burn-in (2026-11-21), late (header only). Not a substitute for the PHP update.
+  rule_cve_php_multipart_desync = "logonly", -- CVE-2026-129289's first leg, for the class of PHP multipart parser desyncs: a multipart POST that leaves bytes PHP never reads. GARBLED_STOP (a part with a Content-Disposition but neither name nor filename ends PHP's parse, checked against PHP 8.3.6, and more than one 5120-byte read buffer of content follows: certainly unread; `:rest=trunc` for a body the edge holds only in part), GARBLED_STOP_SMALL (a smaller rest: PHP may still leave some unread), NO_BOUNDARY (no boundary parameter: PHP parses nothing; mostly broken clients, a noise baseline), BOUNDARY_TOO_LARGE (a boundary PHP refuses, over 5116 bytes). LOGONLY burn-in (2026-11-21), early in step 0 with 10031.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
-  rule_php_file_body = "block", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Promoted logonly→block 2026-11-17 (burn-in: 289 hits / 269 IPs in 7 days, the PHPUnit eval-stdin.php sweep and a PUT dropper, 0 FP); family WAF_PHP_WEBSHELL_BODY, ban held per rule (HoldAutoblock, RULE_416 = 0): ~40 bans a day. Recorded late, with the held rules.
-  rule_upload_content_deep = "logonly", -- 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole (added 2026-10-09; burn-in, then promote)
+  rule_php_file_body = "block", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Promoted logonly→block 2026-11-17 (burn-in: 289 hits / 269 IPs in 7 days, the PHPUnit eval-stdin.php sweep and a PUT dropper, 0 FP); family WAF_PHP_WEBSHELL_BODY, ban held through a burn-in, armed 2026-11-24 (74 hits / 66 IPs in 5.5 days, all datacenter, 0 GR/CY): RULE_416 = 1.
+  rule_upload_content_deep = "block", -- rule 415: 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole, where 402 reads only its head (added 2026-10-09). Promoted logonly→block 2026-11-24 (burn-in: one hit in 7 days on 8 nodes, a `.png` carrying `<?php` through Bricksforge's form_file_upload on novamotors.sa; the two admin media uploads of the first burn-in did not recur; 0 FP); ban held per rule (HoldAutoblock, RULE_415 = 0), since WAF_UPLOAD_CONTENT is armed by 402. Recorded late, with the held rules: a held block rule shadows armed ones.
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge_v2",  -- multipart uploaded file content obfuscation scorer
@@ -738,6 +748,9 @@ local RULE_IDS = {
   rule_cve_magento_polyshell_unseen = 10028,
   rule_cve_fabrik_listfilter_eval = 10029,
   rule_cve_drupal_render_callback = 10030,
+  rule_cve_php_fpm_smuggle = 10031,
+  rule_cve_php_oversized_auth = 10032,
+  rule_cve_php_multipart_desync = 10033,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
@@ -1110,6 +1123,33 @@ local function check_impl(ctx, st)
       end
     end
   end
+  -- php-src advisory of 2026-11-19, CVE-2026-129289 (rules 10031 / 10033,
+  -- logonly burn-in): here in step 0, before every block rule, so the
+  -- exploit's own request (which also trips 305's php://input wrapper, a
+  -- block that ends the check) still records them, at least as an
+  -- also_rule_ids id. A logonly record never ends the check nor outranks a
+  -- challenge / block; it can take the headline from a later logonly rule.
+  do
+    local mode = rule_mode(CFG.rule_cve_php_fpm_smuggle, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_php_fpm_smuggle(body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_fpm_smuggle) then goto done end
+      end
+    end
+  end
+  do
+    local mode = rule_mode(CFG.rule_cve_php_multipart_desync, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_php_multipart_desync(m_lower, body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_desync) then goto done end
+      end
+    end
+  end
+
   -- Magento "PolyShell" unauth file upload (CVE-2026-48356), rule 10027: a
   -- cart item's custom option `file_info` writes a base64 file, any name and
   -- extension, to pub/media/custom_options/quote/ (orion, 2026-10-29: GIF+PHP
@@ -1754,20 +1794,6 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 18b) Upload content in each file part, whole (415, burn-in) ──────────
-  do
-    local mode = rule_mode(CFG.rule_upload_content_deep, "logonly")
-    if mode ~= "disabled"
-       and body_inspect_ok
-       and not legit_archive_upload then
-      local tag = det.detect_upload_content_deep(body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_upload_content_deep) then goto done end
-      end
-    end
-  end
-
   -- ── 19) Upload obfuscation scorer (multipart file content) ───────────────
   do
     local mode = rule_mode(CFG.rule_upload_obfuscation, "logonly")
@@ -1875,8 +1901,26 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- (22, XXE, runs late with the held block rules: see "XXE (307)" before
-  -- traversal.)
+  -- ── 22) XXE (307, block, armed) ───────────────────────────────────────────
+  -- Block since 2026-11-17; its ban was held through a burn-in (2026-11-17 to
+  -- 2026-11-24, in the late group then) and is armed since 2026-11-24: 220 hits
+  -- / 91 IPs in 5.5 days on 8 nodes, every one XXE_SYSTEM from datacenter
+  -- scanners, 0 GR/CY. Armed, it runs here again, before every held block rule.
+  do
+    local mode = rule_mode(CFG.rule_xxe, "logonly")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_xxe(body, headers)
+      -- The detector is loose (a DOCTYPE and the word `system` anywhere; an
+      -- ENTITY and `public` anywhere): an Illustrator SVG's internal
+      -- entities match it. A block needs an external entity declaration
+      -- (`<!ENTITY x SYSTEM "…">` / `PUBLIC "…"`); the rest stays challenge_v2.
+      if tag and mode == "block" and not det.xxe_external_entity(body) then mode = "challenge_v2" end
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
+      end
+    end
+  end
 
   -- ── 23) CRLF / HTTP response splitting ───────────────────────────────────
   do
@@ -2640,8 +2684,49 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- (60e, a PHP file as the raw body (416), runs late with the held block
-  -- rules: see "A PHP file as the raw body (416)" before traversal.)
+  -- ── 60e) A PHP file as the raw body (416, block, armed) ───────────────────
+  -- Block since 2026-11-17; its ban was held through a burn-in (in the late
+  -- group then) and is armed since 2026-11-24: 74 hits / 66 IPs in 5.5 days on
+  -- 8 nodes, webshell / PHPUnit uploads from datacenters, 0 GR/CY. Armed, it
+  -- runs here again, before the held 10019 / 10020 and every other held rule.
+  -- The body a php://input dropper writes to disk, which 402 (multipart)
+  -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
+  -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
+  -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
+  -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
+  -- /remote.php/webdav): a sync client uploads a user's .php files there
+  -- as their raw body.
+  -- Nor a PUT / PATCH on a cPanel Web Disk host (webdisk.<domain>, Apache to
+  -- cpdavd): the customer's own WebDAV client uploads their .php files. The
+  -- Host is the client's, so it counts only under cfm.lua Step 0d's gates:
+  -- a registrable-domain name (cfm_panel_hosts.is_proxy_panel_host, asked
+  -- about the same name under `cpanel.`) and proxysubdomains=1 with
+  -- proxysubdomainsoverride=0, which route every webdisk.* Host to cpdavd.
+  -- Elsewhere a spoofed `Host: webdisk.x` could reach a docroot dropper.
+  do
+    local mode = rule_mode(CFG.rule_php_file_body, "logonly")
+    local webdav = false
+    if m_lower == "put" or m_lower == "patch" then
+      local h = lower(ctx.host or "")
+      if lower(uri or ""):find("/remote%.php/") then
+        webdav = true
+      elseif h:find("^webdisk%.") then
+        local okp, ph = pcall(require, "cfm_panel_hosts")
+        webdav = okp and type(ph) == "table" and ph.is_proxy_panel_host
+          and ph.proxy_hosts_reach_panel
+          and ph.is_proxy_panel_host("cpanel." .. h:sub(9))
+          and ph.proxy_hosts_reach_panel() or false
+      end
+    end
+    if mode ~= "disabled" and (body or "") ~= "" and not webdav
+       and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
+      local tag = det.detect_php_file_body(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_PHP_WEBSHELL_BODY:BODY_IS_" .. tag, ttl, mode, RULE_IDS.rule_php_file_body) then goto done end
+      end
+    end
+  end
 
   -- ── CVE-2026-19632 TranslatePress unauth account takeover (10018-10020) ──
   -- Placed after every armed block-tier family, next to traversal, for the
@@ -2812,65 +2897,21 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── XXE (307) — block, ban held, so late ─────────────────────────────────
-  -- Block since 2026-11-17 with its ban held per rule (HoldAutoblock,
-  -- RULE_307 = 0) through a burn-in; late for the same reason as 303. It was
-  -- step 22.
+  -- ── Upload content in each file part, whole (415) — block, ban held, so late
+  -- Block since 2026-11-24 with its ban held per rule (HoldAutoblock,
+  -- RULE_415 = 0): WAF_UPLOAD_CONTENT is armed by 402, and a held block rule
+  -- evaluated early would take the headline and end the check before an
+  -- armed rule's ban (CLAUDE.md §6). 402 (armed) still runs at step 18 and
+  -- owns every file whose head it reads.
   do
-    local mode = rule_mode(CFG.rule_xxe, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_xxe(body, headers)
-      -- The detector is loose (a DOCTYPE and the word `system` anywhere; an
-      -- ENTITY and `public` anywhere): an Illustrator SVG's internal
-      -- entities match it. A block needs an external entity declaration
-      -- (`<!ENTITY x SYSTEM "…">` / `PUBLIC "…"`); the rest stays challenge_v2.
-      if tag and mode == "block" and not det.xxe_external_entity(body) then mode = "challenge_v2" end
+    local mode = rule_mode(CFG.rule_upload_content_deep, "logonly")
+    if mode ~= "disabled"
+       and body_inspect_ok
+       and not legit_archive_upload then
+      local tag = det.detect_upload_content_deep(body, headers)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_XXE:" .. tag, ttl, mode, RULE_IDS.rule_xxe) then goto done end
-      end
-    end
-  end
-
-  -- ── A PHP file as the raw body (416) — block, ban held, so late ─────────
-  -- Block since 2026-11-17 with its ban held per rule (HoldAutoblock,
-  -- RULE_416 = 0); a held block rule shadows armed ones (CLAUDE.md §6), so it
-  -- runs here, after every armed block family.
-  -- The body a php://input dropper writes to disk, which 402 (multipart)
-  -- and 404 (textual types, 2 KB) miss: application/octet-stream, or any
-  -- label a dropper puts on it. POST, PUT or PATCH: php://input reads the
-  -- body of each (cfm.lua reads PUT / PATCH bodies under its size gate).
-  -- Not a PUT / PATCH to Nextcloud / ownCloud WebDAV (/remote.php/dav,
-  -- /remote.php/webdav): a sync client uploads a user's .php files there
-  -- as their raw body.
-  -- Nor a PUT / PATCH on a cPanel Web Disk host (webdisk.<domain>, Apache to
-  -- cpdavd): the customer's own WebDAV client uploads their .php files. The
-  -- Host is the client's, so it counts only under cfm.lua Step 0d's gates:
-  -- a registrable-domain name (cfm_panel_hosts.is_proxy_panel_host, asked
-  -- about the same name under `cpanel.`) and proxysubdomains=1 with
-  -- proxysubdomainsoverride=0, which route every webdisk.* Host to cpdavd.
-  -- Elsewhere a spoofed `Host: webdisk.x` could reach a docroot dropper.
-  do
-    local mode = rule_mode(CFG.rule_php_file_body, "logonly")
-    local webdav = false
-    if m_lower == "put" or m_lower == "patch" then
-      local h = lower(ctx.host or "")
-      if lower(uri or ""):find("/remote%.php/") then
-        webdav = true
-      elseif h:find("^webdisk%.") then
-        local okp, ph = pcall(require, "cfm_panel_hosts")
-        webdav = okp and type(ph) == "table" and ph.is_proxy_panel_host
-          and ph.proxy_hosts_reach_panel
-          and ph.is_proxy_panel_host("cpanel." .. h:sub(9))
-          and ph.proxy_hosts_reach_panel() or false
-      end
-    end
-    if mode ~= "disabled" and (body or "") ~= "" and not webdav
-       and (m_lower == "post" or m_lower == "put" or m_lower == "patch") then
-      local tag = det.detect_php_file_body(body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_PHP_WEBSHELL_BODY:BODY_IS_" .. tag, ttl, mode, RULE_IDS.rule_php_file_body) then goto done end
+        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_upload_content_deep) then goto done end
       end
     end
   end
@@ -2941,20 +2982,26 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 404's scorer over the whole body (417, logonly burn-in) ──────────────
+  -- ── 404's scorer over the whole body (417) — block, ban held, so late ────
+  -- Block since 2026-11-24, ban held per rule (HoldAutoblock, RULE_417 = 0).
   -- Only when 404's 2 KB head scored nothing: PHP saved through a form field
   -- (an editor, a file manager's put) sits wherever the file puts it. A body
   -- no longer than the head is read only where 404 could not read it as PHP
   -- gets it (a multipart body, a JSON one with escapes: php_body_head_blind)
   -- or when 404 did not run; otherwise 417 would score what 404 just scored.
   -- detect_php_webshell_body's cheap raw gate keeps a body with nothing a
-  -- score can come from out of the decoder. Late, before
-  -- only 612 and 530: cfm.lua pushes the headline hit alone, and at step 15
-  -- it took the headline (and the push) from the logonly body rules that run
-  -- after it (331 on a wget || curl dropper, 421-425, 430-439, 330).
+  -- score can come from out of the decoder. Late, after every armed block
+  -- rule (a held block evaluated earlier would end the check before an armed
+  -- rule's ban) and after the logonly body rules (at step 15 it took the
+  -- headline and the push from 331, 421-425, 430-439 and 330).
   do
     local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
-    if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit then
+    -- Not on the code-editor / installer endpoints the other body-PHP rules
+    -- stand down for (is_known_legit_php_upload_endpoint: Code Snippets and
+    -- String Locator saves, the plugin / theme installer): there a whole PHP
+    -- file is the request's purpose, and at block it would be a 403.
+    if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit
+       and not legit_archive_upload then
       local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
       local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
       if deep_len > head_len
@@ -2968,6 +3015,20 @@ local function check_impl(ctx, st)
     end
   end
 
+  -- ── php-src advisory of 2026-11-19, rule 10032 (logonly burn-in) ────────
+  -- Header-only telemetry, late: after every block rule and after the
+  -- logonly 503 / 417, which keep their headline (between equal logonly hits
+  -- the first recorded owns it). 10031 / 10033 run early (step 0).
+  do
+    local mode = rule_mode(CFG.rule_cve_php_oversized_auth, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_cve_php_oversized_auth(headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_129496:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_oversized_auth) then goto done end
+      end
+    end
+  end
   -- ── Fetch-metadata missing (headless / automation tell) — logonly ───────
   -- (Last but 530, which is no security finding at all.)
   -- Track-2 Stage 1b, the edge-only "Sec-Fetch tell": a UA that CLAIMS a modern
@@ -3281,6 +3342,21 @@ end
 -- This exposes the full CFG table (rule modes + tuning values) to cfm_stats.lua
 -- without copying data or adding any runtime overhead to the hot path.
  
+-- cfm.lua's question after a logonly verdict: should this request get rule
+-- 530's crawler redirect? True when the hit list carries 530 with its
+-- CRAWLER tag, the rule is not disabled and the redirect is on.
+function _M.cart_crawl_redirect(hits)
+  if CFG.wc_cart_crawl_redirect == false then return false end
+  if rule_mode(CFG.rule_wc_cart_get_crawl, "logonly") == "disabled" then return false end
+  for _, h in ipairs(hits or {}) do
+    if h.waf_rule_id == RULE_IDS.rule_wc_cart_get_crawl and h.reason == "WAF_CART_CRAWL:CRAWLER" then
+      return true
+    end
+  end
+  return false
+end
+_M.query_without_field = det.query_without_field
+
 function _M.get_config()
   -- Return a shallow copy so callers cannot mutate the live CFG table.
   local snap = {}

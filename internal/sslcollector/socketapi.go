@@ -143,11 +143,13 @@ func (s *sockServer) handleCert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cert read error", http.StatusServiceUnavailable)
 		return
 	}
-	keyPEM, err := os.ReadFile(e.KeyPath)
+	keyFile, err := os.ReadFile(e.KeyPath)
 	if err != nil {
 		http.Error(w, "key read error", http.StatusServiceUnavailable)
 		return
 	}
+	// Only the key: a bundle's chain is in cert_pem already (privateKeyBlocksOnly).
+	keyPEM := privateKeyBlocksOnly(keyFile)
 
 	// Update cache (simple eviction)
 	s.mu.Lock()

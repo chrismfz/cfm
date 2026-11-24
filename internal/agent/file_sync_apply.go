@@ -174,11 +174,13 @@ type applyResult struct {
 
 // pendingWrite is one update on its way to disk, with what it replaces.
 type pendingWrite struct {
-	u       ConfigUpdate
-	path    string
-	prev    []byte
-	existed bool
-	mode    fs.FileMode
+	u        ConfigUpdate
+	path     string
+	prev     []byte
+	existed  bool
+	mode     fs.FileMode // the mode the new content is written with
+	prevMode fs.FileMode // the existing file's mode (a rollback restores it, kept readable for SA)
+	owner    *fileOwner  // the existing file's owner, kept by a rewrite
 }
 
 // applyUpdates writes the updates that differ from disk, lints SpamAssassin
@@ -209,13 +211,14 @@ func (st *fileSyncState) applyUpdates(ctx context.Context, updates []ConfigUpdat
 				continue
 			}
 		}
-		w := pendingWrite{u: u, path: path, mode: 0600}
+		w := pendingWrite{u: u, path: path, mode: newFileMode(path), prevMode: newFileMode(path)}
 		prev, err := os.ReadFile(path)
 		switch {
 		case err == nil:
 			w.prev, w.existed = prev, true
 			if fi, err := os.Stat(path); err == nil {
-				w.mode = fi.Mode().Perm()
+				w.prevMode, w.owner = fi.Mode().Perm(), ownerOf(fi)
+				w.mode = keptFileMode(path, w.prevMode)
 			}
 		case errors.Is(err, fs.ErrNotExist):
 		default:
@@ -501,12 +504,72 @@ func (st *fileSyncState) park(ws []pendingWrite, intro []string, res *applyResul
 	}
 }
 
+// newFileMode is the mode a target gets when it does not exist yet. An
+// existing file keeps its own mode, except that keptFileMode adds group/other
+// read to a SpamAssassin file. SpamAssassin files must be world-readable:
+// spamd reads its config after dropping root privileges, so a 0600 .cf is
+// skipped with "cannot open … Permission denied" — on 2026-11-22 that
+// silently unloaded myip.cf and mailfromfilters.cf (all our RBL tests and the
+// DNS server line) fleet-wide.
+func newFileMode(path string) fs.FileMode {
+	if isSpamassassinFile(path) {
+		return 0o644
+	}
+	return 0o600
+}
+
+// keptFileMode is the mode a rewrite of an existing file gets: its own, but a
+// SpamAssassin file is always made group/other readable, so one the old agent
+// left at 0600 is repaired by the next sync instead of kept unreadable.
+func keptFileMode(path string, prev fs.FileMode) fs.FileMode {
+	if isSpamassassinFile(path) {
+		return prev | 0o044
+	}
+	return prev
+}
+
+// newDirMode is the mode of a directory the sync creates for a target:
+// traversable by spamd under the SpamAssassin dir, private elsewhere.
+func newDirMode(path string) fs.FileMode {
+	if isSpamassassinFile(path) {
+		return 0o755
+	}
+	return 0o750
+}
+
+// missingDirs is dir and each of its parents that does not exist yet,
+// deepest first: the directories MkdirAll(dir) is about to create.
+func missingDirs(dir string) []string {
+	var out []string
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); !errors.Is(err, fs.ErrNotExist) {
+			return out
+		}
+		out = append(out, d)
+		if parent := filepath.Dir(d); parent == d {
+			return out
+		}
+	}
+}
+
 func writePending(w pendingWrite) bool {
-	if err := os.MkdirAll(filepath.Dir(w.path), 0750); err != nil {
-		logging.LogfAPI("[files] mkdir %s: %v", filepath.Dir(w.path), err)
+	dir := filepath.Dir(w.path)
+	missing := missingDirs(dir)
+	if err := os.MkdirAll(dir, newDirMode(w.path)); err != nil {
+		logging.LogfAPI("[files] mkdir %s: %v", dir, err)
 		return false
 	}
-	if err := atomicWrite(w.path, []byte(w.u.Content), 0600); err != nil {
+	// MkdirAll's mode is masked by the umask: set it on every level it made,
+	// so spamd can walk down to a SpamAssassin file several levels deep.
+	for _, d := range missing {
+		if err := os.Chmod(d, newDirMode(w.path)); err != nil {
+			logging.LogfAPI("[files] chmod %s: %v", d, err)
+		}
+	}
+	// The mode is set on the temp file before the rename, so a failed chmod
+	// fails the write and the old file stays in place; a failed chown is
+	// logged and the file is written as the agent's (atomicWrite).
+	if err := atomicWrite(w.path, []byte(w.u.Content), w.mode, w.owner); err != nil {
 		logging.LogfAPI("[files] write %s: %v", w.path, err)
 		return false
 	}
@@ -520,9 +583,9 @@ func rollback(ws []pendingWrite, res *applyResult) {
 	for _, w := range ws {
 		var err error
 		if w.existed {
-			if err = atomicWrite(w.path, w.prev, w.mode); err == nil {
-				err = os.Chmod(w.path, w.mode) // atomicWrite's mode is masked by the umask
-			}
+			// The old content, but a SpamAssassin file stays readable: putting
+			// back a 0600 an older agent left would unload it from spamd again.
+			err = atomicWrite(w.path, w.prev, keptFileMode(w.path, w.prevMode), w.owner)
 		} else {
 			err = os.Remove(w.path)
 		}

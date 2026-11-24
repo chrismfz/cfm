@@ -312,6 +312,29 @@ binds `::1`.
 - **IPv6 on the panel ports** — [open decision]. cpsrvd listens on IPv4
   only on the fleet; the panel listeners stay IPv4.
 
+## 9d. Edge performance
+
+Measuring: **`docs/proxy-performance.md`**; sslcollector: `docs/ssl-collector.md`.
+
+- **SNI-keyed keepalive pool for the 443 origin hop** — [track]. Every HTTPS
+  request opens a fresh TCP + full TLS handshake to the origin: all three reuse
+  layers are off on 443 since the cross-SNI `421` incident (speedhost,
+  2026-08). On rigel (2026-11-23, RSA-2048) that hop cost ~0.9 ms and
+  ~500-620 µs of LiteSpeed CPU per request. The safe form is a pool keyed by
+  SNI (a host-scoped Lua balancer pool, native keepalive kept off), shipped
+  only behind the integration self-test `docs/proxy-performance.md` "Why
+  HTTPS origin connections are not pooled" spells out (backend-seen SNI ==
+  `Host`, no connection or TLS session crosses hosts, zero `421`, on the
+  deployed engine). ECDSA P-256 certs cut only the signature share of it.
+- **sslcollector: no hourly full re-ingest of an unchanged version** —
+  [idea]. Each worker rebuilds its whole store about once an hour (the
+  age-forced `/dumpall`) even when the version has not changed (rigel,
+  2026-11-23: same version all day, a full replace every 10 min across six
+  workers), re-parsing every PEM and releasing a whole store each time. Skip
+  the re-parse when the worker already holds that version, keeping a sparser
+  staleness check. The release cost itself is handled by the post-ingest
+  collect (cfm#1767).
+
 ## 10. PHP runtime defense (CFM-managed Snuffleupagus)
 
 Design: `docs/roadmaps/php-runtime-defense.md`. CFM renders Snuffleupagus

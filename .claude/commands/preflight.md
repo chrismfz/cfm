@@ -37,18 +37,20 @@ relevant output and stop (don't keep going past a hard failure).
 19. `./scripts/tests/check_install_edge.sh` (install-edge.sh prepares only: no
    systemctl switch, no `cfm dnat`; adoption line = the deploy's; `-t` before install)
 20. `./scripts/tests/check_rpm_spec_macros.sh`
-21. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
+21. `./scripts/tests/check_deb_config_seed.sh` (the .deb ships no dpkg conffile:
+   postinst seeds /etc/cfm from packaging/etc-cfm-files.list, the same set as the rpm's `%config(noreplace)`)
+22. `./scripts/tests/check_site_cache_config.sh` (Site Cache bypass-by-default:
    every `proxy_cache` location gated on `$cfm_cache_skip`)
-22. `./scripts/tests/stamp_changelog_test.sh`
-23. `./scripts/tests/release_notes_test.sh`
-24. `./scripts/tests/check_preflight_parity.sh` (this list and the CLAUDE.md §3
+23. `./scripts/tests/stamp_changelog_test.sh`
+24. `./scripts/tests/release_notes_test.sh`
+25. `./scripts/tests/check_preflight_parity.sh` (this list and the CLAUDE.md §3
    block == the commands `security.yml` runs)
-25. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
+26. `./scripts/tests/check_changelog_entry.sh` (CHANGELOG structure; the per-PR
    "code changed → needs a `[Unreleased]` entry" leg only runs in CI)
 
 Keep this list in sync with `security.yml`. It drifted twice — once silently
 dropping seven gates, later missing `check_site_cache_config.sh` — the same
-false-confidence failure the guardrails exist to prevent; step 24 now fails CI
+false-confidence failure the guardrails exist to prevent; step 25 now fails CI
 on any difference, in either direction.
 
 If everything passes, say so explicitly. If something fails, summarize what

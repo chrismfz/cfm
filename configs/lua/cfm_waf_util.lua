@@ -129,6 +129,12 @@ local function is_known_legit_php_upload_endpoint(uri, args)
   if u:match("^/wp%-json/string%-locator/") then
     return true
   end
+  -- Not the `?rest_route=` form a site without pretty permalinks uses
+  -- (`/index.php?rest_route=/code-snippets/...`): WP's front controller is
+  -- also any other app's (`/index.php`), which can route on its own query or
+  -- body fields, so keying on the field would let that app's upload skip the
+  -- body-PHP rules (tried and removed 2026-11-24, docs/waf.md FP case 7).
+  -- Such a site gets a rule-scoped exclude.
 
   -- WordPress plugin/theme installer. The uploaded .zip legitimately
   -- contains PHP source — a plugin/theme *is* PHP code, frequently
