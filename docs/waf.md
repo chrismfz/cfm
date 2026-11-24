@@ -1009,10 +1009,11 @@ nodes:
   `TEMPLATE=…<?php system('id')`, Magento `/paypal/transparent/response/?<?=eval(…)`).
   `WAF_RCE` is armed: a 332 hit bans (6 h).
 - 416: 289 hits from 269 IPs, every one an exploit (the PHPUnit
-  `eval-stdin.php` sweep, a PUT dropper). Its ban is held per rule
-  (`HoldAutoblock`, `RULE_416 = 0`; ~40 bans a day if armed), so the armed
-  `WAF_PHP_WEBSHELL_BODY` family bans nothing through 416. It runs with the
-  late (held) group.
+  `eval-stdin.php` sweep, a PUT dropper). Its ban was held per rule
+  through a second burn-in and is armed since 2026-11-24 (74 hits from 66
+  IPs in 5.5 days, all datacenter, 0 GR/CY): a 416 hit bans (6 h).
+  `RULE_416 = 0` holds it again. Armed, it runs at step 60e again, before
+  the held rules.
 
 ### Rule 332 — `rule_php_code_args`
 

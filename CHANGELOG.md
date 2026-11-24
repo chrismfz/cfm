@@ -21,6 +21,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Changed
+- **WAF rules 307 (XXE) and 416 (a PHP file as the request body) now ban.**
+  Both block since 2026-11-17 with their `waf_security` ban held for a
+  burn-in. On 8 nodes from 2026-11-19 to 11-24 (5.5 days), 307 had 220 hits
+  from 91 IPs and 416 had 74 from 66. Every hit came from a datacenter
+  scanner or webshell uploader. None came from GR/CY, none hit a panel port,
+  and none was a false positive. A hit now gives the usual soft 6 h ban
+  (15 min for GR/CY under leniency). `RULE_307 = 0` / `RULE_416 = 0` in
+  `[waf_security]` hold one again. Both rules move back to their earlier
+  place in the WAF: in the late group, rule 303 (still held) could take the
+  hit, and with it the ban. Rule 303 stays held: its sweep sends one request
+  per Google Cloud IP, so a ban would add thousands of addresses that never
+  return.
 - **WAF rules 415 and 417 block (bans held).** Rule 417 (PHP source in the
   whole POST body, past rule 404's 2 KB) and rule 415 (PHP in an uploaded
   file, past rule 402's head) move from logonly to block after a 7-day

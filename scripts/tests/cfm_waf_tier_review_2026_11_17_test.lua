@@ -2,10 +2,12 @@
 -- 8 edge nodes):
 --   * shipped modes: 332 / 416 logonly→block, 303 / 307 / 438
 --     challenge_v2→block, 10029 (Fabrik list-filter eval) new and logonly;
---   * 303, 307 and 416 have their bans held (WAFRule.HoldAutoblock), and a
---     held block rule shadows armed ones (CLAUDE.md §6), so they run late: an
---     armed block hit on the same request keeps the headline (the one
---     cfm.lua pushes to waf_security);
+--   * 303 has its ban held (WAFRule.HoldAutoblock), and a held block rule
+--     shadows armed ones (CLAUDE.md §6), so it runs late: an armed block hit
+--     on the same request keeps the headline (the one cfm.lua pushes to
+--     waf_security). 307 and 416 were held the same way until their bans
+--     were armed on 2026-11-24; armed, they run at their old steps (22 and
+--     60e) again, ahead of every held rule;
 --   * rule 10029 (CVE-2026-67282) on the exploit the dmkomotinis.gr attacker
 --     sent, and not on Fabrik's own list filter;
 --   * rule 701's SSRF_DWORD_IP only for a value an IPv4 address can be;
@@ -87,18 +89,34 @@ do
   check(r.rule_id == 301 and r.action == "block", "416 + 301: the armed 301 keeps the headline (" .. show(r) .. ")")
 end
 
--- 416 vs the armed CVE rules that run between its old (60e) and new place:
--- a `<?php`-prefixed lost-password POST carrying TranslatePress's
--- trp-edit-translation is 10018's (armed), not 416's (held).
+-- 307 and 416 armed (2026-11-24): back at steps 22 / 60e, so the held 303
+-- (late) no longer takes the headline, and the ban, from them. Before the
+-- move a `__proto__` query on either request headlined 303.
+do
+  local PROTO = "__proto__[polluted]=1"
+  local r = run{ method = "POST", args = PROTO }
+  check(r.rule_id == 303, "premise: the query alone is a 303 block (" .. show(r) .. ")")
+
+  r = run{ method = "POST", args = PROTO, ct = "application/xml",
+           body = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><x>&e;</x>' }
+  check(r.rule_id == 307 and r.action == "block", "307 + held 303: the armed 307 keeps the headline (" .. show(r) .. ")")
+
+  r = run{ method = "POST", uri = "/up.php", args = PROTO, ct = "application/octet-stream",
+           body = "<?php echo 1;" }
+  check(r.rule_id == 416 and r.action == "block", "416 + held 303: the armed 416 keeps the headline (" .. show(r) .. ")")
+end
+
+-- 416 at 60e runs before the TranslatePress CVE section again: a
+-- `<?php`-prefixed lost-password POST carrying trp-edit-translation is
+-- 416's. Both are armed, so the ban stands either way.
 do
   local r = run{ method = "POST", uri = "/wp-login.php", args = "action=lostpassword",
                  ct = "application/x-www-form-urlencoded",
                  body = "<?php=1&user_login=admin&trp-edit-translation=preview&redirect_to=" }
-  check(r.ids["10018"] == "block", "premise: 10018 fires (" .. show(r) .. ")")
-  check(r.rule_id == 10018, "416 + 10018: the armed 10018 keeps the headline (" .. show(r) .. ")")
+  check(r.rule_id == 416 and r.action == "block", "416 + 10018: the armed 416 runs first (" .. show(r) .. ")")
 end
 
--- Each held rule alone still blocks.
+-- Each rule alone still blocks.
 do
   local r = run{ method = "POST", ct = "text/plain;charset=UTF-8",
                  body = '{"then":"$1:__proto__:then","status":"resolved_model"}' }
@@ -284,4 +302,4 @@ if fails > 0 then
   io.stderr:write(("cfm_waf tier review 2026-11-17 tests: %d FAILED\n"):format(fails))
   os.exit(1)
 end
-print("ok: tier review 2026-11-17 (332/416/303/307/438 block, held ones late, 10029, 701 DWORD, 601 OD beacon)")
+print("ok: tier review 2026-11-17 (332/416/303/307/438 block, 307/416 armed in place, 303 late, 10029, 701 DWORD, 601 OD beacon)")
