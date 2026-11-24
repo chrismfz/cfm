@@ -225,11 +225,12 @@ do
   local src = io.open("configs/lua/cfm.lua"):read("*a")
   local at = src:find("waf.cart_crawl_redirect(waf_hits)", 1, true)
   check(at ~= nil, "cfm.lua calls cart_crawl_redirect")
-  local blk = at and src:sub(at - 200, at + 1600) or ""
+  local blk = at and src:sub(at - 200, at + 2200) or ""
   check(blk:find('waf_action == "logonly"', 1, true) ~= nil, "only on a logonly verdict")
   check(blk:find("realip_remote_addr", 1, true) ~= nil and blk:find("if not proxied then", 1, true) ~= nil, "skips proxied requests")
   check(blk:find('gsub("^[/\\\\]+", "/")', 1, true) ~= nil, "Location: leading slashes collapsed")
   check(blk:find('"Cache-Control"] = "no-store"', 1, true) ~= nil, "no-store on the 301")
+  check(blk:find('path:sub(1, 1) ~= "/"', 1, true) ~= nil, "Location: a non-path target becomes a local path")
   check(blk:find("301)", 1, true) ~= nil, "status 301")
   local allow_at = src:find('waf_allow_action = converted_from_challenge and "logonly_pc" or "logonly"', 1, true)
   check(allow_at and at < allow_at, "before the logonly fall-through to Steps 2b-4")

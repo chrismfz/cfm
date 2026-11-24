@@ -1345,7 +1345,14 @@ in the access log). The redirect:
 - never applies behind a trusted proxy (Cloudflare): a CDN cache rule that
   ignores `Cache-Control` could serve it to shoppers on the same URL (the
   anastasiadi.gr incident, CLAUDE.md §6). It carries `Cache-Control:
-  no-store` and `Vary: User-Agent` for any other cache;
+  no-store` and `Vary: User-Agent` for any other cache. **Residual:** a CDN
+  the edge does not trust (Bunny, Fastly, a customer's Varnish) looks like a
+  direct client, so a "cache everything, ignore origin headers" rule there
+  could still cache the 301. That is WebShield parity P4's question ("never
+  treat a CDN node as a client", `docs/imunify360-gap-analysis.md`);
+  `wc_cart_crawl_redirect = false` is the switch if it happens;
+- answers before Step 3: a crawler the daemon blocks or challenges gets the
+  301 first, and the block or challenge on the URL it is sent to;
 - strips every field PHP registers as `add-to-cart` (an array form, an
   encoded name) through the same reader that found it, keeps the other
   fields as sent, and sends a path with leading slashes collapsed (`//x/`
