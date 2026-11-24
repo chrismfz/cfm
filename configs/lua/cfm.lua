@@ -296,7 +296,9 @@ local cache_ok, cfm_cache = pcall(require, "cfm_cache")
 -- went to the origin uncached before they went on to Step 4, and the cache
 -- must not keep a response to a payload the WAF flagged or never saw.
 -- micro_skip: record why a micro-armed request will not be micro-cached when
--- it is allowed before Step 4, the only micro entry (mwhy= in the access log;
+-- it is allowed before Step 4, the micro entry for every client but a
+-- bypass-list crawler, which Step 0 enters itself (one a vhost lockdown holds
+-- reaches Step 4, with the crawler class) (mwhy= in the access log;
 -- cfm_cache.note_skip writes only on a micro-armed vhost and a conf that
 -- declares the variable). Under a pcall: logging never breaks an allow path.
 local function micro_skip(why)

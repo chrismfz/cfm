@@ -462,7 +462,8 @@ the bucket model is the answer.
    uncacheable on the same variable. Harness evidence only (nginx 1.24 +
    lua-nginx-module 0.10.26): a header set with `ngx.header` before the
    `ngx.exec` (`X-CFM-Action`) is present on the micro response, HIT
-   included. Until then micro serves Step 4 only.
+   included. Until then a clearance holder is not micro-cached (micro serves
+   Step 4, and the Step 0 crawler entry, §5.3).
 2. **Origin keepalive — OPEN.** Caching sits in front of the origin whatever
    the `ORIGIN_KEEPALIVE` pools; 443 `proxy_ssl_session_reuse off` is
    unaffected. HIT/MISS accounting with keepalive armed is not yet checked on
