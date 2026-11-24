@@ -619,16 +619,22 @@ end
 -- the next ingest allocates on top of them keeps it flat. It runs from the
 -- caller, not inside ingest_dumpall, because there the raw body (~20 MB on
 -- titan) and the decoded payload are still referenced and would survive it.
--- ~50 ms for 3000 pairs, in a timer, never on a handshake.
+-- It runs in a timer, but on the worker's own event loop: while it runs the
+-- worker serves nothing (~50 ms for 3000 pairs in a container; 85-300 ms on
+-- titan, 2026-11-24, on a ~500 MB heap, after an ingest that already blocks
+-- for about a second).
 --
 -- Then glibc's malloc_trim(0): the collect frees the pairs, but glibc keeps
 -- the freed pages, and with the worker's traffic allocations living between
--- them it cannot reuse them whole, so RSS climbs in steps to the peak of an
--- ingest (titan, 2026-11-23, collect only: 118 -> 238 -> 337 -> 440 MB over
--- three hourly ingests). malloc_trim hands the free pages back, the middle of
--- the heap included. Container, 3500 pairs, a 17.6 MB payload, 16 ingests
--- with live allocations in between: collect only flat at 227 MB, collect +
--- trim flat at 165 MB, ~25-40 ms. It is thread-safe; CFM's edge config runs
+-- them it cannot reuse them whole. Titan, collect only, the night of
+-- 2026-11-23/24, a worker's RSS after each ingest: three steps (333 -> 432 ->
+-- 524 MB), then a creep of ~4 MB/h (535 -> 573 MB over 9 h), back to ~460 MB
+-- between ingests. malloc_trim hands the free pages back, the middle of the
+-- heap included. Container, 3500 pairs, a 17.6 MB payload, 16 ingests with
+-- live allocations in between: collect only settled at 227 MB, collect + trim
+-- at 165 MB, ~25-40 ms. Titan's heap is far bigger, so its cost is what
+-- trim_ms= says there, not this; and the next ingest faults the returned pages
+-- back in (inside its own stall, in no field). It is thread-safe; CFM's edge config runs
 -- no thread pool on any engine (no aio / thread_pool), so the arena locks it
 -- takes contend with nothing. Absent (not glibc, no FFI) it is skipped:
 -- trim_ms=-.

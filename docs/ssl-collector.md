@@ -167,17 +167,22 @@ each swap it stayed at 92 MB. The collect (`collect_released`) runs in the
 ingest's caller, `do_dumpall` (after the shared lock is released) or the
 snapshot load, once `ingest_dumpall` has returned: inside it the raw body
 (~20 MB on titan) and the decoded payload were still referenced and survived
-it. It runs only when the payload stored at least one pair, in a timer, never
-on a handshake (~50 ms for 3000 pairs).
+it. It runs only when the payload stored at least one pair, in a timer, but on
+the worker's own event loop: while it runs the worker serves nothing (~50 ms
+for 3000 pairs in a container; 85-300 ms on titan, 2026-11-24, on a ~500 MB
+heap, after an ingest that already blocks for about a second).
 
 **Then `malloc_trim(0)`** (glibc, through the FFI). The collect frees the
 pairs, but glibc keeps the freed pages, and the worker's traffic allocations
-living between them stop it from reusing them whole: on titan (collect only,
-2026-11-23) RSS climbed in steps to the peak of an ingest, 118 → 238 → 337 →
-440 MB over three hourly ingests. malloc_trim hands the free pages back to
-the OS, the middle of the heap included. In a container (3500 pairs, a 17.6 MB
-payload, live allocations between 16 ingests) collect only settled at 227 MB,
-collect + trim at 165 MB, for ~25-40 ms more. Where it does not exist (no
+living between them stop it from reusing them whole. On titan (collect
+only, the night of 2026-11-23/24) a worker's RSS after each ingest rose in
+three steps (333 → 432 → 524 MB), then crept ~4 MB/h (535 → 573 MB over 9 h),
+and fell back to ~460 MB between ingests. malloc_trim hands the free pages
+back to the OS, the middle of the heap included. In a container (3500 pairs,
+a 17.6 MB payload, live allocations between 16 ingests) collect only settled
+at 227 MB, collect + trim at 165 MB, for ~25-40 ms more. On titan's far bigger
+heap the cost is what `trim_ms=` reports, and the next ingest faults the
+returned pages back in (inside its own stall, in no log field). Where it does not exist (no
 glibc, no FFI) it is skipped. It is thread-safe, and CFM's edge config runs
 no thread pool on any engine (no `aio` / `thread_pool`), so the arena locks
 it takes contend with nothing.

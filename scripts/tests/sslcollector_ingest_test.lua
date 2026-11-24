@@ -394,23 +394,32 @@ do
     live[d] = true
     return d
   end
+  -- malloc_trim runs right after each collect, never alone. The module reaches
+  -- it through the FFI, so a fake "ffi" stands in for the module's load: the
+  -- test sees every call wherever the module makes it, and never runs glibc's.
+  local trims, trim_after, collects_seen = 0, true, 0
+  local trim_impl = function()
+    trims = trims + 1
+    if trims ~= collects_seen then trim_after = false end
+    return 0
+  end
+  local function fake_ffi(has_symbol)
+    local C = setmetatable({}, { __index = function(_, k)
+      if k == "malloc_trim" and has_symbol then return function(...) return trim_impl(...) end end
+      error("missing declaration for symbol '" .. tostring(k) .. "'")
+    end })
+    return { os = "Linux", cdef = function() end, C = C }
+  end
+  local real_ffi = package.loaded["ffi"]
+  package.loaded["ffi"] = fake_ffi(true)
   local M6 = fresh_module()
+  package.loaded["ffi"] = fake_ffi(false)
+  local M7 = fresh_module()          -- a node without glibc's malloc_trim
+  package.loaded["ffi"] = real_ffi
   local ingest6 = find_upvalue(M6.start_background, "ingest_dumpall")
   local do_dumpall6 = find_upvalue(M6.start_background, "do_dumpall")
   local snap6 = find_upvalue(M6.start_background, "safe_load_snapshot")
-  -- malloc_trim runs right after each collect, never alone.
-  local collect6 = find_upvalue(M6.start_background, "collect_released")
-  local trims, trim_after = 0, true
-  local function set_upvalue(fn, want, val)
-    local i = 1
-    while true do
-      local name = debug.getupvalue(fn, i)
-      if not name then return false end
-      if name == want then debug.setupvalue(fn, i, val); return true end
-      i = i + 1
-    end
-  end
-  local collects_seen = 0
+  local do_dumpall7 = find_upvalue(M7.start_background, "do_dumpall")
   local function n6() local e, w = M6.cert_counts(); return e + w end
   local real_gc = collectgarbage
   local collects = {}
@@ -427,11 +436,6 @@ do
   end
   local ok, err = pcall(function()
     check(do_dumpall6 ~= nil and snap6 ~= nil, "found do_dumpall and safe_load_snapshot")
-    check(collect6 ~= nil and set_upvalue(collect6, "malloc_trim", function()
-      trims = trims + 1
-      if trims ~= collects_seen then trim_after = false end
-      return 0
-    end), "collect_released has a malloc_trim upvalue")
 
     -- ingest_dumpall itself never collects.
     ingest6({ version = "g0", complete = true, exact = names("z", 2, "A"), wild = {} }, "dumpall")
@@ -477,18 +481,20 @@ do
     check(trims == 3 and trim_after, "g4: the snapshot load trims too (trims=" .. trims .. ")")
 
     -- A malloc_trim that throws is skipped: the line says trim_ms=-, the ingest goes on.
-    set_upvalue(collect6, "malloc_trim", function() error("no glibc") end)
+    trim_impl = function() error("trim failed") end
     warn_lines = {}
     next_payload = function() return { version = "g5", complete = true, exact = names("t", 3, "D"), wild = {} } end
     do_dumpall6(false)
     check(logged("trim_ms=-"), "g5: a throwing malloc_trim logs trim_ms=-")
     check(n6() == 3, "g5: the ingest was taken (store " .. n6() .. ")")
-    -- None at all (not glibc): the same.
-    set_upvalue(collect6, "malloc_trim", nil)
+    -- None at all (not glibc): the module loads, collects, logs trim_ms=-.
+    trims = 0
+    trim_impl = function() trims = trims + 1; return 0 end
     warn_lines = {}
     next_payload = function() return { version = "g6", complete = true, exact = names("u", 3, "E"), wild = {} } end
-    do_dumpall6(false)
-    check(logged("trim_ms=-"), "g6: no malloc_trim logs trim_ms=-")
+    do_dumpall7(false)
+    check(logged("gc src=dumpall") and logged("trim_ms=-"), "g6: no malloc_trim: collected, logs trim_ms=-")
+    check(trims == 0, "g6: no malloc_trim: nothing called (trims=" .. trims .. ")")
   end)
   _G.collectgarbage = real_gc
   io.open = real_open
