@@ -952,6 +952,22 @@ already opened.
    their challenge ran out (the gain). Outcomes: `enforce` as the shipped
    default / keep `log` / retire.
 
+8. **Traffic mix, reporting only** (2026-11-24, `traffic_mix.go`,
+   `/api/v1/webdet/traffic-mix`, MCP `traffic_mix`). A per-request class
+   label (crawler / bot / automation / human) with origin time, for the
+   operator's Web Traffic page and cfm-web's fleet view. The `automation`
+   class is a new READING: a browser UA from an IP with 20+ dynamic requests
+   a minute and no static file, POST or XHR in 10 minutes (the separator the
+   2026-11-24 fleet read measured: 95%+ of humans fetch static files or send
+   XHR/POSTs; the Chrome/152 wave sent neither). Nothing reads it to act.
+   **Exit contract (D3):** review by **2026-12-22**, operator decides. It must
+   show, fleet-wide: how often `automation` fires on a vhost whose traffic the
+   operator judged human (spot-check the top automation clients against the
+   access log, as the 2026-11-24 read did), and whether its top clients are
+   the ones operators then act on. Outcomes: keep as a reporting label /
+   promote to an INPUT of a would-challenge shadow signal (never straight to
+   enforcement; D1/D2 hold) / retire.
+
 **Config decisions after E4** (2026-10-22: `vhost_config` decided yes, the
 orphan keys are the operator's cleanup; 2026-10-27, read 4: the `solver_farm`
 defaults are **180s / 30 / 15**, shipped in code and the reference config.

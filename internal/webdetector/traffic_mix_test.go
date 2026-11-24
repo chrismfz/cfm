@@ -57,7 +57,7 @@ func TestTrafficMix_Classes(t *testing.T) {
 		tmFeed(s, tmOrigin("94.65.1.2", "shop.example", "GET", fmt.Sprintf("/p/%d", i), human, 200, 0.3), now.Add(time.Duration(i)*time.Second))
 	}
 
-	m := s.Snapshot(now.Add(time.Minute), time.Hour, "", 0, 0)
+	m := s.Snapshot(now.Add(time.Minute), time.Hour, "", false, 0, 0)
 	if c := tmClassOf(m, "crawler"); c.Requests != 1 {
 		t.Fatalf("crawler = %d, want Meta's 1", c.Requests)
 	}
@@ -105,7 +105,7 @@ func TestTrafficMix_EvidenceExpires(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		tmFeed(s, tmOrigin("94.65.1.3", "a.example", "GET", fmt.Sprintf("/p/%d", i), tmChrome152, 200, 0.1), later)
 	}
-	m := s.Snapshot(later.Add(time.Second), 30*time.Minute, "", 0, 0)
+	m := s.Snapshot(later.Add(time.Second), 30*time.Minute, "", false, 0, 0)
 	if c := tmClassOf(m, "automation"); c.Requests != 25-(tmAutomationDynPerMin-1) {
 		t.Fatalf("after the evidence expired: automation = %d", c.Requests)
 	}
@@ -130,8 +130,8 @@ func TestTrafficMix_OriginEdgeAndStatus(t *testing.T) {
 	retried.RT = 3.0 // URT parsed as 0 ("0.1, 0.2"): RT, the client's transfer included, is not origin time
 	tmFeed(s, retried, now)
 
-	c := tmClassOf(s.Snapshot(now.Add(time.Second), time.Hour, "", 0, 0), "bot")
-	if c.Requests != 7 || c.OriginSec != 4.0 || c.EdgeServed != 3 {
+	c := tmClassOf(s.Snapshot(now.Add(time.Second), time.Hour, "", false, 0, 0), "bot")
+	if c.Requests != 7 || c.OriginSec != 4.0 || c.EdgeServed == nil || *c.EdgeServed != 3 || c.Status == nil {
 		t.Fatalf("bot class: %+v, want 7 requests, 4.0 origin s, 3 edge-served", c)
 	}
 	if st := c.Status; st.S2xx != 2 || st.S3xx != 1 || st.S403 != 1 || st.S429 != 1 || st.S4xx != 1 || st.S5xx != 1 {
@@ -147,13 +147,17 @@ func TestTrafficMix_HostsAndHostFilter(t *testing.T) {
 	tmFeed(s, tmOrigin("203.0.113.1", "cheap.example", "GET", "/", "curl/8", 200, 0.1), now)
 	tmFeed(s, tmOrigin("57.141.20.1", "dear.example", "GET", "/p", tmMeta, 200, 3.0), now)
 
-	m := s.Snapshot(now.Add(time.Second), time.Hour, "", 0, 0)
+	m := s.Snapshot(now.Add(time.Second), time.Hour, "", false, 0, 0)
 	if len(m.Hosts) != 2 || m.Hosts[0].Host != "dear.example" || m.Hosts[0].Classes["crawler"].OriginSec != 3.0 {
 		t.Fatalf("hosts: %+v", m.Hosts)
 	}
-	f := s.Snapshot(now.Add(time.Second), time.Hour, "CHEAP.example", 0, 0)
+	f := s.Snapshot(now.Add(time.Second), time.Hour, "CHEAP.example", false, 0, 0)
 	if f.Total.Requests != 2 || tmClassOf(f, "crawler").Requests != 0 || len(f.Hosts) != 0 || len(f.Clients) != 0 {
 		t.Fatalf("host filter: total %d, hosts %d, clients %d", f.Total.Requests, len(f.Hosts), len(f.Clients))
+	}
+	// Not kept per vhost: absent, never a fabricated zero.
+	if c := tmClassOf(f, "bot"); c.Status != nil || c.EdgeServed != nil || f.Total.Status != nil {
+		t.Fatalf("per-vhost view reports a status mix / edge count it does not keep: %+v", c)
 	}
 }
 
@@ -166,14 +170,14 @@ func TestTrafficMix_WindowAndPeak(t *testing.T) {
 		tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0.1), now.Add(-10*time.Minute))
 	}
 	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0.1), now.Add(-5*time.Minute))
-	c := tmClassOf(s.Snapshot(now, time.Hour, "", 0, 0), "bot")
+	c := tmClassOf(s.Snapshot(now, time.Hour, "", false, 0, 0), "bot")
 	if c.Requests != 121 {
 		t.Fatalf("in the hour: %d, want 121", c.Requests)
 	}
 	if c.RPSPeak != 2.0 || c.PeakAt != now.Add(-10*time.Minute).Unix()/60*60 {
 		t.Fatalf("peak %.2f at %d, want 2.0 r/s at the -10m minute", c.RPSPeak, c.PeakAt)
 	}
-	if c := tmClassOf(s.Snapshot(now, 24*time.Hour, "", 0, 0), "bot"); c.Requests != 122 {
+	if c := tmClassOf(s.Snapshot(now, 24*time.Hour, "", false, 0, 0), "bot"); c.Requests != 122 {
 		t.Fatalf("in 24h: %d, want 122", c.Requests)
 	}
 }
@@ -192,7 +196,7 @@ func TestTrafficMix_IPsLastHourOnly(t *testing.T) {
 	if ips != nil {
 		t.Fatalf("the 70-minute-old bucket still holds IPs: %v", ips)
 	}
-	m := s.Snapshot(t0.Add(2*time.Hour), 24*time.Hour, "", 0, 50)
+	m := s.Snapshot(t0.Add(2*time.Hour), 24*time.Hour, "", false, 0, 50)
 	for _, c := range m.Clients {
 		if c.Client == "python-requests" {
 			if c.Requests != 1 || c.IPs != 0 || len(c.TopIPs) != 0 {
@@ -214,7 +218,7 @@ func TestTrafficMix_OutOfOrderRecords(t *testing.T) {
 	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0.1), now.Add(-tmBuckets*tmBucketSec*time.Second))
 	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0.1), now.Add(-25*time.Hour))
 	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0.1), now.Add(time.Hour))
-	if c := tmClassOf(s.Snapshot(time.Now(), time.Hour, "", 0, 0), "bot"); c.Requests != 2 {
+	if c := tmClassOf(s.Snapshot(time.Now(), time.Hour, "", false, 0, 0), "bot"); c.Requests != 2 {
 		t.Fatalf("bot = %d, want the current one + the future one counted now", c.Requests)
 	}
 }
@@ -225,7 +229,7 @@ func TestTrafficMix_SeriesAndPeakWindow(t *testing.T) {
 	s := newTrafficMixStore()
 	now := tmBase()
 	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0.1), now)
-	m := s.Snapshot(now.Add(time.Hour), time.Hour, "", 0, 0)
+	m := s.Snapshot(now.Add(time.Hour), time.Hour, "", false, 0, 0)
 	if len(m.Series) < 12 {
 		t.Fatalf("series has %d points for an hour, want one per bucket (>= 12)", len(m.Series))
 	}
@@ -241,8 +245,74 @@ func TestTrafficMix_SeriesAndPeakWindow(t *testing.T) {
 	if c := tmClassOf(m, "bot"); c.PeakWindow != 60 {
 		t.Fatalf("node-wide peak window %d", c.PeakWindow)
 	}
-	if c := tmClassOf(s.Snapshot(now.Add(time.Hour), time.Hour, "a.example", 0, 0), "bot"); c.PeakWindow != tmBucketSec {
+	if c := tmClassOf(s.Snapshot(now.Add(time.Hour), time.Hour, "a.example", false, 0, 0), "bot"); c.PeakWindow != tmBucketSec {
 		t.Fatalf("per-vhost peak window %d", c.PeakWindow)
+	}
+}
+
+// Buckets older than an hour keep their top vhosts and clients; the rest is
+// summed under _other, so every total stays exact.
+func TestTrafficMix_CompactsOldBuckets(t *testing.T) {
+	s := newTrafficMixStore()
+	t0 := tmBase()
+	n := tmOldMaxHosts + 40
+	for i := 0; i < n; i++ {
+		tmFeed(s, tmOrigin("203.0.113.1", fmt.Sprintf("h%03d.example", i), "GET", "/", fmt.Sprintf("tool%03d/1.0", i), 200, float64(i)/100), t0)
+	}
+	tmFeed(s, tmOrigin("203.0.113.1", "late.example", "GET", "/", "curl/8", 200, 0), t0.Add(70*time.Minute)) // compacts t0's bucket
+	s.mu.Lock()
+	b := &s.buckets[(t0.Unix()/tmBucketSec)%tmBuckets]
+	hosts, clients, compact := len(b.hosts), len(b.clients[tmBot]), b.compact
+	s.mu.Unlock()
+	if !compact || hosts != tmOldMaxHosts || clients != tmOldMaxClients {
+		t.Fatalf("compacted bucket: compact=%v hosts=%d clients=%d, want %d / %d", compact, hosts, clients, tmOldMaxHosts, tmOldMaxClients)
+	}
+	m := s.Snapshot(t0.Add(2*time.Hour), 24*time.Hour, "", false, 500, 500)
+	if c := tmClassOf(m, "bot"); c.Requests != int64(n+1) {
+		t.Fatalf("total after compaction: %d, want %d", c.Requests, n+1)
+	}
+	var sum int64
+	for _, h := range m.Hosts {
+		sum += h.Total.Requests
+	}
+	if sum != int64(n+1) {
+		t.Fatalf("vhost rows sum to %d, want %d (the rest under _other)", sum, n+1)
+	}
+	first := ""
+	for _, h := range m.Hosts {
+		if h.Host != tmOtherKey { // _other (the summed tail) may be the biggest row
+			first = h.Host
+			break
+		}
+	}
+	if first != fmt.Sprintf("h%03d.example", n-1) {
+		t.Fatalf("top named vhost after compaction: %s, want the costliest", first)
+	}
+}
+
+// The window starts at the first bucket wholly inside it.
+func TestTrafficMix_WindowStartsOnABucket(t *testing.T) {
+	s := newTrafficMixStore()
+	b := tmBase().Truncate(tmBucketSec * time.Second)
+	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0), b.Add(time.Minute))    // in the partial bucket
+	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0), b.Add(6*time.Minute)) // inside
+	m := s.Snapshot(b.Add(17*time.Minute), 15*time.Minute, "", false, 0, 0)
+	if c := tmClassOf(m, "bot"); c.Requests != 1 || m.Since != b.Add(5*time.Minute).Unix() || m.WindowSec != 12*60 {
+		t.Fatalf("requests %d, since %d, window %d s; want 1 from the bucket at +5m, a 12-minute window", c.Requests, m.Since, m.WindowSec)
+	}
+}
+
+// merge_www counts example.com and www.example.com together.
+func TestTrafficMix_MergeWWW(t *testing.T) {
+	s := newTrafficMixStore()
+	now := tmBase()
+	tmFeed(s, tmOrigin("203.0.113.1", "seedsworld.gr", "GET", "/", "curl/8", 200, 0), now)
+	tmFeed(s, tmOrigin("203.0.113.1", "www.seedsworld.gr", "GET", "/", "curl/8", 200, 0), now)
+	if m := s.Snapshot(now.Add(time.Minute), time.Hour, "seedsworld.gr", false, 0, 0); m.Total.Requests != 1 {
+		t.Fatalf("without merge_www: %d", m.Total.Requests)
+	}
+	if m := s.Snapshot(now.Add(time.Minute), time.Hour, "www.seedsworld.gr", true, 0, 0); m.Total.Requests != 2 {
+		t.Fatalf("with merge_www: %d, want both names", m.Total.Requests)
 	}
 }
 
@@ -264,7 +334,7 @@ func TestTrafficMix_IPv6Per64(t *testing.T) {
 		ip := fmt.Sprintf("2001:db8:1:2::%x", i+1)
 		tmFeed(s, tmOrigin(ip, "a.example", "GET", fmt.Sprintf("/p/%d", i), tmChrome152, 200, 0.1), now)
 	}
-	if c := tmClassOf(s.Snapshot(now.Add(time.Second), time.Hour, "", 0, 0), "automation"); c.Requests != 30-(tmAutomationDynPerMin-1) {
+	if c := tmClassOf(s.Snapshot(now.Add(time.Second), time.Hour, "", false, 0, 0), "automation"); c.Requests != 30-(tmAutomationDynPerMin-1) {
 		t.Fatalf("rotating inside one /64: automation = %d", c.Requests)
 	}
 }
@@ -276,7 +346,7 @@ func TestTrafficMix_HostCap(t *testing.T) {
 	for i := 0; i < tmMaxHosts+5; i++ {
 		tmFeed(s, tmOrigin("203.0.113.1", fmt.Sprintf("h%d.example", i), "GET", "/", "curl/8", 200, 0), now)
 	}
-	m := s.Snapshot(now.Add(time.Second), time.Hour, "", 500, 0)
+	m := s.Snapshot(now.Add(time.Second), time.Hour, "", false, 500, 0)
 	if m.Total.Requests != int64(tmMaxHosts+5) {
 		t.Fatalf("total %d", m.Total.Requests)
 	}
@@ -316,7 +386,7 @@ func TestTrafficMix_HandlerAdminOnly(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Schema != "webdet.traffic_mix.v1" || m.WindowSec != 900 || tmClassOf(m, "bot").Requests != 1 || m.Note == "" {
+	if m.Schema != "webdet.traffic_mix.v1" || m.WindowSec > 900 || m.WindowSec <= 600 || tmClassOf(m, "bot").Requests != 1 || m.Note == "" {
 		t.Fatalf("response: %+v", m)
 	}
 }

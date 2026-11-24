@@ -975,17 +975,18 @@ func registerBotsTop(srv *mcp.Server, d Deps) {
 }
 
 type trafficMixInput struct {
-	Window  string `json:"window,omitempty" jsonschema:"how far back: a duration from 5m to 24h (e.g. 15m, 1h, 6h, 24h); default 1h"`
-	Host    string `json:"host,omitempty" jsonschema:"limit every figure to ONE vhost (its class split and 5-minute series); omit for the whole node with the top vhosts and clients"`
-	Hosts   int    `json:"hosts,omitempty" jsonschema:"how many top vhosts (by origin time) to list; default 20, max 500"`
-	Clients int    `json:"clients,omitempty" jsonschema:"how many top clients (by origin time) to list; default 20, max 500"`
+	Window   string `json:"window,omitempty" jsonschema:"how far back: a duration from 5m to 24h (e.g. 15m, 1h, 6h, 24h); default 1h"`
+	Host     string `json:"host,omitempty" jsonschema:"limit every figure to ONE vhost (its class split and 5-minute series; no status mix, edge_served or clients per vhost); omit for the whole node with the top vhosts and clients"`
+	MergeWWW bool   `json:"merge_www,omitempty" jsonschema:"with host: count example.com and www.example.com together"`
+	Hosts    int    `json:"hosts,omitempty" jsonschema:"how many top vhosts (by origin time) to list; default 20, max 500"`
+	Clients  int    `json:"clients,omitempty" jsonschema:"how many top clients (by origin time) to list; default 20, max 500"`
 }
 
 func registerTrafficMix(srv *mcp.Server, d Deps) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Annotations: readOnly,
 		Name:        "traffic_mix",
-		Description: "WHO the node's web traffic is and WHAT IT COSTS the origin, over the last 5m..24h, from the daemon's in-memory counters (no log scan). Every request falls in one class: crawler (a known search/social crawler by UA family), bot (any other non-browser UA or none), automation (a browser UA from an IP making 20+ dynamic requests a minute with no static file, POST or XHR in 10 minutes: a browser-looking scraper), human (every other browser-UA request). Per class: requests, origin_sec (time the site's origin spent answering), bytes, status mix (2xx/3xx/4xx/403/429/5xx), edge_served (cache/block/challenge), rps_avg and rps_peak (busiest minute, when). Plus a 5-minute series, the top vhosts by origin time with their class split, and the top clients (UA family, or the raw UA for the browser classes) with, for automation and bot clients, their top IPs over the last hour. Answers 'why is the load high / which bot is it / which vhost pays for it'. The classes are LABELS, never an enforcement decision; automation is a lower bound. Read-only.",
+		Description: "WHO the node's web traffic is and WHAT IT COSTS the origin, over the last 5m..24h, from the daemon's in-memory counters (no log scan). Every request falls in one class: crawler (a known search/social crawler by UA family), bot (any other non-browser UA or none), automation (a browser UA from an IP making 20+ dynamic requests a minute with no static file, POST or XHR in 10 minutes: a browser-looking scraper), human (every other browser-UA request). Per class: requests, origin_sec (time the site's origin spent answering), bytes, status mix (2xx/3xx/4xx/403/429/5xx), edge_served (cache/block/challenge), rps_avg and rps_peak (the busiest peak_window_sec window and when: a minute node-wide, 5 minutes for one vhost). Plus a 5-minute series, the top vhosts by origin time with their class split (beyond the last hour, each 5-minute bucket keeps its top 256 vhosts and 64 clients per class; the rest are summed under _other), and the top clients (UA family, or the raw UA for the browser classes) with, for automation and bot clients, their top IPs over the last hour. Answers 'why is the load high / which bot is it / which vhost pays for it'. The classes are LABELS, never an enforcement decision; automation is a lower bound. Read-only.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in trafficMixInput) (*mcp.CallToolResult, any, error) {
 		q := url.Values{}
 		if in.Window != "" {
@@ -993,6 +994,9 @@ func registerTrafficMix(srv *mcp.Server, d Deps) {
 		}
 		if in.Host != "" {
 			q.Set("host", in.Host)
+		}
+		if in.MergeWWW {
+			q.Set("merge_www", "1")
 		}
 		setInt(q, "hosts", in.Hosts)
 		setInt(q, "clients", in.Clients)

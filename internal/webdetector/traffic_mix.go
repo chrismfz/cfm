@@ -81,6 +81,8 @@ const (
 	tmIPBuckets     = 3600 / tmBucketSec // top IPs kept for the last hour
 	tmMaxHosts      = 4096               // per bucket
 	tmMaxClients    = 256                // per bucket
+	tmOldMaxHosts   = 256                // per bucket older than an hour (compactBucket)
+	tmOldMaxClients = 64                 // per class per bucket older than an hour
 	tmMaxClientIPs  = 512                // per client per bucket
 	tmMaxIPState    = 100000
 	tmIPStateSweep  = 30 * time.Second
@@ -120,6 +122,7 @@ type tmClient struct {
 
 type tmBucket struct {
 	id      int64 // unix/tmBucketSec; 0 = unused
+	compact bool  // older than an hour: trimmed to its top hosts and clients
 	c       [tmClasses]tmCounters
 	hosts   map[string]*[tmClasses]tmSmall
 	clients [tmClasses]map[string]*tmClient
@@ -383,17 +386,98 @@ func (s *trafficMixStore) bucketLocked(id int64) *tmBucket {
 		*b = tmBucket{id: id, hosts: make(map[string]*[tmClasses]tmSmall)}
 		for i := range s.buckets {
 			old := &s.buckets[i]
-			if old.id == 0 || old.id > id-tmIPBuckets {
+			if old.id == 0 || old.id > id-tmIPBuckets || old.compact {
 				continue
 			}
-			for _, cm := range old.clients {
-				for _, cl := range cm {
-					cl.ips = nil
-				}
-			}
+			compactBucket(old)
 		}
 	}
 	return b
+}
+
+// compactBucket trims a bucket that is older than an hour to its top
+// tmOldMaxHosts vhosts and tmOldMaxClients clients per class (by origin time;
+// the rest are merged into "_other", so every total stays exact) and drops its
+// IPs. It bounds the 24 h ring: full detail for the last hour (12 buckets at
+// the per-bucket caps), the top of each older bucket after it. Worst case, all
+// caps full: ~12 x (4096 hosts + 1024 clients) + 276 x (256 + 256), on the
+// order of tens of MB; a typical node is far below it.
+func compactBucket(b *tmBucket) {
+	b.compact = true
+	if len(b.hosts) > tmOldMaxHosts {
+		type hk struct {
+			k string
+			o int64
+		}
+		var list []hk
+		for k, v := range b.hosts {
+			if k == tmOtherKey {
+				continue
+			}
+			var o int64
+			for i := 0; i < tmClasses; i++ {
+				o += v[i].OriginMs*1000 + v[i].Req // origin time first, requests break ties
+			}
+			list = append(list, hk{k, o})
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].o != list[j].o {
+				return list[i].o > list[j].o
+			}
+			return list[i].k < list[j].k
+		})
+		other := b.hosts[tmOtherKey]
+		if other == nil {
+			other = &[tmClasses]tmSmall{}
+		}
+		for _, e := range list[tmOldMaxHosts-1:] {
+			v := b.hosts[e.k]
+			for i := 0; i < tmClasses; i++ {
+				other[i].Req += v[i].Req
+				other[i].OriginMs += v[i].OriginMs
+				other[i].Bytes += v[i].Bytes
+			}
+			delete(b.hosts, e.k)
+		}
+		b.hosts[tmOtherKey] = other
+	}
+	for c, cm := range b.clients {
+		for _, cl := range cm {
+			cl.ips = nil
+		}
+		if len(cm) <= tmOldMaxClients {
+			continue
+		}
+		type kk struct {
+			k string
+			o int64
+		}
+		var list []kk
+		for k, v := range cm {
+			if k != tmOtherKey {
+				list = append(list, kk{k, v.OriginMs*1000 + v.Req})
+			}
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].o != list[j].o {
+				return list[i].o > list[j].o
+			}
+			return list[i].k < list[j].k
+		})
+		other := cm[tmOtherKey]
+		if other == nil {
+			other = &tmClient{}
+		}
+		for _, e := range list[tmOldMaxClients-1:] {
+			v := cm[e.k]
+			other.Req += v.Req
+			other.OriginMs += v.OriginMs
+			other.Bytes += v.Bytes
+			delete(cm, e.k)
+		}
+		cm[tmOtherKey] = other
+		b.clients[c] = cm
+	}
 }
 
 // ── Query ──────────────────────────────────────────────────────────────────
@@ -408,17 +492,17 @@ type TrafficMixStatus struct {
 }
 
 type TrafficMixClass struct {
-	Key        string           `json:"key"`
-	Label      string           `json:"label"`
-	Requests   int64            `json:"requests"`
-	OriginSec  float64          `json:"origin_sec"`
-	Bytes      int64            `json:"bytes"`
-	EdgeServed int64            `json:"edge_served"` // answered by the edge itself (cache, block, challenge)
-	Status     TrafficMixStatus `json:"status"`
-	RPSAvg     float64          `json:"rps_avg"`
-	RPSPeak    float64          `json:"rps_peak"`          // busiest window of peak_window_sec
-	PeakAt     int64            `json:"peak_at,omitempty"` // that window's start
-	PeakWindow int64            `json:"peak_window_sec,omitempty"`
+	Key        string            `json:"key"`
+	Label      string            `json:"label"`
+	Requests   int64             `json:"requests"`
+	OriginSec  float64           `json:"origin_sec"`
+	Bytes      int64             `json:"bytes"`
+	EdgeServed *int64            `json:"edge_served,omitempty"` // answered by the edge itself (cache, block, challenge); node-wide view only
+	Status     *TrafficMixStatus `json:"status,omitempty"`      // node-wide view only (not kept per vhost: absent, never a fabricated zero)
+	RPSAvg     float64           `json:"rps_avg"`
+	RPSPeak    float64           `json:"rps_peak"`          // busiest window of peak_window_sec
+	PeakAt     int64             `json:"peak_at,omitempty"` // that window's start
+	PeakWindow int64             `json:"peak_window_sec,omitempty"`
 }
 
 type TrafficMixSplit struct {
@@ -473,7 +557,7 @@ const trafficMixNote = "classes are labels by UA and behaviour, never an enforce
 // Snapshot aggregates the last window (5m..24h) at now. host != "" limits
 // every figure to that vhost (the per-minute peaks and the series then come
 // from its 5-minute buckets). hostLimit / clientLimit cap the lists.
-func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host string, hostLimit, clientLimit int) TrafficMix {
+func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host string, mergeWWW bool, hostLimit, clientLimit int) TrafficMix {
 	if window < tmBucketSec*time.Second {
 		window = tmBucketSec * time.Second
 	}
@@ -487,9 +571,20 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 		clientLimit = tmDefaultClient
 	}
 	host = strings.ToLower(strings.TrimSpace(host))
+	var hostKeys []string // the vhost filter: host, plus its www. twin with mergeWWW
+	if host != "" {
+		hostKeys = []string{host}
+		if mergeWWW {
+			base := strings.TrimPrefix(host, "www.")
+			hostKeys = []string{base, "www." + base}
+		}
+	}
 	nowSec := now.Unix()
+	// The window starts at the first bucket wholly inside it: a bucket that
+	// began before since would add up to 5 minutes the averages do not cover.
 	sinceSec := nowSec - int64(window/time.Second)
-	firstB, lastB := sinceSec/tmBucketSec, nowSec/tmBucketSec
+	firstB, lastB := (sinceSec+tmBucketSec-1)/tmBucketSec, nowSec/tmBucketSec
+	sinceSec = firstB * tmBucketSec
 
 	out := TrafficMix{Schema: "webdet.traffic_mix.v1", WindowSec: nowSec - sinceSec, Since: sinceSec, Until: nowSec, Host: host, Note: trafficMixNote}
 	var cls [tmClasses]tmCounters
@@ -535,13 +630,23 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 					acc[i].Bytes += hv[i].Bytes
 				}
 			}
-		} else if hv := b.hosts[host]; hv != nil {
+		} else {
+			var bc [tmClasses]int64
+			for _, hk := range hostKeys {
+				hv := b.hosts[hk]
+				if hv == nil {
+					continue
+				}
+				for i := 0; i < tmClasses; i++ {
+					cls[i].Req += hv[i].Req
+					cls[i].OriginMs += hv[i].OriginMs
+					cls[i].Bytes += hv[i].Bytes
+					bc[i] += hv[i].Req
+				}
+			}
 			for i := 0; i < tmClasses; i++ {
-				cls[i].Req += hv[i].Req
-				cls[i].OriginMs += hv[i].OriginMs
-				cls[i].Bytes += hv[i].Bytes
-				pt.Classes[tmClassKeys[i]] = hv[i].Req
-				if r := float64(hv[i].Req) / tmBucketSec; r > peak[i] {
+				pt.Classes[tmClassKeys[i]] = bc[i]
+				if r := float64(bc[i]) / tmBucketSec; r > peak[i] {
 					peak[i], peakAt[i] = r, id*tmBucketSec
 				}
 			}
@@ -597,11 +702,11 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 	var tot tmCounters
 	for i := 0; i < tmClasses; i++ {
 		tot.add(cls[i])
-		c := tmClassOut(i, cls[i], secs, peak[i], peakAt[i])
+		c := tmClassOut(i, cls[i], secs, peak[i], peakAt[i], len(hostKeys) == 0)
 		c.PeakWindow = peakWin
 		out.Classes = append(out.Classes, c)
 	}
-	out.Total = tmClassOut(-1, tot, secs, 0, 0)
+	out.Total = tmClassOut(-1, tot, secs, 0, 0, len(hostKeys) == 0)
 	out.Series, out.SeriesSec = series, tmBucketSec
 
 	if host == "" {
@@ -666,11 +771,15 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 
 func msToSec(ms int64) float64 { return float64(ms) / 1000 }
 
-func tmClassOut(i int, c tmCounters, secs, peak float64, peakAt int64) TrafficMixClass {
+func tmClassOut(i int, c tmCounters, secs, peak float64, peakAt int64, full bool) TrafficMixClass {
 	o := TrafficMixClass{
-		Requests: c.Req, OriginSec: msToSec(c.OriginMs), Bytes: c.Bytes, EdgeServed: c.Edge,
-		Status:  TrafficMixStatus{S2xx: c.S2xx, S3xx: c.S3xx, S4xx: c.S4xx, S403: c.S403, S429: c.S429, S5xx: c.S5xx},
+		Requests: c.Req, OriginSec: msToSec(c.OriginMs), Bytes: c.Bytes,
 		RPSPeak: peak, PeakAt: peakAt,
+	}
+	if full {
+		edge := c.Edge
+		o.EdgeServed = &edge
+		o.Status = &TrafficMixStatus{S2xx: c.S2xx, S3xx: c.S3xx, S4xx: c.S4xx, S403: c.S403, S429: c.S429, S5xx: c.S5xx}
 	}
 	if i >= 0 {
 		o.Key, o.Label = tmClassKeys[i], tmClassLabels[i]
@@ -684,7 +793,7 @@ func tmClassOut(i int, c tmCounters, secs, peak float64, peakAt int64) TrafficMi
 }
 
 // handleTrafficMix serves GET /api/v1/webdet/traffic-mix
-// ?window=<5m..24h, default 1h>&host=<vhost>&hosts=<n>&clients=<n>.
+// ?window=<5m..24h, default 1h>&host=<vhost>&merge_www=1&hosts=<n>&clients=<n>.
 // Admin-only (docs/endpoint_scope_inventory.md): the node-wide view names
 // other tenants' vhosts, clients and IPs.
 func (e *Engine) handleTrafficMix(w http.ResponseWriter, r *http.Request) {
@@ -708,5 +817,6 @@ func (e *Engine) handleTrafficMix(w http.ResponseWriter, r *http.Request) {
 		}
 		return n
 	}
-	writeJSON(w, http.StatusOK, trafficMix.Snapshot(time.Now(), window, q.Get("host"), atoi("hosts"), atoi("clients")))
+	mergeWWW := q.Get("merge_www") == "1" || strings.EqualFold(q.Get("merge_www"), "true")
+	writeJSON(w, http.StatusOK, trafficMix.Snapshot(time.Now(), window, q.Get("host"), mergeWWW, atoi("hosts"), atoi("clients")))
 }
