@@ -172,25 +172,26 @@ the worker's own event loop: while it runs the worker serves nothing (~50 ms
 for 3000 pairs in a container; 85-300 ms on titan, 2026-11-24, on a ~500 MB
 heap, after an ingest that already blocks for about a second).
 
-**Then `malloc_trim(0)`** (glibc, through the FFI). The collect frees the
-pairs, but glibc keeps the freed pages, and the worker's traffic allocations
-living between them stop it from reusing them whole. On titan (collect
+**What still stays: ~3 stores in glibc's heap, not 1.** On titan (collect
 only, the night of 2026-11-23/24) a worker's RSS after each ingest rose in
 three steps (333 → 432 → 524 MB), then crept ~4 MB/h (535 → 573 MB over 9 h),
-and fell back to ~460 MB between ingests. malloc_trim hands the free pages
-back to the OS, the middle of the heap included. In a container (3500 pairs,
-a 17.6 MB payload, live allocations between 16 ingests) collect only settled
-at 227 MB, collect + trim at 165 MB, for ~25-40 ms more. On titan's far bigger
-heap the cost is what `trim_ms=` reports, and the next ingest faults the
-returned pages back in (inside its own stall, in no log field). Where it does not exist (no
-glibc, no FFI) it is skipped. It is thread-safe, and CFM's edge config runs
-no thread pool on any engine (no `aio` / `thread_pool`), so the arena locks
-it takes contend with nothing.
+and fell back to ~460 MB between ingests; ~290 MB of it is glibc's `[heap]`
+(the OpenSSL side). A faithful container repro (this module, a fake daemon on
+the socket, 3500 pairs, a 17.6 MB payload, real TLS traffic with ~250 open
+connections; 2026-11-24) read `mallinfo` after each ingest: **in use ~160 MB for
+a ~53 MB store**, steady from the second ingest, and 2 stores in use right after
+boot, before any traffic. A second collect changed nothing, so it is not the
+two-cycle finalizer delay. Nothing in this module keeps an old store; the
+references are outside it (LuaJIT / lua-resty-core), and finding them means
+LuaJIT internals. Accepted as is: the collect bounds it, and titan's workers
+went from 410-530 to ~350 MB PSS. `malloc_trim(0)` after the collect was tried
+(cfm#1771) and dropped: on titan and in the repro with traffic it returned
+nothing (`trim_ms` 0 at first, then ~30-40 ms for no RSS), the memory being in
+use, not free.
 
 The collect logs its own line,
-`gc src=dumpall|snapshot gc_ms= trim_ms= lua_kb= rss_mb=`: the wall time of
-the collect and of the trim (`-` when none ran), the Lua heap after them, and
-the worker's resident set (from `/proc/self/status`), which is where the
+`gc src=dumpall|snapshot gc_ms= lua_kb= rss_mb=`: the wall time of the
+collect, the Lua heap after it, and the worker's resident set (from `/proc/self/status`), which is where the
 OpenSSL side shows.
 
 ---

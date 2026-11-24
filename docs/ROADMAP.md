@@ -326,6 +326,15 @@ Measuring: **`docs/proxy-performance.md`**; sslcollector: `docs/ssl-collector.md
   HTTPS origin connections are not pooled" spells out (backend-seen SNI ==
   `Host`, no connection or TLS session crosses hosts, zero `421`, on the
   deployed engine). ECDSA P-256 certs cut only the signature share of it.
+- **sslcollector: two old stores stay in use after an ingest** — [idea].
+  glibc's heap holds ~3 stores, not 1 (container repro with this module, a
+  fake daemon and real TLS traffic, 2026-11-24: `mallinfo` in use ~160 MB for
+  a ~53 MB store, 2 stores right after boot, before any traffic; a second
+  collect changes nothing). Nothing in `sslcollector.lua` keeps them, so the
+  references are in LuaJIT / lua-resty-core. Accepted as is (titan ~350 MB
+  PSS per worker, bounded); `docs/ssl-collector.md` has the numbers.
+  `malloc_trim` was tried (cfm#1771) and dropped: the memory is in use, not
+  free.
 - **sslcollector: no hourly full re-ingest of an unchanged version** —
   [idea]. Each worker rebuilds its whole store about once an hour (the
   age-forced `/dumpall`) even when the version has not changed (rigel,
