@@ -916,7 +916,13 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "host not in scope"})
 		return
 	}
+	writeJSON(w, http.StatusOK, e.vhostChallengeStatus(host, vhostScopeFromContext(r.Context())))
+}
 
+// vhostChallengeStatus is the body of /api/v1/challenge/vhost/status for a
+// normalized host (the vhost profile carries it verbatim). scope is the
+// caller's vhost scope (nil for an admin): it decides the pin-lock flags.
+func (e *Engine) vhostChallengeStatus(host string, scope map[string]struct{}) map[string]interface{} {
 	// Use covering (not exact-key) so the www variant of an apex manual
 	// challenge reports manual_active=true — matching what the bridge enforces
 	// and what the vhost status list now shows (apex→www expansion).
@@ -947,7 +953,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 	if !autoActive && tier.Trigger != "" && tier.Trigger != autoV2UnderAttack {
 		autoActive = true // a real automatic challenge (not a bare under_attack note)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	return map[string]interface{}{
 		"host":          host,
 		"manual_active": active,
 		"expires_at":    expiresAt,
@@ -969,8 +975,8 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"manual_default_rung": rungOrV1(defaultRung),
 		// true when the caller is a scoped token and the operator set the
 		// pin: the tenant's surfaces hide the pin controls (the write 403s).
-		"rung_pin_locked":   tier.pinLockedFor(vhostScopeFromContext(r.Context())),
-		"rung_unpin_locked": tier.unpinLockedFor(vhostScopeFromContext(r.Context())),
+		"rung_pin_locked":   tier.pinLockedFor(scope),
+		"rung_unpin_locked": tier.unpinLockedFor(scope),
 		// The covering manual arm's LOCKDOWN (vhost_lockdown.go): no client
 		// exemption on this vhost until lockdown_until (null when none).
 		"lockdown":       !lockUntil.IsZero(),
@@ -988,7 +994,7 @@ func (e *Engine) handleChallengeVhostStatus(w http.ResponseWriter, r *http.Reque
 		"cost_pressure":     CostShadowPressure(host),
 		"dc_fraction":       DCFracShadowPercent(host),
 		"state":             e.deriveVhostStateForHost(host, time.Now()),
-	})
+	}
 }
 
 // ttlOrDash renders an override's TTL for the audit line ("-" for off).

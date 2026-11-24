@@ -21,6 +21,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **One API call for everything that applies to a vhost.**
+  `GET /api/v1/webdet/vhost-profile?host=` (admin) returns one host's
+  settings and what decided each: challenge (manual or automatic, tier and
+  its source, lockdown, under attack), WAF on/off and the excludes that cover
+  the host (`example.com`'s exclude also covers `www.example.com`), HTTP/3,
+  ClamAV, the Site Cache policy that decides it (its own or a covering
+  `*.example.com`) with the node switches, and every traffic rule whose scope
+  takes it, with its state (enabled, disabled, expired). It also lists the
+  other known hosts of the same domain. Each part comes from the code the
+  edge and the existing pages already use, so it cannot disagree with them.
+  It backs the coming per-vhost page in cfm-admin.
 - **Web Traffic: rank the clients by any column.** Click Requests, Rate,
   Traffic, Origin time or IPs: the node picks the top clients by that column
   (the traffic mix API's new `sort=origin|requests|bytes|ips`, also on the MCP

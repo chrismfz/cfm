@@ -74,65 +74,29 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 
 	filter := parseVhostFilterWithAliases(r)
 	hosts := e.collectKnownVhosts()
+	in := e.vhostControlInputs()
 
-	challengeEntries := hostExcludeValues(e.ChallengeExcludeList())
-	for _, val := range challengeEntries {
-		h := normalizeControlHost(val)
-		if h != "" {
-			hosts[h] = struct{}{}
-		}
+	// Every host an exclude or override names gets a row, so the owner can
+	// toggle it even without recent traffic. The HTTP/3 and ClamAV columns
+	// match exact hosts (and "*.suffix" for HTTP/3) only, as their Lua data
+	// paths do; see vhostControlRow.
+	for _, val := range in.challengeEntries {
+		hosts[val] = struct{}{}
 	}
-
-	// Only whole-WAF excludes (RuleIDs empty) toggle the WAFEnabled flag.
-	// Rule-scoped excludes still leave the WAF active for that host — they
-	// just suppress specific rule IDs — so they must not flip this toggle.
-	wafEntries := hostExcludeValues(filterWholeWAFEntries(e.WAFExcludeList()))
-	for _, val := range wafEntries {
-		h := normalizeControlHost(val)
-		if h != "" {
-			hosts[h] = struct{}{}
-		}
+	for _, val := range in.wafEntries {
+		hosts[val] = struct{}{}
 	}
-
-	// HTTP/3 opt-in list. Opposite semantics from WAF/Challenge:
-	// presence in the store = host is enabled. We still surface every
-	// opt-in host as a UI row so the owner can toggle it off, even if
-	// the host doesn't appear in cPanel userdata or recent traffic.
-	//
-	// NOTE: we deliberately do NOT use matchHostExclude here. That
-	// helper's suffix-expansion semantics (treat "cdn.example.com" as
-	// matching every "*.cdn.example.com") would lie about the runtime
-	// behavior — the Lua data path in cfm_h3_config.lua matches only
-	// exact hosts and explicit "*.suffix" wildcards. Use the store's
-	// MatchInfo, which mirrors the Lua matcher exactly.
 	for _, h := range e.HTTP3OverrideHosts() {
-		hn := normalizeControlHost(h)
-		if hn != "" {
+		if hn := normalizeControlHost(h); hn != "" {
 			hosts[hn] = struct{}{}
 		}
 	}
-
-	// ClamAV per-vhost override set. Like HTTP/3 (and unlike the WAF/Challenge
-	// columns) we match EXACT hosts only — cfm_clamav.lua keys its override set
-	// by exact hostname, so matchHostExclude's suffix expansion would lie about
-	// runtime behaviour. Surface every override host as a row so the owner can
-	// toggle it even without recent traffic.
-	clamOverride := make(map[string]struct{})
-	for _, val := range hostExcludeValues(e.ClamOverrideList()) {
-		if h := normalizeControlHost(val); h != "" {
-			clamOverride[h] = struct{}{}
-			hosts[h] = struct{}{}
-		}
+	for h := range in.clamOverride {
+		hosts[h] = struct{}{}
 	}
-	clamModeOverride := make(map[string]struct{})
-	for _, val := range hostExcludeValues(e.ClamModeOverrideList()) {
-		if h := normalizeControlHost(val); h != "" {
-			clamModeOverride[h] = struct{}{}
-			hosts[h] = struct{}{}
-		}
+	for h := range in.clamModeOverride {
+		hosts[h] = struct{}{}
 	}
-	clamGlobal, clamScanDefault := clamScanPolicy()
-	clamInline := clamInlineDefault()
 
 	list := make([]string, 0, len(hosts))
 	for host := range hosts {
@@ -144,51 +108,98 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 
 	rows := make([]webdetVhostControlRow, 0, len(list))
 	for _, host := range list {
-		challengeMatched, challengeValue, challengeExact := matchHostExclude(challengeEntries, host)
-		wafMatched, wafValue, wafExact := matchHostExclude(wafEntries, host)
-		http3Matched, http3Pattern, http3Exact := e.HTTP3OverrideMatchInfo(host)
-
-		// Normalize the lookup key: collectKnownVhosts seeds some hosts
-		// (cPanel userdata) un-normalized, and matchHostExclude normalizes its
-		// host internally — the exact clam membership check must too, or a
-		// mixed-case/trailing-dot host would miss its own override.
-		_, clamPresent := clamOverride[normalizeControlHost(host)]
-		// XOR: an override flips the vhost relative to the global default.
-		clamEnabled := clamGlobal && (clamScanDefault != clamPresent)
-		_, clamModePresent := clamModeOverride[normalizeControlHost(host)]
-		clamModeInline := clamEnabled && (clamInline != clamModePresent)
-
-		// Under-Attack override state (reflects a just-issued force immediately).
-		underAttack, _, _ := e.VhostAttackState(host)
-		tier := e.challengeV2VhostTier(host)
-
-		rows = append(rows, webdetVhostControlRow{
-			Host:                    host,
-			ChallengeEnabled:        !challengeMatched,
-			WAFEnabled:              !wafMatched,
-			HTTP3Enabled:            http3Matched,
-			ChallengeToggleable:     !challengeMatched || challengeExact,
-			WAFToggleable:           !wafMatched || wafExact,
-			HTTP3Toggleable:         !http3Matched || http3Exact,
-			ChallengeMatchedExclude: challengeValue,
-			WAFMatchedExclude:       wafValue,
-			HTTP3MatchedOptIn:       http3Pattern,
-			ClamEnabled:             clamEnabled,
-			ClamToggleable:          clamGlobal, // every clam override is exact
-			ClamOverridePresent:     clamPresent,
-			ClamModeInline:          clamModeInline,
-			ClamModeToggleable:      clamGlobal && clamEnabled,
-			ClamModeOverridePresent: clamModePresent,
-			UnderAttack:             underAttack,
-			UnderAttackToggleable:   e.cfg.UnderAttack,
-			ChallengeRung:           tier.Rung,
-			ChallengeRungSource:     tier.Source,
-			ChallengeRungTrigger:    tier.Trigger,
-			ChallengeLockdownUntil:  lockdownPtr(e.vhostLockdownUntil(host)),
-		})
+		rows = append(rows, e.vhostControlRow(in, host))
 	}
 
 	writeJSON(w, http.StatusOK, webdetVhostControlResponse{Rows: rows})
+}
+
+// vhostControlInputs is what every row of the controls table is computed
+// from, read once per request.
+type vhostControlInputs struct {
+	// Host values of the challenge excludes and of the WHOLE-WAF excludes
+	// (rule-scoped entries leave the WAF on for the host: they suppress
+	// specific rule IDs, so they must not flip the WAF column).
+	challengeEntries []string
+	wafEntries       []string
+	// ClamAV per-vhost overrides, EXACT hosts: cfm_clamav.lua keys its
+	// override set by exact hostname, so matchHostExclude's suffix expansion
+	// would lie about runtime behaviour.
+	clamOverride     map[string]struct{}
+	clamModeOverride map[string]struct{}
+	clamGlobal       bool
+	clamScanDefault  bool
+	clamInline       bool
+}
+
+func (e *Engine) vhostControlInputs() vhostControlInputs {
+	in := vhostControlInputs{
+		challengeEntries: hostExcludeValues(e.ChallengeExcludeList()),
+		wafEntries:       hostExcludeValues(filterWholeWAFEntries(e.WAFExcludeList())),
+		clamOverride:     make(map[string]struct{}),
+		clamModeOverride: make(map[string]struct{}),
+	}
+	for _, val := range hostExcludeValues(e.ClamOverrideList()) {
+		in.clamOverride[val] = struct{}{}
+	}
+	for _, val := range hostExcludeValues(e.ClamModeOverrideList()) {
+		in.clamModeOverride[val] = struct{}{}
+	}
+	in.clamGlobal, in.clamScanDefault = clamScanPolicy()
+	in.clamInline = clamInlineDefault()
+	return in
+}
+
+// vhostControlRow is one host's row of the controls table (and the controls
+// block of the vhost profile).
+func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhostControlRow {
+	challengeMatched, challengeValue, challengeExact := matchHostExclude(in.challengeEntries, host)
+	wafMatched, wafValue, wafExact := matchHostExclude(in.wafEntries, host)
+	// HTTP/3 does NOT use matchHostExclude: its suffix expansion (treat
+	// "cdn.example.com" as matching every "*.cdn.example.com") would lie
+	// about the runtime behaviour — cfm_h3_config.lua matches only exact
+	// hosts and explicit "*.suffix" wildcards. The store's MatchInfo mirrors
+	// the Lua matcher exactly. Presence in the store = host is enabled.
+	http3Matched, http3Pattern, http3Exact := e.HTTP3OverrideMatchInfo(host)
+
+	// Normalize the lookup key: collectKnownVhosts seeds some hosts
+	// (cPanel userdata) un-normalized, and matchHostExclude normalizes its
+	// host internally — the exact clam membership check must too, or a
+	// mixed-case/trailing-dot host would miss its own override.
+	_, clamPresent := in.clamOverride[normalizeControlHost(host)]
+	// XOR: an override flips the vhost relative to the global default.
+	clamEnabled := in.clamGlobal && (in.clamScanDefault != clamPresent)
+	_, clamModePresent := in.clamModeOverride[normalizeControlHost(host)]
+	clamModeInline := clamEnabled && (in.clamInline != clamModePresent)
+
+	// Under-Attack override state (reflects a just-issued force immediately).
+	underAttack, _, _ := e.VhostAttackState(host)
+	tier := e.challengeV2VhostTier(host)
+
+	return webdetVhostControlRow{
+		Host:                    host,
+		ChallengeEnabled:        !challengeMatched,
+		WAFEnabled:              !wafMatched,
+		HTTP3Enabled:            http3Matched,
+		ChallengeToggleable:     !challengeMatched || challengeExact,
+		WAFToggleable:           !wafMatched || wafExact,
+		HTTP3Toggleable:         !http3Matched || http3Exact,
+		ChallengeMatchedExclude: challengeValue,
+		WAFMatchedExclude:       wafValue,
+		HTTP3MatchedOptIn:       http3Pattern,
+		ClamEnabled:             clamEnabled,
+		ClamToggleable:          in.clamGlobal, // every clam override is exact
+		ClamOverridePresent:     clamPresent,
+		ClamModeInline:          clamModeInline,
+		ClamModeToggleable:      in.clamGlobal && clamEnabled,
+		ClamModeOverridePresent: clamModePresent,
+		UnderAttack:             underAttack,
+		UnderAttackToggleable:   e.cfg.UnderAttack,
+		ChallengeRung:           tier.Rung,
+		ChallengeRungSource:     tier.Source,
+		ChallengeRungTrigger:    tier.Trigger,
+		ChallengeLockdownUntil:  lockdownPtr(e.vhostLockdownUntil(host)),
+	}
 }
 
 // filterWholeWAFEntries returns only entries that exclude the whole WAF
