@@ -164,9 +164,10 @@ var wafRuleIDs = []WAFRule{
 	// 404's scorer over the whole body the edge read (32 KB), when 404's
 	// 2 KB head scored nothing: PHP saved through a form field (a plugin
 	// editor, a file manager's put, a webshell's own editor) past the head
-	// (orion 2026-11-15, rigel 2026-11-17). A whole legitimate plugin file saved
-	// through an editor is scored too. Block since 2026-11-24 (7-day burn-in: 5 hits, every one an attacker; 0 FP), ban
-	// held so such a save is a 403, never a 6 h ban.
+	// (orion 2026-11-15, rigel 2026-11-17). A whole legitimate plugin file
+	// saved through an editor is scored too. Block since 2026-11-24 (7-day
+	// burn-in: 5 hits, every one an attacker; 0 FP), ban held so such a save
+	// is a 403, never a 6 h ban.
 	{ID: 417, Name: "rule_php_webshell_body_deep", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},

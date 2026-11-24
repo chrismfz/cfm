@@ -466,9 +466,10 @@ fields with these rules off. Not closed yet: the allowlist would have to
 exclude foreign routing fields, which it cannot name for every app.
 
 **Why it is safe here and not in case 6:**
-1. *Routing key.* The REST path is what routes the request; no body field
-   makes PHP dispatch another handler, and it is in the request line, never
-   past the body window.
+1. *Routing key.* On WordPress the REST path is what routes the request; no
+   body field makes WP dispatch another handler, and it is in the request
+   line, never past the body window. (Another app that answers the same path
+   can route on its own fields: the residual above.)
 2. *Reachability.* `/save` sits behind the plugin's `permission_callback`
    (`edit_themes` / `manage_options`), the same trust boundary as the
    installer and Code Snippets. admin-ajax also serves pre-auth `nopriv`
