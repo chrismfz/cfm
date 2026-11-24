@@ -3,6 +3,7 @@ package webdetector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -73,8 +74,8 @@ func TestChallengeIPManual(t *testing.T) {
 	b.ChallengeIPWithReason("198.51.100.8", 10*time.Minute, "waf")
 	// A shorter live challenge is extended, and reported apart from Done: an
 	// undo of Done must not lift a challenge the operator did not set.
-	if _, out := call(e.handleChallengeIPAdd, CtxRoleAdmin, "/api/v1/challenge/ip/add", `{"ips":["198.51.100.8"],"ttl_seconds":3600}`); len(out.Done) != 0 || len(out.Extended) != 1 {
-		t.Fatalf("a shorter live challenge: done=%v extended=%v, want it extended, not in done", out.Done, out.Extended)
+	if _, out := call(e.handleChallengeIPAdd, CtxRoleAdmin, "/api/v1/challenge/ip/add", `{"ips":["198.51.100.8"],"ttl_seconds":3600}`); len(out.Done) != 0 || len(out.Extended) != 1 || len(out.RevokedKept) != 1 {
+		t.Fatalf("a shorter live challenge: done=%v extended=%v revoked_kept=%v, want it extended (revocation kept), not in done", out.Done, out.Extended, out.RevokedKept)
 	}
 	if en, _ := ipEntry(b, "198.51.100.8"); en.Reason != "waf" || time.Until(en.Expires) < 50*time.Minute {
 		t.Fatalf("extended entry = %+v, want its own reason and ~1h", en)
@@ -96,5 +97,24 @@ func TestChallengeIPManual(t *testing.T) {
 	}
 	if blk, _ := ipEntry(b, "192.0.2.2"); blk.Action != "block" {
 		t.Fatal("remove lifted a block")
+	}
+}
+
+// A full revocation list is reported, never hidden behind "done".
+func TestChallengeIPManual_RevokeListFull(t *testing.T) {
+	e := &Engine{nginxBridge: NewNginxBridge("/tmp/cfm-test-manual-ip.sock", "tok", time.Minute, time.Minute)}
+	b := e.nginxBridge
+	b.mu.Lock()
+	b.clrRevoked = map[string]time.Time{}
+	for i := 0; i < clearanceRevokeMax; i++ {
+		b.clrRevoked[fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255)] = time.Now().Add(time.Hour)
+	}
+	b.mu.Unlock()
+	rr := httptest.NewRecorder()
+	e.handleChallengeIPAdd(rr, manualIPReq(CtxRoleAdmin, "/api/v1/challenge/ip/add", `{"ips":["203.0.113.77"]}`))
+	var out manualIPChallengeResult
+	_ = json.Unmarshal(rr.Body.Bytes(), &out)
+	if len(out.Done) != 1 || len(out.NotRevoked) != 1 || out.NotRevoked[0] != "203.0.113.77" {
+		t.Fatalf("full list: done=%v not_revoked=%v, want the IP challenged AND reported not revoked", out.Done, out.NotRevoked)
 	}
 }

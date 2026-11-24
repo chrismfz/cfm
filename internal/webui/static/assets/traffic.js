@@ -337,7 +337,14 @@ import {
       });
       const skipped = Array.isArray(r.skipped) ? r.skipped.length : 0;
       const extended = Array.isArray(r.extended) ? r.extended.length : 0;
-      flash(`✓ challenged ${r.done ? r.done.length : 0} IP(s)${extended ? `, extended ${extended} existing` : ""}${skipped ? `, ${skipped} skipped (already challenged longer, blocked or never challenged here)` : ""}`, "ok");
+      const kept = Array.isArray(r.revoked_kept) ? r.revoked_kept.length : 0;
+      const notRevoked = Array.isArray(r.not_revoked) ? r.not_revoked.length : 0;
+      let text = `✓ challenged ${r.done ? r.done.length : 0} IP(s)`;
+      if (extended) text += `, extended ${extended} existing`;
+      if (skipped) text += `, ${skipped} skipped (already challenged longer, blocked or never challenged here)`;
+      if (kept) text += `. Undo will not restore the clearance of ${kept} already-challenged IP(s): it ends by itself at the chosen time`;
+      if (notRevoked) text += `. ⚠ ${notRevoked} IP(s) kept their clearance (revocation list full): clients there that already solved still pass`;
+      flash(text, notRevoked ? "warn" : "ok");
       // Undo lifts only the challenges this click set, never one it extended.
       offerUndo(Array.isArray(r.done) ? r.done : []);
       closeIPDialog();

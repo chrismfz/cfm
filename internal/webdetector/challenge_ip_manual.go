@@ -54,7 +54,16 @@ type manualIPChallengeResult struct {
 	// Extended (add only): IPs that already had a shorter live challenge,
 	// now extended. Not in Done: an undo must not lift a challenge the
 	// operator did not set (a WAF or malpath one, with its holds and marks).
-	Extended   []string                `json:"extended,omitempty"`
+	Extended []string `json:"extended,omitempty"`
+	// RevokedKept (add only): IPs whose clearance this call revoked but an
+	// undo (remove of Done) will not restore: the extended ones and those
+	// skipped as already challenged longer. Their revocation ends by itself
+	// at the chosen TTL (lifting it here could also lift a malpath one).
+	RevokedKept []string `json:"revoked_kept,omitempty"`
+	// NotRevoked (add only): IPs challenged but whose clearance could not be
+	// revoked (the revocation list is full): a client there that already
+	// solved keeps passing until its cookie expires.
+	NotRevoked []string                `json:"not_revoked,omitempty"`
 	Skipped    []manualIPChallengeSkip `json:"skipped,omitempty"`
 	TTLSeconds int                     `json:"ttl_seconds,omitempty"`
 }
@@ -147,9 +156,16 @@ func (e *Engine) handleChallengeIPAdd(w http.ResponseWriter, r *http.Request) {
 				// Its challenge already outlasts ours; the operator still
 				// wants a client that had solved to face it.
 				b.mu.Lock()
-				b.revokeClearanceLocked(ip, now.Add(ttl), now)
+				revoked := b.revokeClearanceLocked(ip, now.Add(ttl), now)
 				b.mu.Unlock()
-				out.Skipped = append(out.Skipped, manualIPChallengeSkip{IP: ip, Why: "already challenged until " + cur.Expires.UTC().Format(time.RFC3339) + "; clearance revoked for the chosen time"})
+				why := "already challenged until " + cur.Expires.UTC().Format(time.RFC3339) + "; clearance revoked for the chosen time"
+				if revoked {
+					out.RevokedKept = append(out.RevokedKept, ip)
+				} else {
+					why = "already challenged until " + cur.Expires.UTC().Format(time.RFC3339) + "; clearance NOT revoked (the revocation list is full)"
+					out.NotRevoked = append(out.NotRevoked, ip)
+				}
+				out.Skipped = append(out.Skipped, manualIPChallengeSkip{IP: ip, Why: why})
 				continue
 			}
 			why, extended = "", true
@@ -160,10 +176,16 @@ func (e *Engine) handleChallengeIPAdd(w http.ResponseWriter, r *http.Request) {
 		// (a solving farm) would never see the challenge. A person on the
 		// address re-solves once; a solve or a remove lifts it (ClearIPScoped).
 		b.mu.Lock()
-		b.revokeClearanceLocked(ip, now.Add(ttl), now)
+		revoked := b.revokeClearanceLocked(ip, now.Add(ttl), now)
 		b.mu.Unlock()
+		if !revoked {
+			out.NotRevoked = append(out.NotRevoked, ip)
+		}
 		if extended {
 			out.Extended = append(out.Extended, ip)
+			if revoked {
+				out.RevokedKept = append(out.RevokedKept, ip)
+			}
 		} else {
 			out.Done = append(out.Done, ip)
 		}
