@@ -781,9 +781,12 @@ cPanel — every rule here exists because of that. Design + as-built:
   `MICRO_CACHE_ENFORCE` (default `1`) is a node-wide kill switch like
   `SITE_CACHE`; the per-vhost arm is what guards a tenant. Before arming micro
   on a new kind of app (a shop, a membership site), follow runbook §7. The
-  edge reader treats an ABSENT field as off (fail-safe). Micro is entered ONLY
-  at cfm.lua's Step 4 (after WAF, challenge, bridge decisions);
-  `cfm_micro_entry_structure_test.lua` pins it.
+  edge reader treats an ABSENT field as off (fail-safe). Micro is entered
+  at cfm.lua's Step 4 (after WAF, challenge, bridge decisions) and, for a
+  bypass-list crawler (`1`) only, at the Step 0 bypass, which skips those
+  steps anyway; a crawler's entries live in their own keyspace (`gc<gen>|…`,
+  `ngx.ctx.cfm_micro_class`), so a page stored for a crawler never reaches a
+  visitor. `cfm_micro_entry_structure_test.lua` pins both entries.
 - **Tier A's static recipe/TTL are labels.** The static locations follow the
   origin's Cache-Control/Expires with a 1 h fallback; don't document or
   promise a static TTL the edge doesn't apply. Micro TTL snaps to

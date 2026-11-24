@@ -374,8 +374,19 @@ public entry points are `static_gate`, `micro_gate`, `observe`,
 ### 5.3 Insertion points in `cfm.lua`
 
 Micro-cache (Tier B) is decided at the **allow-return**, after all
-enforcement: **Step 4 only** (Step 2b waits on §5.5.1);
-`cfm_micro_entry_structure_test.lua` pins it. Step 4 is after Step 0a1 (the
+enforcement: **Step 4** (Step 2b waits on §5.5.1), plus the **Step 0
+static bypass for a crawler** of the bypass list (kind `1`: Google, Bing,
+Apple, DuckDuckGo, Skroutz, …; a CDN `2` is never cached there).
+`cfm_micro_entry_structure_test.lua` pins both. The crawler entry is safe
+before the WAF because nothing below Step 0 applies to a bypassed client
+anyway, and because a crawler gets its **own keyspace**: `micro_gate("crawler")`
+prefixes the purge generation (`gc<gen>|…` against a visitor's `g<gen>|…`),
+so a page an origin renders for a crawler (an SEO prerender, a hacked site's
+spam cloaked for Googlebot) never reaches a visitor, nor a visitor's page a
+crawler, and a purge still drops both. A crawler a vhost lockdown holds goes
+through the steps and keeps the crawler keyspace at Step 4. Crawlers that are
+not on the bypass list (Meta, Amazon, the AI crawlers) are ordinary clients
+and reach Step 4 like a visitor (visitor keyspace). Step 4 is after Step 0a1 (the
 `/.well-known/` carve-out for a plain fetch), so ACME/DCV is never cached; the
 rest of the prefix reaches Step 4 and is refused by the `MICRO_PATH_PREFIX`
 rail. `micro_cache_target()` calls `cfm_cache.micro_gate()` under a pcall;

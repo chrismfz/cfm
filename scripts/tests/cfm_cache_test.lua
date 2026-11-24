@@ -482,6 +482,16 @@ reset_gate_vars(); ngx.var.host = "myip.gr"
 check(cache.micro_gate() == "@cfm_micro_5s", "enforce: myip.gr (micro ttl 5s) → @cfm_micro_5s")
 check(ngx.var.cfm_cache_skip == "0", "enforce: micro_gate opens the bypass gate ($cfm_cache_skip=0)")
 check(ngx.var.cfm_cache_gen == "3", "enforce: micro_gate stamps the purge generation")
+-- a crawler of the bypass list (cfm.lua Step 0) gets its own keyspace: the key
+-- starts "g$cfm_cache_gen|", so "gc3|" never meets a visitor's "g3|"
+reset_gate_vars(); ngx.var.host = "myip.gr"
+check(cache.micro_gate("crawler") == "@cfm_micro_5s", "a crawler routes to the same bucket")
+check(ngx.var.cfm_cache_gen == "c3", "a crawler's purge generation is prefixed c: " .. tostring(ngx.var.cfm_cache_gen))
+reset_gate_vars(); ngx.var.host = "myip.gr"
+check(cache.micro_gate("visitor") == "@cfm_micro_5s" and ngx.var.cfm_cache_gen == "3", "any other class is the visitor keyspace")
+reset_gate_vars(); ngx.var.host = "myip.gr"; ngx.var.http_cookie = "PHPSESSID=x"; ngx.var.cfm_micro_why = "-"
+check(cache.micro_gate("crawler") == nil and ngx.var.cfm_micro_why == "auth:PHPSESSID", "a crawler with a session cookie bypasses like anyone")
+ngx.var.http_cookie = nil
 reset_gate_vars(); ngx.var.host = "www.myip.gr"
 check(cache.micro_gate() == "@cfm_micro_30s", "enforce: www.myip.gr (micro ttl 30s) → @cfm_micro_30s bucket")
 

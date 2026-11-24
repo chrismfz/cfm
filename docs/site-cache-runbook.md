@@ -192,7 +192,11 @@ access log:
   before micro is ever asked: `clearance` (a visitor holding a valid
   `cfm_clearance` cookie takes the fast path, which never micro-caches, by
   design §5.5.1), `waf` (a logonly WAF hit or an uninspected request) and
-  `self-ip` (the node's own addresses). It carries a cookie's NAME only, never its value, with
+  `self-ip` (the node's own addresses), and `cdn` for a CDN of the bypass list
+  (QUIC.cloud), which is never micro-cached. A crawler of the bypass list
+  (Googlebot, Bingbot, Applebot, …) on a micro-armed vhost IS micro-cached,
+  in its own keyspace (`up=cfm_apache_micro`; its entries never reach a
+  visitor; `site-cache stats` counts its HITs with the visitors'). It carries a cookie's NAME only, never its value, with
   anything outside `[A-Za-z0-9_.:-]` as `_`. `-` for every other request: a
   micro-served one, a vhost without micro, a static asset, the panel
   listeners. (cfm_cache.micro_gate sets `$cfm_micro_why`; the log reads it

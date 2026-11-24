@@ -1404,7 +1404,11 @@ end
 -- returns the bucket location; the only-200 rail + response-side rails (Set-Cookie,
 -- Cache-Control private/no-store/no-cache/s-maxage=0, X-Accel-Expires 0 or @…
 -- never stored) are enforced natively in that location.
-function _M.micro_gate()
+-- class: nil for a visitor, "crawler" for a crawler of the bypass list (cfm.lua
+-- Step 0). A crawler's entries get their own keyspace, through the purge
+-- generation the cache key starts with ("g<gen>|…" vs "gc<gen>|…"): a purge
+-- still drops both, and neither class is ever served the other's page.
+function _M.micro_gate(class)
     if not site_cache_enabled() then return nil end
     if not _cache.has_micro then return nil end
     if not NGX_JOINS_HEADERS then return nil end
@@ -1428,7 +1432,7 @@ function _M.micro_gate()
     local max = micro_conf_max_bucket()
     if bucket > max then bucket = max end
     ngx.var.cfm_cache_skip = "0"
-    ngx.var.cfm_cache_gen  = tostring(p.gen or 0)
+    ngx.var.cfm_cache_gen  = ((class == "crawler") and "c" or "") .. tostring(p.gen or 0)
     return "@cfm_micro_" .. bucket .. "s"
 end
 
