@@ -85,6 +85,11 @@ type Store struct {
 	now     func() time.Time
 	allow   atomic.Pointer[allowSet] // nft's allow sets at the last reconcile
 	saveMu  sync.Mutex               // one save at a time: snapshot, write, rename
+	// saveDelay > 0 (SetSaveDelay) coalesces the file writes: a change marks
+	// the store dirty and one write follows saveDelay later; Flush writes
+	// now. 0 writes on every change.
+	saveDelay time.Duration
+	dirty     atomic.Bool
 }
 
 var (
@@ -785,14 +790,46 @@ func (s *Store) Load() {
 	version.Add(1)
 }
 
-// save writes the store atomically (temp file + rename), one save at a time
-// so an older snapshot never lands after a newer one. Best effort: a failed
-// write only costs the bans a restart would have kept.
+// SetSaveDelay makes the store coalesce its file writes (see save): at most
+// one write per d, and Flush for the rest. Set it before the store is used.
+func (s *Store) SetSaveDelay(d time.Duration) {
+	if s != nil {
+		s.saveDelay = d
+	}
+}
+
+// save records a change: the version moves at once (the edge's next poll sees
+// it), and the file is written now, or once saveDelay later when that is set.
+// Every write marshals the whole store: with 50 000 bans that was 7 MB per
+// automatic ban, a tenth of the daemon's CPU on the busiest nodes
+// (2026-11-24). The file only matters to the next start, so the daemon
+// coalesces the writes and flushes on a stop signal.
 func (s *Store) save() {
 	version.Add(1)
 	if s.path == "" {
 		return
 	}
+	if s.saveDelay > 0 {
+		if s.dirty.CompareAndSwap(false, true) {
+			time.AfterFunc(s.saveDelay, s.Flush)
+		}
+		return
+	}
+	s.write()
+}
+
+// Flush writes a change that save deferred; a no-op when nothing waits.
+func (s *Store) Flush() {
+	if s == nil || !s.dirty.CompareAndSwap(true, false) {
+		return
+	}
+	s.write()
+}
+
+// write saves the store atomically (temp file + rename), one write at a time
+// so an older snapshot never lands after a newer one. Best effort: a failed
+// write only costs the bans a restart would have kept.
+func (s *Store) write() {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 	s.mu.RLock()

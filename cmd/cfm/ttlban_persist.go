@@ -88,6 +88,15 @@ func ttlBanExclude(be firewall.Backend, cfgDir string) (func(net.IP) bool, func(
 // empty store returns at once.
 const ttlBanRestoreWait = 30 * time.Second
 
+// edgeBanSaveDelay bounds how often the edge ban store rewrites its file
+// (edgeban.Store.SetSaveDelay). The edge sees a ban at once either way (the
+// version moves with the change). The pending write is flushed by
+// watchTTLBanShutdown, which catches the stop signals once the TTL ban restore
+// is done: a crash, an os.Exit, or a stop during that restore loses the bans
+// of the last edgeBanSaveDelay from the file (nft still holds them; the edge
+// answers them again from the next ban of that client).
+const edgeBanSaveDelay = 30 * time.Second
+
 // restoreTTLBans loads the persisted TTL bans, re-adds those with time left
 // and installs the store as the default (Forget, the snapshots). Called once,
 // after EnsureBase and before the first edge ban reconcile reads nft.
@@ -165,6 +174,9 @@ func watchTTLBanShutdown(s *ttlban.Store, be firewall.Backend) {
 		// A second signal during the snapshot ends the process at once (a
 		// second Ctrl-C, systemd's SIGKILL aside).
 		signal.Reset(sigs...)
+		// The edge ban store coalesces its file writes (SetSaveDelay): the
+		// bans of the last few seconds are written now, before the nft read.
+		edgeban.Default().Flush()
 		done := make(chan error, 1)
 		go func() { done <- snapshotTTLBans(s, be) }()
 		select {

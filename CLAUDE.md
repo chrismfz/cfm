@@ -145,6 +145,15 @@ The history behind each rule below is in the code comments it names.
   (`PortsPolicyReads.Chains`; `nft/ports_cost_test.go`). Compare before you
   write (`firewall.SameSetElems`), and put a write in one script. `ensurebase_cost_test.go` pins EnsureBase's profile,
   the unknown probe and the dedupe (live: `-run LiveNFTDedupe`).
+- **An automatic ban never reads the whole set.** Every detector ban is a
+  one-address `AddBlockBatch` (never-shorten); its read goes through
+  `firewall.ReadHostElems`, which asks the kernel for just those addresses
+  (`setprobe.HostProbe`, a netlink get each) up to `HostProbeMax` and dumps
+  only above it or when a get fails. With a dump per ban, 50k 7d WAF bans
+  took the daemon to 8–15 % CPU on EL8 (2026-11-24). The same goes for any
+  per-ban write that is O(set): the edge ban file is coalesced
+  (`edgeban.Store.SetSaveDelay`, flushed on a stop signal). Live:
+  `-run 'LiveNFTHostTimes|LiveNFTExtendBlock'`.
 - **A base input rule added after the rest needs an anchor.** Both engines'
   EnsureBase insert a missing early rule at position 0 and append a missing
   late one: on a node's existing chain a new drop would land above the self /

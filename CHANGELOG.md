@@ -79,6 +79,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   another version or a corrupt one starts the page empty, as before.
 
 ### Fixed
+- **An automatic ban no longer costs a read of every ban the node holds.**
+  Since `waf_security` bans xmlrpc multicall bots for 7 days, `block_v4`
+  grew to 15 000–56 000 addresses on the edge nodes within a week, and the
+  daemon went from 1–2 % to 8–15 % CPU on the busiest ones (earth, orion,
+  mars). Each ban dumped the whole block set first, to never shorten a
+  longer ban (`nft -j list set` plus a JSON parse on the exec engine, a
+  netlink dump on nftlib), and rewrote the whole edge ban file
+  (`/var/lib/cfm/edgeban.json`, 7 MB) after it. A ban of up to 64 addresses
+  now asks the kernel for just those addresses (one netlink get each, on both
+  engines; the same never-shorten rules, and the dump is kept for larger
+  batches or when a get fails). The edge ban file is written at most every
+  30 s and on a stop signal. The edge still sees each ban at once.
 - **Site Cache no longer serves CSS/JS uncompressed to every visitor.** The
   cache key leaves out `Accept-Encoding` and relies on the origin's `Vary`,
   but LiteSpeed answers a request that accepts no compression (a bot, `curl`)

@@ -864,6 +864,9 @@ func runDaemon(args []string) {
 	// drop never sees. Loaded from disk, then narrowed to what nft still
 	// blocks every two minutes; it answers nothing until the first reconcile.
 	edgeStore := edgeban.New(edgeban.DefaultPath)
+	// One file write per edgeBanSaveDelay at most, flushed on a stop signal
+	// (watchTTLBanShutdown): each write marshals every ban.
+	edgeStore.SetSaveDelay(edgeBanSaveDelay)
 	edgeStore.Load()
 	edgeban.SetDefault(edgeStore)
 

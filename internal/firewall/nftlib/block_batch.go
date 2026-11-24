@@ -14,7 +14,8 @@ import (
 const blockBatchAttempts = 3
 
 // AddBlockBatch blocks many host addresses over netlink: one read of each
-// block set, then one transaction per setWriteChunk addresses (the netlink
+// block set (firewall.ReadHostElems: per-address gets for a small batch, else
+// a dump), then one transaction per setWriteChunk addresses (the netlink
 // message-size bound) — both families in the same transaction — where
 // AddBlock costs one transaction per address. It only adds or extends, never
 // shortens (firewall.PlanBlockBatch).
@@ -73,11 +74,18 @@ func (b *Backend) hostBatch(op, set4, set6 string, entries []firewall.BlockEntry
 			if len(f.want) == 0 {
 				continue
 			}
-			elems, err := b.conn.GetSetElements(f.set)
+			set := f.set
+			current, err := firewall.ReadHostElems(f.name, f.want, b.hostProbe, func() ([]firewall.SetElementTimed, error) {
+				elems, err := b.conn.GetSetElements(set)
+				if err != nil {
+					return nil, err
+				}
+				return elemsToTimed(elems, set.Interval), nil
+			})
 			if err != nil {
 				return res, fmt.Errorf("%w: nftlib %s %s: %w", firewall.ErrBlockRead, op, f.name, err)
 			}
-			plan := firewall.PlanBlockBatch(f.want, elemsToTimed(elems, f.set.Interval))
+			plan := firewall.PlanBlockBatch(f.want, current)
 			planned = planned.Add(plan.Result())
 			for _, w := range plan.Writes {
 				writes = append(writes, blockWrite{set: f.set, PlannedBlock: w})
