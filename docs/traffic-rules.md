@@ -77,7 +77,11 @@ itself and can cap the matching traffic as a whole.
   windows at the edge (`cfm_rules.lua` `total_hit`, key
   `trt|<rule id>|<host or *>|<window>`; the limit is `rate × 10` requests a
   window). Over it a request gets `429` + `Retry-After`, whatever IP it came
-  from. A per-client throttle does not stop a crawler spread over hundreds of
+  from. It is a fixed window: a window's whole budget can pass at once, and up
+  to twice the rate in the second around a window edge. Per vhost is keyed on
+  the request's Host, so on a `*` scope a client that reaches rule evaluation
+  with Host values of its own choosing gets a budget per value: use `node`
+  there. A per-client throttle does not stop a crawler spread over hundreds of
   IPs: on titan (2026-11-24) a per-IP or per-vhost limit cut 0–4% of Meta's
   origin load, a node total of 5 r/s cut 65%. Match it narrowly (a User-Agent):
   legitimate clients that match share the budget. It ends evaluation like a

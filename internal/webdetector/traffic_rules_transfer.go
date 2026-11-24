@@ -420,6 +420,7 @@ func (s *trafficRuleStore) AddMany(in []TrafficRule) ([]TrafficRule, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(time.Now())
 	if len(s.rules)+len(norms) > maxRulesGlobal {
 		return nil, fmt.Errorf("too many rules (max %d)", maxRulesGlobal)
 	}

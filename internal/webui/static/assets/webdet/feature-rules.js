@@ -86,6 +86,7 @@ export const rulesMixin = {
       // The Expires select: "" never, seconds from now, or "keep" (an edited
       // rule's own until). Applied to ruleForm.until on change.
       ruleUntilChoice: "",
+      ruleUntilOrig: "", // the loaded rule's own until, offered as "keep"
       knownMethods: KNOWN_METHODS,
       recipes: RECIPES,
 
@@ -336,8 +337,7 @@ export const rulesMixin = {
       this.ruleForm.priority = suggestPriority(p.action.type, this.rules, p.scope.vhosts);
     },
     applyUntilChoice() {
-      if (this.ruleUntilChoice === "keep") return;
-      this.ruleForm.until = untilIn(this.ruleUntilChoice);
+      this.ruleForm.until = this.ruleUntilChoice === "keep" ? this.ruleUntilOrig : untilIn(this.ruleUntilChoice);
     },
     ruleIsExpired(row) {
       return ruleExpired(row);
@@ -345,6 +345,7 @@ export const rulesMixin = {
     resetRuleForm() {
       this.ruleEditID = "";
       this.ruleUntilChoice = "";
+      this.ruleUntilOrig = "";
       this.ruleForm = emptyForm();
       this.ruleChips = chipsFromForm(this.ruleForm);
       this.priorityAuto = true;
@@ -354,6 +355,7 @@ export const rulesMixin = {
       this.editorMode = "editor";
       this.ruleEditID = String(row.id || "");
       this.ruleForm = formFromRule(row);
+      this.ruleUntilOrig = this.ruleForm.until;
       this.ruleUntilChoice = this.ruleForm.until ? "keep" : "";
       this.ruleChips = chipsFromForm(this.ruleForm);
       this.priorityAuto = false;
@@ -363,6 +365,7 @@ export const rulesMixin = {
       this.editorMode = "editor";
       this.ruleEditID = "";
       this.ruleForm = formFromRule(row);
+      this.ruleUntilOrig = this.ruleForm.until;
       this.ruleUntilChoice = this.ruleForm.until ? "keep" : "";
       this.ruleForm.enabled = false;
       this.ruleForm.priority = 0;

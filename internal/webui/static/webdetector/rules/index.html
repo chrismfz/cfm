@@ -216,7 +216,7 @@
               <select id="rule-total-per" class="input" v-model="ruleForm.throttlePer">
                 <option v-for="p in throttleTotalPer" :key="p.key" :value="p.key">{{ p.label }}</option>
               </select>
-              <p class="muted form-hint">Over the budget a request gets <code>429</code> with <code>Retry-After</code>, whatever IP it came from. Match the crawler narrowly (its User-Agent): a match on browsers would throttle visitors too.</p>
+              <p class="muted form-hint">Over the budget a request gets <code>429</code> with <code>Retry-After</code>, whatever IP it came from. Match the crawler narrowly (its User-Agent): a match on browsers would throttle visitors too. A window's whole budget can pass at once (up to twice the rate around a window edge). On a <code>*</code> scope prefer <em>whole node</em>: per vhost is keyed on the request's Host.</p>
             </div>
 
             <!-- Step 2 -->
@@ -305,7 +305,7 @@
               <label for="rule-until">Expires</label>
               <div class="inline-field">
                 <select id="rule-until" class="input" v-model="ruleUntilChoice" @change="applyUntilChoice">
-                  <option v-if="ruleForm.until && ruleUntilChoice === 'keep'" value="keep">keep: {{ ruleForm.until }}</option>
+                  <option v-if="ruleUntilOrig" value="keep">keep: {{ ruleUntilOrig }}</option>
                   <option v-for="c in untilChoices" :key="c.key" :value="c.key">{{ c.label }}</option>
                 </select>
                 <span class="muted" v-if="ruleForm.until">ends by itself at {{ ruleForm.until }} (UTC); an older cfm does not enforce an expiring rule at all</span>

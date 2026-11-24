@@ -228,3 +228,79 @@ func TestTrafficRulesImportUntil(t *testing.T) {
 		t.Fatalf("stored = %+v", got)
 	}
 }
+
+// An expired rule can still be disabled with its own (past) until; a changed
+// past until is refused; Remove prunes like the other writes.
+func TestTrafficRuleExpiredStaysEditable(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	r, err := s.Add(emergencyRule("e", time.Now().Add(time.Hour), TrafficRuleAction{Type: "block"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	s.mu.Lock()
+	cur := s.rules[r.ID]
+	cur.Match.untilAt, cur.Match.Until = past, past.Format(time.RFC3339)
+	s.rules[r.ID] = cur
+	s.mu.Unlock()
+
+	off := cur
+	off.Enabled = false
+	if _, err := s.Update(r.ID, off); err != nil {
+		t.Fatalf("disabling an expired rule with its own until: %v", err)
+	}
+	off.Match.Until = past.Add(-time.Minute).Format(time.RFC3339)
+	if _, err := s.Update(r.ID, off); err == nil {
+		t.Fatal("a changed past until was accepted")
+	}
+
+	s.mu.Lock()
+	cur = s.rules[r.ID]
+	cur.Match.untilAt = time.Now().Add(-expiredRuleKeep - time.Minute)
+	s.rules[r.ID] = cur
+	s.mu.Unlock()
+	o, _ := s.Add(emergencyRule("o", time.Now().Add(time.Hour), TrafficRuleAction{Type: "block"}))
+	s.mu.Lock()
+	s.rules["stale"] = cur // re-plant one to see Remove prune it
+	s.mu.Unlock()
+	s.Remove(o.ID)
+	if _, ok := s.Get("stale"); ok {
+		t.Fatal("Remove did not prune a rule expired over a day ago")
+	}
+}
+
+func TestRulesCLISummaryShowsEmergencyFields(t *testing.T) {
+	m, _ := normalizeMatch(TrafficRuleMatch{IPAny: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6", "10.0.0.7", "10.0.0.8", "10.0.0.9"}, Until: "2099-01-01T00:00:00Z"})
+	got := rulesMatchSummary(m)
+	if !strings.Contains(got, "+1 more") || !strings.Contains(got, "until=2099-01-01T00:00:00Z") {
+		t.Fatalf("summary = %q", got)
+	}
+	if got := rulesMatchSummary(TrafficRuleMatch{Until: "2099-01-01T00:00:00Z"}); !strings.HasPrefix(got, "(none)") {
+		t.Fatalf("an until-only match must still read (none): %q", got)
+	}
+	if d := rulesActionDetail(TrafficRuleAction{Type: TrafficActionThrottleTotal, RateRPS: 2.5, Per: "node"}); d != "2.5r/s/node" {
+		t.Fatalf("detail = %q", d)
+	}
+}
+
+// Challenge Access shares the match grammar but not the emergency extras.
+func TestChallengeAccessRefusesEmergencyExtras(t *testing.T) {
+	base := ChallengeAccessEntry{Enabled: true, Scope: TrafficRuleScope{Vhosts: []string{"a.gr"}}}
+	e := base
+	e.Match.UAAny = []string{"*x*"}
+	e.Match.Until = "2099-01-01T00:00:00Z"
+	if _, err := normalizeChallengeAccess(e, true); err == nil {
+		t.Fatal("an access entry with until was accepted")
+	}
+	e = base
+	for i := 0; i <= maxPatternsPerField; i++ {
+		e.Match.IPAny = append(e.Match.IPAny, fmt.Sprintf("10.0.0.%d", i+1))
+	}
+	if _, err := normalizeChallengeAccess(e, true); err == nil {
+		t.Fatal("an access entry over the old ip_any cap was accepted")
+	}
+	e.Match.IPAny = e.Match.IPAny[:maxPatternsPerField]
+	if _, err := normalizeChallengeAccess(e, true); err != nil {
+		t.Fatalf("an access entry at the cap: %v", err)
+	}
+}

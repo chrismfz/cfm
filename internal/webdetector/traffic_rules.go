@@ -343,7 +343,10 @@ func (s *trafficRuleStore) Update(id string, in TrafficRule) (TrafficRule, error
 	if err != nil {
 		return TrafficRule{}, err
 	}
-	if norm.Match.Expired(time.Now()) {
+	// A past until is refused unless it is the rule's own, unchanged one: an
+	// expired rule is inert, and disabling or re-noting it must not need a
+	// new expiry (cfm-admin's toggle resends the whole row).
+	if norm.Match.Expired(time.Now()) && norm.Match.Until != cur.Match.Until {
 		return TrafficRule{}, errors.New("match.until is in the past")
 	}
 	s.pruneExpiredLocked(time.Now())
@@ -383,6 +386,7 @@ func (s *trafficRuleStore) Remove(id string) bool {
 	}
 	delete(s.rules, id)
 	delete(s.frozen, id)
+	s.pruneExpiredLocked(time.Now())
 	s.recountLocked()
 	_ = s.saveLocked()
 	return true
