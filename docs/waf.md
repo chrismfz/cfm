@@ -451,18 +451,19 @@ there it stands down the body-PHP scanners on that path: 401, 402, 403, the
 414 (its own media allowlist) and 437/438 (their own `/wp-admin/` carve-out).
 
 A site without pretty permalinks sends the same REST call as
-`/index.php?rest_route=/string-locator/v1/save` (or to `/`). Since 2026-11-24
-that form matches too (`cfm_waf_detectors.wp_rest_editor_query`, the query
-read through `php_request_fields`), under three conditions:
-- the path is WP's front controller (`/`, `/index.php`);
-- every query field is one WP's REST client sends (`rest_route`, `_locale`,
-  `_wpnonce`, `_method`, `_envelope`, `_fields`, `_embed`, `context`), and
-  no field name has a bracket. Another app that owns `/index.php` routes on
-  its own field (OpenCart `route=`, Joomla `option=`, Drupal `q=`): keyed on
-  `rest_route` alone, that app's upload handler would skip every body-PHP and
-  upload rule;
-- `rest_route` has exactly one value (PHP keeps the last of several), and it
-  starts with the editor's route.
+`/index.php?rest_route=/string-locator/v1/save`. That form is **not** exempt:
+`/index.php` is also the front controller of any other app on the account,
+which may route on its own query or body fields (OpenCart `route=`, Joomla's
+`option` / `task`, read from POST too). Keyed on `rest_route`, that app's
+upload would skip every body-PHP and upload rule. A matching rule was built
+and removed in review (2026-11-24). Such a site gets a rule-scoped exclude
+(`--type path --rule <id> --scope host`).
+
+**Residual of the path form.** An app that rewrites unknown paths to
+`index.php` (Joomla with SEF URLs, Laravel, OpenCart with SEO URLs) answers
+`/wp-json/string-locator/...` too, and can route that request on its own
+fields with these rules off. Not closed yet: the allowlist would have to
+exclude foreign routing fields, which it cannot name for every app.
 
 **Why it is safe here and not in case 6:**
 1. *Routing key.* The REST path is what routes the request; no body field

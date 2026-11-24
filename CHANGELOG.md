@@ -35,9 +35,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   held rules, so a request an armed rule also catches keeps that rule's ban.
   417 now stands down, like the other body-PHP rules, on the code-editor and
   installer endpoints (Code Snippets, String Locator, the plugin / theme
-  installer). Those editors are now recognised on a site without pretty
-  permalinks too (`/index.php?rest_route=/code-snippets/...`), for every rule
-  that exempts them. Webmail is not exempt: an email over 2 KB quoting PHP gets a
+  installer). On a site without pretty permalinks
+  (`/index.php?rest_route=/code-snippets/...`) they are not exempt, since any
+  other app's index.php could be reached that way: such a site needs a
+  rule-scoped exclude. Webmail is not exempt: an email over 2 KB quoting PHP gets a
   403 there. See `docs/waf.md`, "Rule 415" and "Rule 417".
 
 ### Fixed

@@ -296,27 +296,12 @@ do
   inst.args = "action=upload-plugin"; inst.raw_uri = "/wp-admin/update.php?action=upload-plugin"
   hit, reason, _, _, _, rid = waf.check(inst)
   check(not (hit and rid == 415), "plugin installer upload: no 415 (got " .. tostring(reason) .. ")")
-  -- The same editors without pretty permalinks (?rest_route=), on WP's
-  -- front controller only, the field read as PHP fills $_GET.
+  -- The ?rest_route= form is NOT exempt: /index.php is any app's front
+  -- controller, and that app may route on its own fields (OpenCart's upload
+  -- with a shell.php and a rest_route decoy still blocks).
   local util = require("cfm_waf_util")
-  local function L(u, a) return util.is_known_legit_php_upload_endpoint(u, a) or det.wp_rest_editor_query(u, a) end
-  check(L("/index.php", "rest_route=/code-snippets/v1/snippets") == true, "rest_route Code Snippets on /index.php")
-  check(L("/", "rest_route=%2Fstring-locator%2Fv1%2Fsave") == true, "rest_route String Locator, encoded, on /")
-  check(L("/", "rest%2Eroute=/Code-Snippets/v1/x") == true, "rest.route decoded and case-folded as PHP / WP do")
-  check(L("/upload.php", "rest_route=/code-snippets/v1/x") == false, "rest_route off the front controller: not exempt")
-  check(L("/index.php", "rest_route=/code-snippets/x&rest_route=/wp/v2/posts") == false, "two rest_route values: not exempt")
-  check(L("/index.php", "rest_route=/wp/v2/posts") == false, "rest_route to another route: not exempt")
-  check(L("/index.php", "rest_route=/code-snippets/x&rest[route=/wp/v2/posts") == false, "an unmatched-[ decoy PHP reads as rest_route: not exempt")
-  check(L("/index.php", "rest_route=/code-snippets/x&rest_route[]=a") == false, "an array rest_route beside it: not exempt")
-  check(L("/index.php", "rest_route[]=/code-snippets/x") == false, "only an array rest_route: not exempt")
-  check(L("/index.php", "x=1&foo_rest_route=/code-snippets/") == false, "a longer field name: not exempt")
-  check(L("/index.php", "rest_route=/code-snippets/v1/snippets&_locale=user") == true, "apiFetch's _locale beside it: exempt")
-  -- Another app that owns /index.php routes on its own query field: never exempt.
-  for _, q in ipairs({ "route=tool/upload&rest_route=/code-snippets/x", "option=com_media&rest_route=/code-snippets/x",
-                       "q=node/add&rest_route=/code-snippets/x", "rest_route=/code-snippets/x&controller=attachment" }) do
-    check(L("/index.php", q) == false, "rest_route beside another router field: not exempt (" .. q .. ")")
-  end
-  -- And the upload rules still run there: OpenCart's upload with a shell.php.
+  check(util.is_known_legit_php_upload_endpoint("/index.php", "rest_route=/code-snippets/v1/snippets") == false,
+        "?rest_route= Code Snippets: not exempt")
   local oc = req("--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shell.php\"\r\nContent-Type: application/octet-stream\r\n\r\n<?php system($_GET[c]); ?>\r\n--b--\r\n",
                  "/index.php", "multipart/form-data; boundary=b")
   oc.args = "route=tool/upload&rest_route=/code-snippets/x"; oc.raw_uri = "/index.php?" .. oc.args
@@ -325,10 +310,6 @@ do
   hit, reason, _, action, _, rid = waf.check(oc)
   waf.set_rule("rule_upload_filename", saved)
   check(hit and action == "block", "OpenCart upload + rest_route decoy: still blocked (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
-  local rr = req('{"code":"' .. string.rep("x", 2500) .. '<?php system($_GET[c]);"}', "/index.php", "application/json")
-  rr.args = "rest_route=/code-snippets/v1/snippets"; rr.raw_uri = "/index.php?rest_route=/code-snippets/v1/snippets"
-  hit, reason, _, _, _, rid = waf.check(rr)
-  check(not (hit and rid == 417), "Code Snippets save via ?rest_route=: no 417 (got " .. tostring(reason) .. ")")
   -- Source order: 415 and 417 are recorded after 332.
   local src = io.open("configs/lua/cfm_waf.lua"):read("*a")
   local at332 = src:find("RULE_IDS.rule_php_code_args)", 1, true)
