@@ -190,8 +190,8 @@ access log:
   `mwhy="auth:wordpress_logged_in_<hash>"` for a visitor still carrying a
   session cookie. Three reasons come from cfm.lua, for a request allowed
   before micro is ever asked: `clearance` (a visitor holding a valid
-  `cfm_clearance` cookie takes the fast path, which never micro-caches, by
-  design §5.5.1), `waf` (a logonly WAF hit or an uninspected request) and
+  `cfm_clearance` cookie, on an edge conf older than 2026-11-24 only: since,
+  the fast path is a micro entry and gives micro's own reasons), `waf` (a logonly WAF hit or an uninspected request) and
   `self-ip` (the node's own addresses), and `cdn` for a CDN of the bypass list
   (QUIC.cloud), which is never micro-cached. A crawler of the bypass list
   (Googlebot, Bingbot, Applebot, …) on a micro-armed vhost IS micro-cached,
@@ -399,5 +399,7 @@ wildcard too (§6).
 - While `SITE_CACHE = 0` the edge does not read the policy feed. Policy
   changes and purges wait for the switch, and applying a purge before
   restoring it needs an edge reload while it is still off (§8).
-- A cleared visitor (holding a `cfm_clearance` cookie) is not micro-cached.
-  The Step 2b fast path is not a micro entry yet (`site-cache-design.md` §5.5).
+- A cleared visitor (holding a `cfm_clearance` cookie) is micro-cached like
+  any visitor (Step 2b is a micro entry since 2026-11-24; each gets their own
+  cookie back, HIT included). Only on an edge conf older than that, which
+  has no `$cfm_edge_sc`, does it still go to the origin (`mwhy="clearance"`).

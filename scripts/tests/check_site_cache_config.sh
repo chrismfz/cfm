@@ -748,6 +748,15 @@ for f in "$ORT" "$ANG"; do
     err "$f: \$cfm_micro_max is [$(tr '\n' ' ' <<< "$got_max")], not the largest cfm_cache.lua MICRO_BUCKETS entry ($want_max)."
   fi
 
+  # (b5) $cfm_edge_sc is the record of the Set-Cookie lines the EDGE adds
+  # (cfm.lua append_set_cookie), which micro_setcookie_filter leaves out of the
+  # store decision: every main server declares it, and only as "" (a conf that
+  # set a value would exempt that exact cookie line from the rail).
+  n_esc=$(grep -cE '^[[:space:]]*set[[:space:]]+\$cfm_edge_sc[[:space:]]' "$f" || true)
+  n_esc_empty=$(grep -cE '^[[:space:]]*set[[:space:]]+\$cfm_edge_sc[[:space:]]+""[[:space:]]*;' "$f" || true)
+  [ "$n_esc" = "$n_why" ] && [ "$n_esc" -ge 2 ] || err "$f: 'set \$cfm_edge_sc' appears $n_esc time(s), want one per main server ($n_why, next to \$cfm_micro_why)."
+  [ "$n_esc" = "$n_esc_empty" ] || err "$f: \$cfm_edge_sc must be declared as \"\" only (a value would exempt that Set-Cookie line from the micro store rail)."
+
   # ...and nothing beyond them (from the parsed statements, so a commented-out
   # or wrapped declaration reads as nginx reads it).
   got_zones=$(sed -nE 's#.*/var/cache/nginx/cfm_micro_([0-9]+s)([[:space:]].*)?$#\1#p' <<< "${mzones_of[$f]:-}" | sort)

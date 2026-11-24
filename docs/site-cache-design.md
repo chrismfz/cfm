@@ -174,7 +174,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Tier B **forwards no forgeable client-IP / geo / hint header** | micro locations: `X-Forwarded-For $remote_addr` (the real client alone — `mod_remoteip` reads it behind 127.0.0.1, so `REMOTE_ADDR` is unchanged), `CF-IPCountry` / `CF-Visitor` only from the trusted peer (`$cfm_cf_ipcountry` / `$cfm_cf_visitor`, the `$cf_xfp` gate), and `True-Client-IP`, `Client-IP`, `X-Client-IP`, `X-Cluster-Client-IP`, `Fastly-Client-IP`, `X-Originating-IP`, `X-ProxyUser-Ip`, `X-Forwarded`, `X-Country-Code`, `HTTPS`, `X-Arr-Ssl`, `X-Proto`, `CloudFront-Forwarded-Proto`, `Surrogate-Capability`, `Proxy` (httpoxy), `Content-Type`, `Content-Encoding` not sent; `X-Real-IP` / `CF-Connecting-IP` are `$remote_addr` (guard-pinned) | WooCommerce geolocation takes `CF-IPCountry` before any IP lookup, PHP helpers read `Client-IP` / the `X-Forwarded-For` prefix, Flexible-SSL snippets read `CF-Visitor`: a direct client choosing any of them would store its forged answer for everyone. The client IP the origin sees is still a residual (above) — the real one |
 | Tier B **never forwards a request body** | `proxy_pass_request_body off` + `proxy_set_header Content-Length ""` in every micro location (micro serves only GET/HEAD) | fat-GET poisoning: a body on a GET is not in the key, yet an app may read it — the WordPress REST API reads a JSON body on any method, so `GET /wp-json/wp/v2/posts` with `{"search":…}` in the body would store an attacker-shaped listing for everyone (verified with Content-Length, chunked and HTTP/2 bodies). Tier A keeps forwarding bodies (static files, and a POST to a static-extension URL must keep working) |
 | Tier B request rails | `micro_decision`: a `Range` request, `Accept: text/event-stream` and a partial-page request (`X-Requested-With`, `X-PJAX`, `HX-Request`, `Turbo-Frame`, `X-Inertia` present, empty or not — apps answer those with a fragment, usually without `Vary`), a credential-style request header (`Cart-Token`, `WooCommerce-Session`, `X-WP-Nonce`, `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`) and a `Cookie` header over 8 KB bypass; on the response side a micro location never stores an answer that hands out a session token in a header (`$upstream_http_cart_token` / `$upstream_http_woocommerce_session` on `proxy_no_cache`, mirrored by `micro_storable`, so the key is remembered) — the token-less `GET /wp-json/wc/store/v1/cart` is how a headless WooCommerce client obtains its `Cart-Token`, and a stored one would put every such shopper in one cart. `X-Requested-With` counts with any value: Android WebView (in-app browsers — Facebook, Instagram) sends its app package in it on every request, so that traffic is not micro-cached — an accepted hit-ratio cost, since an app that tests `!empty($_SERVER['HTTP_X_REQUESTED_WITH'])` would otherwise store the fragment it serves them; micro routes only from the HTTPS server's `location /` (the conf sentinel `set $cfm_micro_conf "1"`, `""` by default at server level; `micro_gate` requires `"1"`), never on an internal redirect (`ngx.req.is_internal()`: a named-location redirect keeps the sentinel; a redirect to a URI re-runs the `""` default), and only on an nginx core ≥ 1.23 (older ones expose only the first of several `Cache-Control` headers to the map). `rewrite … last`, `ngx.req.set_uri(…, true)` and every redirect also keep the sentinel, and all of them make the request internal (verified), so the check refuses them; the guard additionally keeps `location /` free of `rewrite` / `try_files` / `error_page` and of `rewrite_by_lua*` (in it, at its server and http level), and of buffering off there or inherited | a micro location buffers, so an SSE stream would be held back until it ends, and the no-buffer PHP/admin and streaming passthroughs would stop streaming; an older live conf (no sentinel) never gets newer Lua's micro routing |
-| `cfm_clearance` is edge-set, not origin | see §5.5.1 (open) | edge cookie poisoning the cache |
+| `cfm_clearance` is edge-set, not origin | `$cfm_edge_sc` records the edge's own lines; the filter leaves exactly those out of the store decision (§5.5.1) | edge cookie poisoning the cache, or a cleared visitor never cached |
 
 **Residuals (cannot be seen at the edge).** An origin that varies a `200` on
 something outside the key **without sending `Vary`** fills the cache with
@@ -188,7 +188,13 @@ that client:
   UA-class hints (`Sec-CH-UA-Mobile`, which `wp_is_mobile()` reads first,
   `X-Wap-Profile`, `X-Operamini-Phone-UA`) — mobile themes, WebP negotiation by
   `.htaccess`, language auto-detect, compression — safe only when the origin
-  sends `Vary` (nginx then stores one copy per variant);
+  sends `Vary` (nginx then stores one copy per variant); the same goes for an
+  origin that renders differently for **Google's address space**: Google's
+  user-triggered fetchers (Read Aloud, Translate, link previews;
+  `google-proxy-*`) are not on the bypass list since 2026-11-24, so they reach
+  Step 4 as visitors, and a site cloaking spam for Google's ranges would get
+  it micro-cached for visitors for one bucket (decided: accepted, like the
+  UA residual; a crawler of the bypass list has its own keyspace, §5.3);
 - on Tier B, a **non-session preference cookie** the app reads server-side: the
   common WordPress consent / age-gate cookies bypass (Cookie Notice
   `cookie_notice_accepted` / `hu-consent`, CookieYes legacy
@@ -236,11 +242,9 @@ rail off). What it checks: §13.
 
 `cfm_clearance`-cookie holders (cleared visitors) are still *anonymous* to the
 app, and the cookie is on the ignore-list, so they **may** be served
-micro-cache; the cache key never varies on the clearance cookie. *As built
-they are not:* a cleared visitor returns at `cfm.lua`'s Step 2b fast path,
-which is not a micro entry until the clearance-cookie ordering (§5.5.1) is
-verified on a live edge. Micro is entered only at Step 4 (uncleared but
-allowed).
+micro-cache; the cache key never varies on the clearance cookie. As built
+they are: `cfm.lua`'s Step 2b fast path is a micro entry (§5.5.1), in the
+visitor keyspace, besides Step 4 (uncleared but allowed).
 
 ### 4.1 Cookie handling — why the challenge cookie does **not** block caching
 
@@ -271,8 +275,8 @@ and `a[b]` read as `a`, URL-decoded as older PHP and Rack do, `__Host-` /
 
 So "won't our own challenge-solve cookie stop caching?" — **no**:
 `cfm_clearance` is on the ignore-list. An anonymous-but-cleared visitor is
-exactly the burst traffic micro-cache exists for; they get cached once Step 2b
-becomes a micro entry (§5.5.1). Only a **named app session** bypasses.
+exactly the burst traffic micro-cache exists for; Step 2b is a micro entry
+(§5.5.1). Only a **named app session** bypasses.
 
 **The allowlist's blind spot** is an app with an unknown session-cookie name.
 Two layers cover it: (1) the **response-side rails** — a page rendered
@@ -374,7 +378,9 @@ public entry points are `static_gate`, `micro_gate`, `observe`,
 ### 5.3 Insertion points in `cfm.lua`
 
 Micro-cache (Tier B) is decided at the **allow-return**, after all
-enforcement: **Step 4** (Step 2b waits on §5.5.1), plus the **Step 0
+enforcement: **Step 4** and the **Step 2b clearance fast path** (§5.5.1:
+after the WAF, visitor keyspace, only on a conf that declares `$cfm_edge_sc`),
+plus the **Step 0
 static bypass for a crawler** of the bypass list (kind `1`: Google, Bing,
 Apple, DuckDuckGo, Skroutz, …; a CDN `2` is never cached there).
 `cfm_micro_entry_structure_test.lua` pins both. The crawler entry is safe
@@ -449,21 +455,24 @@ the bucket model is the answer.
 
 ### 5.5 Open edge items
 
-1. **§5.5.1 Clearance-cookie ordering — OPEN.** Before Step 2b (the
-   clearance fast path) can be a micro entry, verify on a live
-   OpenResty/Angie edge that the edge-set `cfm_clearance` refresh
-   (`refresh_clearance_cookie`, `ngx.header` in the access phase) survives the
-   `ngx.exec` to `@cfm_micro_<n>s`, HIT included, and does not make the
-   response unstorable. nginx's "don't store `Set-Cookie`" check reads the
-   upstream headers, but the micro locations decide on `$cfm_sc_unsafe`,
-   which `micro_setcookie_filter` computes from `headers_out` — so an
-   edge-added cookie also keeps it at `"1"`. Wiring Step 2b must exclude
-   edge-set cookies in that filter **and** in `micro_note`, which marks a URL
-   uncacheable on the same variable. Harness evidence only (nginx 1.24 +
-   lua-nginx-module 0.10.26): a header set with `ngx.header` before the
-   `ngx.exec` (`X-CFM-Action`) is present on the micro response, HIT
-   included. Until then a clearance holder is not micro-cached (micro serves
-   Step 4, and the Step 0 crawler entry, §5.3).
+1. **§5.5.1 Clearance-cookie ordering — CLOSED (2026-11-24).** Step 2b is a
+   micro entry. The edge-set `cfm_clearance` refresh
+   (`refresh_clearance_cookie` → `append_set_cookie`, `ngx.header` in the
+   access phase) survives the `ngx.exec` to `@cfm_micro_<n>s`, HIT included.
+   It used to keep `$cfm_sc_unsafe` at `"1"` (the filter reads
+   `headers_out`), so nothing a cleared visitor fetched was stored. Now
+   `append_set_cookie` records each edge line in `$cfm_edge_sc` (`"\n"`-joined;
+   a variable survives the exec, `ngx.ctx` does not), and
+   `micro_setcookie_filter` leaves exactly those lines out of the decision;
+   `micro_note` reads the same variable. Measured on nginx 1.24 +
+   lua-nginx-module 0.10.26 with the real `cfm_cache.lua`, three visitors with
+   three clearance values: a plain page and one with `_ga` → MISS, then HIT
+   for the others, each with only **their own** `cfm_clearance` (and a
+   visitor with none gets the HIT with none); `PHPSESSID` and an
+   origin-set `cfm_clearance` (not the edge's exact line) are never stored;
+   no cache file holds a clearance value (nginx stores the origin's headers,
+   never `headers_out`). A conf without `$cfm_edge_sc` keeps Step 2b out of
+   micro (`mwhy=clearance`).
 2. **Origin keepalive — OPEN.** Caching sits in front of the origin whatever
    the `ORIGIN_KEEPALIVE` pools; 443 `proxy_ssl_session_reuse off` is
    unaffected. HIT/MISS accounting with keepalive armed is not yet checked on
@@ -534,8 +543,8 @@ box's own IPs, `IGNORE_IPS` / `IGNORE_NETS` and RFC 1918 peers (they bypass
 `cfm.lua` at Step 0a), the verified-crawler prefixes of
 `challenge_waf_bypass.conf` (`$cfm_bypass_ip`, Step 0), any other request an
 earlier step allows outright (a plain `/.well-known/` fetch at Step 0a1, …),
-and a client holding a valid `cfm_clearance` cookie (Step 2b, §5.5.1) — micro
-serves the Step 4 plain allows only. So the debug stamp, from the box, shows
+— micro serves the Step 4 plain allows and the Step 2b clearance holders (and
+the crawler entry, §5.3). So the debug stamp, from the box, shows
 the would-cache verdict; the served verdict comes from a **public-IP client
 with no `cfm_clearance`** (e.g. `curl` without a cookie jar), read in the edge
 access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
@@ -1151,7 +1160,6 @@ rows, and tracking-cookie storage + the 90 s / 120 s buckets.
 
 **Open (not built):**
 
-- Micro-cache on the Step 2b clearance fast path (§5.5.1).
 - Origin-keepalive HIT/MISS check on a live edge (§5.5 item 2).
 - Bypass on `Vary: Cookie` (§5.5 item 3).
 - Per-URL purge (§10).

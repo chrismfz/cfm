@@ -782,11 +782,13 @@ cPanel — every rule here exists because of that. Design + as-built:
   `SITE_CACHE`; the per-vhost arm is what guards a tenant. Before arming micro
   on a new kind of app (a shop, a membership site), follow runbook §7. The
   edge reader treats an ABSENT field as off (fail-safe). Micro is entered
-  at cfm.lua's Step 4 (after WAF, challenge, bridge decisions) and, for a
-  bypass-list crawler (`1`) only, at the Step 0 bypass, which skips those
-  steps anyway; a crawler's entries live in their own keyspace (`gc<gen>|…`,
-  `ngx.ctx.cfm_micro_class`), so a page stored for a crawler never reaches a
-  visitor. `cfm_micro_entry_structure_test.lua` pins both entries.
+  at cfm.lua's Step 4 (after WAF, challenge, bridge decisions), at the Step 2b
+  clearance fast path (after the WAF; a cleared client skipped the rest
+  anyway) and, for a bypass-list crawler (`1`) only, at the Step 0 bypass,
+  which skips those steps anyway; a crawler's entries live in their own
+  keyspace (`gc<gen>|…`, `ngx.ctx.cfm_micro_class`), so a page stored for a
+  crawler never reaches a visitor. `cfm_micro_entry_structure_test.lua` pins
+  all three entries.
 - **Tier A's static recipe/TTL are labels.** The static locations follow the
   origin's Cache-Control/Expires with a 1 h fallback; don't document or
   promise a static TTL the edge doesn't apply. Micro TTL snaps to
@@ -823,10 +825,15 @@ cPanel — every rule here exists because of that. Design + as-built:
   `cfm_cache.micro_setcookie_filter` (`$cfm_sc_unsafe`, fail-closed "1"). That
   filter must stay in the server-level `header_filter_by_lua_block` (a
   location-level one replaces it). A cookie the EDGE adds before the micro
-  exec (`cfm_clearance`) keeps `$cfm_sc_unsafe` at "1": wiring the clearance
-  fast path to micro (design §5.5.1) must exclude those first, in the filter
-  AND in `micro_note`. A node can run new Lua with an old conf: keep the
-  old-conf fallbacks in `cfm_cache.lua`. Cookie list: runbook; details: design doc.
+  exec (the Step 2b `cfm_clearance` refresh) is recorded in `$cfm_edge_sc` by
+  `cfm.lua` `append_set_cookie`, and the filter leaves exactly those lines
+  out of `$cfm_sc_unsafe` (`micro_note` reads that variable): kept on the
+  response, never in the stored copy, so each visitor gets their own back
+  (design §5.5.1). Any other edge Set-Cookie must go through
+  `append_set_cookie` too, or it keeps the response unstorable. A node can run
+  new Lua with an old conf: keep the old-conf fallbacks in `cfm_cache.lua`
+  (no `$cfm_edge_sc` = Step 2b stays out of micro). Cookie list: runbook;
+  details: design doc.
 - **`SITE_CACHE = 0` freezes each worker's policy table** (no feed poll while
   off). Incident procedure: purge, reload the edge WHILE the switch is still
   0, then restore it (runbook §8); reloading after the restore leaves a
