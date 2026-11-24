@@ -72,6 +72,8 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/webdet/ua-top", e.handleUATop},
 		{"/api/v1/webdet/ua-drill", e.handleUADrill},
 		{"/api/v1/webdet/ua-emergency", e.handleUAEmergency},
+		// Traffic mix: who the traffic is and what it costs the origin (24 h, labels only).
+		{"/api/v1/webdet/traffic-mix", e.handleTrafficMix},
 
 		// History API
 		{"/api/v1/webdet/history/events", e.handleHistoryEvents},

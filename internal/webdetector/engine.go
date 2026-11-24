@@ -1628,6 +1628,15 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 	if host == "" {
 		return
 	}
+	// The traffic mix counts every request, before any exemption below
+	// (traffic_mix.go: its own lock, a label only).
+	{
+		at := tsToTime(rec.TS)
+		if at.IsZero() {
+			at = time.Now()
+		}
+		trafficMix.observe(rec, host, NormalizeUA(rec.UA), at)
+	}
 
 	// /.well-known/ (ACME HTTP-01, CA DCV, RFC 8615 metadata) is fully excluded
 	// from the challenge engine — before ANY per-host/per-IP accounting — so a
