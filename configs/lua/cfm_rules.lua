@@ -120,6 +120,41 @@ local function throttle_hit(profileName, host, ip)
   return false, 0
 end
 
+-- TOTAL_WINDOW is the fixed window of a throttle_total budget: the cap is
+-- rate * TOTAL_WINDOW requests per window (at least 1), so a 0.5 r/s cap is 5
+-- per 10 s and a 5 r/s cap 50.
+local TOTAL_WINDOW = 10
+
+-- total_hit is throttle_hit for a throttle_total rule: ONE budget for every
+-- matching request, per vhost (per == "vhost") or across the node ("node"),
+-- keyed on the rule id, never on the client (a bot spread over hundreds of
+-- IPs must not get hundreds of budgets). The shared dict is node-wide, so all
+-- workers count together. Same lock-free fixed window and fail-open as
+-- throttle_hit. Key: trt|<rule id>|<host or *>|<window>; no client in it, so
+-- cfm_purge.purge_ip (which matches a trailing client) never touches it.
+local function total_hit(rule_id, rate, per, host)
+  if not SH then return false, 0 end
+  local limit = math.max(1, math.floor(rate * TOTAL_WINDOW + 0.5))
+  local now = ngx.now()
+  local win = math.floor(now / TOTAL_WINDOW)
+  local scope = (per == "vhost") and tostring(host or "-") or "*"
+  local key = "trt|" .. rule_id .. "|" .. scope .. "|" .. win
+  local count, err = shd.incr(SH, key, 1, TOTAL_WINDOW * 2)
+  if not count then
+    if SH:add("tr|_incr_fail_logged", true, 60) then
+      ngx.log(ngx.ERR, "[cfm_rules] shdict :incr failed (rate-limited 60s) key=", key,
+        " err=", tostring(err), " — throttle may be ineffective")
+    end
+    return false, 0
+  end
+  if count > limit then
+    local retry = TOTAL_WINDOW - (now - win * TOTAL_WINDOW)
+    if retry < 1 then retry = 1 end
+    return true, math.ceil(retry)
+  end
+  return false, 0
+end
+
 -- apply executes rule action side effects and returns normalized result:
 --   { action = "allow" | "challenge" | "block" | "throttle", retry_after = number }
 function _M.apply(decision, ctx)
@@ -134,9 +169,25 @@ function _M.apply(decision, ctx)
     return { action = "allow" }
   end
 
-  local profile = tostring(decision.throttle_profile or ctx.profile or "soft_bot")
   local host = tostring(ctx.host or "-")
   local ip = tostring(ctx.ip or "-")
+
+  -- throttle_total (the daemon sends throttle_rate + throttle_per + rule_id):
+  -- one budget for every matching request, never per client. Anything
+  -- malformed falls back to the per-client profile throttle below.
+  local rate = tonumber(decision.throttle_rate)
+  local per = decision.throttle_per
+  local rule_id = decision.rule_id
+  if rate and rate > 0 and (per == "vhost" or per == "node")
+     and type(rule_id) == "string" and rule_id ~= "" then
+    local hit, retry_after = total_hit(rule_id, rate, per, host)
+    if hit then
+      return { action = "throttle", retry_after = retry_after }
+    end
+    return { action = "allow" }
+  end
+
+  local profile = tostring(decision.throttle_profile or ctx.profile or "soft_bot")
 
   local hit, retry_after = throttle_hit(profile, host, ip)
   if hit then

@@ -13,6 +13,9 @@ export const LIMITS = Object.freeze({
   vhostsPerRule: 32,
   countriesPerRule: 64,
   patternsPerField: 20,
+  ipsPerRule: 500, // maxIPsPerRule: ip_any holds a scraper's top IPs
+  throttleTotalMin: 0.1, // minThrottleTotalRPS / maxThrottleTotalRPS
+  throttleTotalMax: 10000,
   noteLen: 256,
   priorityMin: 1,
   priorityMax: 100000,
@@ -58,7 +61,48 @@ export const ACTIONS = Object.freeze([
     summary: "Rate-limit matching clients per IP; requests over the limit get 429 + Retry-After.",
     caveat: "",
   },
+  {
+    key: "throttle_total",
+    label: "Throttle (total)",
+    tone: "info",
+    summary: "One budget for ALL matching clients together, per vhost or for the whole node; requests over it get 429 + Retry-After.",
+    caveat: "Per-client limits do not stop a crawler spread over hundreds of IPs; this does. Legitimate requests that match share the same budget. An older edge falls back to the per-client soft_bot throttle.",
+  },
 ]);
+
+// throttle_total scopes (TrafficRuleAction.Per): one budget per vhost, or one
+// for the whole node (every vhost the rule covers together).
+export const THROTTLE_TOTAL_PER = Object.freeze([
+  { key: "vhost", label: "per vhost (each vhost its own budget)" },
+  { key: "node", label: "whole node (all covered vhosts share one budget)" },
+]);
+
+// Expiry choices for match.until (an emergency rule ends by itself). The
+// daemon stores an RFC3339 time; past it the rule matches nothing, and it is
+// pruned a day later.
+export const UNTIL_CHOICES = Object.freeze([
+  { key: "", label: "never" },
+  { key: "3600", label: "in 1 hour" },
+  { key: "21600", label: "in 6 hours" },
+  { key: "86400", label: "in 24 hours" },
+  { key: "604800", label: "in 7 days" },
+]);
+
+// untilIn returns the RFC3339 time `seconds` from `now` (no milliseconds, UTC).
+export function untilIn(seconds, now = Date.now()) {
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return new Date(Math.floor(now / 1000) * 1000 + n * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+}
+
+// ruleExpired mirrors TrafficRuleMatch.Expired: a rule past its until matches
+// nothing (it is still listed, then pruned a day later).
+export function ruleExpired(row, now = Date.now()) {
+  const u = row?.match?.until;
+  if (!u) return false;
+  const t = Date.parse(u);
+  return Number.isFinite(t) && now >= t;
+}
 
 export function actionInfo(key) {
   return ACTIONS.find((a) => a.key === String(key || "").toLowerCase()) || null;
@@ -120,6 +164,7 @@ const VERIFIABLE_UA_GLOBS_LC = new Set([...VERIFIABLE_UA_GLOBS].map((u) => u.toL
 export const PRIORITY_BANDS = Object.freeze({
   allow: { from: 10, to: 99, default: 50 },
   throttle: { from: 100, to: 199, default: 150 },
+  throttle_total: { from: 100, to: 199, default: 150 }, // a throttle too: it ends evaluation like one
   challenge: { from: 200, to: 299, default: 250 },
   challenge_v2: { from: 200, to: 299, default: 250 }, // same band: it IS a challenge, one rung up
   block: { from: 300, to: 899, default: 350 },
@@ -331,6 +376,9 @@ export function emptyForm(overrides = {}) {
     methods: "",
     actionType: "",
     throttleProfile: "soft_bot",
+    throttleRate: 5,
+    throttlePer: "vhost",
+    until: "",
     note: "",
     hasQS: false,
     qsNotRx: "",
@@ -370,10 +418,14 @@ export function buildRulePayload(form) {
       // string, independently of has_qs — never drop it because the checkbox
       // is off, or editing a rule would silently widen it.
       qs_not_rx: String(f.qsNotRx || "").trim() || undefined,
+      // match.until: an older cfm freezes a rule with it (inert, never
+      // permanent), which is why the expiry is a match key.
+      ...(String(f.until || "").trim() ? { until: String(f.until).trim() } : {}),
     },
     action: {
       type: actionType,
       profile: actionType === "throttle" ? String(f.throttleProfile || "").trim() : "",
+      ...(actionType === "throttle_total" ? { rate_rps: Number(f.throttleRate), per: String(f.throttlePer || "").trim().toLowerCase() } : {}),
     },
     note: String(f.note || "").trim(),
   };
@@ -395,6 +447,9 @@ export function formFromRule(row) {
     methods: list(r?.match?.methods),
     actionType: String(r?.action?.type || ""),
     throttleProfile: String(r?.action?.profile || "soft_bot"),
+    throttleRate: Number(r?.action?.rate_rps) > 0 ? Number(r.action.rate_rps) : 5,
+    throttlePer: String(r?.action?.per || "vhost"),
+    until: String(r?.match?.until || ""),
     note: String(r?.note || ""),
     hasQS: Boolean(r?.match?.has_qs),
     qsNotRx: String(r?.match?.qs_not_rx || ""),
@@ -482,14 +537,14 @@ export function re2Rejects(rx) {
 //    would silently do something surprising) ───────────────────────────────
 // Returns { errors, warnings, hints }. `errors` block the save; `warnings`
 // are shown but allowed; `hints` are facts about what the rule will do.
-export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
+export function validateRuleForm(form, { rules = [], editId = "", now = Date.now() } = {}) {
   const errors = [];
   const warnings = [];
   const hints = [];
   const p = buildRulePayload(form);
   const act = actionInfo(p.action.type);
 
-  if (!p.action.type) errors.push("Choose what should happen (allow / block / challenge / challenge v2 / throttle).");
+  if (!p.action.type) errors.push("Choose what should happen (allow / block / challenge / challenge v2 / throttle / throttle total).");
   else if (!act) errors.push(`Unknown action "${p.action.type}".`);
 
   if (p.action.type === "throttle") {
@@ -497,6 +552,18 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
     else if (!throttleProfile(p.action.profile)) {
       errors.push(`Unknown throttle profile "${p.action.profile}" — the edge would silently fall back to soft_bot.`);
     }
+  }
+  if (p.action.type === "throttle_total") {
+    const r = p.action.rate_rps;
+    if (!Number.isFinite(r) || r < LIMITS.throttleTotalMin || r > LIMITS.throttleTotalMax) {
+      errors.push(`Total throttle rate must be between ${LIMITS.throttleTotalMin} and ${LIMITS.throttleTotalMax} requests per second.`);
+    }
+    if (!THROTTLE_TOTAL_PER.some((x) => x.key === p.action.per)) errors.push(`Total throttle: choose per vhost or whole node.`);
+  }
+  if (p.match.until) {
+    const t = Date.parse(p.match.until);
+    if (!Number.isFinite(t) || !/^\d{4}-\d{2}-\d{2}T/.test(p.match.until)) errors.push(`Expiry "${p.match.until}" is not an RFC3339 time.`);
+    else if (t <= now) errors.push("The expiry is in the past — pick a new one (or never).");
   }
 
   if (!p.scope.vhosts.length) errors.push("At least one vhost is required.");
@@ -512,7 +579,7 @@ export function validateRuleForm(form, { rules = [], editId = "" } = {}) {
   for (const cc of countries) {
     if (!/^[A-Z]{2}$/.test(cc)) errors.push(`"${cc}" is not a 2-letter country code (use ISO codes like GR, CY, US).`);
   }
-  if (p.match.ip_any.length > LIMITS.patternsPerField) errors.push(`Too many IPs / ranges (max ${LIMITS.patternsPerField}).`);
+  if (p.match.ip_any.length > LIMITS.ipsPerRule) errors.push(`Too many IPs / ranges (max ${LIMITS.ipsPerRule}).`);
   for (const ip of p.match.ip_any) {
     if (!isIPOrCIDR(ip)) errors.push(`"${ip}" is not an IPv4/IPv6 address or CIDR range (e.g. 203.0.113.0/24, 2001:db8::/48).`);
   }
@@ -633,6 +700,10 @@ export function describeAction(action) {
     const prof = throttleProfile(action?.profile);
     return `throttle (${prof ? prof.label : action?.profile || "?"})`;
   }
+  if (t === "throttle_total") {
+    const per = action?.per === "node" ? "for the whole node" : "per vhost";
+    return `throttle to ${Number(action?.rate_rps) || "?"} req/s in total ${per}`;
+  }
   return t || "?";
 }
 
@@ -642,7 +713,8 @@ export function describeRule(row, { max = 3 } = {}) {
   const r = row || {};
   const hosts = Array.isArray(r?.scope?.vhosts) ? r.scope.vhosts : [];
   const where = hosts.length ? `On ${joinList(hosts, max)}: ` : "";
-  return `${where}${describeAction(r.action)} ${describeMatch(r.match, { max })}.`;
+  const until = r?.match?.until ? ` (until ${r.match.until})` : "";
+  return `${where}${describeAction(r.action)} ${describeMatch(r.match, { max })}${until}.`;
 }
 
 // recipeOf returns the recipe key a rule was created by (note prefix
@@ -850,7 +922,7 @@ export function pathPatternMatches(pattern, path, qs = "") {
     });
 }
 // shadowingRules lists the EXISTING enabled rules that run before `row` on an
-// overlapping vhost, let the client through (allow, or a throttle — both end
+// overlapping vhost, let the client through (allow, or a throttle of either kind — all end
 // evaluation: Simulate is first-match), cover the row's User-Agents (a
 // verified_bot allow for FCrDNS-verifiable UAs, or a shared UA pattern) and
 // are not narrower than the row (no path / IP / country condition of their
@@ -866,7 +938,10 @@ export function shadowingRules(row, rules = []) {
   const rowMethods = (row.match?.methods || []).map((m) => String(m).toUpperCase());
   return (rules || []).filter((r) => {
     const m = r?.match || {};
-    if (!r?.enabled || !["allow", "throttle"].includes(r.action?.type) || !(Number(r.priority) < Number(row.priority))) return false;
+    if (!r?.enabled || !["allow", "throttle", "throttle_total"].includes(r.action?.type) || !(Number(r.priority) < Number(row.priority))) return false;
+    // an expired rule matches nothing; one that expires before the row stops
+    // shadowing it then, still worth listing
+    if (ruleExpired(r)) return false;
     if (!(r.scope?.vhosts || []).some((a) => (row.scope?.vhosts || []).some((b) => vhostPatternsOverlap(a, b)))) return false;
     // narrower than the row → only a subset of its clients is shadowed; skip
     if ((m.path_any || []).length || (m.ip_any || []).length || (m.country_in || []).length || (m.country_not_in || []).length) return false;

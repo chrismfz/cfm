@@ -30,7 +30,35 @@ const (
 	// passive humanity check to earn clearance (challenge_v2.go).
 	TrafficActionChallengeV2 = "challenge_v2"
 	TrafficActionThrottle    = "throttle"
+	// TrafficActionThrottleTotal caps the TOTAL rate of every matching
+	// request, across all clients: per vhost (Per "vhost") or across the node
+	// (Per "node"), at RateRPS. "throttle" is per client (each IP has its own
+	// budget), which a bot spread over hundreds of IPs walks through: on
+	// titan (2026-11-24) a per-IP or per-vhost limit cut 0-4% of Meta's
+	// crawl, a 5 r/s cap on its node total 65%. Over the cap: 429 +
+	// Retry-After (cfm_rules.lua). On the wire it is rule_action "throttle"
+	// with throttle_rate / throttle_per; an older edge ignores those and
+	// applies its per-client soft_bot instead (a weaker throttle, never a
+	// block). An older DAEMON reading this value freezes the rule
+	// (decodeStoredRule: an unknown action type is never enforced).
+	TrafficActionThrottleTotal = "throttle_total"
 )
+
+// Bounds of a throttle_total rate (requests per second).
+const (
+	minThrottleTotalRPS = 0.1
+	maxThrottleTotalRPS = 10000
+)
+
+// maxIPsPerRule bounds ip_any (an operator's emergency rule on a scraper's
+// top IPs needs more than maxPatternsPerField). Matching is a linear prefix
+// scan per rule; 500 stays in the low microseconds. rules-model.js
+// LIMITS.ipsPerRule mirrors it.
+const maxIPsPerRule = 500
+
+// expiredRuleKeep is how long a rule past its match.until is kept (listed as
+// expired, never enforced) before a write prunes it.
+const expiredRuleKeep = 24 * time.Hour
 
 // maxCountriesPerRule bounds country_in / country_not_in. 64 fits a
 // whole-continent fence ("allow only Europe" is ~50 codes with the microstates
@@ -79,14 +107,31 @@ type TrafficRuleMatch struct {
 	// Query-string guards (both optional, evaluated only when set)
 	HasQS   bool   `json:"has_qs,omitempty"`    // true → rule only fires when QS is present
 	QSNotRx string `json:"qs_not_rx,omitempty"` // if set, pass-through when QS matches this pattern
+	// Until (RFC 3339) makes the rule match only BEFORE that instant: an
+	// emergency rule that expires by itself. It lives in match ON PURPOSE:
+	// an older cfm that reads a rule with an unknown match key freezes it
+	// (decodeStoredRule) and never enforces it, so on a downgrade an expiring
+	// rule goes inert instead of becoming permanent. Checked in
+	// ruleMatchFilters, so Challenge Access entries honour it too.
+	Until string `json:"until,omitempty"`
 
 	qsNotRxCompiled *regexp.Regexp // pre-compiled from QSNotRx; set by normalizeTrafficRule
 	ipAnyCompiled   []netip.Prefix // parsed from IPAny; set by normalizeTrafficRule
+	untilAt         time.Time      // parsed from Until; zero = no expiry
+}
+
+// Expired reports whether the match carries an until that has passed.
+func (m TrafficRuleMatch) Expired(now time.Time) bool {
+	return !m.untilAt.IsZero() && !now.Before(m.untilAt)
 }
 
 type TrafficRuleAction struct {
 	Type    string `json:"type"`
 	Profile string `json:"profile,omitempty"` // required when type=throttle
+	// throttle_total only: the cap (requests per second) and what it is a
+	// total of: "vhost" (each vhost in scope has its own budget) or "node".
+	RateRPS float64 `json:"rate_rps,omitempty"`
+	Per     string  `json:"per,omitempty"`
 }
 
 type TrafficRule struct {
@@ -252,8 +297,13 @@ func (s *trafficRuleStore) Add(in TrafficRule) (TrafficRule, error) {
 		return TrafficRule{}, err
 	}
 
+	if norm.Match.Expired(time.Now()) {
+		return TrafficRule{}, errors.New("match.until is in the past")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneExpiredLocked(time.Now())
 	if len(s.rules) >= maxRulesGlobal {
 		return TrafficRule{}, fmt.Errorf("too many rules (max %d)", maxRulesGlobal)
 	}
@@ -293,12 +343,32 @@ func (s *trafficRuleStore) Update(id string, in TrafficRule) (TrafficRule, error
 	if err != nil {
 		return TrafficRule{}, err
 	}
+	if norm.Match.Expired(time.Now()) {
+		return TrafficRule{}, errors.New("match.until is in the past")
+	}
+	s.pruneExpiredLocked(time.Now())
 	s.rules[id] = norm
 	s.recountLocked()
 	if err := s.saveLocked(); err != nil {
 		return TrafficRule{}, err
 	}
 	return norm, nil
+}
+
+// pruneExpiredLocked drops the rules whose match.until passed more than
+// expiredRuleKeep ago (an expired emergency rule is listed for a day, then
+// goes; it was never enforced past its until). Write paths call it; the
+// caller saves. Caller holds s.mu.
+func (s *trafficRuleStore) pruneExpiredLocked(now time.Time) {
+	for id, r := range s.rules {
+		if r.Unsupported || r.Match.untilAt.IsZero() {
+			continue
+		}
+		if now.Sub(r.Match.untilAt) > expiredRuleKeep {
+			delete(s.rules, id)
+			delete(s.frozen, id)
+		}
+	}
 }
 
 func (s *trafficRuleStore) Remove(id string) bool {
@@ -455,12 +525,22 @@ func normalizeTrafficRule(in TrafficRule, generateID bool) (TrafficRule, error) 
 
 	r.Action.Type = strings.ToLower(strings.TrimSpace(r.Action.Type))
 	r.Action.Profile = strings.TrimSpace(r.Action.Profile)
+	r.Action.Per = strings.ToLower(strings.TrimSpace(r.Action.Per))
 	switch r.Action.Type {
 	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge, TrafficActionChallengeV2:
-		r.Action.Profile = ""
+		r.Action.Profile, r.Action.RateRPS, r.Action.Per = "", 0, ""
 	case TrafficActionThrottle:
+		r.Action.RateRPS, r.Action.Per = 0, ""
 		if r.Action.Profile == "" {
 			return TrafficRule{}, errors.New("action.profile is required for throttle")
+		}
+	case TrafficActionThrottleTotal:
+		r.Action.Profile = ""
+		if r.Action.RateRPS < minThrottleTotalRPS || r.Action.RateRPS > maxThrottleTotalRPS {
+			return TrafficRule{}, fmt.Errorf("action.rate_rps must be between %g and %g requests per second", minThrottleTotalRPS, float64(maxThrottleTotalRPS))
+		}
+		if r.Action.Per != "vhost" && r.Action.Per != "node" {
+			return TrafficRule{}, errors.New(`action.per must be "vhost" or "node"`)
 		}
 	default:
 		return TrafficRule{}, fmt.Errorf("unsupported action type %q", r.Action.Type)
@@ -519,7 +599,7 @@ func normalizeMatch(m TrafficRuleMatch) (TrafficRuleMatch, error) {
 		return TrafficRuleMatch{}, errors.New("country_in and country_not_in are mutually exclusive")
 	}
 
-	ips, prefixes, err := normalizeIPList(m.IPAny, maxPatternsPerField)
+	ips, prefixes, err := normalizeIPList(m.IPAny, maxIPsPerRule)
 	if err != nil {
 		return TrafficRuleMatch{}, fmt.Errorf("ip_any: %w", err)
 	}
@@ -551,6 +631,16 @@ func normalizeMatch(m TrafficRuleMatch) (TrafficRuleMatch, error) {
 		}
 		m.QSNotRx = rx
 		m.qsNotRxCompiled = compiled
+	}
+	m.Until = strings.TrimSpace(m.Until)
+	m.untilAt = time.Time{}
+	if m.Until != "" {
+		t, err := time.Parse(time.RFC3339, m.Until)
+		if err != nil {
+			return TrafficRuleMatch{}, fmt.Errorf("until: an RFC 3339 time such as 2026-11-24T18:00:00Z: %w", err)
+		}
+		m.untilAt = t.UTC()
+		m.Until = m.untilAt.Format(time.RFC3339)
 	}
 	return m, nil
 }
@@ -717,6 +807,9 @@ func ruleHostMatch(vhosts []string, host string) bool {
 // parse in Simulate (the client IP is the same for every rule).
 // verifiedBot is the FCrDNS good-bot name for the request ("" = none).
 func ruleMatchFilters(m TrafficRuleMatch, ip netip.Addr, ipOK bool, country, ua, path, method, qs, verifiedBot string) bool {
+	if !m.untilAt.IsZero() && !time.Now().Before(m.untilAt) {
+		return false // past its until: an expired emergency rule matches nothing
+	}
 	if m.VerifiedBot && verifiedBot == "" {
 		return false // only a forward-confirmed crawler satisfies verified_bot
 	}
@@ -1089,9 +1182,24 @@ func decodeStoredRule(raw json.RawMessage) (*TrafficRule, bool) {
 	// shipped). Freeze those verbatim too.
 	switch strings.ToLower(strings.TrimSpace(e.Action.Type)) {
 	case TrafficActionAllow, TrafficActionBlock, TrafficActionChallenge,
-		TrafficActionChallengeV2, TrafficActionThrottle, "":
+		TrafficActionChallengeV2, TrafficActionThrottle, TrafficActionThrottleTotal, "":
 	default:
 		return &e, true
+	}
+	// An unknown ACTION KEY (a parameter a newer cfm added to an action this
+	// build knows) is the same hazard: enforced without it, the rule would do
+	// something its author did not write. Freeze it too (checked from this
+	// build on; throttle_total's rate_rps/per are the first such keys).
+	var aprobe struct {
+		Action json.RawMessage `json:"action"`
+	}
+	if err := json.Unmarshal(raw, &aprobe); err == nil && len(aprobe.Action) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(aprobe.Action))
+		dec.DisallowUnknownFields()
+		var a TrafficRuleAction
+		if err := dec.Decode(&a); err != nil {
+			return &e, true
+		}
 	}
 	return &e, false
 }
