@@ -1,0 +1,597 @@
+<title>CFM Vhost Profile</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* Layout: cfm-admin frame (sidebar + main). Domain header, then a posture strip of
+   six "what applies here, and why" tiles, then tabs. Tokens mirror
+   internal/webui/static/assets/style.css; class colours mirror traffic-model.js. */
+:root {
+  --bg: #f2f4f9; --bg-inset: #ffffff; --card: #ffffff; --card-hover: #f7f9fd;
+  --fg: #1f2a44; --muted: #64748d; --accent: #2f7fd6; --accent-strong: #1f6cc0;
+  --accent-soft: rgba(47,127,214,.12);
+  --ok: #22935c; --ok-soft: rgba(34,147,92,.12);
+  --warn: #b07d1e; --warn-soft: rgba(176,125,30,.12);
+  --danger: #c94263; --danger-soft: rgba(201,66,99,.1);
+  --border: #d9e0ec; --border-soft: #e4e9f2;
+  --sidebar-bg: #101827; --sidebar-fg: #dbe4f2; --sidebar-muted: #8493ab;
+  --sidebar-border: #1e2a40; --sidebar-active: rgba(77,163,255,.16);
+  --c-automation: #eb6834; --c-crawler: #2a78d6; --c-bot: #eda100; --c-human: #1baf7a;
+  --mock: #8a5cd6; --mock-soft: rgba(138,92,214,.12);
+  --font: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #141b2d; --bg-inset: #0f1626; --card: #1a2338; --card-hover: #202c46;
+  --fg: #e9eef6; --muted: #9aa9c0; --accent: #4da3ff; --accent-strong: #6db4ff;
+  --accent-soft: rgba(77,163,255,.14);
+  --ok: #46c07a; --ok-soft: rgba(70,192,122,.14);
+  --warn: #eec35e; --warn-soft: rgba(238,195,94,.13);
+  --danger: #e5647f; --danger-soft: rgba(229,100,127,.13);
+  --border: #2c3b58; --border-soft: #253148;
+  --c-automation: #d95926; --c-crawler: #3987e5; --c-bot: #c98500; --c-human: #199e70;
+  --mock: #b18cf0; --mock-soft: rgba(177,140,240,.14);
+  color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #141b2d; --bg-inset: #0f1626; --card: #1a2338; --card-hover: #202c46;
+  --fg: #e9eef6; --muted: #9aa9c0; --accent: #4da3ff; --accent-strong: #6db4ff;
+  --accent-soft: rgba(77,163,255,.14);
+  --ok: #46c07a; --ok-soft: rgba(70,192,122,.14);
+  --warn: #eec35e; --warn-soft: rgba(238,195,94,.13);
+  --danger: #e5647f; --danger-soft: rgba(229,100,127,.13);
+  --border: #2c3b58; --border-soft: #253148;
+  --c-automation: #d95926; --c-crawler: #3987e5; --c-bot: #c98500; --c-human: #199e70;
+  --mock: #b18cf0; --mock-soft: rgba(177,140,240,.14);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; }
+a { color: var(--accent-strong); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.mono { font-family: var(--mono); font-size: .86em; }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+
+.shell { display: flex; min-height: 100vh; }
+.sidebar { width: 210px; flex: none; background: var(--sidebar-bg); color: var(--sidebar-fg);
+  border-right: 1px solid var(--sidebar-border); padding: 1rem .6rem; display: flex; flex-direction: column; gap: .15rem; }
+.brand { display: flex; align-items: center; gap: .5rem; padding: 0 .5rem 1rem; font-weight: 650; }
+.brand svg { width: 26px; height: 26px; }
+.nav-group { color: var(--sidebar-muted); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; padding: .8rem .6rem .3rem; }
+.nav-item { color: var(--sidebar-fg); padding: .38rem .6rem; border-radius: 7px; font-size: .86rem; border-left: 2px solid transparent; }
+.nav-item.dim { color: var(--sidebar-muted); }
+.nav-item.active { background: var(--sidebar-active); border-left-color: #4da3ff; }
+.nav-item .new { font-size: .62rem; color: #b18cf0; border: 1px solid #b18cf0; border-radius: 99px; padding: 0 .35rem; margin-left: .3rem; }
+
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; justify-content: space-between;
+  padding-block: .7rem; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  border-bottom: 1px solid var(--border-soft); }
+.topbar h1 { margin: 0; font-size: 1.02rem; font-weight: 650; }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.input, select, button { font-family: inherit; font-size: .84rem; color: var(--fg); background: var(--bg-inset);
+  border: 1px solid var(--border); border-radius: 8px; padding: .32rem .6rem; }
+button { cursor: pointer; }
+button:hover { background: var(--card-hover); }
+button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mockflag { color: var(--mock); background: var(--mock-soft); border: 1px dashed var(--mock); border-radius: 99px; padding: .15rem .6rem; font-size: .75rem; }
+
+.layout { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem;
+  padding-block: 1rem 2rem; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.card { background: var(--card); border: 1px solid var(--border-soft); border-radius: 12px; padding: 1rem; min-width: 0; grid-column: span 6; }
+.card.wide { grid-column: 1 / -1; }
+.card.third { grid-column: span 4; }
+.card h2 { margin: 0 0 .25rem; font-size: 1rem; font-weight: 650; text-wrap: balance; }
+.card .lead { margin: 0 0 .8rem; color: var(--muted); font-size: .84rem; max-width: 75ch; }
+.src { display: inline-flex; gap: .3rem; align-items: center; margin-top: .7rem; font-size: .72rem; color: var(--muted); }
+.src code { font-family: var(--mono); font-size: .95em; }
+.src.new code { color: var(--mock); }
+.tag-new { color: var(--mock); border: 1px solid var(--mock); border-radius: 99px; padding: 0 .35rem; font-size: .66rem; }
+
+.pill { display: inline-flex; align-items: center; gap: .25rem; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 999px; padding: .08rem .5rem; font-size: .74rem; white-space: nowrap; }
+.pill.ok { color: var(--ok); border-color: var(--ok); background: var(--ok-soft); }
+.pill.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.pill.danger { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+.pill.info { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
+.pill.attack { color: #fff; border-color: var(--danger); background: var(--danger); }
+
+/* Domain header */
+.dom { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; justify-content: space-between; }
+.dom h2 { font-size: 1.35rem; margin: 0; font-weight: 700; letter-spacing: -.01em; }
+.dom .sub { color: var(--muted); font-size: .84rem; margin-top: .2rem; }
+.hosts { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .8rem; }
+.hostchip { display: inline-flex; gap: .45rem; align-items: center; border: 1px solid var(--border); background: var(--bg-inset);
+  border-radius: 9px; padding: .3rem .6rem; cursor: pointer; font-family: var(--mono); font-size: .8rem; color: var(--fg); }
+.hostchip .rq { font-family: var(--font); color: var(--muted); font-size: .72rem; }
+.hostchip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.hostchip .dot.diff { background: var(--warn); }
+.hostchip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.dom-actions { display: flex; flex-wrap: wrap; gap: .4rem; }
+
+/* Posture strip */
+.posture { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .6rem; }
+.ptile { border: 1px solid var(--border-soft); border-radius: 10px; padding: .7rem .75rem; background: var(--bg-inset);
+  display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
+.ptile .k { font-size: .68rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.ptile .v { font-weight: 650; font-size: .95rem; display: flex; flex-wrap: wrap; gap: .3rem; align-items: center; }
+.ptile .why { font-size: .76rem; color: var(--muted); line-height: 1.4; }
+.ptile .why b { color: var(--fg); font-weight: 600; }
+.ptile .edit { margin-top: auto; font-size: .76rem; }
+.ptile.inherit { border-style: dashed; }
+
+/* Tabs */
+.tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border-soft); grid-column: 1 / -1; overflow-x: auto; }
+.tab { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: .55rem .9rem; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+.tabpanel { display: contents; }
+
+/* Stat tiles */
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .6rem; margin-bottom: .9rem; }
+.tile { border: 1px solid var(--border-soft); border-radius: 10px; padding: .6rem .75rem; background: var(--bg-inset); }
+.tile .k { font-size: .72rem; color: var(--muted); }
+.tile .v { font-size: 1.3rem; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: .1rem; }
+.tile .d { font-size: .72rem; color: var(--muted); }
+
+/* Stacked bars */
+.sbar-row { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: .6rem; align-items: center; margin: .35rem 0; }
+.sbar-row .lbl { font-size: .78rem; color: var(--muted); }
+.sbar { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: var(--border-soft); gap: 2px; }
+.sbar span { display: block; height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: .8rem; font-size: .76rem; color: var(--muted); margin-top: .5rem; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: .3rem; vertical-align: -1px; }
+
+.chart { width: 100%; height: 170px; display: block; }
+.chart text { fill: var(--muted); font-size: 10px; font-family: var(--font); }
+.chart .grid { stroke: var(--border-soft); stroke-width: 1; }
+
+/* Tables */
+.tw { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: .72rem; letter-spacing: .04em; text-transform: uppercase;
+  border-bottom: 1px solid var(--border); padding: .4rem .5rem; white-space: nowrap; }
+td { border-bottom: 1px solid var(--border-soft); padding: .45rem .5rem; vertical-align: top; }
+td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: none; }
+.cls { display: inline-flex; align-items: center; gap: .35rem; white-space: nowrap; }
+.cls i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+.minibar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .75; }
+.act { font-size: .76rem; white-space: nowrap; }
+.disabled-row td { opacity: .6; }
+
+.funnel { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; }
+.fstep { border-radius: 9px; padding: .55rem .6rem; background: var(--bg-inset); border: 1px solid var(--border-soft); }
+.fstep .v { font-size: 1.15rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.fstep .k { font-size: .72rem; color: var(--muted); }
+
+.notes ol { margin: .3rem 0 0; padding-left: 1.2rem; line-height: 1.55; max-width: 90ch; }
+.notes li { margin-bottom: .35rem; }
+.placeholder { border: 1px dashed var(--border); border-radius: 10px; padding: 1.5rem; color: var(--muted); text-align: center; }
+
+@media (max-width: 1200px) {
+  .posture { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .card, .card.third { grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+  .sidebar { display: none; }
+  .posture { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tiles, .funnel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sbar-row { grid-template-columns: 1fr; gap: .2rem; }
+}
+@media (max-width: 420px) { .posture { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: no-preference) { .sbar span { transition: flex-basis .25s ease; } }
+</style>
+
+<div class="shell">
+  <aside class="sidebar" aria-label="cfm-admin navigation">
+    <div class="brand"><svg viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#141b2d"/><path d="M16 6l8.7 5v10L16 26l-8.7-5V11z" fill="none" stroke="#4da3ff" stroke-width="2.4"/></svg>CFM Admin</div>
+    <div class="nav-item dim">Dashboard</div>
+    <div class="nav-item dim">Health</div>
+    <div class="nav-group">Web</div>
+    <div class="nav-item dim">WebDetector</div>
+    <div class="nav-item active">Vhost<span class="new">was "Vhost live"</span></div>
+    <div class="nav-item dim">Web Traffic</div>
+    <div class="nav-item dim">Forensics</div>
+    <div class="nav-group">Controls</div>
+    <div class="nav-item dim">WAF engine</div>
+    <div class="nav-item dim">Vhost controls</div>
+    <div class="nav-item dim">Traffic rules</div>
+    <div class="nav-item dim">Challenge access</div>
+    <div class="nav-item dim">Site cache</div>
+    <div class="nav-item dim">ClamAV</div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <h1>Vhost</h1>
+      <div class="meta">
+        <label for="hostInput" class="muted">Host</label>
+        <input id="hostInput" class="input mono" value="example-shop.gr" aria-label="Host" size="18">
+        <label for="win" class="muted">Window</label>
+        <select id="win"><option>15 min</option><option selected>1 hour</option><option>6 hours</option><option>24 hours</option></select>
+        <button id="themeBtn" type="button">Theme</button>
+        <span class="mockflag">Mockup · example data</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- Domain header + posture -->
+      <section class="card wide" aria-labelledby="domTitle">
+        <div class="dom">
+          <div>
+            <h2 id="domTitle" class="mono">example-shop.gr</h2>
+            <div class="sub">cPanel account <span class="mono">exshop</span> · edge OpenResty · DNAT on · <span id="hostCount"></span></div>
+          </div>
+          <div class="dom-actions" id="headPills"></div>
+        </div>
+        <div class="hosts" id="hosts" role="group" aria-label="Hosts of this domain"></div>
+        <p class="muted" style="font-size:.76rem;margin:.55rem 0 .9rem">An amber dot marks a host whose settings differ from the apex. A dashed tile is a setting that comes from a broader match (the apex or a <span class="mono">*.domain</span> entry), not one written for this host.</p>
+        <div class="posture" id="posture"></div>
+        <div class="src new"><span class="tag-new">new</span> <code>GET /api/v1/webdet/vhost-profile?host=</code> built from the controls row (<code>challengeV2VhostTier</code>, excludes, http3, clam), site-cache policy, rule matcher</div>
+      </section>
+
+      <nav class="tabs" role="tablist" aria-label="Vhost views">
+        <button class="tab" role="tab" id="tab-overview" aria-selected="true" data-tab="overview">Overview</button>
+        <button class="tab" role="tab" id="tab-traffic" aria-selected="false" data-tab="traffic">Bots &amp; traffic</button>
+        <button class="tab" role="tab" id="tab-security" aria-selected="false" data-tab="security">WAF &amp; challenges</button>
+        <button class="tab" role="tab" id="tab-config" aria-selected="false" data-tab="config">What applies</button>
+        <button class="tab" role="tab" id="tab-live" aria-selected="false" data-tab="live">Live</button>
+      </nav>
+
+      <!-- OVERVIEW -->
+      <div class="tabpanel" data-panel="overview">
+        <section class="card" aria-labelledby="ovTraffic">
+          <h2 id="ovTraffic">Who is visiting, and what it costs the origin</h2>
+          <p class="lead">The same four labels as Web Traffic, for this host only. Labels never act by themselves.</p>
+          <div class="tiles" id="ovTiles"></div>
+          <div id="ovBars"></div>
+          <div class="legend" id="legend1"></div>
+          <div class="src"><code>GET /api/v1/webdet/traffic-mix?host=</code> (exists)</div>
+        </section>
+        <section class="card" aria-labelledby="ovSec">
+          <h2 id="ovSec">Security in the last 24 hours</h2>
+          <p class="lead">WAF hits and challenge outcomes on this host. Open the WAF &amp; challenges tab for the rule breakdown.</p>
+          <div class="tiles" id="secTiles"></div>
+          <div class="tw"><table><thead><tr><th>Top rule</th><th>Mode</th><th class="r">Hits</th><th class="r">IPs</th></tr></thead><tbody id="ovWafTop"></tbody></table></div>
+          <div class="src new"><span class="tag-new">new</span> <code>vhost-profile.security</code> from WAF history + challenge history, <code>host=</code> filter</div>
+        </section>
+        <section class="card wide" aria-labelledby="ovBots">
+          <h2 id="ovBots">Biggest bot clients on this host</h2>
+          <p class="lead">Ranked by origin time. Actions open Web Traffic with the client and host already filled in; this page adds no editor of its own.</p>
+          <div class="tw"><table><thead><tr><th>Class</th><th>Client</th><th class="r">Requests</th><th class="r">Origin time</th><th>Share of origin</th><th class="r">IPs (1h)</th><th></th></tr></thead><tbody id="ovBotRows"></tbody></table></div>
+          <div class="src"><code>traffic-mix?host=</code> <code>.clients</code> (exists)</div>
+        </section>
+      </div>
+
+      <!-- BOTS & TRAFFIC -->
+      <div class="tabpanel" data-panel="traffic" hidden>
+        <section class="card wide" aria-labelledby="trSeries">
+          <h2 id="trSeries">Requests over time, by class</h2>
+          <p class="lead">5-minute buckets for the selected window.</p>
+          <svg class="chart" id="series" viewBox="0 0 900 170" preserveAspectRatio="none" role="img" aria-label="Stacked area of requests by class"></svg>
+          <div class="legend" id="legend2"></div>
+          <div class="src"><code>traffic-mix?host=</code> <code>.series</code> (exists)</div>
+        </section>
+        <section class="card" aria-labelledby="trClasses">
+          <h2 id="trClasses">Per class</h2>
+          <p class="lead">Status codes are not kept per vhost, so this table has no 4xx/5xx columns. Absent stays absent, never a zero.</p>
+          <div class="tw"><table><thead><tr><th>Class</th><th class="r">Requests</th><th class="r">Origin s</th><th class="r">Bytes</th><th class="r">Peak r/s</th></tr></thead><tbody id="classRows"></tbody></table></div>
+        </section>
+        <section class="card" aria-labelledby="trAll">
+          <h2 id="trAll">All clients</h2>
+          <p class="lead">Browser UAs get IP actions only: every real Chrome sends the same string.</p>
+          <div class="tw"><table><thead><tr><th>Class</th><th>Client</th><th class="r">Req</th><th class="r">Origin s</th><th></th></tr></thead><tbody id="allClients"></tbody></table></div>
+        </section>
+      </div>
+
+      <!-- WAF & CHALLENGES -->
+      <div class="tabpanel" data-panel="security" hidden>
+        <section class="card" aria-labelledby="secWaf">
+          <h2 id="secWaf">WAF hits by rule (24h)</h2>
+          <p class="lead">An "excluded" count is a hit an exclude let through; it shows whether an exclude is still needed.</p>
+          <div class="tw"><table><thead><tr><th>Rule</th><th>Family</th><th>Mode</th><th class="r">Hits</th><th class="r">Excluded</th><th class="r">IPs</th><th>Top path</th></tr></thead><tbody id="wafRows"></tbody></table></div>
+          <div class="src new"><span class="tag-new">new</span> WAF history grouped by rule, <code>host=</code></div>
+        </section>
+        <section class="card" aria-labelledby="secCh">
+          <h2 id="secCh">Challenges (24h)</h2>
+          <p class="lead">From challenge issued to solved. A v2 reject is its own history row (<span class="mono">challenge_v2_reject</span>).</p>
+          <div class="funnel" id="funnel"></div>
+          <h2 style="margin-top:1rem;font-size:.9rem">Why clients were challenged</h2>
+          <div class="tw"><table><thead><tr><th>Grain</th><th class="r">Issued</th><th class="r">Solved</th><th class="r">v2 rejects</th></tr></thead><tbody id="grainRows"></tbody></table></div>
+          <div class="src new"><span class="tag-new">new</span> detection_history <code>type=challenge_*</code>, <code>host=</code></div>
+        </section>
+      </div>
+
+      <!-- WHAT APPLIES -->
+      <div class="tabpanel" data-panel="config" hidden>
+        <section class="card wide" aria-labelledby="cfgRules">
+          <h2 id="cfgRules">Traffic rules that match this host</h2>
+          <p class="lead">Evaluated by the same matcher as <span class="mono">Simulate</span>, the enforcement path. A disabled rule appears as "would match". An allow only ends rule evaluation; it does not bypass WAF, challenges or IP blocks.</p>
+          <div class="tw"><table><thead><tr><th>#</th><th>Rule</th><th>Matched by</th><th>Action</th><th>State</th><th class="r">Hits 24h</th><th></th></tr></thead><tbody id="ruleRows"></tbody></table></div>
+        </section>
+        <section class="card" aria-labelledby="cfgEx">
+          <h2 id="cfgEx">Excludes and overrides in effect</h2>
+          <div class="tw"><table><thead><tr><th>Kind</th><th>Entry</th><th>Scope</th><th>Expires</th></tr></thead><tbody id="exRows"></tbody></table></div>
+        </section>
+        <section class="card" aria-labelledby="cfgPol">
+          <h2 id="cfgPol">Node-wide policies that reach this host</h2>
+          <p class="lead">Set fleet-wide in cfm-web. Admin only: scoped (cPanel) viewers never see this section.</p>
+          <div class="tw"><table><thead><tr><th>Policy</th><th>Target</th><th>Action</th><th class="r">Hits 24h</th></tr></thead><tbody id="polRows"></tbody></table></div>
+        </section>
+      </div>
+
+      <!-- LIVE -->
+      <div class="tabpanel" data-panel="live" hidden>
+        <section class="card wide">
+          <h2>Live</h2>
+          <div class="placeholder">Today's Vhost live drilldown moves here unchanged (<span class="mono">v1/webdet/drilldown?host=</span>: top paths, top IPs, short/long window, under-attack state). The old URL <span class="mono">/webdetector/vhost?host=</span> keeps working and opens this tab.</div>
+        </section>
+      </div>
+
+      <section class="card wide notes" aria-labelledby="notesT">
+        <h2 id="notesT">Design notes</h2>
+        <ol>
+          <li><b>One endpoint, no logic in the browser.</b> Every tile comes from <span class="mono">vhost-profile</span>, which calls the enforcement resolvers. The page holds no copy of a matcher.</li>
+          <li><b>What applies, not what is written.</b> Each tile says why: "← exclude <span class="mono">*.example-shop.gr</span>", "← auto (under attack)". A dashed tile is inherited.</li>
+          <li><b>Read-only first.</b> Each "Edit" link opens the existing page with <span class="mono">?host=</span> filled in. Inline toggles come later and reuse the same API calls.</li>
+          <li><b>Bot stats reuse Web Traffic.</b> The data is <span class="mono">traffic-mix?host=</span>, the model is <span class="mono">traffic-model.js</span> (same classes, colours and action guardrails).</li>
+          <li><b>Scope.</b> Admin only in phase 1. If cPanel viewers get it later, strip <span class="mono">v2*</span>/<span class="mono">ms</span>/<span class="mono">src</span>/<span class="mono">scope</span>/<span class="mono">sig</span>, remove the policies card, and update <span class="mono">endpoint_scope_inventory.md</span>.</li>
+          <li><b>Click a host anywhere, land here.</b> Hosts on Web Traffic, WAF engine, Overview and Forensics become links to this page.</li>
+        </ol>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+(() => {
+  const CLASSES = ["automation", "crawler", "bot", "human"];
+  const LABEL = { automation: "Browser UA, no static/XHR", crawler: "Known crawlers", bot: "Other bots and tools", human: "Likely humans" };
+  const fmt = (n) => Math.round(n).toLocaleString("en-US");
+  const pct = (a, b) => (b > 0 ? ((a / b) * 100).toFixed(1) + "%" : "0.0%");
+  const bytes = (b) => { const u = ["B","KB","MB","GB"]; let i = 0; while (b >= 1000 && i < 3) { b /= 1000; i++; } return (i ? b.toFixed(b >= 100 ? 0 : 2) : b) + " " + u[i]; };
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const cls = (k) => `<span class="cls"><i style="background:var(--c-${k})"></i>${LABEL[k]}</span>`;
+
+  function series(seed, base) {
+    const out = []; let s = seed;
+    for (let i = 0; i < 12; i++) {
+      s = (s * 9301 + 49297) % 233280; const r = s / 233280;
+      const surge = i >= 8 ? 1.9 : 1;
+      out.push({ automation: base.automation * (0.6 + r) * surge, crawler: base.crawler * (0.85 + r * 0.3), bot: base.bot * (0.7 + r * 0.6), human: base.human * (0.9 + r * 0.2) });
+    }
+    return out;
+  }
+
+  const HOSTS = {
+    "example-shop.gr": {
+      req: { automation: 21400, crawler: 38900, bot: 12800, human: 111120 },
+      origin: { automation: 2310, crawler: 1120, bot: 640, human: 1930 },
+      bytes: { automation: 1.9e9, crawler: 3.1e9, bot: 0.6e9, human: 9.4e9 },
+      peak: { automation: 14.2, crawler: 13.8, bot: 6.1, human: 41.0 },
+      differs: false,
+      posture: {
+        challenge: { v: [["v2", "danger"], ["auto", "info"]], why: "<b>← under attack</b> since 14:02 (automatic). Paths: <span class='mono'>/wp-login.php</span>, <span class='mono'>/xmlrpc.php</span>. Lockdown off.", edit: "Vhost controls" },
+        waf: { v: [["On", "ok"], ["1 exclude", "warn"]], why: "Rule <b>402</b> excluded on <span class='mono'>/wp-admin/admin-ajax.php</span>, expires in 3 h.", edit: "WAF engine" },
+        proto: { v: [["HTTP/2", "ok"], ["HTTP/3 off", ""]], why: "HTTP/3 off by default; no opt-in for this host.", edit: "Vhost controls" },
+        cache: { v: [["Static", "ok"], ["Micro off", ""]], why: "Static files follow the origin's Cache-Control, 1 h fallback. Hit ratio 71%.", edit: "Site cache" },
+        rules: { v: [["3 match", "info"]], why: "2 enabled, 1 disabled (would match). 1 emergency throttle expires in 40 min.", edit: "Traffic rules" },
+        clam: { v: [["Async scan", "ok"]], why: "Uploads scanned after the request (notify only). Node default.", edit: "ClamAV", inherit: true },
+      },
+      pills: [["UNDER ATTACK · 14:02", "attack"], ["Edge ban: 12 proxied IPs", "warn"]],
+      clients: [
+        ["automation", "Chrome 152 / Windows (no static, no XHR)", 11900, 1480, 214],
+        ["crawler", "meta-externalagent", 9800, 520, 41],
+        ["crawler", "Googlebot", 14200, 310, 38],
+        ["bot", "python-requests/2.32", 6100, 420, 3],
+        ["automation", "Safari 18 / macOS (no static)", 5200, 610, 77],
+        ["crawler", "AhrefsBot", 4400, 150, 12],
+        ["bot", "Go-http-client/2.0", 3900, 140, 6],
+        ["human", "Chrome 152 / Android", 48200, 610, 0],
+      ],
+      waf: [
+        [301, "rule_sqli", "WAF_SQLI", "block", 412, 0, 37, "/index.php?route=product/search"],
+        [201, "rule_bad_ua", "WAF_BAD_UA", "challenge_v2", 288, 0, 61, "/"],
+        [101, "rule_traversal", "WAF_TRAVERSAL", "block", 96, 0, 14, "/../../etc/passwd"],
+        [402, "rule_upload_content", "WAF_UPLOAD_CONTENT", "block", 31, 29, 2, "/wp-admin/admin-ajax.php"],
+        [302, "rule_xss", "WAF_XSS", "challenge_v2", 18, 0, 9, "/?s=%3Cscript%3E"],
+      ],
+      funnel: { issued: 9420, solved: 3110, rejects: 214, banned: 38 },
+      grains: [["Vhost v2 (under attack)", 7300, 2480, 190], ["Malpath (CHALLENGE_PATHS)", 1210, 120, 21], ["WAF rule at challenge_v2", 640, 410, 3], ["Fingerprint policy", 270, 100, 0]],
+      rules: [
+        [12, "Throttle python-requests (emergency)", "host = example-shop.gr", "throttle 2 r/s", "on", 6100, "expires in 40 min"],
+        [7, "Block /wp-json/wp/v2/users", "host suffix .example-shop.gr", "block", "on", 214, ""],
+        [19, "Challenge v2 on /checkout from CN", "host = example-shop.gr", "challenge_v2", "off", 380, "would match"],
+      ],
+      excludes: [
+        ["WAF rule exclude", "rule 402 · /wp-admin/admin-ajax.php", "this host", "3 h"],
+        ["Challenge exclude", "/.well-known/ (built in)", "all hosts", "never"],
+        ["Bypass list", "crawler prefixes (kind 1)", "node", "refreshed at release"],
+      ],
+      policies: [["Country", "CN", "challenge", 380], ["Fingerprint", "c28caa00", "deny", 92], ["ASN", "AS14061", "challenge_v2", 51]],
+    },
+    "www.example-shop.gr": {
+      req: { automation: 310, crawler: 2100, bot: 450, human: 6900 },
+      origin: { automation: 4, crawler: 12, bot: 3, human: 21 },
+      bytes: { automation: 1e6, crawler: 6e6, bot: 2e6, human: 1.9e7 },
+      peak: { automation: 0.4, crawler: 1.1, bot: 0.5, human: 4.2 },
+      differs: false,
+      posture: {
+        challenge: { v: [["v2", "danger"], ["auto", "info"]], why: "<b>← apex under attack</b>. Inherited from <span class='mono'>example-shop.gr</span>.", edit: "Vhost controls", inherit: true },
+        waf: { v: [["On", "ok"]], why: "No exclude matches this host.", edit: "WAF engine" },
+        proto: { v: [["HTTP/2", "ok"], ["HTTP/3 off", ""]], why: "Node default.", edit: "Vhost controls", inherit: true },
+        cache: { v: [["Off", ""]], why: "Mostly 301s to the apex; nothing cacheable.", edit: "Site cache" },
+        rules: { v: [["1 match", "info"]], why: "Rule #7 via <b>host suffix .example-shop.gr</b>.", edit: "Traffic rules", inherit: true },
+        clam: { v: [["Async scan", "ok"]], why: "Node default.", edit: "ClamAV", inherit: true },
+      },
+      pills: [["Redirect host · 94% 301", "info"]],
+      clients: [["crawler", "Googlebot", 1400, 6, 9], ["bot", "curl/8.5", 300, 2, 4], ["crawler", "bingbot", 500, 3, 7], ["automation", "Chrome 151 / Linux (no static)", 310, 4, 11], ["human", "Chrome 152 / Windows", 3100, 9, 0]],
+      waf: [[201, "rule_bad_ua", "WAF_BAD_UA", "challenge_v2", 22, 0, 6, "/"]],
+      funnel: { issued: 140, solved: 90, rejects: 4, banned: 0 },
+      grains: [["Vhost v2 (under attack)", 140, 90, 4]],
+      rules: [[7, "Block /wp-json/wp/v2/users", "host suffix .example-shop.gr", "block", "on", 3, ""]],
+      excludes: [["Challenge exclude", "/.well-known/ (built in)", "all hosts", "never"]],
+      policies: [["Country", "CN", "challenge", 4]],
+    },
+    "b2b.example-shop.gr": {
+      req: { automation: 9800, crawler: 300, bot: 5200, human: 7000 },
+      origin: { automation: 1720, crawler: 9, bot: 880, human: 410 },
+      bytes: { automation: 8.1e8, crawler: 1e7, bot: 3.2e8, human: 6.6e8 },
+      peak: { automation: 9.8, crawler: 0.3, bot: 7.7, human: 3.1 },
+      differs: true,
+      posture: {
+        challenge: { v: [["v1", "warn"], ["manual", "info"], ["lockdown", "danger"]], why: "<b>Manual arm with lockdown</b> until 18:00: no client exemption (crawlers held too). Apex v2 does not downgrade it.", edit: "Vhost controls" },
+        waf: { v: [["On", "ok"]], why: "No exclude matches this host.", edit: "WAF engine" },
+        proto: { v: [["HTTP/2", "ok"], ["HTTP/3 on", "ok"]], why: "<b>Opt-in</b> exact match <span class='mono'>b2b.example-shop.gr</span>.", edit: "Vhost controls" },
+        cache: { v: [["Static", "ok"], ["Micro 10 s", "warn"]], why: "Micro armed for the catalog. Session cookies and <span class='mono'>/my-account</span> are never cached. Micro hit 38%.", edit: "Site cache" },
+        rules: { v: [["2 match", "info"]], why: "#7 via host suffix; #21 throttle on <span class='mono'>/api/price</span>.", edit: "Traffic rules" },
+        clam: { v: [["Inline scan", "warn"]], why: "<b>Override</b>: inline mode (the upload waits for the scan).", edit: "ClamAV" },
+      },
+      pills: [["Lockdown until 18:00", "danger"], ["Micro-cached", "warn"]],
+      clients: [["automation", "Chrome 150 / Windows (no static, no XHR)", 7400, 1310, 96], ["bot", "PostmanRuntime/7.39", 3100, 620, 2], ["automation", "Firefox 140 / Linux (no static)", 2400, 410, 28], ["bot", "okhttp/4.12", 2100, 260, 5], ["crawler", "Googlebot", 300, 9, 4], ["human", "Chrome 152 / Windows", 4200, 260, 0]],
+      waf: [[310, "rule_cmd_params", "WAF_CMD_PARAM", "challenge_v2", 77, 0, 8, "/api/price?cmd=list"], [301, "rule_sqli", "WAF_SQLI", "block", 40, 0, 5, "/api/price"]],
+      funnel: { issued: 5100, solved: 1400, rejects: 0, banned: 0 },
+      grains: [["Vhost v1 (manual, lockdown)", 5100, 1400, 0]],
+      rules: [[7, "Block /wp-json/wp/v2/users", "host suffix .example-shop.gr", "block", "on", 0, ""], [21, "Throttle /api/price", "host = b2b.example-shop.gr", "throttle 5 r/s", "on", 3900, ""]],
+      excludes: [["HTTP/3 opt-in", "b2b.example-shop.gr", "this host", "never"], ["ClamAV mode override", "inline", "this host", "never"], ["Challenge exclude", "/.well-known/ (built in)", "all hosts", "never"]],
+      policies: [["Fingerprint", "c28caa00", "deny", 11]],
+    },
+  };
+  for (const [k, h] of Object.entries(HOSTS)) {
+    const per = {}; for (const c of CLASSES) per[c] = h.req[c] / 12;
+    h.series = series(k.length * 7919, per);
+  }
+
+  const POSTURE_KEYS = [["challenge", "Challenge"], ["waf", "WAF"], ["proto", "HTTP/2 · HTTP/3"], ["cache", "Site cache"], ["rules", "Traffic rules"], ["clam", "ClamAV"]];
+  let current = "example-shop.gr";
+
+  function renderHosts() {
+    const el = document.getElementById("hosts");
+    el.innerHTML = Object.entries(HOSTS).map(([name, h]) => {
+      const total = CLASSES.reduce((s, c) => s + h.req[c], 0);
+      return `<button type="button" class="hostchip" aria-pressed="${name === current}" data-host="${esc(name)}"><span class="dot${h.differs ? " diff" : ""}"></span>${esc(name)}<span class="rq">${fmt(total)} req</span></button>`;
+    }).join("") + `<span class="hostchip" style="cursor:default;opacity:.65">cpanel.example-shop.gr<span class="rq">panel host · own path</span></span>`;
+    document.getElementById("hostCount").textContent = `${Object.keys(HOSTS).length} hosts with traffic in this window`;
+    el.querySelectorAll("button[data-host]").forEach((b) => b.addEventListener("click", () => { current = b.dataset.host; render(); }));
+  }
+
+  function renderPosture(h) {
+    document.getElementById("posture").innerHTML = POSTURE_KEYS.map(([k, label]) => {
+      const p = h.posture[k];
+      return `<div class="ptile${p.inherit ? " inherit" : ""}"><div class="k">${label}</div><div class="v">${p.v.map(([t, c]) => `<span class="pill ${c}">${t}</span>`).join("")}</div><div class="why">${p.why}</div><a class="edit" href="#" onclick="return false">${p.edit} →</a></div>`;
+    }).join("");
+    document.getElementById("headPills").innerHTML = h.pills.map(([t, c]) => `<span class="pill ${c}">${esc(t)}</span>`).join("");
+  }
+
+  function legend(id) {
+    document.getElementById(id).innerHTML = CLASSES.map((c) => `<span><i style="background:var(--c-${c})"></i>${LABEL[c]}</span>`).join("");
+  }
+
+  function stackBar(vals) {
+    const t = CLASSES.reduce((s, c) => s + vals[c], 0);
+    return `<div class="sbar">${CLASSES.map((c) => `<span title="${LABEL[c]}: ${pct(vals[c], t)}" style="flex:0 0 calc(${(vals[c] / t) * 100}% - 2px);background:var(--c-${c})"></span>`).join("")}</div>`;
+  }
+
+  function botAction(k) {
+    if (k === "human") return `<span class="muted act">none</span>`;
+    if (k === "automation") return `<a class="act" href="#" onclick="return false">Challenge its IPs →</a>`;
+    return `<a class="act" href="#" onclick="return false">Throttle / deny UA →</a>`;
+  }
+
+  function renderOverview(h) {
+    const tr = CLASSES.reduce((s, c) => s + h.req[c], 0);
+    const to = CLASSES.reduce((s, c) => s + h.origin[c], 0);
+    const br = tr - h.req.human, bo = to - h.origin.human;
+    document.getElementById("ovTiles").innerHTML = [
+      ["Requests (1h)", fmt(tr), `${(tr / 3600).toFixed(1)} r/s avg`],
+      ["Origin time", fmt(to) + " s", "PHP/upstream seconds"],
+      ["Bot share · requests", pct(br, tr), "automation + crawler + bot"],
+      ["Bot share · origin", pct(bo, to), bo / to > 0.5 ? "bots cost more than visitors" : "visitors cost more"],
+    ].map(([k, v, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join("");
+    document.getElementById("ovBars").innerHTML =
+      `<div class="sbar-row"><div class="lbl">Requests</div>${stackBar(h.req)}</div><div class="sbar-row"><div class="lbl">Origin time</div>${stackBar(h.origin)}</div>`;
+    legend("legend1");
+
+    const hits = h.waf.reduce((s, r) => s + r[4], 0), blocked = h.waf.filter((r) => r[3] === "block").reduce((s, r) => s + r[4] - r[5], 0);
+    document.getElementById("secTiles").innerHTML = [
+      ["WAF hits", fmt(hits), `${fmt(blocked)} blocked`],
+      ["Challenges issued", fmt(h.funnel.issued), `${pct(h.funnel.solved, h.funnel.issued)} solved`],
+      ["v2 rejects", fmt(h.funnel.rejects), "own history rows"],
+      ["Banned after fails", fmt(h.funnel.banned), "malpath IPs only"],
+    ].map(([k, v, d]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join("");
+    document.getElementById("ovWafTop").innerHTML = h.waf.slice(0, 4).map((r) =>
+      `<tr><td><span class="mono">${r[0]}</span> ${esc(r[1])}</td><td>${modePill(r[3])}</td><td class="r">${fmt(r[4])}</td><td class="r">${fmt(r[6])}</td></tr>`).join("");
+
+    const bots = h.clients.filter((c) => c[0] !== "human").sort((a, b) => b[3] - a[3]);
+    const maxO = Math.max(...bots.map((c) => c[3]));
+    document.getElementById("ovBotRows").innerHTML = bots.map((c) =>
+      `<tr><td>${cls(c[0])}</td><td class="mono">${esc(c[1])}</td><td class="r">${fmt(c[2])}</td><td class="r">${fmt(c[3])} s</td><td style="min-width:120px"><div class="minibar" style="width:${(c[3] / maxO) * 100}%;background:var(--c-${c[0]})"></div><span class="muted" style="font-size:.72rem">${pct(c[3], to)}</span></td><td class="r">${c[4] ? fmt(c[4]) : "–"}</td><td>${botAction(c[0])}</td></tr>`).join("");
+  }
+
+  function modePill(m) {
+    const c = m === "block" ? "danger" : m === "challenge_v2" ? "warn" : m === "logonly" ? "" : "info";
+    return `<span class="pill ${c}">${m}</span>`;
+  }
+
+  function renderTraffic(h) {
+    const W = 900, H = 170, padB = 18, padL = 34;
+    const totals = h.series.map((p) => CLASSES.reduce((s, c) => s + p[c], 0));
+    const max = Math.ceil(Math.max(...totals) / 1000) * 1000 || 1;
+    const x = (i) => padL + (i / (h.series.length - 1)) * (W - padL - 6);
+    const y = (v) => H - padB - (v / max) * (H - padB - 8);
+    let svg = "";
+    for (let g = 0; g <= 4; g++) { const v = (max / 4) * g; svg += `<line class="grid" x1="${padL}" x2="${W - 6}" y1="${y(v)}" y2="${y(v)}"/><text x="2" y="${y(v) + 3}">${v >= 1000 ? (v / 1000).toFixed(1) + "k" : v}</text>`; }
+    const base = h.series.map(() => 0);
+    for (const c of [...CLASSES].reverse()) {
+      const top = h.series.map((p, i) => base[i] + p[c]);
+      const pts = top.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+      const bot = base.map((v, i) => `${x(i)},${y(v)}`).reverse().join(" ");
+      svg += `<polygon points="${pts} ${bot}" fill="var(--c-${c})" fill-opacity=".82"/>`;
+      top.forEach((v, i) => (base[i] = v));
+    }
+    ["−60m", "−45m", "−30m", "−15m", "now"].forEach((t, i) => { svg += `<text x="${padL + (i / 4) * (W - padL - 30)}" y="${H - 4}">${t}</text>`; });
+    document.getElementById("series").innerHTML = svg;
+    legend("legend2");
+    document.getElementById("classRows").innerHTML = CLASSES.map((c) =>
+      `<tr><td>${cls(c)}</td><td class="r">${fmt(h.req[c])}</td><td class="r">${fmt(h.origin[c])}</td><td class="r">${bytes(h.bytes[c])}</td><td class="r">${h.peak[c].toFixed(1)}</td></tr>`).join("");
+    document.getElementById("allClients").innerHTML = [...h.clients].sort((a, b) => b[3] - a[3]).map((c) =>
+      `<tr><td>${cls(c[0])}</td><td class="mono">${esc(c[1])}</td><td class="r">${fmt(c[2])}</td><td class="r">${fmt(c[3])}</td><td>${botAction(c[0])}</td></tr>`).join("");
+  }
+
+  function renderSecurity(h) {
+    document.getElementById("wafRows").innerHTML = h.waf.map((r) =>
+      `<tr><td class="mono">${r[0]}</td><td class="mono" style="font-size:.74rem">${esc(r[2])}</td><td>${modePill(r[3])}</td><td class="r">${fmt(r[4])}</td><td class="r">${r[5] ? `<span class="pill warn">${fmt(r[5])}</span>` : "–"}</td><td class="r">${fmt(r[6])}</td><td class="mono" style="font-size:.74rem;word-break:break-all">${esc(r[7])}</td></tr>`).join("");
+    const f = h.funnel;
+    document.getElementById("funnel").innerHTML = [["Issued", f.issued], ["Solved", f.solved], ["v2 rejected", f.rejects], ["Banned", f.banned]].map(([k, v], i) =>
+      `<div class="fstep"><div class="k">${k}</div><div class="v">${fmt(v)}</div><div class="k">${i ? pct(v, f.issued) : "100%"}</div></div>`).join("");
+    document.getElementById("grainRows").innerHTML = h.grains.map((g) =>
+      `<tr><td>${esc(g[0])}</td><td class="r">${fmt(g[1])}</td><td class="r">${fmt(g[2])}</td><td class="r">${fmt(g[3])}</td></tr>`).join("");
+  }
+
+  function renderConfig(h) {
+    document.getElementById("ruleRows").innerHTML = h.rules.map((r) =>
+      `<tr class="${r[4] === "off" ? "disabled-row" : ""}"><td class="mono">#${r[0]}</td><td>${esc(r[1])}${r[6] ? ` <span class="muted" style="font-size:.74rem">· ${esc(r[6])}</span>` : ""}</td><td class="mono" style="font-size:.76rem">${esc(r[2])}</td><td>${modePill(r[3])}</td><td>${r[4] === "on" ? '<span class="pill ok">enabled</span>' : '<span class="pill">disabled</span>'}</td><td class="r">${fmt(r[5])}</td><td><a class="act" href="#" onclick="return false">Open →</a></td></tr>`).join("");
+    document.getElementById("exRows").innerHTML = h.excludes.map((e) =>
+      `<tr><td>${esc(e[0])}</td><td class="mono" style="font-size:.76rem">${esc(e[1])}</td><td>${e[2] === "this host" ? '<span class="pill info">this host</span>' : `<span class="pill">${esc(e[2])}</span>`}</td><td class="muted">${esc(e[3])}</td></tr>`).join("");
+    document.getElementById("polRows").innerHTML = h.policies.map((p) =>
+      `<tr><td>${esc(p[0])}</td><td class="mono">${esc(p[1])}</td><td>${modePill(p[2])}</td><td class="r">${fmt(p[3])}</td></tr>`).join("");
+  }
+
+  function render() {
+    const h = HOSTS[current];
+    document.getElementById("hostInput").value = current;
+    renderHosts(); renderPosture(h); renderOverview(h); renderTraffic(h); renderSecurity(h); renderConfig(h);
+  }
+
+  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((x) => x.setAttribute("aria-selected", String(x === t)));
+    document.querySelectorAll("[data-panel]").forEach((p) => (p.hidden = p.dataset.panel !== t.dataset.tab));
+  }));
+  document.getElementById("hostInput").addEventListener("change", (e) => { if (HOSTS[e.target.value.trim()]) { current = e.target.value.trim(); render(); } });
+  document.getElementById("themeBtn").addEventListener("click", () => {
+    const r = document.documentElement;
+    const dark = r.dataset.theme ? r.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    r.dataset.theme = dark ? "light" : "dark";
+  });
+  render();
+})();
+</script>
