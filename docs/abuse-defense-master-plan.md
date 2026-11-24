@@ -981,6 +981,10 @@ already opened.
    a minute and no static file, POST or XHR in 10 minutes (the separator the
    2026-11-24 fleet read measured: 95%+ of humans fetch static files or send
    XHR/POSTs; the Chrome/152 wave sent neither). Nothing reads it to act.
+   The 24 h ring survives a restart (`traffic_mix_persist.go`: saved every
+   5 minutes and on shutdown to `/var/lib/cfm/traffic_mix.json.gz`, 0600,
+   restored at start). cfm-web keeps the per-class 5-minute requests for
+   14 days (`fleet:poll-traffic`).
    **Exit contract (D3):** review by **2026-12-22**, operator decides. It must
    show, fleet-wide: how often `automation` fires on a vhost whose traffic the
    operator judged human (spot-check the top automation clients against the

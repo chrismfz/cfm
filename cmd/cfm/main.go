@@ -866,6 +866,11 @@ func runDaemon(args []string) {
 	edgeStore := edgeban.New(edgeban.DefaultPath)
 	edgeStore.Load()
 	edgeban.SetDefault(edgeStore)
+
+	// The Web Traffic page's 24 h survive a restart: restored here, before
+	// the log tailers count anything, then saved every 5 minutes and on
+	// shutdown (watchTTLBanShutdown).
+	startTrafficMixPersist(ctx)
 	go func() {
 		waitTTLBanRestore(ttlRestored)
 		runEdgeBanReconcile(edgeStore, be)
