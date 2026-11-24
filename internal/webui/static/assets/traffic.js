@@ -67,7 +67,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
   const st = {
     auto: true, timer: null, mix: null, challenged: new Map(), rules: [], chart: null, dialogClient: null, busy: false,
     opener: null, lastIPs: [], undoTimer: null,
-    trules: [], emClient: null, emAction: "", emOpener: null,
+    trules: [], trulesLoaded: false, emClient: null, emAction: "", emOpener: null,
   };
 
   const REFRESH_MS = 30000;
@@ -279,7 +279,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
       ]);
       // A failed rules read keeps the last list (and its priorities) rather
       // than showing "none active".
-      if (trules && Array.isArray(trules.rows)) st.trules = trules.rows;
+      if (trules && Array.isArray(trules.rows)) { st.trules = trules.rows; st.trulesLoaded = true; }
       st.mix = mix;
       st.challenged = new Map();
       for (const v of Array.isArray(vhosts) ? vhosts : []) {
@@ -454,7 +454,8 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     show(emRows.vhosts, el.emWhere.value === "list");
 
     const o = emOpts();
-    const built = buildEmergencyRule(o);
+    // The slot is chosen against the node's rules: never without them.
+    const built = st.trulesLoaded ? buildEmergencyRule(o) : { error: "The traffic rules could not be read yet (the slot is picked against them): Refresh now." };
     const secs = Number(st.mix && st.mix.window_sec) || 0;
     const rps = currentRate(c, secs);
     const parts = [];
@@ -478,9 +479,10 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
 
     const cav = [];
     if (deny && ips) cav.push("A deny returns 403 to everyone on those addresses: a real visitor behind the same carrier NAT or /64 is refused too. For residential addresses prefer the challenge.");
+    if (ips) cav.push("A client that already solved a challenge keeps passing (its clearance cookie is honoured before any rule) until the cookie expires: for a solving farm, challenge its IPs first, which revokes their clearance.");
     if (deny && !ips) cav.push("Every client sending that User-Agent gets 403, on every IP.");
     if (!ips && c.class === "crawler") cav.push("A crawler whose IPs are on the static crawler bypass list (Google, Bing, Apple, DuckDuckGo, …) never reaches traffic rules: the rule will have no effect on it.");
-    cav.push("The rule runs before your own rules on those vhosts (allows included) and ends by itself; end or extend it under Active emergency rules. Clients holding a clearance cookie are not affected.");
+    cav.push("The rule runs before your own rules on those vhosts (allows included) and ends by itself; end or extend it under Active emergency rules.");
     el.emCaveat.textContent = cav.join(" ");
   }
 
@@ -518,6 +520,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
 
   async function applyEmergency() {
     if (!st.emClient || st.busy) return;
+    if (!st.trulesLoaded) { flash("✖ the traffic rules could not be read yet: Refresh now", "danger"); return; }
     const built = buildEmergencyRule(emOpts());
     if (built.error) { flash(`✖ ${built.error}`, "danger"); return; }
     st.busy = true;
