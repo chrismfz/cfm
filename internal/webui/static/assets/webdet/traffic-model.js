@@ -144,6 +144,23 @@ export function topIPs(client, n) {
   return { ips: picked.map((r) => r.ip), coverage: share(got, all), known: list.length, total: num(client && client.ips_last_hour) };
 }
 
+// Client ranking (the clients table's sortable columns). `param` is the
+// traffic-mix API's `sort` (TrafficMixSorts in traffic_mix.go): the node
+// picks the top N by it. A per-second rate is requests over the same window,
+// so "rate" ranks as requests.
+export const CLIENT_SORTS = Object.freeze({
+  origin: { param: "origin", label: "origin time" },
+  requests: { param: "requests", label: "requests" },
+  rate: { param: "requests", label: "request rate" },
+  bytes: { param: "bytes", label: "traffic" },
+  ips: { param: "ips", label: "distinct IPs (last hour; bot and automation clients only)" },
+});
+export const DEFAULT_CLIENT_SORT = "origin";
+
+export function clientSort(key) {
+  return Object.prototype.hasOwnProperty.call(CLIENT_SORTS, key) ? key : DEFAULT_CLIENT_SORT;
+}
+
 // clientActions lists what the page offers for one client row. Each action:
 // { id, label, kind: "primary"|"quiet"|"danger" }. See the guardrails above;
 // which targets a deny/throttle may use is emergency-model.js targetsFor.

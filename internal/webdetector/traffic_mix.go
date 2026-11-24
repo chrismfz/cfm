@@ -49,6 +49,7 @@ package webdetector
 
 import (
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -558,6 +559,27 @@ const trafficMixNote = "classes are labels by UA and behaviour, never an enforce
 // every figure to that vhost (the per-minute peaks and the series then come
 // from its 5-minute buckets). hostLimit / clientLimit cap the lists.
 func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host string, mergeWWW bool, hostLimit, clientLimit int) TrafficMix {
+	return s.SnapshotSorted(now, window, host, mergeWWW, hostLimit, clientLimit, TrafficMixSortOrigin)
+}
+
+// Client orders of the traffic mix: which clients make the top N, and in
+// what order (the Web Traffic page's sortable columns; a per-second rate is
+// requests over the same window, so it sorts as requests).
+const (
+	TrafficMixSortOrigin   = "origin"
+	TrafficMixSortRequests = "requests"
+	TrafficMixSortBytes    = "bytes"
+	TrafficMixSortIPs      = "ips"
+)
+
+// TrafficMixSorts lists the accepted client orders (the API validates against it).
+var TrafficMixSorts = []string{TrafficMixSortOrigin, TrafficMixSortRequests, TrafficMixSortBytes, TrafficMixSortIPs}
+
+// SnapshotSorted is Snapshot with the clients picked and ordered by sortBy
+// (one of TrafficMixSorts; anything else is origin time). The selection
+// happens before the cap, so "by requests" returns the busiest clients, not
+// the costliest ones reordered.
+func (s *trafficMixStore) SnapshotSorted(now time.Time, window time.Duration, host string, mergeWWW bool, hostLimit, clientLimit int, sortBy string) TrafficMix {
 	if window < tmBucketSec*time.Second {
 		window = tmBucketSec * time.Second
 	}
@@ -772,14 +794,31 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 		}
 		out.Clients = append(out.Clients, c)
 	}
+	// The chosen key first, then origin time and requests, then the name:
+	// a stable order for equal keys.
+	key := func(c TrafficMixClient) float64 {
+		switch sortBy {
+		case TrafficMixSortRequests:
+			return float64(c.Requests)
+		case TrafficMixSortBytes:
+			return float64(c.Bytes)
+		case TrafficMixSortIPs:
+			return float64(c.IPs)
+		}
+		return c.OriginSec
+	}
 	sort.Slice(out.Clients, func(i, j int) bool {
-		if out.Clients[i].OriginSec != out.Clients[j].OriginSec {
-			return out.Clients[i].OriginSec > out.Clients[j].OriginSec
+		a, b := out.Clients[i], out.Clients[j]
+		if ka, kb := key(a), key(b); ka != kb {
+			return ka > kb
 		}
-		if out.Clients[i].Requests != out.Clients[j].Requests {
-			return out.Clients[i].Requests > out.Clients[j].Requests
+		if a.OriginSec != b.OriginSec {
+			return a.OriginSec > b.OriginSec
 		}
-		return out.Clients[i].Client < out.Clients[j].Client
+		if a.Requests != b.Requests {
+			return a.Requests > b.Requests
+		}
+		return a.Client < b.Client
 	})
 	if len(out.Clients) > clientLimit {
 		out.Clients = out.Clients[:clientLimit]
@@ -814,7 +853,9 @@ func tmClassOut(i int, c tmCounters, secs, peak float64, peakAt int64, full bool
 }
 
 // handleTrafficMix serves GET /api/v1/webdet/traffic-mix
-// ?window=<5m..24h, default 1h>&host=<vhost>&merge_www=1&hosts=<n>&clients=<n>.
+// ?window=<5m..24h, default 1h>&host=<vhost>&merge_www=1&hosts=<n>&clients=<n>
+// &sort=<origin|requests|bytes|ips> (which clients make the top n, and their
+// order; default origin time; anything else is a 400).
 // Admin-only (docs/endpoint_scope_inventory.md): the node-wide view names
 // other tenants' vhosts, clients and IPs.
 func (e *Engine) handleTrafficMix(w http.ResponseWriter, r *http.Request) {
@@ -839,5 +880,13 @@ func (e *Engine) handleTrafficMix(w http.ResponseWriter, r *http.Request) {
 		return n
 	}
 	mergeWWW := q.Get("merge_www") == "1" || strings.EqualFold(q.Get("merge_www"), "true")
-	writeJSON(w, http.StatusOK, trafficMix.Snapshot(time.Now(), window, q.Get("host"), mergeWWW, atoi("hosts"), atoi("clients")))
+	sortBy := strings.ToLower(strings.TrimSpace(q.Get("sort")))
+	if sortBy == "" {
+		sortBy = TrafficMixSortOrigin
+	}
+	if !slices.Contains(TrafficMixSorts, sortBy) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sort: one of " + strings.Join(TrafficMixSorts, ", ")})
+		return
+	}
+	writeJSON(w, http.StatusOK, trafficMix.SnapshotSorted(time.Now(), window, q.Get("host"), mergeWWW, atoi("hosts"), atoi("clients"), sortBy))
 }

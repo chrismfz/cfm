@@ -27,6 +27,7 @@ import {
   CLASS_ORDER, CLASS_LABELS, CLASS_COLORS, OTHER_KEY,
   share, fmtPct, fmtCount, fmtBytes, fmtMbps, fmtRate, fmtSeconds,
   classMap, summary, segments, hostBotShare, topIPs, clientActions, challengeableIPs,
+  CLIENT_SORTS, clientSort,
 } from "./webdet/traffic-model.js";
 import {
   EMERGENCY_DURATIONS, EMERGENCY_DEFAULT_SEC, uaPattern, ipTargets, targetsFor, currentRate,
@@ -68,6 +69,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     auto: true, timer: null, mix: null, challenged: new Map(), rules: [], chart: null, dialogClient: null, busy: false,
     opener: null, lastIPs: [], undoTimer: null,
     trules: [], trulesLoaded: false, emClient: null, emAction: "", emOpener: null,
+    sort: (() => { try { return clientSort(localStorage.getItem("cfm-traffic-sort")); } catch (e) { return clientSort(""); } })(),
   };
 
   const REFRESH_MS = 30000;
@@ -159,7 +161,17 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     }, true);
   }
 
+  function renderSortHeaders() {
+    for (const b of document.querySelectorAll("button.th-sort[data-sort]")) {
+      const on = b.getAttribute("data-sort") === st.sort;
+      b.closest("th").setAttribute("aria-sort", on ? "descending" : "none");
+    }
+    const note = document.getElementById("clientsSortNote");
+    if (note) note.textContent = `Top clients by ${CLIENT_SORTS[st.sort].label}.`;
+  }
+
   function renderClients(mix) {
+    renderSortHeaders();
     const list = (mix && Array.isArray(mix.clients)) ? mix.clients : [];
     const secs = Number(mix && mix.window_sec) || 1;
     const totalOrigin = Number(mix && mix.total && mix.total.origin_sec) || 0;
@@ -272,7 +284,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     const win = el.windowSelect.value || "1h";
     try {
       const [mix, vhosts, rules, trules] = await Promise.all([
-        api(`/v1/webdet/traffic-mix?window=${encodeURIComponent(win)}&hosts=20&clients=25`),
+        api(`/v1/webdet/traffic-mix?window=${encodeURIComponent(win)}&hosts=20&clients=25&sort=${encodeURIComponent(CLIENT_SORTS[st.sort].param)}`),
         api("/v1/challenge/vhosts").catch(() => []),
         api("/v1/webdet/ua-emergency").catch(() => []),
         api("/v1/webdet/rules").catch(() => null),
@@ -598,6 +610,16 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
 
   // ── wiring ────────────────────────────────────────────────────────────────
 
+  for (const b of document.querySelectorAll("button.th-sort[data-sort]")) {
+    b.addEventListener("click", () => {
+      const next = clientSort(b.getAttribute("data-sort"));
+      if (next === st.sort) return;
+      st.sort = next;
+      try { localStorage.setItem("cfm-traffic-sort", next); } catch (e) { /* per-viewer convenience only */ }
+      renderSortHeaders();
+      loadAll();
+    });
+  }
   el.clientsBody.addEventListener("click", (ev) => {
     const btn = ev.target.closest("button[data-act]");
     if (!btn) return;

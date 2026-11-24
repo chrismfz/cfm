@@ -979,7 +979,8 @@ type trafficMixInput struct {
 	Host     string `json:"host,omitempty" jsonschema:"limit every figure to ONE vhost (its class split and 5-minute series; no status mix, edge_served or clients per vhost); omit for the whole node with the top vhosts and clients"`
 	MergeWWW bool   `json:"merge_www,omitempty" jsonschema:"with host: count example.com and www.example.com together"`
 	Hosts    int    `json:"hosts,omitempty" jsonschema:"how many top vhosts (by origin time) to list; default 20, max 500"`
-	Clients  int    `json:"clients,omitempty" jsonschema:"how many top clients (by origin time) to list; default 20, max 500"`
+	Clients  int    `json:"clients,omitempty" jsonschema:"how many top clients to list; default 20, max 500"`
+	Sort     string `json:"sort,omitempty" jsonschema:"which clients make the list and in what order: origin (default: origin time), requests, bytes, or ips (distinct IPs in the last hour, automation and bot clients only)"`
 }
 
 func registerTrafficMix(srv *mcp.Server, d Deps) {
@@ -1000,6 +1001,9 @@ func registerTrafficMix(srv *mcp.Server, d Deps) {
 		}
 		setInt(q, "hosts", in.Hosts)
 		setInt(q, "clients", in.Clients)
+		if in.Sort != "" {
+			q.Set("sort", in.Sort)
+		}
 		return dispatchJSON(ctx, d, "/api/v1/webdet/traffic-mix", q)
 	})
 }

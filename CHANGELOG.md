@@ -20,7 +20,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Web Traffic: rank the clients by any column.** Click Requests, Rate,
+  Traffic, Origin time or IPs: the node picks the top clients by that column
+  (the traffic mix API's new `sort=origin|requests|bytes|ips`, also on the MCP
+  `traffic_mix` tool), so "by requests" shows the busiest clients, not the
+  costliest ones reordered. The choice is remembered per browser.
 
 ## 2026.11.24
 
