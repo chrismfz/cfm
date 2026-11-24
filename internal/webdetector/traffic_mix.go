@@ -591,9 +591,9 @@ type TrafficMixClient struct {
 	// EvidenceShare (browser-UA clients) is the share of its last hour's
 	// requests a person's browser sends: static files, POSTs, XHR.
 	EvidenceShare *float64 `json:"evidence_share,omitempty"`
-	// Distributed is set on a browser-UA ("human") client whose last hour
-	// reads as a scraper spread over many addresses (distributedTell): a
-	// LABEL, never an enforcement decision.
+	// Distributed is set on a browser-UA ("human") client whose last hour of
+	// the window (all of it when shorter) reads as a scraper spread over many
+	// addresses (distributedTell): a LABEL, never an enforcement decision.
 	Distributed *TrafficMixDistributed `json:"distributed,omitempty"`
 }
 
@@ -713,7 +713,10 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 	}
 	clients := map[ck]*tmClient{}
 	// The last hour of the window, per client: requests and evidence (the
-	// distributed tell reads the hour its IPs cover).
+	// distributed tell reads the hour its IPs cover). A window shorter than
+	// an hour is read whole: its thresholds (200 requests, 50 IPs) then apply
+	// to less time, so a 15-minute view flags fewer populations than the 1 h
+	// default, never more.
 	hourStat := map[ck]*[2]int64{}
 	var series []TrafficMixPoint
 	var peak [tmClasses]float64
