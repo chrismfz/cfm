@@ -86,9 +86,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   time vs traffic by class, a 5-minute chart, the clients to act on (rate,
   traffic, origin share, IPs) and the bots-vs-humans split per vhost. Actions:
   challenge a client's top IPs (a per-IP challenge, never the whole vhost and
-  never a ban), a box-wide UA throttle/block for UA families only (a browser
-  UA is never offered one: every real Chrome of that version sends the same
-  string), lift a manual vhost challenge, undo a UA rule.
+  never a ban; an IPv6 client's /64 cannot be challenged per IP and is left
+  out, said so), and **Deny… / Throttle… for a while**: an expiring traffic
+  rule (15 m to 7 d) keyed on a UA family or on the client's top IPs (up to
+  500, /64s included), on every vhost or a chosen list, as a 403, a total
+  budget (the page suggests a quarter of the client's current rate and shows
+  the share it would cut) or a per-client limit. A browser UA is never a UA
+  target (every real Chrome of that version sends the same string); likely
+  humans are offered nothing. The emergency rules run before the operator's
+  own rules (priority 1–9) and are listed under "Active emergency rules" with
+  +1 h and End now. Also: lift a manual vhost challenge, undo a `cfm bots`
+  UA rule.
 - **`POST /api/v1/challenge/ip/add` and `/remove`** (admin-only): the
   operator's per-IP challenge on a list of up to 500 IPs (TTL 5 m to 24 h,
   default 1 h), and lifting it (the page's Undo). It also revokes the IP's

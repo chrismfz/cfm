@@ -61,7 +61,12 @@ rules before downgrading below those versions.
 ## Emergency rules: expiry and a total throttle
 
 For an incident (a crawler on hundreds of IPs loading a node) a rule can end by
-itself and can cap the matching traffic as a whole. Like every rule, it never
+itself and can cap the matching traffic as a whole. cfm-admin's Web Traffic
+page makes these from a client row ("Deny…" / "Throttle…",
+`webdet/emergency-model.js`): note `emergency: <reason>`, priority 1–9 (so they
+run before the operator's own rules, allows included), a UA family as
+`*<family>*` or the client's top IPs, and lists the live ones with +1 h /
+End now. Like every rule, it never
 sees a client that leaves `cfm.lua` earlier: an address in
 `challenge_waf_bypass.conf` (Google, Bing and the other listed crawler and CDN
 ranges, Step 0) or a client holding a valid clearance cookie (Step 2b). A

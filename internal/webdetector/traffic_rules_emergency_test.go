@@ -304,3 +304,27 @@ func TestChallengeAccessRefusesEmergencyExtras(t *testing.T) {
 		t.Fatalf("an access entry at the cap: %v", err)
 	}
 }
+
+// The Web Traffic page's emergency payloads (emergency-model.js
+// buildEmergencyRule, as the browser posts them) are rules this daemon takes.
+func TestWebTrafficEmergencyPayloadsAccepted(t *testing.T) {
+	s := newTrafficRuleStore(filepath.Join(t.TempDir(), "rules.json"))
+	until := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	for _, body := range []string{
+		`{"enabled":true,"priority":1,"scope":{"vhosts":["*"]},"match":{"ua_any":["*meta-externalagent*"],"until":"` + until + `"},"action":{"type":"throttle_total","rate_rps":2.5,"per":"node"},"note":"emergency: meta load"}`,
+		`{"enabled":true,"priority":2,"scope":{"vhosts":["shop.gr"]},"match":{"ip_any":["83.212.158.22","2a02:587:1:2::/64"],"until":"` + until + `"},"action":{"type":"block"},"note":"emergency: scraper"}`,
+		`{"enabled":true,"priority":3,"scope":{"vhosts":["*"]},"match":{"ua_any":["-"],"until":"` + until + `"},"action":{"type":"throttle","profile":"hard_bot"},"note":"emergency: no UA"}`,
+	} {
+		var r TrafficRule
+		if err := json.Unmarshal([]byte(body), &r); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Add(r); err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+	}
+	got := s.Simulate(TrafficRuleEvalInput{Host: "shop.gr", IP: "2a02:587:1:2::99", UA: "Mozilla/5.0 Chrome/152", Path: "/"})
+	if !got.Matched || got.Action != "block" {
+		t.Fatalf("an address inside the /64 is not denied: %+v", got)
+	}
+}
