@@ -774,7 +774,8 @@ of evasion. Modes: 430-436 `logonly`, 437 `challenge_v2`, 438 `block` (armed,
 
 ### Rule 415 — `rule_upload_content_deep`
 
-Family `WAF_UPLOAD_CONTENT`, `logonly`. 402's PHP / JSP openers (`<?php`, `<?=`
+Family `WAF_UPLOAD_CONTENT`, **`block`** since 2026-11-24, its ban held per
+rule (`HoldAutoblock`, `RULE_415 = 0`). 402's PHP / JSP openers (`<?php`, `<?=`
 with a PHP expression after it, `<jsp:`) in uploaded **file** parts (a
 `filename=`) past 402's 2 KB window: a webshell after 2 KB of image data, or
 in a second file. Each part is read from its start, to the multipart budget
@@ -789,11 +790,20 @@ attribute; `<?xml:` is a goto label and counts; or `<script
 language="php">`). So `$_POST` in a ticket or an attached `error.log` is no
 402 FP; `<?php` / `<?=` alone still block anywhere in the window.
 
-**Why logonly:** these bytes were never scanned before, and a text attachment
-quoting PHP would be a 6 h ban at block. 14-day fleet read (2026-11-17): 2
-hits, both media-library uploads by Greek admins. Promote with
-`rule_upload_content_deep = "block"` after a clean burn-in; the family is armed
-through 402, so the promotion arms 415 too. Exempt on the same legit-archive
+**Promotion (2026-11-24).** Logonly from 2026-10-09: these bytes were never
+scanned before, and a text attachment quoting PHP would be a 6 h ban at block.
+Two fleet reads before the promotion:
+- 14 days to 2026-11-17: 2 hits, both media-library uploads by Greek admins,
+  which the log could not name (hence the extension tag);
+- the 7 days after: 1 hit, a `.png` carrying `<?php` POSTed to Bricksforge's
+  `/wp-json/bricksforge/v1/form_file_upload` on novamotors.sa (orion), from
+  Venezuela. Nothing landed (no new file under uploads, no Imunify hit).
+
+At `block` the edge answers 403. The ban is held: `WAF_UPLOAD_CONTENT` is
+armed by 402, and a ban for a real file that quotes PHP would be 6 h;
+`RULE_415 = 1` arms it. Held, it runs late with the other held rules
+(after every armed block rule), so a request 402 or an armed rule also catches
+keeps that rule's headline and ban. Exempt on the same legit-archive
 endpoints as 402.
 
 ### Rule 430 — `rule_htaccess_poisoning`
@@ -1056,7 +1066,8 @@ matched only dmkomotinis.gr in 7 days. The burn-in above was the measurement.
 
 ### Rule 417 — `rule_php_webshell_body_deep`
 
-Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, `logonly`. 404 scores PHP in
+Reason `WAF_PHP_WEBSHELL_BODY:DEEP_<404's tag>`, **`block`** since
+2026-11-24, its ban held per rule (`HoldAutoblock`, `RULE_417 = 0`). 404 scores PHP in
 a textual POST body over its first 2 KB only (`php_webshell_max_scan_len`).
 Two compromises passed beyond it: a plugin-editor save with an eval of a
 request header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), and a
@@ -1081,18 +1092,31 @@ urlencoded body with `multipart/form-data` in a Content-Type parameter was
 read by neither rule), and its early-out admits `assert` / `popen` /
 `proc_open`.
 
-**Order.** Runs late, after every rule but 612 and 530: earlier, it took the
-headline (and the push) from the logonly body rules after it (a
-`wget || curl` dropper reported 417 instead of 331). It shows in
-`also_rule_ids` instead.
+**Order.** Runs late, after every armed block rule (a held block evaluated
+earlier would end the check before an armed rule's ban) and after the logonly
+body rules (at step 15 it took the headline and the push from 331 on a
+`wget || curl` dropper).
 
 **Cost.** ~0.17 ms on a 20 KB form with no marker; nothing on a short body
 404 already read; ~+0.4 ms on a 30 KB post with HTML; ~+5 ms on a 30 KB PHP
 file saved through an editor (rare).
 
-**Why logonly.** A whole legitimate plugin file saved through an editor is
-scored too (a global `exec(` / `system(` plus a superglobal reaches 5). Read
-its hits fleet-wide before any promotion.
+**Promotion (2026-11-24).** Logonly for a 7-day fleet burn-in on 8 nodes: 5
+hits, every one an attacker, 0 false positives:
+- kspk.gr (earth), twice: a Joomla tool posting `system($_GET…)` into each
+  template's `error.php` through the template editor, then fetching
+  `error_<rand>.php`. It had no admin session (every POST 302), and the
+  files are unchanged;
+- 2001.gr (earth): an `eval` POST to `com_ajax&plugin=helix3` from AWS, on a
+  WordPress site (a blind spray).
+
+The template-editor tool shows why logonly was not enough: with stolen
+credentials its POST would have written the file. At `block` the edge answers
+403. The ban is held, because a whole legitimate plugin file saved through an
+editor still scores (a global `exec(` / `system(` plus a superglobal reaches
+5), and that save must cost a 403, not a 6 h ban. Remedy for such a site: a
+rule-scoped exclude on the editor path (`cfm webtop waf exclude add <path>
+--type path --rule 417 --scope host`). `RULE_417 = 1` arms the ban.
 
 ### Fleet read of 702, 10029 and 415 (2026-11-17, 14 days, 8 nodes)
 
@@ -1100,7 +1124,7 @@ its hits fleet-wide before any promotion.
 |---|---:|---|---|
 | 10029 Fabrik `[eval]` | 10 | all `EVAL_ZERO` (`[eval]=0`) from Greek users on three Fabrik sites (Fabrik's own form); `EVAL_ARG` only from the dmkomotinis attacker | **block**, armed (WAF_CVE): the first probe bans |
 | 702 C2 tunnel | 355 | 176 `RENTRY` on `zort.me/shorten` (a URL shortener we host, the known FP source of 611); the rest comment spam with tunnel links, a Joomla `component/ajax` poller, `/wp-22.php?sfilecontent=<?php` writers | stays `challenge_v2`; `zort.me` needs a rule-scoped exclude (operator) |
-| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stays logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`) |
+| 415 upload deep | 2 | both `/wp-admin/async-upload.php` from Greek admins (media library) | stayed logonly; its tag now names the file's extension (`UPLOAD_PHP_TAG_DEEP:<ext>`). Promoted to block (ban held) on 2026-11-24, see "Rule 415" |
 
 ## Rule 501 — `rule_auth_burst` (login submissions)
 

@@ -1,5 +1,5 @@
 -- Tests for rule 417 (rule_php_webshell_body_deep, WAF_PHP_WEBSHELL_BODY,
--- logonly): 404's PHP-source scorer over the whole body the edge read, when
+-- block since 2026-11-24, ban held): 404's PHP-source scorer over the whole body the edge read, when
 -- 404's 2 KB head scored nothing.
 --
 -- The positives rebuild what passed the edge on the fleet:
@@ -90,9 +90,10 @@ local function clean(c, label)
 end
 
 -- ── Shipped configuration ──────────────────────────────────────────────────
-check(waf.get_config().rule_php_webshell_body_deep == "logonly", "417 ships logonly")
+check(waf.get_config().rule_php_webshell_body_deep == "block", "417 ships block")
 check(fires(req(editor_save(PLUGIN_HEAD .. INJECTION .. PLUGIN_TAIL)), "defaults: the orion plugin-editor save", 417,
-            "WAF_PHP_WEBSHELL_BODY:DEEP_RAW_EVAL") == "logonly", "defaults: logonly")
+            "WAF_PHP_WEBSHELL_BODY:DEEP_RAW_EVAL") == "block", "defaults: block")
+check(waf.get_config().rule_upload_content_deep == "block", "415 ships block")
 
 set_only({ rule_php_webshell_body = "challenge_v2", rule_php_webshell_body_deep = "logonly" })
 
@@ -254,6 +255,37 @@ do
   check(det.detect_upload_content_deep(mp("noext", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:none", "415 tag: no extension")
   check(det.detect_upload_content_deep(mp("a.verylongextension", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:verylong", "415 tag: capped at 8")
   check(det.detect_upload_content_deep(mp("a.p-h.p", pad .. "<?php echo 1;"), H) == "UPLOAD_PHP_TAG_DEEP:p", "415 tag: last segment, alnum only")
+end
+
+-- ── 415 / 417 are block with their bans held, so they run late: an armed
+-- block rule recorded after their old place (332, WAF_RCE, step 60d) still
+-- owns the headline and the ban (promotion 2026-11-24).
+do
+  set_only({ rule_php_code_args = "block", rule_upload_content_deep = "block",
+             rule_php_webshell_body = "challenge_v2", rule_php_webshell_body_deep = "block" })
+  local q = "x=" .. urlenc("file_put_contents('a.php','<?php system($_GET[c]);')")
+  -- 415: a .png carrying <?php past 402's head (the novamotors.sa Bricksforge upload).
+  local c = req("--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"x.png\"\r\nContent-Type: image/png\r\n\r\n" ..
+                string.rep("\137PNG", 1000) .. "<?php system($_GET[c]); ?>\r\n--b--\r\n",
+                "/wp-json/bricksforge/v1/form_file_upload", "multipart/form-data; boundary=b")
+  local hit, reason, _, action, _, rid = waf.check(c)
+  check(hit and rid == 415 and action == "block", "415 alone blocks (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
+  c.args = q; c.raw_uri = c.uri .. "?" .. q
+  hit, reason, _, action, _, rid = waf.check(c)
+  check(hit and rid == 332, "415 + an armed 332: 332 owns the headline (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
+  -- 417: the orion plugin-editor save.
+  local e = req(editor_save(PLUGIN_HEAD .. INJECTION .. PLUGIN_TAIL))
+  hit, reason, _, action, _, rid = waf.check(e)
+  check(hit and rid == 417 and action == "block", "417 alone blocks (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
+  e.args = q; e.raw_uri = e.uri .. "?" .. q
+  hit, reason, _, action, _, rid = waf.check(e)
+  check(hit and rid == 332, "417 + an armed 332: 332 owns the headline (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
+  -- Source order: 415 and 417 are recorded after 332.
+  local src = io.open("configs/lua/cfm_waf.lua"):read("*a")
+  local at332 = src:find("RULE_IDS.rule_php_code_args)", 1, true)
+  local at415 = src:find("RULE_IDS.rule_upload_content_deep)", 1, true)
+  local at417 = src:find("RULE_IDS.rule_php_webshell_body_deep)", 1, true)
+  check(at332 and at415 and at417 and at332 < at415 and at332 < at417, "415 / 417 recorded after 332")
 end
 
 -- ── Disabled ───────────────────────────────────────────────────────────────

@@ -113,7 +113,7 @@ local CFG = {
                                          --  multipart/binary CTs; 0 hits over 6 weeks ×
                                          --  5 servers — no legit traffic produces these bytes)
   rule_php_webshell_body = "challenge_v2",  -- raw POST-body PHP webshell scorer (<?php + exec/superglobals)
-  rule_php_webshell_body_deep = "logonly", -- rule 417: 404's scorer over the whole body the edge read (php_webshell_deep_scan_len, 32 KB), when 404's 2 KB head scored nothing. PHP source saved through a form field lands past 2 KB: a plugin-editor save with an eval of a header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), a file manager's cmd=put / a webshell editor saving a shell whose comment header fills the first 2 KB ("ANTI-BLANK & WAF BYPASS", zerooneoliveoil.gr, rigel, 2026-11-17). Logonly through burn-in: a whole legitimate plugin file saved through an editor is scored too.
+  rule_php_webshell_body_deep = "block", -- rule 417: 404's scorer over the whole body the edge read (php_webshell_deep_scan_len, 32 KB), when 404's 2 KB head scored nothing. PHP source saved through a form field lands past 2 KB: a plugin-editor save with an eval of a header at line 32 (apolymanseisantoniou.gr, orion, 2026-11-15), a file manager's cmd=put / a webshell editor saving a shell whose comment header fills the first 2 KB ("ANTI-BLANK & WAF BYPASS", zerooneoliveoil.gr, rigel, 2026-11-17). Promoted logonly→block 2026-11-24 (burn-in: 5 hits in 7 days on 8 nodes, every one an attacker: a Joomla template-editor `system($_GET)` tool on kspk.gr twice, a Helix3 eval spray; 0 FP); ban held per rule (HoldAutoblock, RULE_417 = 0): a whole legitimate plugin file saved through an editor still scores, and that must be a 403, not a 6 h ban. Recorded late, with the held rules.
   rule_b64_injection     = "challenge_v2",  -- POST-body base64 decode heuristic scanner
 
   -- ── Auth / brute / XML-RPC ────────────────────────────────────────────────
@@ -271,7 +271,7 @@ local CFG = {
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
   rule_upload_content     = "block",  -- webshell bytes / PHP tags inside uploaded file content
   rule_php_file_body = "block", -- rule 416: a non-multipart POST / PUT / PATCH body that IS a PHP file (opens with <?php / <?=, or a GIF header and one), whatever its Content-Type says: 402 reads multipart, 404 reads textual types and only 2 KB, and a real form / JSON / XML body never opens with a PHP tag. A php://input dropper's upload, as dmkomotinis.gr's up.php took yavuzshell.php as application/octet-stream (2026-11-12). Promoted logonly→block 2026-11-17 (burn-in: 289 hits / 269 IPs in 7 days, the PHPUnit eval-stdin.php sweep and a PUT dropper, 0 FP); family WAF_PHP_WEBSHELL_BODY, ban held per rule (HoldAutoblock, RULE_416 = 0): ~40 bans a day. Recorded late, with the held rules.
-  rule_upload_content_deep = "logonly", -- 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole (added 2026-10-09; burn-in, then promote)
+  rule_upload_content_deep = "block", -- rule 415: 402's PHP/JSP openers (+ the `<?` short open tag) in each uploaded FILE, whole, where 402 reads only its head (added 2026-10-09). Promoted logonly→block 2026-11-24 (burn-in: one hit in 7 days on 8 nodes, a `.png` carrying `<?php` through Bricksforge's form_file_upload on novamotors.sa; the two admin media uploads of the first burn-in did not recur; 0 FP); ban held per rule (HoldAutoblock, RULE_415 = 0), since WAF_UPLOAD_CONTENT is armed by 402. Recorded late, with the held rules: a held block rule shadows armed ones.
   rule_upload_archive_php = "block",  -- PHP webshell compressed inside an uploaded .zip (ZIP entry name scan). Scoped to Joomla asset uploads (option=com_ + task=asset.upload), where a php-bearing zip is never legitimate → safe to block.
   rule_script_obfuscation = "challenge_v2",  -- raw POST-body PHP/JS obfuscation scorer
   rule_upload_obfuscation = "challenge_v2",  -- multipart uploaded file content obfuscation scorer
@@ -1787,20 +1787,6 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 18b) Upload content in each file part, whole (415, burn-in) ──────────
-  do
-    local mode = rule_mode(CFG.rule_upload_content_deep, "logonly")
-    if mode ~= "disabled"
-       and body_inspect_ok
-       and not legit_archive_upload then
-      local tag = det.detect_upload_content_deep(body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_upload_content_deep) then goto done end
-      end
-    end
-  end
-
   -- ── 19) Upload obfuscation scorer (multipart file content) ───────────────
   do
     local mode = rule_mode(CFG.rule_upload_obfuscation, "logonly")
@@ -2908,6 +2894,25 @@ local function check_impl(ctx, st)
     end
   end
 
+  -- ── Upload content in each file part, whole (415) — block, ban held, so late
+  -- Block since 2026-11-24 with its ban held per rule (HoldAutoblock,
+  -- RULE_415 = 0): WAF_UPLOAD_CONTENT is armed by 402, and a held block rule
+  -- evaluated early would take the headline and end the check before an
+  -- armed rule's ban (CLAUDE.md §6). 402 (armed) still runs at step 18 and
+  -- owns every file whose head it reads.
+  do
+    local mode = rule_mode(CFG.rule_upload_content_deep, "logonly")
+    if mode ~= "disabled"
+       and body_inspect_ok
+       and not legit_archive_upload then
+      local tag = det.detect_upload_content_deep(body, headers)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_UPLOAD_CONTENT:" .. tag, ttl, mode, RULE_IDS.rule_upload_content_deep) then goto done end
+      end
+    end
+  end
+
   -- ── Traversal (rule 101) — AFTER every armed block-tier family on purpose ──
   -- rule_traversal is block-tier since 2026-09-05, but its autoblock family
   -- (WAF_TRAVERSAL) is HELD un-armed for burn-in (waf_security_register.go).
@@ -2974,17 +2979,18 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── 404's scorer over the whole body (417, logonly burn-in) ──────────────
+  -- ── 404's scorer over the whole body (417) — block, ban held, so late ────
+  -- Block since 2026-11-24, ban held per rule (HoldAutoblock, RULE_417 = 0).
   -- Only when 404's 2 KB head scored nothing: PHP saved through a form field
   -- (an editor, a file manager's put) sits wherever the file puts it. A body
   -- no longer than the head is read only where 404 could not read it as PHP
   -- gets it (a multipart body, a JSON one with escapes: php_body_head_blind)
   -- or when 404 did not run; otherwise 417 would score what 404 just scored.
   -- detect_php_webshell_body's cheap raw gate keeps a body with nothing a
-  -- score can come from out of the decoder. Late, before
-  -- only 612 and 530: cfm.lua pushes the headline hit alone, and at step 15
-  -- it took the headline (and the push) from the logonly body rules that run
-  -- after it (331 on a wget || curl dropper, 421-425, 430-439, 330).
+  -- score can come from out of the decoder. Late, after every armed block
+  -- rule (a held block evaluated earlier would end the check before an armed
+  -- rule's ban) and after the logonly body rules (at step 15 it took the
+  -- headline and the push from 331, 421-425, 430-439 and 330).
   do
     local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
     if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit then

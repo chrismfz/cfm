@@ -20,6 +20,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Changed
+- **WAF rules 415 and 417 block (bans held).** Rule 417 (PHP source in the
+  whole POST body, past rule 404's 2 KB) and rule 415 (PHP in an uploaded
+  file, past rule 402's head) move from logonly to block after a 7-day
+  read on 8 nodes. 417 had 5 hits, every one an attacker: a Joomla tool
+  writing `system($_GET…)` into each template's `error.php` through the
+  template editor (twice, on one site), and an eval spray. 415 had 1, a
+  `.png` carrying `<?php` posted to a WordPress form-upload endpoint. No
+  false positives. Neither bans: their autoblock is held per rule
+  (`RULE_415 = 0`, `RULE_417 = 0`), because a real plugin file saved
+  through an editor, or a real file quoting PHP, still scores, and that
+  must be a 403 rather than a 6 h ban. 415 now runs late with the other
+  held rules, so a request an armed rule also catches keeps that rule's ban.
+  See `docs/waf.md`, "Rule 415" and "Rule 417".
+
 ### Fixed
 - **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**
   Every `/etc/cfm` file was a dpkg conffile, and CFM edits several of them

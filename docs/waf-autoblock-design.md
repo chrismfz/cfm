@@ -179,7 +179,7 @@ The registry today:
 | `SQLI_LEXICAL` | 309 | — | 1 |
 | `RCE` | 320, 329, 332 | — | 1 |
 | `UPLOAD_FNAME` | 401, 414 | — | 1 |
-| `UPLOAD_CONTENT` | 402 | — | 1 |
+| `UPLOAD_CONTENT` | 402, 415 | `RULE_415` | 1 |
 | `WEBSHELL` | 413 | — | 1 |
 | `BACKDOOR` | 438, 440 | `RULE_440` | 1 |
 | `PHP_WRAPPER` | 305 | — | 1 |
@@ -187,7 +187,7 @@ The registry today:
 | `CVE` | every 10xxx rule (10001-10033; 10031-10033 logonly, so they feed no ban) | `RULE_10020`, `RULE_10022`, `RULE_10026`, `RULE_10028` | 1 |
 | `JS_PROTO` | 303 | `RULE_303` | 1 |
 | `XXE` | 307 | `RULE_307` | 1 |
-| `PHP_WEBSHELL_BODY` | 416 | `RULE_416` | 1 |
+| `PHP_WEBSHELL_BODY` | 416, 417 | `RULE_416`, `RULE_417` | 1 |
 | `TRAVERSAL` | 101, 103 | the family (`heldAutoblockFamilies`) | **0** |
 
 Every other family has no block rule, defaults to `0` and is inert in

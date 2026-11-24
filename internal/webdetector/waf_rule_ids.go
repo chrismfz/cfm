@@ -149,7 +149,10 @@ var wafRuleIDs = []WAFRule{
 	// (option=com_ + task=asset.upload*), where a php-bearing zip is never
 	// legitimate — so it ships at `block`.
 	{ID: 414, Name: "rule_upload_archive_php", ReasonFamily: "WAF_UPLOAD_FNAME", DefaultMode: "block"},
-	{ID: 415, Name: "rule_upload_content_deep", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "logonly"},
+	// 415: 402's openers in each uploaded file, whole. Block since 2026-11-24
+	// (7-day burn-in: one hit, a .png carrying <?php through Bricksforge's
+	// upload; 0 FP), ban held: WAF_UPLOAD_CONTENT is armed by 402.
+	{ID: 415, Name: "rule_upload_content_deep", ReasonFamily: "WAF_UPLOAD_CONTENT", DefaultMode: "block", HoldAutoblock: true},
 	// A non-multipart POST / PUT / PATCH body that is a PHP file (opens with
 	// <?php / <?=, or a GIF header and one), whatever its Content-Type
 	// says. A php://input dropper's upload (dmkomotinis.gr's up.php took
@@ -161,9 +164,10 @@ var wafRuleIDs = []WAFRule{
 	// 404's scorer over the whole body the edge read (32 KB), when 404's
 	// 2 KB head scored nothing: PHP saved through a form field (a plugin
 	// editor, a file manager's put, a webshell's own editor) past the head
-	// (orion 2026-11-15, rigel 2026-11-17). Logonly through burn-in: a whole
-	// legitimate plugin file saved through an editor is scored too.
-	{ID: 417, Name: "rule_php_webshell_body_deep", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "logonly"},
+	// (orion 2026-11-15, rigel 2026-11-17). A whole legitimate plugin file saved
+	// through an editor is scored too. Block since 2026-11-24 (7-day burn-in: 5 hits, every one an attacker; 0 FP), ban
+	// held so such a save is a 403, never a 6 h ban.
+	{ID: 417, Name: "rule_php_webshell_body_deep", ReasonFamily: "WAF_PHP_WEBSHELL_BODY", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 421, Name: "rule_php_split_string_canary", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 422, Name: "rule_php_dropper_wget_curl", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
 	{ID: 423, Name: "rule_php_dropper_markers", ReasonFamily: "WAF_DROPPER", DefaultMode: "logonly"},
