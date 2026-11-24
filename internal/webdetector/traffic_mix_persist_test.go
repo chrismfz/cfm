@@ -132,3 +132,23 @@ func TestTrafficMixPersist_DefaultPath(t *testing.T) {
 		t.Fatalf("TrafficMixPath = %q", TrafficMixPath)
 	}
 }
+
+// A save killed half-way leaves a temp file; startup removes it, never the
+// saved mix itself.
+func TestTrafficMixPersist_RemovesStaleTemps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "traffic_mix.json.gz")
+	for _, f := range []string{".traffic_mix-123.json.gz", ".traffic_mix-abc.json.gz", "traffic_mix.json.gz", "ttlbans.json"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := removeStaleTrafficMixTemps(path); n != 2 {
+		t.Fatalf("removed %d, want the 2 temps", n)
+	}
+	for _, keep := range []string{"traffic_mix.json.gz", "ttlbans.json"} {
+		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
+			t.Fatalf("%s was removed", keep)
+		}
+	}
+}

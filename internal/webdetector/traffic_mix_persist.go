@@ -274,7 +274,26 @@ func mergeFileBucket(b *tmBucket, fb tmFileBucket) {
 
 // LoadTrafficMix restores the saved mix into the daemon's store (startup,
 // before the log tailers count anything; a bucket counted meanwhile is merged).
-func LoadTrafficMix() (int, error) { return trafficMix.loadFrom(TrafficMixPath, time.Now()) }
+// It first removes the temp files of saves a killed daemon left half-written.
+func LoadTrafficMix() (int, error) {
+	removeStaleTrafficMixTemps(TrafficMixPath)
+	return trafficMix.loadFrom(TrafficMixPath, time.Now())
+}
+
+// removeStaleTrafficMixTemps deletes saveTo's temp files next to path: a
+// daemon killed mid-save (SIGKILL after the stop timeout, OOM, power loss)
+// never runs the deferred remove. Called once at startup, before any save of
+// this process can have one open.
+func removeStaleTrafficMixTemps(path string) int {
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".traffic_mix-*.json.gz"))
+	n := 0
+	for _, m := range matches {
+		if os.Remove(m) == nil {
+			n++
+		}
+	}
+	return n
+}
 
 // SaveTrafficMix writes the daemon's mix to TrafficMixPath (periodic and
 // shutdown saves).
