@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.24
+
 ### Security
 - **Google's user-triggered fetchers no longer skip the WAF and the
   challenge.** These are the `google-proxy-*.google.com` IPs behind Read
