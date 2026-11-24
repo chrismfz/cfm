@@ -49,6 +49,7 @@ type compiledExcludeEntry struct {
 	RuleIDs []int  // nil/empty => whole-WAF skip
 	Raw     string // the stored value, for log lines
 	Scoped  bool   // ScopeHosts non-empty
+	Entry   excludeEntry
 }
 
 type compiledScopeMatcher struct {
@@ -274,19 +275,26 @@ func (s *excludeStore) List() []excludeEntry {
 	for _, e := range s.entries {
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Type != out[j].Type {
-			return out[i].Type < out[j].Type
-		}
-		if strings.Join(out[i].ScopeHosts, ",") != strings.Join(out[j].ScopeHosts, ",") {
-			return strings.Join(out[i].ScopeHosts, ",") < strings.Join(out[j].ScopeHosts, ",")
-		}
-		if out[i].Value != out[j].Value {
-			return out[i].Value < out[j].Value
-		}
-		return ruleIDsKey(out[i].RuleIDs) < ruleIDsKey(out[j].RuleIDs)
-	})
+	sortExcludeEntries(out)
 	return out
+}
+
+// sortExcludeEntries is List's order: type, scope, value, rule ids.
+func sortExcludeEntries(out []excludeEntry) {
+	sort.Slice(out, func(i, j int) bool { return excludeEntryLess(out[i], out[j]) })
+}
+
+func excludeEntryLess(a, b excludeEntry) bool {
+	if a.Type != b.Type {
+		return a.Type < b.Type
+	}
+	if sa, sb := strings.Join(a.ScopeHosts, ","), strings.Join(b.ScopeHosts, ","); sa != sb {
+		return sa < sb
+	}
+	if a.Value != b.Value {
+		return a.Value < b.Value
+	}
+	return ruleIDsKey(a.RuleIDs) < ruleIDsKey(b.RuleIDs)
 }
 
 func hostInScope(host string, scopeHosts []string) bool {
@@ -405,14 +413,16 @@ func (s *excludeStore) MatchChallenge(host string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, e := range s.challengeEntries {
-		if !e.Scope.Match(host) {
-			continue
-		}
-		if e.Value.Match(host) {
+		if e.challengeHostCovers(host) {
 			return true
 		}
 	}
 	return false
+}
+
+// challengeHostCovers is MatchChallenge's per-entry test.
+func (e compiledExcludeEntry) challengeHostCovers(host string) bool {
+	return e.Scope.Match(host) && e.Value.Match(host)
 }
 
 // MatchWAF reports whether the (host, path) request should skip the WAF
@@ -446,17 +456,7 @@ func (s *excludeStore) MatchWAFRules(host, path string) (skipAll bool, skipIDs m
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, e := range s.wafEntries {
-		if !e.Scope.Match(host) {
-			continue
-		}
-		var matched bool
-		switch e.Type {
-		case "host":
-			matched = e.Value.Match(host)
-		case "path":
-			matched = e.Value.Match(path)
-		}
-		if !matched {
+		if !e.wafCovers(host, path) {
 			continue
 		}
 		if len(e.RuleIDs) == 0 {
@@ -494,14 +494,8 @@ func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// A literal scope host also covers its www. alias: cPanel lists a domain
-	// without it (a tenant's token cannot name it), and nginx serves both.
-	apex := ""
-	if strings.HasPrefix(host, "www.") {
-		apex = host[len("www."):]
-	}
 	for _, e := range s.pathEntries {
-		if !e.Scoped || !(e.Scope.Match(host) || (apex != "" && e.Scope.matchExact(apex))) {
+		if !e.challengePathScopeCovers(host) {
 			continue
 		}
 		if e.Value.Match(path) {
@@ -509,6 +503,112 @@ func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// wafCovers is MatchWAFRules' per-entry test: the entry's scope takes host,
+// and its value matches host (a host entry) or path (a path entry).
+func (e compiledExcludeEntry) wafCovers(host, path string) bool {
+	if !e.Scope.Match(host) {
+		return false
+	}
+	switch e.Type {
+	case "host":
+		return e.Value.Match(host)
+	case "path":
+		return e.Value.Match(path)
+	}
+	return false
+}
+
+// challengePathScopeCovers is MatchChallengePath's scope test: only a SCOPED
+// path entry counts, and a literal scope host also covers its www. alias
+// (cPanel lists a domain without it, a tenant's token cannot name it, and
+// nginx serves both).
+func (e compiledExcludeEntry) challengePathScopeCovers(host string) bool {
+	if !e.Scoped {
+		return false
+	}
+	if e.Scope.Match(host) {
+		return true
+	}
+	apex, ok := strings.CutPrefix(host, "www.")
+	return ok && apex != "" && e.Scope.matchExact(apex)
+}
+
+// WAFHostMatch is one WAF exclude that the in-path WAF applies on a host.
+type WAFHostMatch struct {
+	excludeEntry
+	// ScopeTakesHost: the entry's scope_hosts (empty = every vhost) list this
+	// host, as MatchWAFRules requires. When false the entry is listed anyway:
+	// the edge's waf_skip_for (cfm.lua) matches on the value alone and never
+	// reads scope_hosts, so it applies the entry on this host regardless.
+	ScopeTakesHost bool `json:"scope_takes_host"`
+}
+
+// WAFEntriesForHost lists the WAF excludes the in-path WAF applies to a
+// request on host: every host entry whose value covers host (the same value
+// matcher as cfm_waf_excl.lua matches_rule) and every path entry (it applies
+// on that path of every host). Read-only, for the vhost profile.
+func (s *excludeStore) WAFEntriesForHost(host string) []WAFHostMatch {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if s == nil || host == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []WAFHostMatch
+	for _, e := range s.wafEntries {
+		switch {
+		case e.Type == "host" && e.Value.Match(host), e.Type == "path":
+			out = append(out, WAFHostMatch{excludeEntry: e.Entry, ScopeTakesHost: e.Scope.Match(host)})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return excludeEntryLess(out[i].excludeEntry, out[j].excludeEntry) })
+	return out
+}
+
+// ChallengeEntriesForHost lists the challenge excludes that can apply on
+// host: the host entries MatchChallenge would match, and the scoped path
+// entries MatchChallengePath would consider for it.
+func (s *excludeStore) ChallengeEntriesForHost(host string) []excludeEntry {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if s == nil || host == "" {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []excludeEntry
+	for _, e := range s.challengeEntries {
+		if e.challengeHostCovers(host) {
+			out = append(out, e.Entry)
+		}
+	}
+	for _, e := range s.pathEntries {
+		if e.challengePathScopeCovers(host) {
+			out = append(out, e.Entry)
+		}
+	}
+	sortExcludeEntries(out)
+	return out
+}
+
+// FirstChallengeHostMatch is the host entry MatchChallenge excludes host by
+// (the first in List order when several do); ok=false when none does.
+func (s *excludeStore) FirstChallengeHostMatch(host string) (excludeEntry, bool) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if s == nil || host == "" {
+		return excludeEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best excludeEntry
+	found := false
+	for _, e := range s.challengeEntries {
+		if e.challengeHostCovers(host) && (!found || excludeEntryLess(e.Entry, best)) {
+			best, found = e.Entry, true
+		}
+	}
+	return best, found
 }
 
 // matchExact reports host among the literal (non-glob) scope hosts.
@@ -559,6 +659,7 @@ func (s *excludeStore) rebuildCompiledLocked() {
 			RuleIDs: append([]int(nil), e.RuleIDs...),
 			Raw:     e.Value,
 			Scoped:  len(e.ScopeHosts) > 0,
+			Entry:   e,
 		}
 		switch e.Type {
 		case "host":

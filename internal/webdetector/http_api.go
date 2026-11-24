@@ -59,6 +59,7 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/webdet/summary", e.handleWebdetSummary},
 		{"/api/v1/webdet/ingest-source", e.handleIngestSource},
 		{"/api/v1/webdet/vhosts", e.handleWebdetVhosts},
+		{"/api/v1/webdet/vhost-profile", e.handleVhostProfile}, // one host: every setting that applies and why (admin)
 		{"/api/v1/webdet/rules", e.handleWebdetRulesList},
 		{"/api/v1/webdet/rules/get", e.handleWebdetRulesGet},
 		{"/api/v1/webdet/rules/add", e.handleWebdetRulesAdd},

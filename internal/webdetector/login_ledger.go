@@ -285,9 +285,10 @@ func siteCount(n int, capped bool) string {
 	return strconv.Itoa(n)
 }
 
-// loginSiteKey is the registrable domain of a host: one owner's www.,
-// staging. and bare names are one site.
-func loginSiteKey(host string) string {
+// siteKey is the registrable domain of a host: one owner's www.,
+// staging. and bare names are one site. Shared by the login ledger and the
+// vhost profile.
+func siteKey(host string) string {
 	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
 		return d
 	}
@@ -310,7 +311,7 @@ func (l *loginLedger) observeForm(rec LogRec, host, tag, outcome string, form bo
 		now = wall // a skewed edge clock must not move a window ahead
 	}
 	client, network := loginKeys(rec.IP)
-	siteKey := loginSiteKey(host)
+	siteKey := siteKey(host)
 	site := authHash(siteKey)
 	var rows []HistoryEvent
 	owner := false
