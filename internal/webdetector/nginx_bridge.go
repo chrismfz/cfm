@@ -325,9 +325,11 @@ type bridgeIPEntry struct {
 	Expires   time.Time
 	Reason    string
 	WAFRuleID int // cfm_waf RULE_IDS handle (e.g. 302). 0 if unknown.
-	// HoldUntil: a malpath challenge on this IP lives at least until here
-	// (withMalpathHoldLocked). Carried across every later challenge write,
-	// whatever its reason; a block replaces it.
+	// HoldUntil: a held challenge on this IP lives at least until here
+	// (withMalpathHoldLocked): the malpath hold (challenge_v2_paths_ban.go)
+	// or the unsolved-challenge hold (challenge_unsolved_hold.go). Carried
+	// across every later challenge write, whatever its reason; a block
+	// replaces it.
 	HoldUntil time.Time
 }
 
@@ -1208,9 +1210,10 @@ func (b *NginxBridge) pushedIPEntryLocked(ip, action string, expires time.Time, 
 	return b.withMalpathHoldLocked(ip, bridgeIPEntry{Action: action, Expires: expires, Reason: reason, WAFRuleID: wafRuleID}, time.Now())
 }
 
-// withMalpathHoldLocked keeps a live malpath challenge (CHALLENGE_PATHS,
-// including the hour-long hold of challenge_v2_paths_ban.go) from being
-// SHORTENED by a later challenge over it: a WAF push or a detector's 10m
+// withMalpathHoldLocked keeps a held challenge from being SHORTENED by a
+// later challenge over it. Two holds ride on HoldUntil: the malpath one
+// (CHALLENGE_PATHS, including the hour-long hold of challenge_v2_paths_ban.go)
+// and the unsolved-challenge hold (challenge_unsolved_hold.go). For malpath: a WAF push or a detector's 10m
 // re-challenge rewrote the entry to its own TTL, the hold's mark and
 // revocation outlived the decision, and once it ran out the decision
 // answered allow for the rest of the hour. The floor rides on HoldUntil,
@@ -1266,15 +1269,22 @@ func (b *NginxBridge) HoldChallengeIP(ip string, ttl time.Duration) bool {
 	}
 	e = b.withMalpathHoldLocked(ip, e, now)
 	b.ipState[ip] = e
+	// The malpath side effects run for THIS hold's ttl, not the merged
+	// HoldUntil: that floor may come from an unsolved-challenge hold
+	// (challenge_unsolved_hold.go, up to a day), which must not stretch the
+	// revocation, the v2 mark or the stored malpath hold. Each of the three
+	// keeps a longer live value, so an earlier, longer malpath hold is not
+	// shortened either.
+	until := now.Add(ttl)
 	if clearanceRevokeArms(challengeV2PathsReason) {
-		b.revokeClearanceLocked(ip, e.HoldUntil, now)
+		b.revokeClearanceLocked(ip, until, now)
 	}
 	b.mu.Unlock()
 	// Kept outside the bridge too, so a config reload (a new Engine, a new
 	// bridge, an empty ipState) restores it (RestoreMalpathHolds).
-	malpathHolds.putFor(ip, struct{}{}, now, e.HoldUntil.Sub(now))
+	malpathHolds.putFor(ip, struct{}{}, now, ttl)
 	if challengeV2PathsArms(challengeV2PathsReason) {
-		markChallengeV2Path(ip, e.HoldUntil.Sub(now))
+		markChallengeV2Path(ip, ttl)
 	}
 	return true
 }
@@ -1489,6 +1499,10 @@ func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 		// not run at v2 and count toward the malpath ban for an hour).
 		endMalpathHold(ip)
 	}
+	// Any scope: the entry is deleted below, so the stored unsolved hold must
+	// go too, or a config reload would re-impose a challenge the live state
+	// no longer has (challenge_unsolved_hold.go).
+	endUnsolvedHold(ip)
 	b.mu.Lock()
 	delete(b.ipState, ip)
 	b.unrevokeClearanceLocked(ip)
@@ -2859,6 +2873,7 @@ func (b *NginxBridge) handleIPClear(w http.ResponseWriter, r *http.Request) {
 	b.unrevokeClearanceLocked(msg.IP)
 	b.mu.Unlock()
 	endMalpathHold(strings.TrimSpace(msg.IP)) // as ClearIP does
+	endUnsolvedHold(strings.TrimSpace(msg.IP))
 
 	w.WriteHeader(http.StatusOK)
 }

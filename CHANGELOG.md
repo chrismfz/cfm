@@ -20,6 +20,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **A per-IP challenge that is loaded again and again but never solved can
+  now be held instead of running out** (`[webdetector]
+  CHALLENGE_UNSOLVED_HOLD`, default `log`). On titan a facet scraper on Greek
+  residential IPs was challenged per IP, reached the origin with 0 pages while
+  the challenge lived, loaded the challenge page ~80 times a minute without
+  solving, then waited out the 20-minute TTL and, under the 45-minute
+  `CHALLENGE_COOLDOWN`, went back to full rate for over an hour. With
+  `enforce`, 20 unsolved page loads in 10 minutes hold the challenge for an
+  hour, renewed while they continue (at most 24 h). It only extends a live
+  per-IP challenge (never starts one, never over a block, no vhost-wide
+  effect), and a solve on the address ends it. `log` writes
+  `[challenge] unsolved_hold verdict=would_hold` lines to the challenge log for
+  a burn-in; review by 2026-12-08 (`docs/abuse-defense-master-plan.md` §5).
+
 ### Fixed
 - **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
   current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
