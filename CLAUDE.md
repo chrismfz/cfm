@@ -817,7 +817,9 @@ cPanel — every rule here exists because of that. Design + as-built:
   keeps it); key counters on a fixed-size digest so capacity is a fixed
   number of counters.
 - **The never-cache rules differ by tier. Don't document them as one list.**
-  Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
+  Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200, a
+  request accepting neither br nor gzip (`$cfm_cache_no_ae`: served, never
+  stored, because LiteSpeed answers it uncompressed without `Vary`),
   panel/webmail hosts, GET/HEAD only, script paths, a declared size cap
   (Tier A 10 MB `$cfm_cache_too_big`, Tier B 5 MB `$cfm_micro_too_big`);
   session cookies, credential headers and admin paths are Tier B only. ONE Tier B exception: a

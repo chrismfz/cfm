@@ -21,6 +21,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **cfm-admin: one page per vhost.** The Vhost page (it was "Vhost live";
+  same URL, every link to it still works) now opens with the host's
+  settings at a glance: challenge, WAF, HTTP/3, Site Cache, traffic rules
+  and ClamAV, each saying what decided it (its own entry, the apex, a
+  `*.domain` entry or the node default) with a link to the page that edits
+  it, already filtered to the host. Tabs add who visits the host and what it
+  costs the origin (the Web Traffic labels for this host, bot clients by
+  origin time, distributed browser-UA populations), its WAF hits by rule and
+  challenge outcomes, and every traffic rule and exclude that applies. The
+  host's other subdomains are one click away. The live drilldown is the Live
+  tab. Admins only; a cPanel user's view is unchanged.
 - **One API call for everything that applies to a vhost.**
   `GET /api/v1/webdet/vhost-profile?host=` (admin) returns one host's
   settings and what decided each: challenge (manual or automatic, tier and
@@ -68,6 +79,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   another version or a corrupt one starts the page empty, as before.
 
 ### Fixed
+- **Site Cache no longer serves CSS/JS uncompressed to every visitor.** The
+  cache key leaves out `Accept-Encoding` and relies on the origin's `Vary`,
+  but LiteSpeed answers a request that accepts no compression (a bot, `curl`)
+  with the full uncompressed body and no `Vary`. When such a request filled a
+  key first, that copy was stored and served to everyone, for as long as the
+  asset's `max-age` (often a year). On orion, 53% of the bytes of the heaviest
+  compressible URLs went out that way, for example a 485 KB css that the
+  origin sends as 42 KB of Brotli. Both tiers now store nothing fetched for a
+  request that does not accept `br` or `gzip`. The request is still served.
+  **After upgrading, where Site Cache is armed:** the package writes the new
+  edge config but does not reload the edge, so first reload it (`systemctl
+  reload cfm-edge`, or the engine the upgrade output names), then purge once
+  (`cfm webtop site-cache purge --all`). Copies stored before the fix stay
+  until they expire, and a purge done before the reload is refilled by the
+  old config.
 - **Vhost controls: a tenant's challenge exclude no longer reads as
   covering its other hosts.** The Challenge column matched an exclude by its
   value alone, so an exclude a cPanel user added for `example.com` showed
