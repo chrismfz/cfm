@@ -660,6 +660,36 @@ do
   check(S("200", "", "", "", "*") == false, "Vary: * is not storable")
   check(S("200", "", "", "", string.rep("a", 129)) == false, "a Vary longer than nginx stores is not storable")
   check(S("200", "", "", "", "Accept-Encoding, *") == false, "a * inside a Vary list is not storable")
+  -- $cfm_micro_too_big (5 MB+): never stored; nil (an older conf) or "" is not too big
+  check(S("200", "", "", "", nil, nil, nil, "1") == false, "a 5 MB+ response ($cfm_micro_too_big=1) is not storable")
+  check(S("200", "", "", "", nil, nil, nil, "") == true, "$cfm_micro_too_big empty → storable")
+  check(S("200", "", "", "", nil, nil, nil, nil) == true, "$cfm_micro_too_big absent (older conf) → storable as before")
+  -- and a too-big MISS is remembered, so the next requests go to the origin direct
+  check(cache._micro_mark_ttl("MISS", "200", "", "", "", nil, nil, nil, "1") == 60, "a 5 MB+ MISS marks the key for 60s")
+  check(cache._micro_mark_ttl("EXPIRED", "200", "", "", "", nil, nil, nil, "1") == 420, "a 5 MB+ EXPIRED refresh marks for the long TTL")
+  check(cache._micro_mark_ttl("MISS", "200", "", "", "", nil, nil, nil, nil) == nil, "a storable MISS is not marked")
+end
+
+-- The size map's regex (configs/openresty.conf $cfm_micro_too_big), read from the
+-- conf itself, against lengths around the 5 MB line (as nginx's PCRE reads it,
+-- the same pattern in Lua's ngx-free form: anchored digits only).
+do
+  local f = assert(io.open("configs/openresty.conf", "rb")); local conf = f:read("*a"); f:close()
+  local re = conf:match('map%s+%$upstream_http_content_length%s+%$cfm_micro_too_big%s*{.-"~%^%(%?:([^"]-)%)%$"')
+  check(re ~= nil, "the $cfm_micro_too_big map regex is readable from the conf")
+  if re then
+    -- the two alternatives, as Lua patterns ([0-9] classes, a trailing +)
+    local alts = {}
+    for alt in (re .. "|"):gmatch("([^|]+)|") do alts[#alts + 1] = "^" .. alt .. "$" end
+    local function big(len)
+      for _, p in ipairs(alts) do if len:match(p) then return true end end
+      return false
+    end
+    for _, c in ipairs({ { "0", false }, { "4999999", false }, { "5000000", true }, { "9999999", true },
+                         { "10000000", true }, { "123456789", true }, { "999999", false }, { "", false } }) do
+      check(big(c[1]) == c[2], "Content-Length " .. c[1] .. " → too_big " .. tostring(c[2]))
+    end
+  end
 end
 
 -- ── PR-3: micro_mark_ttl — which fetches are remembered, and for how long ─────
