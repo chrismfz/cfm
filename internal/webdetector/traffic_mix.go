@@ -586,6 +586,9 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 	// asked just after a boundary still covers at least what was asked.
 	sinceSec := nowSec - int64(window/time.Second)
 	firstB, lastB := sinceSec/tmBucketSec, nowSec/tmBucketSec
+	if lastB-firstB >= tmBuckets { // never more buckets than the ring holds
+		firstB = lastB - tmBuckets + 1
+	}
 	sinceSec = firstB * tmBucketSec
 
 	out := TrafficMix{Schema: "webdet.traffic_mix.v1", WindowSec: nowSec - sinceSec, Since: sinceSec, Until: nowSec, Host: host, Note: trafficMixNote}

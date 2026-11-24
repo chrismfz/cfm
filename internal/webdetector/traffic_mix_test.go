@@ -309,6 +309,10 @@ func TestTrafficMix_WindowStartsOnABucket(t *testing.T) {
 	if c := tmClassOf(m, "bot"); c.Requests != 2 || m.Since != b.Unix() || m.WindowSec != 17*60 {
 		t.Fatalf("requests %d, since %d, window %d s; want 2 from the bucket at b, a 17-minute span", c.Requests, m.Since, m.WindowSec)
 	}
+	// A 24h window never spans more buckets than the ring holds.
+	if m := s.Snapshot(b.Add(17*time.Minute+5*time.Second), 24*time.Hour, "", false, 0, 0); len(m.Series) != tmBuckets || m.WindowSec > 24*3600 {
+		t.Fatalf("24h: %d series points, %d s; want %d points, <= 24h", len(m.Series), m.WindowSec, tmBuckets)
+	}
 	// 5 seconds after a boundary, a 5m window still covers >= 5 minutes.
 	if m := s.Snapshot(b.Add(10*time.Minute+5*time.Second), 5*time.Minute, "", false, 0, 0); m.WindowSec < 300 {
 		t.Fatalf("a 5m window just after a boundary covers %d s", m.WindowSec)
