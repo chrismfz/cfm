@@ -130,6 +130,44 @@ local function is_known_legit_php_upload_endpoint(uri, args)
     return true
   end
 
+  -- The same two REST editors on a site without pretty permalinks, where
+  -- WordPress takes the route from the `rest_route` query field instead of
+  -- the path (`/index.php?rest_route=/code-snippets/v1/...`). Only on WP's
+  -- front controller (`/` or `/index.php`): elsewhere the field means
+  -- nothing, and keying on it would let any script's request opt out of the
+  -- body-PHP rules. The field is read as PHP fills $_GET: the name decoded,
+  -- `.` / ` ` turned into `_`, cut at `[`; it must appear exactly once (PHP
+  -- keeps the last of several, so a decoy first value must not count), and
+  -- its decoded value must start with the route, case-insensitively as WP
+  -- matches routes. A query-only exemption: a body `rest_route` that differs
+  -- from the query makes WP answer 400.
+  if (u == "/" or u == "/index.php") and args and args ~= "" then
+    local function dec(x)
+      return (x:gsub("%+", " "):gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+    end
+    -- Any key PHP could turn into rest_route counts toward `n` (an array
+    -- `rest_route[x]`, and an unmatched `[`, which PHP turns into `_`), so
+    -- such a decoy makes n > 1 and the request is not exempt. Only a plain
+    -- `rest_route` supplies the value.
+    local val, n = nil, 0
+    for pair in (args .. "&"):gmatch("([^&]*)&") do
+      local k, v = pair:match("^([^=]*)=?(.*)$")
+      k = dec(k or ""):gsub("^ +", "")
+      local cut = (k:match("^([^%[]*)") or k):gsub("[%. ]", "_")
+      local flat = k:gsub("[%.%[ ]", "_")
+      if cut == "rest_route" or flat:sub(1, 10) == "rest_route" then
+        n = n + 1
+        if flat == "rest_route" then val = dec(v or "") end
+      end
+    end
+    if n == 1 and val then
+      local r = lower(val)
+      if r:match("^/code%-snippets/") or r:match("^/string%-locator/") then
+        return true
+      end
+    end
+  end
+
   -- WordPress plugin/theme installer. The uploaded .zip legitimately
   -- contains PHP source — a plugin/theme *is* PHP code, frequently
   -- obfuscated in commercial products — and the POST is behind WP's admin

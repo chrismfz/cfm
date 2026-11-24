@@ -447,8 +447,17 @@ Save POSTs the whole edited file (`functions.php` …), which starts with
 **Fix (in code, unlike case 6):** `is_known_legit_php_upload_endpoint`
 (`cfm_waf_util.lua`) matches `^/wp%-json/string%-locator/`. Like every entry
 there it stands down the body-PHP scanners on that path: 401, 402, 403, the
-431-436 and 439 `WAF_BACKDOOR` body rules. Every URI rule still runs, as do
+431-436 and 439 `WAF_BACKDOOR` body rules, 415 and 417. Every URI rule still runs, as do
 414 (its own media allowlist) and 437/438 (their own `/wp-admin/` carve-out).
+
+A site without pretty permalinks sends the same REST call as
+`/index.php?rest_route=/string-locator/v1/save` (or to `/`). Since 2026-11-24
+that form matches too, but only on WP's front controller (`/`, `/index.php`),
+and only when the query holds exactly one field PHP reads as `rest_route`
+(name decoded, `.` / ` ` / an unmatched `[` turned into `_`; an array form or
+a second copy, of which PHP would keep the last, means no exemption). Keyed on
+the field anywhere else, any script's request could opt out of the body-PHP
+rules.
 
 **Why it is safe here and not in case 6:**
 1. *Routing key.* The REST path is what routes the request; no body field

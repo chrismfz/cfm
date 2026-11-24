@@ -296,6 +296,24 @@ do
   inst.args = "action=upload-plugin"; inst.raw_uri = "/wp-admin/update.php?action=upload-plugin"
   hit, reason, _, _, _, rid = waf.check(inst)
   check(not (hit and rid == 415), "plugin installer upload: no 415 (got " .. tostring(reason) .. ")")
+  -- The same editors without pretty permalinks (?rest_route=), on WP's
+  -- front controller only, the field read as PHP fills $_GET.
+  local util = require("cfm_waf_util")
+  local L = util.is_known_legit_php_upload_endpoint
+  check(L("/index.php", "rest_route=/code-snippets/v1/snippets") == true, "rest_route Code Snippets on /index.php")
+  check(L("/", "rest_route=%2Fstring-locator%2Fv1%2Fsave") == true, "rest_route String Locator, encoded, on /")
+  check(L("/", "rest%2Eroute=/Code-Snippets/v1/x") == true, "rest.route decoded and case-folded as PHP / WP do")
+  check(L("/upload.php", "rest_route=/code-snippets/v1/x") == false, "rest_route off the front controller: not exempt")
+  check(L("/index.php", "rest_route=/code-snippets/x&rest_route=/wp/v2/posts") == false, "two rest_route values: not exempt")
+  check(L("/index.php", "rest_route=/wp/v2/posts") == false, "rest_route to another route: not exempt")
+  check(L("/index.php", "rest_route=/code-snippets/x&rest[route=/wp/v2/posts") == false, "an unmatched-[ decoy PHP reads as rest_route: not exempt")
+  check(L("/index.php", "rest_route=/code-snippets/x&rest_route[]=a") == false, "an array rest_route beside it: not exempt")
+  check(L("/index.php", "rest_route[]=/code-snippets/x") == false, "only an array rest_route: not exempt")
+  check(L("/index.php", "x=1&foo_rest_route=/code-snippets/") == false, "a longer field name: not exempt")
+  local rr = req('{"code":"' .. string.rep("x", 2500) .. '<?php system($_GET[c]);"}', "/index.php", "application/json")
+  rr.args = "rest_route=/code-snippets/v1/snippets"; rr.raw_uri = "/index.php?rest_route=/code-snippets/v1/snippets"
+  hit, reason, _, _, _, rid = waf.check(rr)
+  check(not (hit and rid == 417), "Code Snippets save via ?rest_route=: no 417 (got " .. tostring(reason) .. ")")
   -- Source order: 415 and 417 are recorded after 332.
   local src = io.open("configs/lua/cfm_waf.lua"):read("*a")
   local at332 = src:find("RULE_IDS.rule_php_code_args)", 1, true)
