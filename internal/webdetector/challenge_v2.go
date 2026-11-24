@@ -123,10 +123,12 @@ package webdetector
 //     solve about to be rejected, and only when the solve's PTR is already
 //     known and ends in a crawler's domain, so the lookup goes to the
 //     crawler operator's own DNS, never a zone the client controls. FCrDNS
-//     can't be forged, but "google" covers Google's user-driven fetchers
-//     (Read Aloud, Translate): a client routed through one passes a geo or
-//     vhost arm, exactly as it already skips those challenges once verified.
-//     Accepted — the same trust the decision path extends. A fingerprint
+//     can't be forged. Google's user-triggered fetchers (google-proxy-*:
+//     Read Aloud, Translate, link previews) no longer verify at all
+//     (goodbot.notGoodBotPrefixes, 2026-11-24): a client routed through one
+//     passed a geo or vhost arm, and ~440 of them walked a forum on orion for
+//     days. They are ordinary clients now; "google" still names Google's
+//     special-case crawlers (rate-limited-proxy-*). A fingerprint
 //     policy or a traffic-rule / WAF mark stays strict: the decision path
 //     never softens those for good bots, and traffic rules deliberately
 //     distrust the generic "google" name (verifiedBotForRules). A verify that

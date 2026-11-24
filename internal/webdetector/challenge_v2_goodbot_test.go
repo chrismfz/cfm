@@ -157,7 +157,7 @@ func TestVerify_V2RejectSaysWhyACrawlerWasNotWaived(t *testing.T) {
 	)
 	setSolveEnricher(t, func(ip string) enrich.Result {
 		if strings.HasPrefix(ip, "66.249.") {
-			return enrich.Result{CountryISO: "US", ASN: 15169, PTR: "google-proxy-" + strings.ReplaceAll(ip, ".", "-") + ".google.com"}
+			return enrich.Result{CountryISO: "US", ASN: 15169, PTR: "rate-limited-proxy-" + strings.ReplaceAll(ip, ".", "-") + ".google.com"}
 		}
 		return enrich.Result{CountryISO: "GR", ASN: 6799, PTR: "ppp.otenet.gr"}
 	})
@@ -247,7 +247,7 @@ func TestNewEngineWiresTheV2GoodBotWaiver(t *testing.T) {
 	const (
 		cachedIP = "66.249.81.200"
 		freshIP  = "66.102.9.41" // first seen
-		freshPTR = "google-proxy-66-102-9-41.google.com"
+		freshPTR = "rate-limited-proxy-66-102-9-41.google.com"
 		humanIP  = "203.0.113.9"
 	)
 	ctx := context.Background()
@@ -301,14 +301,14 @@ func TestGoodBotState_VerifiedBeforeReject(t *testing.T) {
 	s.verify = func(ptr, ip string) (string, bool) {
 		verifies = append(verifies, ip)
 		switch ptr {
-		case "google-proxy-66-249-81-200.google.com":
+		case "rate-limited-proxy-66-249-81-200.google.com":
 			return "google", true
 		case "flaky.googlebot.com":
 			return "", false // resolver failure
 		}
 		return "", true // spoofed: resolved, no match
 	}
-	const readAloudPTR = "google-proxy-66-249-81-200.google.com"
+	const readAloudPTR = "rate-limited-proxy-66-249-81-200.google.com"
 
 	// First seen, candidate PTR → forward-confirmed inline, then cached.
 	if got, _ := s.verifiedBeforeReject(ctx, "66.249.81.200", readAloudPTR, now); got != "google" {

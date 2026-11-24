@@ -76,6 +76,16 @@ def test_thresholds() -> None:
     check(ct(1000, 2742) is not None, ">50% shrink must abort")
     check(ct(blp.MIN_PREFIXES_TOTAL - 1, 0) is not None, "< MIN must abort")
     check(ct(blp.MAX_PREFIXES_TOTAL + 1, 0) is not None, "> MAX must abort")
+    # --allow-shrink (a reviewed run that removes a source) lifts only the
+    # shrink guard: the floor and the ceiling still hold.
+    check(ct(1000, 2742, True) is None, "--allow-shrink lets a >50% shrink through")
+    check(ct(blp.MIN_PREFIXES_TOTAL - 1, 2742, True) is not None, "--allow-shrink keeps the MIN floor")
+    check(ct(blp.MAX_PREFIXES_TOTAL + 1, 0, True) is not None, "--allow-shrink keeps the MAX ceiling")
+    # No source may bring Google's user-triggered fetchers back: they fetch
+    # whatever URL a user hands Google (google-proxy-*), a free WAF bypass.
+    check("google-all" not in blp.SOURCES, "google-all includes the user-triggered fetchers")
+    check(not any(s.startswith("google:user-triggered") for s in blp.SOURCES),
+          "a google:user-triggered-* feed must not be a bypass source")
 
 
 # ── 1c. oneline: config-injection defense on metadata ────────────────────────

@@ -40,6 +40,19 @@ var ptrSuffixes = map[string]string{
 	".fbsv.net": "meta",
 }
 
+// notGoodBotPrefixes are host-name prefixes under a registry suffix that are
+// NOT a crawler, so they never match. Google's user-triggered fetchers
+// (google-proxy-*.google.com: Translate, Read Aloud, link previews and the
+// like) fetch whatever URL a user hands Google, so anyone can aim them at any
+// site: verified, they skipped the challenge and the bans for everyone. On
+// 2026-11-24 ~440 of them walked www.mathematica.gr's forum on orion, ~2M
+// requests from 11-21, up to ~58 concurrent origin requests at the peak.
+// Google's own crawlers keep their names: crawl-*.googlebot.com and the
+// special-case rate-limited-proxy-*.google.com (AdsBot, APIs-Google).
+var notGoodBotPrefixes = map[string][]string{
+	".google.com": {"google-proxy-"},
+}
+
 // Suffixes returns a copy of the registry (suffix -> bot name), for callers
 // that list it (tests, the traffic-rules name parity check).
 func Suffixes() map[string]string {
@@ -50,7 +63,8 @@ func Suffixes() map[string]string {
 	return out
 }
 
-// SuffixName reports the good-bot name whose canonical PTR suffix matches ptr,
+// SuffixName reports the good-bot name whose canonical PTR suffix matches ptr
+// (and whose host is not one of that suffix's notGoodBotPrefixes),
 // plus the normalised host (trimmed, lowercased, no trailing dot) to
 // forward-confirm. This is the MATCH only: a caller that needs trust must
 // forward-confirm (Verify).
@@ -61,6 +75,11 @@ func SuffixName(ptr string) (name, host string, ok bool) {
 	}
 	for suf, nm := range ptrSuffixes {
 		if strings.HasSuffix(host, suf) {
+			for _, pre := range notGoodBotPrefixes[suf] {
+				if strings.HasPrefix(host, pre) {
+					return "", host, false
+				}
+			}
 			return nm, host, true
 		}
 	}

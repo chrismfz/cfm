@@ -221,10 +221,11 @@ func (s *trafficRuleStore) recountLocked() {
 }
 
 // verifiedBotForRules narrows an FCrDNS verdict to names a traffic rule may
-// trust as a CRAWLER. The registry's generic ".google.com" suffix also covers
-// Google's user-driven fetchers (Translate proxy, AMP cache, Feedfetcher,
-// Gmail image proxy): fine for a challenge exemption, but as an ALLOW it would
-// let anyone traverse a geo-fence via translate.google.com. Excluded here.
+// trust as a CRAWLER. The registry's generic ".google.com" suffix covers
+// Google's special-case crawlers (rate-limited-proxy-*: AdsBot, APIs-Google)
+// and other Google hosts; as an ALLOW a rule must not trust them as Googlebot.
+// The user-triggered fetchers (google-proxy-*, which fetch any URL a user
+// hands Google) no longer verify at all (goodbot.notGoodBotPrefixes).
 var verifiedBotExcludedForRules = map[string]bool{"google": true}
 
 func verifiedBotForRules(name string) string {

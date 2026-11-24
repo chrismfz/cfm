@@ -20,6 +20,29 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Security
+- **Google's user-triggered fetchers no longer skip the WAF and the
+  challenge.** These are the `google-proxy-*.google.com` IPs behind Read
+  Aloud, Translate and link previews. They fetch whatever URL a user hands
+  Google, so anyone can aim them at a site. They were exempt twice over:
+  - **The bypass list.** It took all five of Google's IP feeds (`google-all`),
+    including the three user-triggered ones. It now takes the common crawlers
+    (Googlebot) and the special-case crawlers (AdsBot) only, 1620 fewer
+    prefixes.
+  - **The good-bot check.** A `google-proxy-*` PTR verified as the good bot
+    "google". It no longer verifies, everywhere that check is read
+    (challenge exemption, v2 waiver, bans, uniqIP, shadow, L4 autoblock).
+
+  Why: from 2026-11-21, ~440 of them walked `www.mathematica.gr`'s phpBB
+  forum on orion. They sent ~2M requests (671k on the 11-24 morning) with no
+  static asset, and at the 08–09 peak took about 40 % of orion's origin time.
+  Elsewhere on the fleet the same proxies sent 0–31 requests per node that
+  day.
+
+  Cost: on a vhost that is challenging, Read Aloud and Translate now see the
+  challenge, and a v2 arm rejects them. The bypass list changes with the
+  package (`make release` regenerates it from the same, narrower sources).
+
 ### Added
 - **Traffic mix: who the web traffic is and what it costs the origin, for
   24 h** (`GET /api/v1/webdet/traffic-mix`, MCP `traffic_mix`, admin-only).

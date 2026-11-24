@@ -927,7 +927,11 @@ make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
   validator fails a list that lost its `2` lines. **Never add a source whose
   target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
   monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so it becomes a
-  free WAF-bypass proxy; such callers need a path-scoped exclude.
+  free WAF-bypass proxy; such callers need a path-scoped exclude. That
+  includes Google's user-triggered fetchers (`google-proxy-*`; the bypass
+  takes Google's common and special-case crawler feeds only, and
+  `internal/goodbot` never verifies those PTRs): ~440 of them walked a forum
+  on orion for days in 2026-11.
   `trusted_proxies.conf` is Cloudflare-only on purpose: a proxy that passes a
   client-supplied `CF-Connecting-IP` through (QUIC.cloud does) must never be
   added.
