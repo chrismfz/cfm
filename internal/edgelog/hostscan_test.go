@@ -14,8 +14,9 @@ import (
 
 // cfmline builds one log_format cfm access line with the fields hostscan
 // consumes. bytes>0 appends the bytes=$body_bytes_sent field (the 2026-08
-// format addition) and req_len=$request_length after it (the 2026-10 one, a
-// field the scan does not read and must step over); ts drives both msec= and
+// format addition) and the later fields after it (req_len=, mwhy=, and the
+// 2026-11 conn= creq=), which the scan does not read and must step over; ts
+// drives both msec= and
 // the ts="$time_local" fallback.
 func cfmline(ts float64, client, host, method, uri string, status int, ua string, nbytes int64) string {
 	tl := time.Unix(int64(ts), 0).UTC().Format("02/Jan/2006:15:04:05 -0700")
@@ -24,7 +25,7 @@ func cfmline(ts float64, client, host, method, uri string, status int, ua string
 		tl, ts, client, client, host, method, uri, status, ua,
 	)
 	if nbytes > 0 {
-		s += fmt.Sprintf(" bytes=%d req_len=%d", nbytes, 480)
+		s += fmt.Sprintf(" bytes=%d req_len=%d mwhy=\"-\" conn=81234 creq=1", nbytes, 480)
 	}
 	return s
 }
