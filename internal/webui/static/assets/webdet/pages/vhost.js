@@ -12,9 +12,10 @@ import { liveMixin } from "../feature-live.js";
 import { challengeMixin } from "../feature-challenge.js";
 import { firewallMixin } from "../feature-firewall.js";
 import { vhostProfileMixin } from "../feature-vhost-profile.js";
+import { vhostPickerMixin } from "../feature-vhost-picker.js";
 
 createWebdetApp({
   pageMode: "vhost",
   sections: ["vhost"],
-  mixins: [liveMixin, challengeMixin, firewallMixin, vhostProfileMixin],
+  mixins: [liveMixin, challengeMixin, firewallMixin, vhostProfileMixin, vhostPickerMixin],
 });

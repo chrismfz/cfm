@@ -41,6 +41,18 @@
     .vp-series text { fill: var(--muted); font-size: 10px; }
     .vp-grid { stroke: var(--border-soft); stroke-width: 1; }
     .vp-dim td { opacity: .65; }
+    .vpk { position: relative; flex: 1 1 22rem; max-width: 34rem; min-width: 0; }
+    .vpk .input { width: 100%; }
+    .vpk-list { position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px); margin: 0; padding: .25rem; list-style: none; max-height: 420px; overflow-y: auto;
+      background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
+    .vpk-head { font-size: .74rem; padding: .3rem .5rem .4rem; }
+    .vpk-opt { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .3rem .6rem; padding: .4rem .5rem; border-radius: 7px; cursor: pointer; }
+    .vpk-opt.on { background: var(--accent-soft); }
+    .vpk-opt.current .vpk-host { font-weight: 700; }
+    .vpk-host { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .86rem; word-break: break-all; }
+    .vpk-chips { display: flex; flex-wrap: wrap; gap: .2rem; }
+    .vpk-chips .pill { margin-right: 0; }
+    .vpk-empty { padding: .5rem; font-size: .8rem; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; }
     @media (max-width: 1300px) { .vp-posture { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
     /* The shared .layout grid keeps a 280px column floor that overflows a
