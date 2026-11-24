@@ -3,7 +3,11 @@
 package nftlib
 
 import (
+	"cfm/internal/firewall/setprobe"
+	"context"
 	"fmt"
+	"net/netip"
+	"time"
 
 	"cfm/internal/firewall"
 
@@ -164,4 +168,23 @@ func (b *Backend) writeBlockBatch(writes []blockWrite) (int, error) {
 		}
 	}
 	return len(writes), nil
+}
+
+// ClientNetHas tells whether block_v6_clients holds p, without a dump of
+// the set (firewall.ClientNetReader), counted with the backend's netlink
+// calls. A Backend a unit test builds (no hostProbe) has no kernel to ask.
+func (b *Backend) ClientNetHas(p netip.Prefix) (bool, error) {
+	if b.hostProbe == nil {
+		return false, firewall.ErrNoProbe
+	}
+	lo, hi := firewall.PrefixRange(p)
+	ctx, cancel := context.WithTimeout(context.Background(), setprobe.Timeout)
+	defer cancel()
+	start := time.Now()
+	b.nl.mu.Lock()
+	b.nl.dials++
+	b.nl.mu.Unlock()
+	has, err := setprobe.IntervalHas(ctx, cfmTableName, firewall.BlockV6Clients, lo, hi)
+	b.nl.record("ClientNetHas", start, err)
+	return has, err
 }

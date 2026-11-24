@@ -371,7 +371,7 @@ func RemoveClientNets(be Backend, ips []net.IP) map[string]error {
 	}
 	held := map[netip.Prefix]bool{}
 	for p := range byNet {
-		plo, phi := prefixRange(p)
+		plo, phi := PrefixRange(p)
 		for _, e := range elems {
 			if lo, hi, ok := ElemRange(e.Elem); ok && lo == plo && hi == phi {
 				held[p] = true
@@ -481,21 +481,11 @@ func writeClientNet(be Backend, ip net.IP, p netip.Prefix, ttl *time.Duration) (
 	}
 	netBlockMu.Lock()
 	defer netBlockMu.Unlock()
-	elems, err := be.ListSetElementsTimed(BlockV6Clients)
+	exists, left, err := readClientNet(be, p)
 	if err != nil {
 		return fallback(fmt.Sprintf("cannot read %s: %v", BlockV6Clients, err))
 	}
-	exists, permanent, left := false, false, time.Duration(0)
-	for _, e := range elems {
-		lo, hi, ok := ElemRange(e.Elem)
-		if !ok {
-			continue
-		}
-		if plo, phi := prefixRange(p); lo == plo && hi == phi {
-			exists, permanent, left = true, e.Expires <= 0, e.Expires
-			break
-		}
-	}
+	permanent := exists && left <= 0
 	switch {
 	case exists && permanent:
 		return BlockBatchResult{Kept: 1, Net: p.String()}, true, ""
@@ -509,6 +499,50 @@ func writeClientNet(be Backend, ip net.IP, p netip.Prefix, ttl *time.Duration) (
 		return BlockBatchResult{Extended: 1, Net: p.String()}, true, ""
 	}
 	return BlockBatchResult{Added: 1, Net: p.String()}, true, ""
+}
+
+// ClientNetReader is a backend that can tell whether block_v6_clients holds
+// one /64 as an element without a dump of the set. ErrNoProbe means it cannot
+// here (a unit test's backend); any other error, that the kernel did not
+// answer.
+type ClientNetReader interface {
+	ClientNetHas(p netip.Prefix) (bool, error)
+}
+
+// ErrNoProbe is a ClientNetReader with no kernel to ask: the caller dumps,
+// and it is not counted as a failed probe.
+var ErrNoProbe = errors.New("no per-element probe on this backend")
+
+// readClientNet is what block_v6_clients holds of p: exists, and the time it
+// has left (0 = permanent). A /64 the probe finds absent (a new client, the
+// common case) costs no dump; one it finds, or a backend without the probe, or
+// a failed probe, is read from a dump by exact range, because a 4.18 kernel
+// answers an interval get without the element's timeout (setprobe.IntervalHas).
+// Counted with the host probes (firewall_selftest host_probe).
+func readClientNet(be Backend, p netip.Prefix) (exists bool, left time.Duration, err error) {
+	if r, ok := be.(ClientNetReader); ok {
+		has, err := r.ClientNetHas(p)
+		switch {
+		case err == nil && !has:
+			probeStats.probed.Add(1)
+			probeStats.addrs.Add(1)
+			return false, 0, nil
+		case err != nil && !errors.Is(err, ErrNoProbe):
+			noteProbeFallback(BlockV6Clients, err)
+		}
+	}
+	probeStats.dumps.Add(1)
+	elems, err := be.ListSetElementsTimed(BlockV6Clients)
+	if err != nil {
+		return false, 0, err
+	}
+	plo, phi := PrefixRange(p)
+	for _, e := range elems {
+		if lo, hi, ok := ElemRange(e.Elem); ok && lo == plo && hi == phi {
+			return true, e.Expires, nil
+		}
+	}
+	return false, 0, nil
 }
 
 // clientNetGuardSets are the sets whose addresses a /64 ban must not cover:
@@ -539,7 +573,7 @@ func (v *guardView) refuses(p netip.Prefix) string {
 	if name := ClientNetExempted(p); name != "" {
 		return fmt.Sprintf("the /64 is refused by the %s check", name)
 	}
-	plo, phi := prefixRange(p)
+	plo, phi := PrefixRange(p)
 	for _, g := range v.spans {
 		if !g.hi.Less(plo) && !phi.Less(g.lo) {
 			return fmt.Sprintf("the /64 holds %s (%s)", g.what, g.text)
@@ -736,8 +770,8 @@ func clientNetGuard(be Backend, p netip.Prefix) (string, error) {
 	return v.refuses(p), nil
 }
 
-// prefixRange is p's first and last address.
-func prefixRange(p netip.Prefix) (netip.Addr, netip.Addr) {
+// PrefixRange is p's first and last address.
+func PrefixRange(p netip.Prefix) (netip.Addr, netip.Addr) {
 	p = p.Masked()
 	lo := p.Addr()
 	b := lo.As16()
@@ -775,7 +809,7 @@ func ElemRange(s string) (lo, hi netip.Addr, ok bool) {
 			}
 			return lo, netip.AddrFrom4([4]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}), true
 		}
-		lo, hi := prefixRange(p)
+		lo, hi := PrefixRange(p)
 		return lo, hi, true
 	}
 	a, err := netip.ParseAddr(s)

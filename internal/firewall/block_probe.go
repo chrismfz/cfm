@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cfm/internal/logging"
@@ -39,11 +40,67 @@ func ReadHostElems(set string, want []BlockEntry, probe HostProbe, dump func() (
 			err = errProbeShape
 		}
 		if err == nil {
+			probeStats.probed.Add(1)
+			probeStats.addrs.Add(uint64(len(want)))
 			return ProbedHosts(want, found, expires), nil
 		}
 		noteProbeFallback(set, err)
+	} else if len(want) > HostProbeMax {
+		probeStats.large.Add(1)
 	}
+	probeStats.dumps.Add(1)
 	return dump()
+}
+
+// probeStats counts what ReadHostElems did since start, for
+// /api/v1/firewall/selftest (both engines): a node whose bans keep falling
+// back to the dump is back on the per-ban O(set) cost, and says so there.
+var probeStats struct {
+	probed, addrs, large, dumps, fallbacks atomic.Uint64
+	mu                                     sync.Mutex
+	last                                   *HostProbeFallback
+}
+
+// HostProbeStats is ReadHostElems' record since start.
+type HostProbeStats struct {
+	// Probed batches were planned from per-address gets (ProbedAddrs
+	// addresses in all).
+	Probed      uint64 `json:"probed"`
+	ProbedAddrs uint64 `json:"probed_addrs"`
+	// Dumps read the whole set: Large batches (over MaxAddrs), Fallbacks
+	// (the probe failed), and the rest had no probe (a CLI or test backend).
+	Dumps     uint64 `json:"dumps"`
+	Large     uint64 `json:"large"`
+	Fallbacks uint64 `json:"fallbacks"`
+	MaxAddrs  int    `json:"max_addrs"`
+	// LastFallback is the latest failed probe: when, which set, why.
+	LastFallback *HostProbeFallback `json:"last_fallback,omitempty"`
+}
+
+// HostProbeFallback is one probe that failed and fell back to the dump.
+type HostProbeFallback struct {
+	At  string `json:"at"` // RFC3339
+	Set string `json:"set"`
+	Err string `json:"err"`
+}
+
+// HostProbeSnapshot returns ReadHostElems' counters.
+func HostProbeSnapshot() HostProbeStats {
+	out := HostProbeStats{
+		Probed:      probeStats.probed.Load(),
+		ProbedAddrs: probeStats.addrs.Load(),
+		Dumps:       probeStats.dumps.Load(),
+		Large:       probeStats.large.Load(),
+		Fallbacks:   probeStats.fallbacks.Load(),
+		MaxAddrs:    HostProbeMax,
+	}
+	probeStats.mu.Lock()
+	if l := probeStats.last; l != nil {
+		c := *l
+		out.LastFallback = &c
+	}
+	probeStats.mu.Unlock()
+	return out
 }
 
 var errProbeShape = errors.New("the probe answered for a different number of addresses")
@@ -68,9 +125,13 @@ var probeFallbackLogged sync.Map // set name -> time.Time
 
 func noteProbeFallback(set string, err error) {
 	now := time.Now()
+	probeStats.fallbacks.Add(1)
+	probeStats.mu.Lock()
+	probeStats.last = &HostProbeFallback{At: now.UTC().Format(time.RFC3339), Set: set, Err: err.Error()}
+	probeStats.mu.Unlock()
 	if v, ok := probeFallbackLogged.Load(set); ok && now.Sub(v.(time.Time)) < probeFallbackEvery {
 		return
 	}
 	probeFallbackLogged.Store(set, now)
-	logging.Logf("[firewall] %s: per-address read failed (%v); reading the whole set instead (logged once per %s)", set, err, probeFallbackEvery)
+	logging.Logf("[firewall] %s: per-address read failed (%v); reading the whole set instead (counted in firewall_selftest host_probe; logged at most every 10 minutes)", set, err)
 }

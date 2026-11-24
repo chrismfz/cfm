@@ -9,7 +9,11 @@
 // that fails to apply ("message too long"). Admin-only
 // like the other global firewall routes; a scoped vhost token has no business
 // with node-wide firewall internals. The exec-nft backend does not implement
-// firewall.SelfTester, so there the endpoint reports available=false.
+// firewall.SelfTester, so there the endpoint reports available=false. Both
+// engines add `host_probe` (firewall.HostProbeSnapshot): how many block /
+// allow batches were planned from per-address kernel gets and how many read
+// the whole set, with the last failed probe; a node whose bans keep falling
+// back is paying a full set read per ban again.
 
 package apiserver
 
@@ -48,17 +52,19 @@ func makeFirewallSelfTestHandler(be firewall.Backend) http.HandlerFunc {
 		st, ok := be.(firewall.SelfTester)
 		if !ok {
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"ok":        true,
-				"available": false,
-				"engine":    engine,
-				"note":      "self-test diagnostics are only recorded by the nftlib backend",
+				"ok":         true,
+				"available":  false,
+				"engine":     engine,
+				"note":       "self-test diagnostics are only recorded by the nftlib backend",
+				"host_probe": firewall.HostProbeSnapshot(),
 			})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"ok":        true,
-			"available": true,
-			"selftest":  st.NftlibSelfTest(),
+			"ok":         true,
+			"available":  true,
+			"selftest":   st.NftlibSelfTest(),
+			"host_probe": firewall.HostProbeSnapshot(),
 		})
 	}
 }

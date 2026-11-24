@@ -152,8 +152,13 @@ The history behind each rule below is in the code comments it names.
   only above it or when a get fails. With a dump per ban, 50k 7d WAF bans
   took the daemon to 8–15 % CPU on EL8 (2026-11-24). The same goes for any
   per-ban write that is O(set): the edge ban file is coalesced
-  (`edgeban.Store.SetSaveDelay`, flushed on a stop signal). Live:
-  `-run 'LiveNFTHostTimes|LiveNFTExtendBlock'`.
+  (`edgeban.Store.SetSaveDelay`, flushed on a stop signal), and the
+  proxied-client filter takes the ban sets from the edge ban reconcile's read
+  (`proxyipfilter.SetLocalBans`) instead of dumping them every minute. An
+  interval get on 4.18 (EL8) carries no timeout: the IPv6 /64 path asks the
+  probe only whether the /64 exists (`setprobe.IntervalHas`) and dumps for
+  its time left. `firewall_selftest` `host_probe` counts the fallbacks. Live:
+  `-run 'LiveNFTHostTimes|LiveNFTIntervalHas|LiveNFTExtendBlock|LiveNFTBanPlansFromTheProbe'`.
 - **A base input rule added after the rest needs an anchor.** Both engines'
   EnsureBase insert a missing early rule at position 0 and append a missing
   late one: on a node's existing chain a new drop would land above the self /

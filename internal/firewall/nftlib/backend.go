@@ -8,6 +8,7 @@ package nftlib
 
 import (
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -159,7 +160,17 @@ func New() (*Backend, error) {
 		return nil, fmt.Errorf("nftlib: open netlink conn: %w", err)
 	}
 	b.conn = conn
-	b.hostProbe = setprobe.HostProbe
+	// Counted with the backend's other netlink calls (firewall_selftest
+	// `netlink`): the probe runs on setprobe's own socket.
+	b.hostProbe = func(set string, ips []net.IP) ([]bool, []time.Duration, error) {
+		start := time.Now()
+		found, expires, err := setprobe.HostProbe(set, ips)
+		b.nl.mu.Lock()
+		b.nl.dials++ // one socket per probe (NetlinkStats: Dials ≈ Ops)
+		b.nl.mu.Unlock()
+		b.nl.record("HostProbe "+set, start, err)
+		return found, expires, err
+	}
 	return b, nil
 }
 

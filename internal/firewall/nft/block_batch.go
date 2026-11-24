@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -261,4 +262,21 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 		lastErr = &nftBatchError{msg: nftFirstError(r.Stdout+r.Stderr, err), err: err}
 	}
 	return fmt.Errorf("nft unblock batch (%d v4, %d v6), %d attempts: %w", len(v4), len(v6), blockBatchAttempts, lastErr)
+}
+
+// clientNetProbe is setprobe.IntervalHas for block_v6_clients; off (nil)
+// with hostProbe in the unit tests (TestMain, the fake-nft helper).
+var clientNetProbe = setprobe.IntervalHas
+
+// ClientNetHas tells whether block_v6_clients holds p without `nft -j list
+// set block_v6_clients` (firewall.ClientNetReader): an IPv6 client's ban
+// listed the set on every ban.
+func (b *Backend) ClientNetHas(p netip.Prefix) (bool, error) {
+	if hostProbe == nil || clientNetProbe == nil {
+		return false, firewall.ErrNoProbe
+	}
+	lo, hi := firewall.PrefixRange(p)
+	ctx, cancel := context.WithTimeout(context.Background(), setprobe.Timeout)
+	defer cancel()
+	return clientNetProbe(ctx, tableName, firewall.BlockV6Clients, lo, hi)
 }

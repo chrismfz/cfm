@@ -96,3 +96,31 @@ func TestReadHostElems_FallsBackToTheDump(t *testing.T) {
 		t.Errorf("a failed dump after a failed probe: err=%v, want the dump's", err)
 	}
 }
+
+// HostProbeSnapshot counts each path: a probed batch (and its addresses), a
+// batch too large to probe, a failed probe (with its set and error).
+func TestHostProbeSnapshotCounts(t *testing.T) {
+	before := HostProbeSnapshot()
+	one := []BlockEntry{{IP: net.ParseIP("192.0.2.1"), TTL: time.Hour}, {IP: net.ParseIP("192.0.2.2"), TTL: time.Hour}}
+	many := make([]BlockEntry, HostProbeMax+1)
+	for i := range many {
+		many[i] = BlockEntry{IP: net.IPv4(192, 0, 2, byte(i+1)), TTL: time.Hour}
+	}
+	ok := func(_ string, ips []net.IP) ([]bool, []time.Duration, error) {
+		return make([]bool, len(ips)), make([]time.Duration, len(ips)), nil
+	}
+	failing := func(string, []net.IP) ([]bool, []time.Duration, error) { return nil, nil, errors.New("no netlink") }
+	dump := func() ([]SetElementTimed, error) { return nil, nil }
+	_, _ = ReadHostElems("block_v4", one, ok, dump)
+	_, _ = ReadHostElems("block_v4", many, ok, dump)
+	_, _ = ReadHostElems("allow_v6", one, failing, dump)
+	got := HostProbeSnapshot()
+	d := func(a, b uint64) uint64 { return a - b }
+	if d(got.Probed, before.Probed) != 1 || d(got.ProbedAddrs, before.ProbedAddrs) != 2 ||
+		d(got.Large, before.Large) != 1 || d(got.Fallbacks, before.Fallbacks) != 1 || d(got.Dumps, before.Dumps) != 2 {
+		t.Errorf("counts moved %+v -> %+v; want probed+1 addrs+2 large+1 fallbacks+1 dumps+2", before, got)
+	}
+	if got.MaxAddrs != HostProbeMax || got.LastFallback == nil || got.LastFallback.Set != "allow_v6" || got.LastFallback.Err != "no netlink" {
+		t.Errorf("max=%d last=%+v", got.MaxAddrs, got.LastFallback)
+	}
+}

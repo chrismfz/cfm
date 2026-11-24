@@ -164,11 +164,11 @@ func TestLocalRefreshKeepsASetItCannotRead(t *testing.T) {
 	fail := atomic.Bool{}
 	list := func(set string) ([]string, error) {
 		calls.Add(1)
-		if set == "block_v4" {
+		if set == "block_v4_nets" {
 			if fail.Load() {
 				return nil, errors.New("nft hiccup")
 			}
-			return []string{"9.9.9.9"}, nil
+			return []string{"9.9.9.0/24"}, nil
 		}
 		return nil, errors.New("no such set")
 	}
@@ -389,5 +389,48 @@ func TestDecideLineCarriesGeo(t *testing.T) {
 		"mode=feed:log,local:log n=1 cc=US asn=32934 asn_name=Facebook,_Inc."
 	if len(lines) != 1 || lines[0] != want {
 		t.Fatalf("line:\n got %q\nwant %q", lines, want)
+	}
+}
+
+// The ban sets come from the edge ban reconcile's read (SetLocalBans), never
+// from the minute refresh, which only drops what expired since: a timed ban
+// leaves the filter when it ends, a permanent one stays, and a set the read
+// did not include keeps what it had.
+func TestSetLocalBansExpireWithoutARead(t *testing.T) {
+	ResetForTest()
+	t.Cleanup(ResetForTest)
+	clock := time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+	setClock(func() time.Time { return clock })
+
+	SetLocalBans(clock, map[string][]BanElem{
+		"block_v4":         {{Elem: "198.51.100.7", Left: 90 * time.Second}, {Elem: "198.51.100.8"}},
+		"block_v6_clients": {{Elem: "2001:db8:5:5::/64", Left: time.Hour}},
+	})
+	for _, ip := range []string{"198.51.100.7", "198.51.100.8", "2001:db8:5:5::9"} {
+		if !Check(ip).Listed() {
+			t.Fatalf("%s not listed after SetLocalBans", ip)
+		}
+	}
+	var reads []string
+	list := func(set string) ([]string, error) { reads = append(reads, set); return nil, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	clock = clock.Add(2 * time.Minute) // the 90 s ban has ended
+	done := StartLocalRefresh(ctx, list, time.Hour)
+	t.Cleanup(func() { cancel(); <-done })
+	waitFor(t, func() bool { return !Check("198.51.100.7").Listed() })
+	if !Check("198.51.100.8").Listed() || !Check("2001:db8:5:5::9").Listed() {
+		t.Error("the refresh dropped a ban that has not ended")
+	}
+	for _, set := range reads {
+		for _, b := range banSets {
+			if set == b {
+				t.Errorf("the minute refresh read %s; the ban sets come from SetLocalBans", set)
+			}
+		}
+	}
+	// A read without block_v6_clients leaves it as it was.
+	SetLocalBans(clock, map[string][]BanElem{"block_v4": {}})
+	if Check("198.51.100.8").Listed() || !Check("2001:db8:5:5::9").Listed() {
+		t.Error("a partial SetLocalBans did not replace block_v4 alone")
 	}
 }

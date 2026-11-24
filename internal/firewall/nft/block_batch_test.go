@@ -27,6 +27,12 @@ func fakeNFTSets(t *testing.T, v4JSON, v6JSON string, failWrites int) (logPath s
 // fakeNFTHostSets is fakeNFTSets for the host sets set4/set6.
 func fakeNFTHostSets(t *testing.T, set4, set6, v4JSON, v6JSON string, failWrites int) (logPath string) {
 	t.Helper()
+	// The fake stands in for nft only: a real per-address get would read the
+	// kernel's sets (a netns's under CFM_NFT_INTEGRATION) instead of the
+	// listings below. A test of the probe path sets hostProbe after this.
+	orig, origNet := hostProbe, clientNetProbe
+	hostProbe, clientNetProbe = nil, nil
+	t.Cleanup(func() { hostProbe, clientNetProbe = orig, origNet })
 	dir := t.TempDir()
 	logPath = filepath.Join(dir, "nft.log")
 	for name, body := range map[string]string{"v4.json": v4JSON, "v6.json": v6JSON, "fails": fmt.Sprint(failWrites)} {

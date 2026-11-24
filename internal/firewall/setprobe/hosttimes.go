@@ -60,7 +60,11 @@ func HostTimes(ctx context.Context, table, set string, addrs []netip.Addr) ([]Ho
 		if a.BitLen()/8 != int(klen) {
 			return nil, fmt.Errorf("setprobe: %s has %d-byte keys, %s is not one", set, klen, a)
 		}
-		msgs, err := k.execute(unix.NFT_MSG_GETSETELEM, append([]byte{unix.NFPROTO_INET, unix.NFNETLINK_V0, 0, 0}, elemRequest(table, set, a)...))
+		data, err := request(table, set, a.AsSlice(), 0)
+		if err != nil {
+			return nil, err
+		}
+		msgs, err := k.execute(unix.NFT_MSG_GETSETELEM, data)
 		if errors.Is(err, unix.ENOENT) {
 			continue // not in the set
 		}
@@ -79,28 +83,10 @@ func HostTimes(ctx context.Context, table, set string, addrs []netip.Addr) ([]Ho
 	return out, nil
 }
 
-// elemRequest is the attribute list of a single-element get of key.
-func elemRequest(table, set string, key netip.Addr) []byte {
-	ae := netlink.NewAttributeEncoder()
-	ae.String(unix.NFTA_SET_ELEM_LIST_TABLE, table)
-	ae.String(unix.NFTA_SET_ELEM_LIST_SET, set)
-	ae.Nested(unix.NFTA_SET_ELEM_LIST_ELEMENTS, func(l *netlink.AttributeEncoder) error {
-		l.Nested(unix.NFTA_LIST_ELEM, func(e *netlink.AttributeEncoder) error {
-			e.Nested(unix.NFTA_SET_ELEM_KEY, func(k *netlink.AttributeEncoder) error {
-				k.Bytes(unix.NFTA_DATA_VALUE, key.AsSlice())
-				return nil
-			})
-			return nil
-		})
-		return nil
-	})
-	b, _ := ae.Encode() // only fails on a nested-encoder error, and these return none
-	return b
-}
-
 // elemReply is the first element of a NEWSETELEM reply.
 type elemReply struct {
 	key        netip.Addr
+	flags      uint32 // NFTA_SET_ELEM_FLAGS (an interval end)
 	hasTimeout bool
 	expiration time.Duration // time left, as the kernel reports it
 }
@@ -136,7 +122,7 @@ func firstElemReply(msgs []netlink.Message) (elemReply, error) {
 }
 
 // parseElemReply reads the first element of a NEWSETELEM reply body (after
-// nfgenmsg): its key, whether it has a timeout, and the time it has left
+// nfgenmsg): its key, flags, whether it has a timeout, and the time it has left
 // (NFTA_SET_ELEM_EXPIRATION, milliseconds, big endian).
 func parseElemReply(b []byte) (elemReply, bool, error) {
 	var r elemReply
@@ -172,6 +158,8 @@ func parseElemReply(b []byte) (elemReply, bool, error) {
 								}
 								return nil
 							})
+						case unix.NFTA_SET_ELEM_FLAGS:
+							cur.flags = e.Uint32()
 						case unix.NFTA_SET_ELEM_TIMEOUT:
 							cur.hasTimeout = true
 						case unix.NFTA_SET_ELEM_EXPIRATION:
@@ -216,4 +204,36 @@ func HostProbe(set string, ips []net.IP) (found []bool, expires []time.Duration,
 		found[i], expires[i] = a.Found, a.Expires
 	}
 	return found, expires, nil
+}
+
+// IntervalHas answers whether the interval set (in table inet table) holds
+// exactly the interval [from, to] as one element (Lookup's interval walk for
+// from, in one ruleset generation). An interval that covers from but is not
+// [from, to] is "no", as a dump read by exact range would say. It does not
+// answer the time left: a 4.18 kernel (EL8) answers an interval get without
+// the element's timeout, which a dump shows (block_v6_clients on orion,
+// 2026-11-24), so the caller dumps for that. Any failure is an error.
+func IntervalHas(ctx context.Context, table, set string, from, to netip.Addr) (bool, error) {
+	from, to = from.Unmap(), to.Unmap()
+	if to.BitLen() != from.BitLen() || to.Less(from) {
+		return false, fmt.Errorf("setprobe: %s-%s is not an interval", from, to)
+	}
+	c, err := netlink.Dial(unix.NETLINK_NETFILTER, nil)
+	if err != nil {
+		return false, fmt.Errorf("setprobe: dial: %w", err)
+	}
+	defer c.Close()
+	k := &nlKernel{c: c, ctx: ctx, table: table, set: set}
+	flags, _, err := k.setInfo()
+	if err != nil {
+		return false, err
+	}
+	if flags&unix.NFT_SET_INTERVAL == 0 {
+		return false, fmt.Errorf("setprobe: %s is not an interval set", set)
+	}
+	m, ok, err := lookup(k, set, []netip.Addr{from})
+	if err != nil {
+		return false, err
+	}
+	return ok[0] && m[0].From == from && m[0].To == to, nil
 }
