@@ -568,7 +568,7 @@ access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
    bypasses) keeps visitors with a session out of the cache while you check.
 3. **Verdicts from the box** (they read the same with or without enforce), against the edge's HTTPS listener :9043
    on the vhost's own IP (so the origin answers from that vhost):
-   `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve <host>:9043:<vhost-ip> https://<host>:9043/`
+   `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' -H 'Accept-Encoding: gzip, br' --resolve <host>:9043:<vhost-ip> https://<host>:9043/`
    shows `microcache=would/5s`; add `-H 'Cookie: wordpress_logged_in_x=1'` →
    `bypass:auth:…`; `/wp-login.php` or `/?doing_wp_cron=1` → `bypass:path`;
    `-H 'Range: bytes=0-10'` → `bypass:range`; `webmail.<domain>` (if armed by a

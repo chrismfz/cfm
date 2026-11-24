@@ -134,9 +134,14 @@ listener and the vhost's IP (port 443 on loopback reaches the origin, not the
 edge):
 
 ```bash
-curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' \
+curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' -H 'Accept-Encoding: gzip, br' \
   --resolve shop.example:9043:<vhost-ip> 'https://shop.example:9043/some/path'
 ```
+
+Keep the `Accept-Encoding` header: like a browser's, it lets the response be
+stored. Without it (curl's default) nothing the origin compresses is ever
+stored for the request, so repeated runs show `status=MISS` and never `HIT`
+(the encoding rail, §1).
 
 The edge answers only for trusted sources: the box, its own IPs,
 `IGNORE_IPS` / `IGNORE_NETS`. It stamps:
@@ -247,6 +252,11 @@ cfm webtop site-cache stats [host]      # also: MCP site_cache_stats, GET /api/v
   - a panel or webmail host under an armed wildcard;
   - any request counted while `SITE_CACHE = 0`. Those counts are pushed once
     the switch is back on.
+- **MISS includes clients that accept no compression.** A request that
+  accepts neither `br` nor `gzip` (a crawler or scanner without
+  `Accept-Encoding`, `curl`) is a MISS for anything the origin compresses,
+  and its response is never stored (the encoding rail). A vhost that such
+  traffic hits hard shows a lower hit ratio without anything being wrong.
 - **The hit ratio** is strict: HIT ÷ (everything except BYPASS). STALE,
   UPDATING and REVALIDATED are served from cache but sit in the denominator,
   so read the breakdown too. The CLI table shows HIT, MISS, EXPIRED, STALE and

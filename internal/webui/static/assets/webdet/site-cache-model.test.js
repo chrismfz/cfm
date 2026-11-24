@@ -336,7 +336,7 @@ test("nodeSwitches reads the list response's switches, else unknown", () => {
 test("debugCurl builds the runbook command for a valid host only", () => {
   assert.equal(
     debugCurl("*.Example.com", "/a b'c"),
-    "curl -gsk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve www.example.com:9043:VHOST_IP 'https://www.example.com:9043/a%20b%27c'",
+    "curl -gsk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' -H 'Accept-Encoding: gzip, br' --resolve www.example.com:9043:VHOST_IP 'https://www.example.com:9043/a%20b%27c'",
   );
   assert.match(debugCurl("shop.example.com", "p"), /:9043\/p'$/);
   assert.match(debugCurl("shop.example.com", "/a[1]{x,y}"), /^curl -g/, "-g: no URL globbing");
