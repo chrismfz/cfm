@@ -140,3 +140,41 @@ func TestCrawlerThrottleStaticBudgetCoversStaticLocation(t *testing.T) {
 		}
 	}
 }
+
+// The node-wide meta-externalagent cap (2026-11-24): one key for the whole
+// node, pages only, meta-externalagent only, applied wherever the per-vhost
+// page limits are.
+func TestMetaExternalAgentNodeCap(t *testing.T) {
+	for _, path := range append(crawlerThrottleConfs, "../../configs/cfm-edge.conf") {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		conf := string(raw)
+		for _, want := range []string{
+			`"~*meta-externalagent" 1;`,
+			`"1|0|0" "meta-externalagent";`,
+			`limit_req_zone  $meta_ext_node_key zone=meta_ext_node_rps:1m rate=2r/s;`,
+			`limit_conn_zone $meta_ext_node_key zone=meta_ext_node_conn:1m;`,
+		} {
+			if !strings.Contains(conf, want) {
+				t.Errorf("%s: missing %q", path, want)
+			}
+		}
+		m := regexp.MustCompile(`(?s)map \$http_user_agent \$is_meta_ext_agent \{(.*?)\n    \}`).FindStringSubmatch(conf)
+		if m == nil {
+			t.Fatalf("%s: $is_meta_ext_agent map not found", path)
+		}
+		for _, other := range []string{"facebookexternalhit", "meta-externalads", "facebookcatalog", "FB_IAB"} {
+			if strings.Contains(m[1], other) {
+				t.Errorf("%s: %s must not take the node cap", path, other)
+			}
+		}
+		pages := strings.Count(conf, "limit_req  zone=meta_fb_host_rps")
+		node := strings.Count(conf, "limit_req  zone=meta_ext_node_rps burst=10 nodelay;")
+		conns := strings.Count(conf, "limit_conn meta_ext_node_conn 6;")
+		if pages == 0 || node != pages || conns != pages {
+			t.Errorf("%s: node cap in %d / %d servers (conn %d), want every server with the page limits", path, node, pages, conns)
+		}
+	}
+}

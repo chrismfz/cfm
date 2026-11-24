@@ -122,7 +122,14 @@ local CFG = {
                                          -- rollout: start this rule in "logonly" to baseline HEAD noise,
                                          -- then promote to "challenge" after validating logs.
   rule_wp_admin_cross_screen = "logonly", -- rule 503: a logged-in WordPress privileged action (the user screens incl. users.php's GET role change, update.php upload-plugin/upload-theme, plugin activation, the admin-ajax file editor and plugin install/activate, REST writes to /wp/v2/users and /wp/v2/plugins) that did not come from its own form: a same-host Referer from another screen or the front end, Fetch Metadata of a script (fetch/XHR, iframe), cross-site, or a navigation no click started; and a GET of a nonce-bearing screen by fetch/XHR or into an iframe. The stored-XSS kill chain of tophair.gr (2026-10-06): the order screen's script created an administrator and uploaded a backdoor plugin from staff's own browser. Logonly through burn-in; the IP is the victim's, so a block promotion must hold the autoblock (HoldAutoblock).
-  rule_wc_cart_get_crawl  = "logonly", -- rule 530: a GET/HEAD with add-to-cart=<id> (WooCommerce adds to the cart and writes a session for it) from a crawler UA, or from a browser UA with no same-site Referer / Fetch Metadata and no WooCommerce session or login cookie (tags CRAWLER / NO_REFERER / XSITE). ~265k a day on six nodes (2026-11-17), mostly meta-externalagent; every tag is client-authored, so measurement only.
+  rule_wc_cart_get_crawl  = "logonly", -- rule 530: a GET/HEAD with add-to-cart=<id> (WooCommerce adds to the cart and writes a session for it) from a crawler UA, or from a browser UA with no same-site Referer / Fetch Metadata and no WooCommerce session or login cookie (tags CRAWLER / NO_REFERER / XSITE). ~265k a day on six nodes (2026-11-17), mostly meta-externalagent; every tag is client-authored, so no ban and no block: since 2026-11-24 the CRAWLER tag gets cfm.lua's 301 without add-to-cart (wc_cart_crawl_redirect below), the other tags stay measurement only.
+  -- Rule 530's CRAWLER tag (a declared crawler UA) answered with a 301 to the
+  -- same URL without add-to-cart, so the shop writes no session and cart for
+  -- it (cfm.lua, after the WAF; the hit is still logged and pushed as
+  -- logonly). Not behind a trusted proxy (Cloudflare): a CDN cache rule that
+  -- ignores Cache-Control could serve the 301 to shoppers on the same URL.
+  -- false turns it off (cfm_waf_config.lua, applied at the next edge reload).
+  wc_cart_crawl_redirect = true,
   rule_xmlrpc_multicall   = "block", -- system.multicall in XML-RPC body
   rule_xmlrpc_pingback    = "block", -- pingback.ping in XML-RPC body. Edge 403 only: autoblock held in code (RULE_511 = 0), WordPress's own pingback client sends it. Recorded late, after the armed families.
   rule_xmlrpc_post_burst  = "block", -- generic repeated POST /xmlrpc.php
@@ -3339,6 +3346,21 @@ end
 -- This exposes the full CFG table (rule modes + tuning values) to cfm_stats.lua
 -- without copying data or adding any runtime overhead to the hot path.
  
+-- cfm.lua's question after a logonly verdict: should this request get rule
+-- 530's crawler redirect? True when the hit list carries 530 with its
+-- CRAWLER tag, the rule is not disabled and the redirect is on.
+function _M.cart_crawl_redirect(hits)
+  if CFG.wc_cart_crawl_redirect == false then return false end
+  if rule_mode(CFG.rule_wc_cart_get_crawl, "logonly") == "disabled" then return false end
+  for _, h in ipairs(hits or {}) do
+    if h.waf_rule_id == RULE_IDS.rule_wc_cart_get_crawl and h.reason == "WAF_CART_CRAWL:CRAWLER" then
+      return true
+    end
+  end
+  return false
+end
+_M.query_without_field = det.query_without_field
+
 function _M.get_config()
   -- Return a shallow copy so callers cannot mutate the live CFG table.
   local snap = {}
