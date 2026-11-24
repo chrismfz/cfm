@@ -52,8 +52,12 @@ type compiledExcludeEntry struct {
 }
 
 type compiledScopeMatcher struct {
-	exact map[string]struct{}
-	wild  []*regexp.Regexp
+	// scoped: the entry named scope hosts. Without it the matcher takes every
+	// host; with it, only the hosts below, so a scope whose every glob failed
+	// to compile takes no host (it once read as "no scope" = every host).
+	scoped bool
+	exact  map[string]struct{}
+	wild   []*regexp.Regexp
 }
 
 type compiledValueMatcher struct {
@@ -309,8 +313,9 @@ func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
 		return compiledScopeMatcher{}
 	}
 	m := compiledScopeMatcher{
-		exact: make(map[string]struct{}),
-		wild:  make([]*regexp.Regexp, 0),
+		scoped: true,
+		exact:  make(map[string]struct{}),
+		wild:   make([]*regexp.Regexp, 0),
 	}
 	for _, scopeHost := range scopeHosts {
 		if strings.ContainsAny(scopeHost, "*?[]") {
@@ -324,8 +329,12 @@ func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
 	return m
 }
 
+// Match reports whether an entry with this scope applies on host (lowercased
+// by the caller). The in-path WAF runs the same semantics
+// (cfm_waf_excl.lua scope_takes); both run
+// scripts/tests/fixtures/waf_exclude_scope.txt.
 func (m compiledScopeMatcher) Match(host string) bool {
-	if len(m.exact) == 0 && len(m.wild) == 0 {
+	if !m.scoped {
 		return true
 	}
 	if _, ok := m.exact[host]; ok {

@@ -33,8 +33,11 @@
 --
 --   local wx = require "cfm_waf_excl"
 --   wx.ts        -- number  : last shdict snapshot timestamp this worker decoded
---   wx.hosts     -- array   : decoded host-rule rows {v, rule_ids?}
---   wx.paths     -- array   : decoded path-rule rows {v, rule_ids?}
+--   wx.hosts     -- array   : decoded host-rule rows {v, rule_ids?, scope?}
+--   wx.paths     -- array   : decoded path-rule rows {v, rule_ids?, scope?}
+--   wx.rows_from_entries(entries) -> hosts, paths   (the /nginx/waf/excludes rows)
+--   wx.skip_for(hosts, paths, host, uri) -> skip_all, skip_ids
+--   wx.scope_takes(host, scope) / wx.normalize_scope(list)
 --
 -- Mutated directly by load_waf_excludes_local_cache in cfm.lua. This
 -- module deliberately exposes the state as plain table fields rather
@@ -44,15 +47,17 @@
 
 local _M = {}
 
--- Cache snapshot timestamp from the shdict (key `wxsnap_ts`). 0 means
+-- Cache snapshot timestamp from the shdict (key `wxsnap2_ts`). 0 means
 -- this worker hasn't decoded any snapshot yet. Compared in
 -- load_waf_excludes_local_cache against the live shdict ts to decide
 -- whether to skip the cjson.decode.
 _M.ts = 0
 
 -- Decoded WAF-exclude entries from the shdict snapshot. Each row is
--- a table { v = <string>, rule_ids = <array of int>? }. The shape is
--- documented at refresh_waf_excludes_if_needed in cfm.lua.
+-- a table { v = <string>, rule_ids = <array of int>?, scope = <array of
+-- string>? } built by rows_from_entries below. An absent scope means every
+-- host (an entry written without scope_hosts, and every row an older Lua
+-- cached, which never carried one).
 _M.hosts = {}
 _M.paths = {}
 
@@ -138,6 +143,181 @@ function _M.matches_rule(value, rule, kind)
   end
   -- host (default): exact handled above, else a dot-boundary subdomain suffix.
   return value:sub(-(#rule + 1)) == "." .. rule
+end
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- EXCLUDE SCOPE (scope_hosts)
+--
+-- An admin `--scope <host>` / `scope_hosts=` (and every scoped cPanel token's
+-- write, pinned to the token's vhosts) narrows an exclude to the hosts it
+-- lists. Before this, the edge kept only the value and rule_ids of each row,
+-- so a path exclude an admin narrowed to one vhost switched those rules (or
+-- the whole WAF) off on that path of EVERY vhost, and a host exclude covered
+-- sub-hosts its scope did not list: a silent WAF bypass across tenants.
+--
+-- Same semantics as the Go compiledScopeMatcher (internal/webdetector/
+-- exclude_store.go), pinned by scripts/tests/fixtures/waf_exclude_scope.txt,
+-- which both sides run:
+--   * no scope (absent / empty after normalisation) = every host;
+--   * a scope host without `* ? [ ]` matches that exact host only (no
+--     subdomain suffix: `shop.gr` does NOT take `www.shop.gr`);
+--   * one with them is an anchored glob (compileGlob): `*` = `[^/]*`,
+--     `?` = `[^/]` (a host has no `/`, so `*` crosses dots), `[...]` a class;
+--   * a scope whose every host is an unusable glob takes NO host.
+-- Bracket classes are ported for the characters a host name holds (letters,
+-- digits, `.`, `-`, ranges, a leading `!`/`^`); anything else in a class
+-- makes that scope host match nothing here (narrower than Go = the WAF runs,
+-- the fail-safe direction).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
+
+-- normalize_scope(list): the scope_hosts array of a bridge entry -> a list of
+-- lowercased, trimmed, de-duplicated host strings, or nil (= every host).
+-- Mirrors Go normalizeScopeHosts. Anything but a table (absent, cjson.null)
+-- is nil: an entry without scope_hosts is global, as Go stores it.
+function _M.normalize_scope(list)
+  if type(list) ~= "table" then return nil end
+  local out, seen = {}, {}
+  for _, h in ipairs(list) do
+    if type(h) == "string" then
+      h = trim(lower(h))
+      if h ~= "" and not seen[h] then seen[h] = true; out[#out+1] = h end
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
+local function lit(c)
+  -- A literal char in a Lua pattern: alphanumerics as is (`%a` etc. would be
+  -- classes), everything else escaped.
+  if c:match("^%w$") then return c end
+  return "%" .. c
+end
+
+-- Anchored-pattern cache for scope globs; `false` caches an unusable glob.
+-- Keys are operator scope strings (a bounded list), never request values.
+local _scope_pat_cache = {}
+local function scope_glob_to_lua_pattern(glob)
+  local hit = _scope_pat_cache[glob]
+  if hit ~= nil then return hit or nil end
+  local out, i, n = { "^" }, 1, #glob
+  local bad = false
+  while i <= n and not bad do
+    local c = glob:sub(i, i)
+    if c == "*" then
+      out[#out+1] = "[^/]*"
+    elseif c == "?" then
+      out[#out+1] = "[^/]"
+    elseif c == "\\" then
+      -- Go: `\x` is a literal x; a trailing `\` fails compileGlob.
+      if i == n then bad = true else i = i + 1; out[#out+1] = lit(glob:sub(i, i)) end
+    elseif c == "[" then
+      local cls = { "[" }
+      i = i + 1
+      local nc = glob:sub(i, i)
+      if nc == "!" or nc == "^" then cls[#cls+1] = "^"; i = i + 1 end
+      local closed, members = false, 0
+      while i <= n do
+        local d = glob:sub(i, i)
+        if d == "]" then closed = true; break end
+        if not d:match("^[%w%.%-]$") then break end
+        cls[#cls+1] = d; members = members + 1
+        i = i + 1
+      end
+      -- Unterminated (Go fails it too), empty, or holding a char not ported.
+      if not closed or members == 0 then bad = true else cls[#cls+1] = "]"; out[#out+1] = table.concat(cls) end
+    else
+      out[#out+1] = lit(c)
+    end
+    i = i + 1
+  end
+  local p = false
+  if not bad then p = table.concat(out) .. "$" end
+  _scope_pat_cache[glob] = p
+  return p or nil
+end
+_M.scope_glob_to_lua_pattern = scope_glob_to_lua_pattern
+
+-- scope_takes(host, scope): does an exclude whose normalised scope is `scope`
+-- apply to a request on `host`? nil / empty scope = every host.
+function _M.scope_takes(host, scope)
+  if type(scope) ~= "table" or #scope == 0 then return true end
+  host = lower(tostring(host or ""))
+  for _, h in ipairs(scope) do
+    if type(h) == "string" then
+      if h:find("[%*%?%[%]]") then
+        local p = scope_glob_to_lua_pattern(h)
+        if p then
+          local ok, res = pcall(string.match, host, p)
+          if ok and res ~= nil then return true end
+        end
+      elseif h == host then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- rows_from_entries(entries): the `entries` array of /nginx/waf/excludes
+-- (NginxBridge.handleWAFExcludes: {type, value, scope_hosts?, rule_ids?}) ->
+-- the host and path row lists cfm.lua caches in the shdict.
+function _M.rows_from_entries(entries)
+  local hosts, paths = {}, {}
+  if type(entries) ~= "table" then return hosts, paths end
+  for _, e in ipairs(entries) do
+    if type(e) == "table" and type(e.value) == "string" then
+      local t = lower(e.type); local v = lower(e.value)
+      if v ~= "" then
+        local row = { v = v, scope = _M.normalize_scope(e.scope_hosts) }
+        if type(e.rule_ids) == "table" then row.rule_ids = e.rule_ids end
+        if t == "host" then hosts[#hosts+1] = row
+        elseif t == "path" then paths[#paths+1] = row end
+      end
+    end
+  end
+  return hosts, paths
+end
+
+-- skip_for(hosts, paths, host, uri) returns:
+--   skip_all (bool)   true if a matching exclude whose scope takes host is
+--                     whole-WAF (no rule_ids)
+--   skip_ids (table)  set of waf_rule_id integers to suppress when the WAF
+--                     runs; nil if no rule-scoped exclude applies
+-- Mirrors Go excludeStore.MatchWAFRules: the scope first, then the value
+-- (the host for a host row, the uri for a path row).
+function _M.skip_for(hosts, paths, host, uri)
+  host = lower(tostring(host or "")); uri = lower(tostring(uri or "/"))
+  local skip_ids = nil
+  local function consider(target, row, kind)
+    -- Back-compat: Lua before rule_ids cached this list as bare strings. The
+    -- snapshot now lives under keys of its own (cfm.lua "wxhosts2"), so an
+    -- older Lua's rows are not read, but a string row keeps its old meaning
+    -- if one ever reaches here: a whole-WAF exclude on every host. A table
+    -- row without `scope` is global too (an entry without scope_hosts).
+    if type(row) == "string" then row = { v = row } end
+    if type(row) ~= "table" then return false end
+    if not _M.scope_takes(host, row.scope) then return false end
+    if not _M.matches_rule(target, row.v, kind) then return false end
+    if type(row.rule_ids) ~= "table" or #row.rule_ids == 0 then
+      return true -- whole-WAF skip; signal caller to short-circuit
+    end
+    if not skip_ids then skip_ids = {} end
+    for _, id in ipairs(row.rule_ids) do
+      local n = tonumber(id)
+      if n then skip_ids[n] = true end
+    end
+    return false
+  end
+  for _, r in ipairs(hosts or {}) do
+    if consider(host, r, "host") then return true, nil end
+  end
+  for _, r in ipairs(paths or {}) do
+    if consider(uri, r, "path") then return true, nil end
+  end
+  return false, skip_ids
 end
 
 return _M

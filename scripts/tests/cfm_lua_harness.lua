@@ -81,7 +81,10 @@ function H.run(req)
     re = { find = function() return nil end, match = function() return nil end },
   }
   -- fakes
-  package.loaded["cjson.safe"] = { encode = function() return "{}" end, decode = function() return nil end }
+  -- req.cjson: a codec standing in for cjson.safe (default: encode "{}",
+  -- decode nil); req.rpc_body(kind, method, path): the body a bridge RPC
+  -- returns (default nil, as an unreachable bridge).
+  package.loaded["cjson.safe"] = req.cjson or { encode = function() return "{}" end, decode = function() return nil end }
   package.loaded["cfm_bridge_cfg"] = {
     get = function() return { clearance_refresh = true, cookie_life_sec = 2700, fp_policy = (req.fp_action ~= nil) } end,
     token = function() return "tok" end,
@@ -97,7 +100,11 @@ function H.run(req)
   package.loaded["cfm_decision"] = {
     new = function() return {
       get = function(_, ...) rpcs[#rpcs+1] = "decision"; return req.verdict or { ip_action = "allow", vhost_action = "allow" } end,
-      rpc = function(_, kind) rpcs[#rpcs+1] = kind; return nil end,
+      rpc = function(_, kind, ...)
+        rpcs[#rpcs+1] = kind
+        if req.rpc_body then return req.rpc_body(kind, ...) end
+        return nil
+      end,
     } end,
   }
   package.loaded["cfm_selfip"] = req.selfip or {
