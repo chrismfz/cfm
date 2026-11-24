@@ -1393,16 +1393,16 @@ On titan the Meta crawlers together kept ~8 origin requests busy, against
 12–25 for the whole node at a normal hour. meta-webindexer now counts as a
 Meta crawler on the per-vhost budgets (`$is_meta_crawler` 2), and on the node
 gets 2 pages/s, burst 10, 6 connections of its own: the two crawlers' keys
-share the zones, never a budget. Link previews, ads, the catalog and the
-in-app browsers keep their per-vhost budgets only: they are the paid and
-user-facing side, and cost little.
+share the zones, never a budget. Link previews, ads and the catalog keep
+their per-vhost budgets only: they are the paid side, and cost little. The
+in-app browsers (real users) take no crawler budget at all.
 
 Two things to know:
 - **Visibility in Meta AI search.** The indexer's night runs will now meet
   429s, and Meta may crawl less or drop pages that keep answering 429. After
-  a deploy, read the share of meta-webindexer requests that got a 429 in
-  `throttle.log` across the fleet for a few days. If it is high, raise its
-  rate.
+  a deploy, count meta-webindexer's 429s in `throttle.log` (it logs only
+  429s) against its requests in the access log, across the fleet for a few
+  days. If the share is high, raise its rate.
 - **A spoofed UA can starve the real crawler.** Each crawler has one key per
   node, so anyone sending that UA at 2 pages/s or more from any address keeps
   the real crawler at 429 on that node. This was already true of

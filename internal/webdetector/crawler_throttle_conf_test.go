@@ -171,10 +171,22 @@ func TestMetaCrawlerNodeCaps(t *testing.T) {
 		if m == nil {
 			t.Fatalf("%s: $is_meta_ext_agent map not found", path)
 		}
-		// The in-app browsers are listed only to map to "" (users, never capped).
+		// The in-app browsers map to "" (users, never capped), and come before
+		// every crawler line: nginx takes the first regex that matches, so an
+		// in-app UA carrying a crawler token must not reach a crawler line.
+		if !regexp.MustCompile(`(?m)^\s*default\s+"";`).MatchString(m[1]) {
+			t.Errorf("%s: $is_meta_ext_agent must default to \"\" (no key)", path)
+		}
+		firstCrawler := len(m[1])
+		for _, c := range []string{`"~*meta-externalagent"`, `"~*meta-webindexer"`} {
+			if i := strings.Index(m[1], c); i >= 0 && i < firstCrawler {
+				firstCrawler = i
+			}
+		}
 		for _, inApp := range []string{"FB_IAB", "FBAV", "Instagram", "IABMV"} {
-			if !strings.Contains(m[1], `"~*`+inApp+`"`) {
-				t.Errorf("%s: in-app %s must be passed through first in $is_meta_ext_agent", path, inApp)
+			loc := regexp.MustCompile(`"~\*` + inApp + `"\s+"";`).FindStringIndex(m[1])
+			if loc == nil || loc[0] > firstCrawler {
+				t.Errorf("%s: in-app %s must map to \"\" before every crawler line in $is_meta_ext_agent", path, inApp)
 			}
 		}
 		for _, other := range []string{"facebookexternalhit", "meta-externalads", "facebookcatalog"} {
