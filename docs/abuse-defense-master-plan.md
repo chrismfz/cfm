@@ -923,6 +923,35 @@ already opened.
    the precondition for the `harden` rung (below). A page change:
    `docs/challenge-waf-release-checklist.md`.
 
+7. **Unsolved-challenge hold** (operator, 2026-11-24; built, `log` by
+   default). A per-IP challenge that its client loads again and again
+   without solving is held, not left to run out
+   (`challenge_unsolved_hold.go`, `CHALLENGE_UNSOLVED_HOLD*`). Why: on titan
+   (2026-11-24) a facet scraper on Greek residential and academic IPs
+   (`Chrome/152.0.0.0`, one UA) tripped `CHALLENGE_UNIQPATHS_IP` on a few
+   addresses. While the challenge lived they reached the origin with 0
+   pages and loaded the page ~80 times a minute, solving none. The 20m TTL
+   then ran out, `CHALLENGE_COOLDOWN` (45m) kept the rules from challenging
+   again, and one address went back to ~700 pages / 5 min for over an hour.
+   Top 50 of its 428 IPs made 98% of its 184k origin pages; 8 were ever
+   challenged. It only extends a LIVE per-IP challenge (never starts one,
+   never under a vhost challenge alone, never over a block), adds no v2
+   mark, revokes no clearance; a solve on the address ends it. Not a
+   fingerprint or geo grain: D1 / D2 are untouched. Known limit: a solve
+   deletes the address's per-IP challenge for every client on it (the
+   existing ClearIP), so on a shared egress (83.212.158.22 is the
+   Democritus University NAT) one person solving also frees a scraper
+   there; (1) below counts it, and keeping the entry after a solve on a
+   held address is the follow-up if it matters.
+   **Exit contract (D3):** review by **2026-12-08**, operator decides.
+   It must show, from the `[challenge] unsolved_hold verdict=would_hold`
+   lines fleet-wide: (1) how many held IPs later solved a challenge (a
+   person behind the address; the hold would have cost them nothing but a
+   solve they made anyway, so this bounds the harm), and how many solved
+   with real input; (2) the origin pages the would-hold IPs made after
+   their challenge ran out (the gain). Outcomes: `enforce` as the shipped
+   default / keep `log` / retire.
+
 **Config decisions after E4** (2026-10-22: `vhost_config` decided yes, the
 orphan keys are the operator's cleanup; 2026-10-27, read 4: the `solver_farm`
 defaults are **180s / 30 / 15**, shipped in code and the reference config.

@@ -237,6 +237,8 @@ func (w *webdetectorWrapped) RunOnce(ctx context.Context, out chan<- core.Alert)
 			// this one, so a config reload cannot be used to wait one out.
 			// After the bypass wiring, so an IP added to IGNORE_IPS is dropped.
 			b.RestoreMalpathHolds()
+			// Same for the unsolved-challenge holds (enforce mode only).
+			b.RestoreUnsolvedHolds()
 			_ = TryWireClamBridge()
 
 			go b.RunExpireLoop(pctx)
@@ -1047,6 +1049,15 @@ func init() {
 		webdet.ConfigureClearanceRevoke(kvBool(kv, "CHALLENGE_PATHS_REVOKE", true))
 		// Failed v2 visits from a malpath-marked IP that ban it; 0 = off.
 		webdet.ConfigureChallengeV2PathsRejectBan(kvInt(kv, "CHALLENGE_V2_PATHS_REJECT_BAN", 2))
+		// A per-IP challenge loaded again and again and never solved is held,
+		// not left to run out; default log (would_hold lines only).
+		webdet.ConfigureChallengeUnsolvedHold(
+			kvStrClean(kv, "CHALLENGE_UNSOLVED_HOLD", "log"),
+			kvInt(kv, "CHALLENGE_UNSOLVED_HOLD_VIEWS", 20),
+			kvDur(kv, "CHALLENGE_UNSOLVED_HOLD_WINDOW", 10*time.Minute),
+			kvDur(kv, "CHALLENGE_UNSOLVED_HOLD_TTL", time.Hour),
+			kvDur(kv, "CHALLENGE_UNSOLVED_HOLD_MAX", 24*time.Hour),
+		)
 
 		engine := webdet.NewEngine(cfg)
 

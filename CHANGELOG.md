@@ -20,6 +20,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **A per-IP challenge that is loaded again and again but never solved can
+  now be held instead of running out** (`[webdetector]
+  CHALLENGE_UNSOLVED_HOLD`, default `log`). On titan a facet scraper on Greek
+  residential IPs was challenged per IP, reached the origin with 0 pages while
+  the challenge lived, loaded the challenge page ~80 times a minute without
+  solving, then waited out the 20-minute TTL and, under the 45-minute
+  `CHALLENGE_COOLDOWN`, went back to full rate for over an hour. With
+  `enforce`, 20 unsolved page loads in 10 minutes hold the challenge for an
+  hour, renewed while they continue (at most 24 h). It only extends a live
+  per-IP challenge (never starts one, never over a block, no vhost-wide
+  effect), and a solve on the address ends it. `log` writes
+  `[challenge] unsolved_hold verdict=would_hold` lines to the challenge log for
+  a burn-in; review by 2026-12-08 (`docs/abuse-defense-master-plan.md` §5).
+
 ### Fixed
 - **sslcollector: edge workers hand the memory of replaced certificates back
   to the OS.** The full collect after each ingest frees the old pairs, but
@@ -30,6 +45,24 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   timer); in a container it brought the settled RSS from 227 to 165 MB. The
   `[sslcollector] gc` line reports it as `trim_ms=` (`-` where glibc's
   malloc_trim is absent).
+- **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
+  current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
+  Chrome/145 … (compatible; meta-externalagent/1.1 (+https://…))`, the UA
+  normalizer (Go `NormalizeUA` and its edge twin `cfm_ua_emergency.lua`)
+  looked only at the first `(...)` group and keyed the crawler as `mozilla`,
+  so the rule never hit (titan, 2026-11-24: 0 hits a minute). Every group is
+  scanned now (a group ends at its matching `)`, an unclosed one runs to the
+  end), and `indexer`, `googleother` and `google-inspectiontool` join the bot
+  markers (none of those names matched one). Browser UAs still read
+  `mozilla`. **Review your active rules before upgrading (`cfm bots list`):**
+  Googlebot smartphone now keys as `googlebot` and Bingbot mobile as
+  `bingbot`, so an existing `googlebot` / `bingbot` rule starts covering the
+  mobile crawler too. `google-inspectiontool` (Search Console) joins the
+  Google crawlers that need `--confirm`. The two normalizers are now
+  ASCII-only on both sides (they keyed a UA with NBSP or non-ASCII letters
+  differently) and run one shared fixture. The edge's UA trim is linear
+  now: while any `cfm bots` rule was active, one request with a long run of
+  spaces inside its User-Agent cost ~200 ms of worker CPU (8 KB header).
 - **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**
   Every `/etc/cfm` file was a dpkg conffile, and CFM edits several of them
   itself (`cfm allow` / `cfm block`, the WebUI's notify and detectors editors,

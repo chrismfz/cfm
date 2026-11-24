@@ -1,0 +1,64 @@
+# The UA key (internal/webdetector NormalizeUA, configs/lua/cfm_ua_emergency.lua
+# normalize_ua): <input>\t<expected>, escapes \n \r \t \v \f \\ \xHH. Run by
+# internal/webdetector/ua_norm_test.go and scripts/tests/cfm_ua_emergency_test.lua;
+# a change here changes which `cfm bots` rule a request hits.
+	-
+-	-
+   	-
+facebookexternalhit/1.1	facebookexternalhit
+facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)	facebookexternalhit
+curl/7.88.1	curl
+python-requests/2.31.0	python-requests
+AhrefsBot/7.0	ahrefsbot
+Wget/1.21.3	wget
+Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)	googlebot
+Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)	bingbot
+Mozilla/5.0 (compatible; SemrushBot/7~bl; +http://www.semrush.com/bot.html)	semrushbot
+Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)	ahrefsbot
+Mozilla/5.0 (compatible; MJ12bot/v1.4.8; http://mj12bot.com/)	mj12bot
+Mozilla/5.0 (compatible; DotBot/1.2; +https://opensiteexplorer.org/dotbot)	dotbot
+Mozilla/5.0 (compatible; Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot)	amazonbot
+Mozilla/5.0 (compatible; meta-externalagent/1.1; +https://developers.facebook.com)	meta-externalagent
+# A bot declared in a LATER group (Meta's Chrome-145 crawler, the mobile search crawlers).
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))	meta-externalagent
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-webindexer/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))	meta-webindexer
+Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)	googlebot
+Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)	bingbot
+# Google crawlers whose name carries no generic marker.
+Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; GoogleOther) Chrome/141.0.0.0 Safari/537.36	googleother
+Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 (compatible; Google-InspectionTool/1.0;)	google-inspectiontool
+# One case per bot marker, so a marker dropped on one side fails here.
+Mozilla/5.0 (compatible; Baiduspider/2.0; +http://www.baidu.com/search/spider.html)	baiduspider
+Mozilla/5.0 (compatible; SiteCrawler/1.0)	sitecrawler
+Mozilla/5.0 (compatible; FeedFetcher/1.0)	feedfetcher
+Mozilla/5.0 (compatible; ContentScraper/1.0)	contentscraper
+Mozilla/5.0 (compatible; LinkPreview/1.0)	linkpreview
+Mozilla/5.0 (compatible; Iframely-embed/1.0)	iframely-embed
+Mozilla/5.0 (compatible; UptimeMonitor/1.0)	uptimemonitor
+Mozilla/5.0 (compatible; LinkChecker/1.0)	linkchecker
+Mozilla/5.0 (compatible; Externalhit-like/1.0)	externalhit-like
+Mozilla/5.0 (compatible; SomeAgent/1.0)	someagent
+Mozilla/5.0 (compatible; Foo-Indexer/1.0)	foo-indexer
+# Group walk: the first marked group wins; a group ends at its MATCHING paren;
+# a group never closed runs to the end of the UA.
+Mozilla/5.0 (compatible; AlphaBot/1.0) AppleWebKit (compatible; BetaBot/2.0)	alphabot
+Mozilla/5.0 (compatible; Foo (x); somebot/1.0)	somebot
+Mozilla/5.0 (compatible; Foo (bar; SomeBot))	somebot
+Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (compatible; FooBot/1.0	foobot
+Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (compatible; nothing here	mozilla
+# Real browsers, in-app browsers and consoles keep the generic "mozilla".
+Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36	mozilla
+Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605	mozilla
+Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/444]	mozilla
+Mozilla/5.0 (Linux; Android 14; SM-A536B Build/UP1A.231005.007; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/131.0.6778.135 Mobile Safari/537.36 Instagram 360.0.0.30.109 Android (34/14; 450dpi; 1080x2340; samsung; SM-A536B; a53x; s5e8825; en_GB; 674675155)	mozilla
+Mozilla/5.0 (Windows NT 10.0; Win64; x64; Xbox; Xbox One) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36 Edge/44.18363.8131	mozilla
+# Whitespace and case are ASCII-only on both sides: tokens break only on
+# space/tab (not \n \r \v \f), NBSP is not trimmed, non-ASCII is not folded.
+FooBot\nextra/1.0	foobot\nextra
+SemBot\v/1.0	sembot\v
+DotBot\f/2.0	dotbot\f
+GooBot\r/3.0	goobot\r
+Mozilla/5.0 (X11) AppleWebKit (compatible;\xc2\xa0FooBot/1.0)	\xc2\xa0foobot
+Mozilla/5.0 (compatible; \xc3\x84Bot/1.0)	\xc3\x84bot
+# Whitespace is trimmed in linear time (a long inner run of spaces).
+Mozilla/5.0 (compatible;     \t  ZedBot/1.0   ) x	zedbot
