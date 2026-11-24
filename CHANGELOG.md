@@ -106,10 +106,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **sslcollector: edge workers hand the memory of replaced certificates back
   to the OS.** The full collect after each ingest frees the old pairs, but
   glibc kept their pages: with traffic allocations in between it could not
-  reuse them whole, so a worker's RSS climbed to the peak of an ingest and
-  stayed there (titan, 3500 names: 118 → 440 MB over three hourly ingests). A
-  `malloc_trim(0)` now follows the collect (~25-40 ms, in the background
-  timer); in a container it brought the settled RSS from 227 to 165 MB. The
+  reuse them whole. On titan (3500 names) a worker's RSS rose in three steps
+  over the first hourly ingests (333 → 524 MB), then crept ~4 MB/h. A
+  `malloc_trim(0)` now follows the collect; in a container it brought the
+  settled RSS from 227 to 165 MB for ~25-40 ms. It runs on the worker's event
+  loop (in the background timer, but the worker serves nothing meanwhile), and
+  titan's real cost is read from the log. The
   `[sslcollector] gc` line reports it as `trim_ms=` (`-` where glibc's
   malloc_trim is absent).
 - **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
