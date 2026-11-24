@@ -63,16 +63,16 @@ function renderInventoryLists(inventory){
     // on this host?" view — keep this inventory line informational.
     if(missing.length && unknown.length){
       warning.textContent = `Inventory: ${missing.length} type(s) with no section, ${unknown.length} unknown section(s) — see Daemon coverage for what matters on this host.`;
-      warning.style.color = '#9ca3af';
+      warning.style.color = 'var(--muted)';
     } else if(missing.length){
       warning.textContent = `Inventory: ${missing.length} detector type(s) have no config section — usually because the daemon is not on this host. Check Daemon coverage below.`;
-      warning.style.color = '#9ca3af';
+      warning.style.color = 'var(--muted)';
     } else if(unknown.length){
       warning.textContent = `Config has ${unknown.length} unknown section(s) — likely a typo or an older binary.`;
-      warning.style.color = '#fca5a5';
+      warning.style.color = 'var(--danger)';
     } else {
       warning.textContent = 'Inventory clean: every available detector type has a section.';
-      warning.style.color = '#9ca3af';
+      warning.style.color = 'var(--muted)';
     }
   }
 }
@@ -520,7 +520,7 @@ function buildTypedControl(key, value, onChange){
   const wrap = document.createElement('div');
   wrap.style.marginBottom = '8px';
   const riskHelp = highRiskHelpForKey(key);
-  const keyLabel = riskHelp ? `${key} <span title="${safeText(riskHelp)}" style="cursor:help;color:#fbbf24;font-weight:700">ⓘ</span>` : key;
+  const keyLabel = riskHelp ? `${key} <span title="${safeText(riskHelp)}" class="warn-text" style="cursor:help;font-weight:700">ⓘ</span>` : key;
   const help = schema.help ? `<div class="muted" style="font-size:11px">${schema.help}${schema.examples?.length?` Example: ${schema.examples.join(', ')}`:''}</div>` : '';
   if(schema.type === 'bool'){
     wrap.innerHTML = `<label class="muted">${keyLabel}</label><select class="input input-wide"><option value="1">true (1)</option><option value="0">false (0)</option></select>${help}`;
@@ -556,7 +556,7 @@ function buildTypedControl(key, value, onChange){
           return;
         }
         inlineState.textContent = 'Invalid value: use a listed mode or duration, e.g. 30m, 24h, 1h30m, 7d';
-        inlineState.style.color = '#fca5a5';
+        inlineState.style.color = 'var(--danger)';
       };
       renderInline(raw);
       input.addEventListener('input',(e)=>{ renderInline(e.target.value); onChange(e.target.value); });
@@ -600,7 +600,7 @@ function buildTypedControl(key, value, onChange){
         .slice(0, 6)
         .map((item)=>`Line ${item.idx + 1}: ${safeText(item.verdict.message)}`)
         .join('<br>');
-      inlineState.style.color = '#fca5a5';
+      inlineState.style.color = 'var(--danger)';
     };
     renderInline(raw);
     ta.addEventListener('input',(e)=>{ renderInline(e.target.value); onChange(e.target.value); });
@@ -694,7 +694,7 @@ function renderConfigEditors(){
 
   const core=byId('detectorsCoreBody'); core.innerHTML='';
   const runtimeBySection = new Map((state.runtime.sections||[]).map((s)=>[String(s.section||''), s]));
-  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const meta = detectorMeta(sec.name) || detectorMeta(detectorTypeFromSectionName(sec.name)); const leniencyHint = (meta?.leniency_supported && !allSectionNames().has(`${String(sec.name||'')}.leniency`.toLowerCase())) ? `<button type="button" class="btn-quiet" data-leniency-for="${safeText(sec.name)}" style="margin-left:8px">Add leniency companion</button>` : ''; const customWarning = String(meta?.type_key||'').toLowerCase()==='custom' ? `<div class="muted" style="margin-top:6px;padding:8px;border:1px solid #fbbf24;background:#422006;color:#fde68a;border-radius:6px">⚠️ Test regex against real sample lines before enabling permanent block.</div>` : ''; const tr=document.createElement('tr'); tr.classList.add('detector-row'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td><div class="detector-section-title">${safeText(sec.name)}</div>${badges}${leniencyHint}${customWarning}${validation?`<div style="margin-top:6px">${validation}</div>`:''}<div class="muted" style="margin-top:4px;display:none" data-runtime-detail></div></td><td><span class="pill" data-runtime-badge style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div data-editor-host></div></td>`;
+  (state.draft.core||[]).forEach((sec)=>{ const runtime = runtimeBySection.get(String(sec.name||'')); const status = runtimeBadge(sec, runtime); const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="danger-text">${safeText(e)}</div>`).join(''); const meta = detectorMeta(sec.name) || detectorMeta(detectorTypeFromSectionName(sec.name)); const leniencyHint = (meta?.leniency_supported && !allSectionNames().has(`${String(sec.name||'')}.leniency`.toLowerCase())) ? `<button type="button" class="btn-quiet" data-leniency-for="${safeText(sec.name)}" style="margin-left:8px">Add leniency companion</button>` : ''; const customWarning = String(meta?.type_key||'').toLowerCase()==='custom' ? `<div class="muted" style="margin-top:6px;padding:8px;border:1px solid var(--warn);background:var(--warn-soft);color:var(--fg);border-radius:6px">⚠ Test regex against real sample lines before enabling permanent block.</div>` : ''; const tr=document.createElement('tr'); tr.classList.add('detector-row'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td><div class="detector-section-title">${safeText(sec.name)}</div>${badges}${leniencyHint}${customWarning}${validation?`<div style="margin-top:6px">${validation}</div>`:''}<div class="muted" style="margin-top:4px;display:none" data-runtime-detail></div></td><td><span class="pill" data-runtime-badge style="background:${status.color};color:#111827" title="${safeText(status.reason)}">${safeText(status.label)}</span></td><td><input type="checkbox" ${sec.enabled?'checked':''}></td><td><div data-editor-host></div></td>`;
     tr.querySelector('input').addEventListener('change',e=>{sec.enabled=e.target.checked; sec.keys.ENABLED=e.target.checked?'1':'0'; setDirty(true); renderConfigEditors();});
     const leniencyBtn = tr.querySelector('[data-leniency-for]');
     if(leniencyBtn) leniencyBtn.addEventListener('click',()=>addLeniencyCompanion(sec.name));
@@ -703,7 +703,7 @@ function renderConfigEditors(){
   });
 
   const len=byId('detectorsLeniencyBody'); len.innerHTML='';
-  (state.draft.leniency||[]).forEach((sec)=>{ const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="muted" style="color:#fca5a5">${safeText(e)}</div>`).join(''); const tr=document.createElement('tr'); tr.classList.add('detector-row'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td><div class="detector-section-title">${safeText(sec.name)}</div>${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}</td><td><div data-editor-host></div></td>`; renderSectionEditor(tr.querySelector('[data-editor-host]'), sec); len.appendChild(tr); });
+  (state.draft.leniency||[]).forEach((sec)=>{ const badges = riskBadgesForSection(sec).map((b)=>`<span class="pill" style="margin-left:6px">${safeText(b)}</span>`).join(''); const validation = (state.inlineValidation.bySection[sec.name||'']||[]).map((e)=>`<div class="danger-text">${safeText(e)}</div>`).join(''); const tr=document.createElement('tr'); tr.classList.add('detector-row'); tr.setAttribute('data-section', String(sec.name||'')); tr.innerHTML=`<td><div class="detector-section-title">${safeText(sec.name)}</div>${badges}${validation?`<div style="margin-top:6px">${validation}</div>`:''}</td><td><div data-editor-host></div></td>`; renderSectionEditor(tr.querySelector('[data-editor-host]'), sec); len.appendChild(tr); });
 
   const adv=byId('detectorsAdvanced'); adv.innerHTML='';
   (state.draft.advanced||[]).forEach((sec)=>{ const box=document.createElement('div'); box.className='summary-card'; box.innerHTML=`<h4>${sec.name}</h4><textarea class="input" style="width:100%;min-height:140px"></textarea>`; const ta=box.querySelector('textarea'); ta.value=(sec.raw_lines||[]).join('\n'); ta.addEventListener('input',e=>{sec.raw_lines=e.target.value.split('\n'); setDirty(true);}); adv.appendChild(box); });
