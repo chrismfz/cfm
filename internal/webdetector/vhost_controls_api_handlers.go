@@ -59,6 +59,19 @@ type webdetVhostControlRow struct {
 	ClamModeInline          bool `json:"clam_mode_inline"`
 	ClamModeToggleable      bool `json:"clam_mode_toggleable"`
 	ClamModeOverridePresent bool `json:"clam_mode_override_present"`
+
+	// Site Cache tiers armed for this host by the policy that decides it at
+	// the edge (siteCacheStore.PolicyFor: its own entry or a covering
+	// "*.suffix"); both false when none does, an opt-out, or a policy this
+	// build cannot load. The policy key is not reported: a scoped caller may
+	// be covered by an operator's wildcard it does not manage.
+	SiteCacheStatic bool `json:"site_cache_static,omitempty"`
+	SiteCacheMicro  bool `json:"site_cache_micro,omitempty"`
+	// Rules counts the enabled, unexpired traffic rules whose scope takes
+	// this host (ruleHostMatch, Simulate's host test), among the rules the
+	// caller may list (scopeFilterRules): a scoped caller is not told about
+	// a rule it cannot see.
+	Rules int `json:"rules,omitempty"`
 }
 
 type webdetVhostControlResponse struct {
@@ -74,6 +87,7 @@ func (e *Engine) handleWebdetVhosts(w http.ResponseWriter, r *http.Request) {
 	filter := parseVhostFilterWithAliases(r)
 	hosts := e.collectKnownVhosts()
 	in := e.vhostControlInputs()
+	in.rules = scopeFilterRules(in.rules, r)
 
 	// Every host an exclude or override names gets a row, so the owner can
 	// toggle it even without recent traffic. The HTTP/3 and ClamAV columns
@@ -129,6 +143,10 @@ type vhostControlInputs struct {
 	clamGlobal       bool
 	clamScanDefault  bool
 	clamInline       bool
+	// The traffic rules a row counts (every rule; a scoped request narrows
+	// it to the ones the caller may list) and the instant they are judged at.
+	rules []TrafficRule
+	now   time.Time
 }
 
 func (e *Engine) vhostControlInputs() vhostControlInputs {
@@ -146,6 +164,8 @@ func (e *Engine) vhostControlInputs() vhostControlInputs {
 	}
 	in.clamGlobal, in.clamScanDefault = clamScanPolicy()
 	in.clamInline = clamInlineDefault()
+	in.rules = e.TrafficRuleList()
+	in.now = time.Now()
 	return in
 }
 
@@ -188,6 +208,7 @@ func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhost
 
 	// Under-Attack override state (reflects a just-issued force immediately).
 	underAttack, _, _ := e.VhostAttackState(host)
+	static, micro := e.siteCacheTiers(host)
 	tier := e.challengeV2VhostTier(host)
 
 	return webdetVhostControlRow{
@@ -213,7 +234,22 @@ func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhost
 		ChallengeRungSource:     tier.Source,
 		ChallengeRungTrigger:    tier.Trigger,
 		ChallengeLockdownUntil:  lockdownPtr(e.vhostLockdownUntil(host)),
+		SiteCacheStatic:         static,
+		SiteCacheMicro:          micro,
+		Rules:                   vhostLiveRuleCount(in.rules, normalizeControlHost(host), in.now),
 	}
+}
+
+// vhostLiveRuleCount counts the rules Simulate would evaluate for host:
+// enabled, supported, unexpired, scope taking the host.
+func vhostLiveRuleCount(rules []TrafficRule, host string, now time.Time) int {
+	n := 0
+	for _, r := range rules {
+		if r.Enabled && !r.Unsupported && !r.Match.Expired(now) && ruleHostMatch(r.Scope.Vhosts, host) {
+			n++
+		}
+	}
+	return n
 }
 
 // filterWholeWAFEntries returns only entries that exclude the whole WAF
@@ -351,4 +387,32 @@ func readHostsFromUserDomains() map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// siteCachePolicy is the Site Cache policy that decides host at the edge
+// (siteCacheStore.PolicyFor) and whether it is a row this build cannot load,
+// which the edge treats as an opt-out. ok=false: no policy decides host.
+func (e *Engine) siteCachePolicy(host string) (key string, entry SiteCacheEntry, unloadable, ok bool) {
+	if e == nil || e.siteCache == nil {
+		return "", SiteCacheEntry{}, false, false
+	}
+	key, entry, ok = e.siteCache.PolicyFor(host)
+	if !ok {
+		return "", SiteCacheEntry{}, false, false
+	}
+	for _, h := range e.siteCache.FrozenHosts() {
+		if h == key {
+			return key, entry, true, true
+		}
+	}
+	return key, entry, false, true
+}
+
+// siteCacheTiers is which Site Cache tiers the edge applies to host.
+func (e *Engine) siteCacheTiers(host string) (static, micro bool) {
+	_, entry, unloadable, ok := e.siteCachePolicy(host)
+	if !ok || unloadable {
+		return false, false
+	}
+	return entry.Static.Enabled, entry.Micro.Enabled
 }

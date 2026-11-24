@@ -20,7 +20,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Vhost page: pick a host from a list that says what is going on.** The
+  host field opens every host you may see (a cPanel user: their own domains),
+  each with chips: under attack, lockdown, challenged (v2), suspicious, WAF
+  off, challenge excluded, cache / micro cache, live traffic rules, HTTP/3,
+  inline ClamAV scan. The hosts that need attention come first; typing
+  filters; arrows and Enter pick. The `/api/v1/webdet/vhosts` rows now carry
+  `site_cache_static` / `site_cache_micro` and `rules` (for a cPanel user,
+  only the rules they can see are counted).
 
 ## 2026.11.24
 

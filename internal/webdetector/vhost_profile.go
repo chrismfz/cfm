@@ -128,19 +128,13 @@ func (e *Engine) VhostProfile(host string, now time.Time) VhostProfile {
 	}
 
 	p.SiteCache.Switches = publishedSiteCacheSwitches.Load()
-	if e.siteCache != nil {
-		if key, entry, ok := e.siteCache.PolicyFor(host); ok {
-			p.SiteCache.Key = key
-			p.SiteCache.Inherited = key != host
+	if key, entry, unloadable, ok := e.siteCachePolicy(host); ok {
+		p.SiteCache.Key = key
+		p.SiteCache.Inherited = key != host
+		p.SiteCache.Unloadable = unloadable
+		if !unloadable { // an unloadable row is a stand-in, not the stored policy
 			ent := entry
 			p.SiteCache.Entry = &ent
-			for _, h := range e.siteCache.FrozenHosts() {
-				if h == key {
-					p.SiteCache.Unloadable = true
-					p.SiteCache.Entry = nil // a stand-in, not the stored policy
-					break
-				}
-			}
 		}
 	}
 
