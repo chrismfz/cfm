@@ -174,6 +174,7 @@ request-time (Lua, `access` phase) and response-time (nginx-native + a thin
 | Tier B **forwards no forgeable client-IP / geo / hint header** | micro locations: `X-Forwarded-For $remote_addr` (the real client alone — `mod_remoteip` reads it behind 127.0.0.1, so `REMOTE_ADDR` is unchanged), `CF-IPCountry` / `CF-Visitor` only from the trusted peer (`$cfm_cf_ipcountry` / `$cfm_cf_visitor`, the `$cf_xfp` gate), and `True-Client-IP`, `Client-IP`, `X-Client-IP`, `X-Cluster-Client-IP`, `Fastly-Client-IP`, `X-Originating-IP`, `X-ProxyUser-Ip`, `X-Forwarded`, `X-Country-Code`, `HTTPS`, `X-Arr-Ssl`, `X-Proto`, `CloudFront-Forwarded-Proto`, `Surrogate-Capability`, `Proxy` (httpoxy), `Content-Type`, `Content-Encoding` not sent; `X-Real-IP` / `CF-Connecting-IP` are `$remote_addr` (guard-pinned) | WooCommerce geolocation takes `CF-IPCountry` before any IP lookup, PHP helpers read `Client-IP` / the `X-Forwarded-For` prefix, Flexible-SSL snippets read `CF-Visitor`: a direct client choosing any of them would store its forged answer for everyone. The client IP the origin sees is still a residual (above) — the real one |
 | Tier B **never forwards a request body** | `proxy_pass_request_body off` + `proxy_set_header Content-Length ""` in every micro location (micro serves only GET/HEAD) | fat-GET poisoning: a body on a GET is not in the key, yet an app may read it — the WordPress REST API reads a JSON body on any method, so `GET /wp-json/wp/v2/posts` with `{"search":…}` in the body would store an attacker-shaped listing for everyone (verified with Content-Length, chunked and HTTP/2 bodies). Tier A keeps forwarding bodies (static files, and a POST to a static-extension URL must keep working) |
 | Tier B request rails | `micro_decision`: a `Range` request, `Accept: text/event-stream` and a partial-page request (`X-Requested-With`, `X-PJAX`, `HX-Request`, `Turbo-Frame`, `X-Inertia` present, empty or not — apps answer those with a fragment, usually without `Vary`), a credential-style request header (`Cart-Token`, `WooCommerce-Session`, `X-WP-Nonce`, `X-Api-Key`, `X-Auth-Token`, `X-Access-Token`) and a `Cookie` header over 8 KB bypass; on the response side a micro location never stores an answer that hands out a session token in a header (`$upstream_http_cart_token` / `$upstream_http_woocommerce_session` on `proxy_no_cache`, mirrored by `micro_storable`, so the key is remembered) — the token-less `GET /wp-json/wc/store/v1/cart` is how a headless WooCommerce client obtains its `Cart-Token`, and a stored one would put every such shopper in one cart. `X-Requested-With` counts with any value: Android WebView (in-app browsers — Facebook, Instagram) sends its app package in it on every request, so that traffic is not micro-cached — an accepted hit-ratio cost, since an app that tests `!empty($_SERVER['HTTP_X_REQUESTED_WITH'])` would otherwise store the fragment it serves them; micro routes only from the HTTPS server's `location /` (the conf sentinel `set $cfm_micro_conf "1"`, `""` by default at server level; `micro_gate` requires `"1"`), never on an internal redirect (`ngx.req.is_internal()`: a named-location redirect keeps the sentinel; a redirect to a URI re-runs the `""` default), and only on an nginx core ≥ 1.23 (older ones expose only the first of several `Cache-Control` headers to the map). `rewrite … last`, `ngx.req.set_uri(…, true)` and every redirect also keep the sentinel, and all of them make the request internal (verified), so the check refuses them; the guard additionally keeps `location /` free of `rewrite` / `try_files` / `error_page` and of `rewrite_by_lua*` (in it, at its server and http level), and of buffering off there or inherited | a micro location buffers, so an SSE stream would be held back until it ends, and the no-buffer PHP/admin and streaming passthroughs would stop streaming; an older live conf (no sentinel) never gets newer Lua's micro routing |
+| Encoding rail (both tiers) | `map $http_accept_encoding $cfm_cache_no_ae` on every cache location's `proxy_no_cache`: a response is stored only for a request that accepts `br` or `gzip` (a plain token, or a `q` above zero; `gzip;q=0` is a refusal). The client is still served, a stored compressed copy carries `Vary` so nginx misses and fetches for it, it just never fills the cache. Residual: on a cold key such a request still takes the cache lock (decided before `proxy_no_cache`), so visitors arriving during its fetch wait for it, at most the lock timeout, then fetch themselves; a bypass would avoid it but send these clients to the origin for every stored image too. Not mirrored by `micro_storable` on purpose: such a fetch must not mark the key uncacheable, or any client without `Accept-Encoding` could switch micro off for a URL | LiteSpeed answers a request without `Accept-Encoding` with the identity body and **no `Vary`**; stored, that copy went to every visitor. Measured on orion 2026-11-24: 53% of the bytes of the 150 heaviest compressible URLs were Tier A HITs served uncompressed (a 485 KB css the origin sends as 42 KB of br) |
 | `cfm_clearance` is edge-set, not origin | `$cfm_edge_sc` records the edge's own lines; the filter leaves exactly those out of the store decision (§5.5.1) | edge cookie poisoning the cache, or a cleared visitor never cached |
 
 **Residuals (cannot be seen at the edge).** An origin that varies a `200` on
@@ -188,7 +189,9 @@ that client:
   UA-class hints (`Sec-CH-UA-Mobile`, which `wp_is_mobile()` reads first,
   `X-Wap-Profile`, `X-Operamini-Phone-UA`) — mobile themes, WebP negotiation by
   `.htaccess`, language auto-detect, compression — safe only when the origin
-  sends `Vary` (nginx then stores one copy per variant); the same goes for an
+  sends `Vary` (nginx then stores one copy per variant; for compression the
+  one case the edge can see, a request that accepts none, is closed by the
+  encoding rail); the same goes for an
   origin that renders differently for **Google's address space**: Google's
   user-triggered fetchers (Read Aloud, Translate, link previews;
   `google-proxy-*`) are not on the bypass list since 2026-11-24, so they reach
@@ -565,7 +568,7 @@ access log (`ucache=` and `up=cfm_apache_micro` vs `up=cfm_apache`).
    bypasses) keeps visitors with a session out of the cache while you check.
 3. **Verdicts from the box** (they read the same with or without enforce), against the edge's HTTPS listener :9043
    on the vhost's own IP (so the origin answers from that vhost):
-   `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve <host>:9043:<vhost-ip> https://<host>:9043/`
+   `curl -sk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' -H 'Accept-Encoding: gzip, br' --resolve <host>:9043:<vhost-ip> https://<host>:9043/`
    shows `microcache=would/5s`; add `-H 'Cookie: wordpress_logged_in_x=1'` →
    `bypass:auth:…`; `/wp-login.php` or `/?doing_wp_cron=1` → `bypass:path`;
    `-H 'Range: bytes=0-10'` → `bypass:range`; `webmail.<domain>` (if armed by a
@@ -1138,10 +1141,14 @@ rows, and tracking-cookie storage + the 90 s / 120 s buckets.
 - **Only 200 is stored.** `proxy_cache_valid 404 1m` was dropped: on an atomic
   deploy a transiently missing asset would stick as a cached 404.
 - **Encoding relies on the origin's `Vary: Accept-Encoding`.** The key omits
-  `Accept-Encoding` (nginx honours `Vary`; mod_deflate sets it). An origin
-  that compresses without `Vary` could serve compressed bytes to a client that
-  did not ask — accepted; keying it would fragment the cache 3× for correct
-  origins.
+  `Accept-Encoding` (nginx honours `Vary`; mod_deflate and LiteSpeed set it
+  on a compressed answer). Keying it would fragment the cache 3× for correct
+  origins. What `Vary` does not cover: LiteSpeed sends the identity body
+  WITHOUT `Vary` to a request that accepts no compression, and that copy was
+  stored and served to everyone; the encoding rail (`$cfm_cache_no_ae`, §4
+  table) stores nothing fetched for such a request. Residual, accepted: an
+  origin that compresses without `Vary` could serve compressed bytes to a
+  client that did not ask.
 - **One shared 10g zone.** css/js/fonts and large images share `cfm_static`,
   so large-image traffic can LRU-evict small assets. Accepted; the 10 MB
   `$cfm_cache_too_big` cap (§5.1) limits it.
