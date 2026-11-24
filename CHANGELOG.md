@@ -21,6 +21,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **cfm-admin: Web Traffic page** (`/cfm-admin/webdetector/traffic/`, in the
+  nav in place of Web Bots, whose UA console stays reachable from it). Built
+  on the traffic mix: the bots' share of the origin time, requests vs origin
+  time vs traffic by class, a 5-minute chart, the clients to act on (rate,
+  traffic, origin share, IPs) and the bots-vs-humans split per vhost. Actions:
+  challenge a client's top IPs (a per-IP challenge, never the whole vhost and
+  never a ban), a box-wide UA throttle/block for UA families only (a browser
+  UA is never offered one: every real Chrome of that version sends the same
+  string), lift a manual vhost challenge, undo a UA rule.
+- **`POST /api/v1/challenge/ip/add` and `/remove`** (admin-only): the
+  operator's per-IP challenge on a list of up to 500 IPs (TTL 5 m to 24 h,
+  default 1 h), and lifting it (the page's Undo). It also revokes the IP's
+  clearance for the challenge's length, so a client that had already solved
+  (a solving farm) is challenged too; a person there re-solves once. A live,
+  longer challenge is never shortened and keeps its own reason; IGNORE_IPS and
+  blocked IPs are skipped with the reason. With `CHALLENGE_UNSOLVED_HOLD = enforce`, an IP that keeps loading the
+  challenge without solving stays challenged.
 - **Traffic mix: who the web traffic is and what it costs the origin, for
   24 h** (`GET /api/v1/webdet/traffic-mix`, MCP `traffic_mix`, admin-only).
   Every request lands in one of four classes: known crawlers (by UA), other

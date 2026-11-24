@@ -91,6 +91,8 @@ func (e *Engine) apiRoutes() []apiRoute {
 		{"/api/v1/challenge/vhost", e.handleChallengeVhost}, // ?host=
 		{"/api/v1/challenge/ips", e.handleChallengeIPs},
 		{"/api/v1/challenge/ip", e.handleChallengeIP}, // ?ip=
+		{"/api/v1/challenge/ip/add", requirePOST(e.handleChallengeIPAdd)},       // manual per-IP challenge (Web Traffic page), admin-only
+		{"/api/v1/challenge/ip/remove", requirePOST(e.handleChallengeIPRemove)}, // lift it, admin-only
 		{"/api/v1/challenge/events", e.handleChallengeEvents},
 		{"/api/v1/challenge/vhost/add", requirePOST(e.handleChallengeVhostAdd)},
 		{"/api/v1/challenge/vhost/remove", requirePOST(e.handleChallengeVhostRemove)},

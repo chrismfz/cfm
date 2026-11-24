@@ -24,17 +24,18 @@ const scopedLandingPage = "/cfm-admin/webdetector/controls/"
 // an admin token. Paths are relative to the /cfm-admin base, without the
 // trailing slash; "/" is the dashboard.
 var scopedAdminOnlyPages = map[string]struct{}{
-	"/":                   {},
-	"/health":             {},
-	"/alerts":             {},
-	"/mail":               {},
-	"/firewall":           {},
-	"/webdetector/bots":   {},
-	"/webdetector/tokens": {},
-	"/notifier":           {},
-	"/detectors":          {},
-	"/settings":           {},
-	"/debug":              {},
+	"/":                    {},
+	"/health":              {},
+	"/alerts":              {},
+	"/mail":                {},
+	"/firewall":            {},
+	"/webdetector/bots":    {},
+	"/webdetector/traffic": {},
+	"/webdetector/tokens":  {},
+	"/notifier":            {},
+	"/detectors":           {},
+	"/settings":            {},
+	"/debug":               {},
 }
 
 // scopedAdminPageRedirect sends a scoped user who asks for an admin-only
