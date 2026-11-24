@@ -139,7 +139,7 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   meta-externalagent has a node-wide cap.** On 2026-11-24 Meta's AI /
   indexing crawler (meta-externalagent) sent titan ~530 pages a minute for
   three hours at ~1.5 s of PHP each, ~27 000 of them `?add-to-cart=` cart
-  writes; titan and orion hit 100% CPU. Two changes:
+  writes; titan and orion hit 100% CPU. Three changes:
   - Rule 530's `CRAWLER` tag (a declared crawler UA) is answered with a 301
     to the same URL without `add-to-cart`, so the shop writes no cart. Not
     behind Cloudflare (a CDN could cache the 301 for shoppers), and only

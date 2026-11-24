@@ -147,7 +147,7 @@ func TestCrawlerThrottleStaticBudgetCoversStaticLocation(t *testing.T) {
 // (neither spends the other's budget). Link previews, ads, the catalog and
 // the in-app browsers never do. meta-webindexer is a Meta crawler (2) on the
 // per-vhost budgets too: it was in none.
-func TestMetaExternalAgentNodeCap(t *testing.T) {
+func TestMetaCrawlerNodeCaps(t *testing.T) {
 	for _, path := range append(crawlerThrottleConfs, "../../configs/cfm-edge.conf") {
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -171,7 +171,13 @@ func TestMetaExternalAgentNodeCap(t *testing.T) {
 		if m == nil {
 			t.Fatalf("%s: $is_meta_ext_agent map not found", path)
 		}
-		for _, other := range []string{"facebookexternalhit", "meta-externalads", "facebookcatalog", "FB_IAB"} {
+		// The in-app browsers are listed only to map to "" (users, never capped).
+		for _, inApp := range []string{"FB_IAB", "FBAV", "Instagram", "IABMV"} {
+			if !strings.Contains(m[1], `"~*`+inApp+`"`) {
+				t.Errorf("%s: in-app %s must be passed through first in $is_meta_ext_agent", path, inApp)
+			}
+		}
+		for _, other := range []string{"facebookexternalhit", "meta-externalads", "facebookcatalog"} {
 			if strings.Contains(m[1], other) {
 				t.Errorf("%s: %s must not take the node cap", path, other)
 			}

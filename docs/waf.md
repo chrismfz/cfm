@@ -1397,6 +1397,18 @@ share the zones, never a budget. Link previews, ads, the catalog and the
 in-app browsers keep their per-vhost budgets only: they are the paid and
 user-facing side, and cost little.
 
+Two things to know:
+- **Visibility in Meta AI search.** The indexer's night runs will now meet
+  429s, and Meta may crawl less or drop pages that keep answering 429. After
+  a deploy, read the share of meta-webindexer requests that got a 429 in
+  `throttle.log` across the fleet for a few days. If it is high, raise its
+  rate.
+- **A spoofed UA can starve the real crawler.** Each crawler has one key per
+  node, so anyone sending that UA at 2 pages/s or more from any address keeps
+  the real crawler at 429 on that node. This was already true of
+  meta-externalagent. It is acceptable for a soft throttle; if it matters,
+  the fix is a key gated on Meta's ASN (AS32934), not a map change.
+
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
 Family `WAF_AUTH_BURST`, all `block`: 510 `system.multicall`, 511
