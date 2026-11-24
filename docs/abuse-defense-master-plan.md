@@ -1007,7 +1007,11 @@ already opened.
    The client keeps its class; `distributed` is a label on it, and the Web
    Traffic page offers its addresses (never its UA) to the operator's
    per-IP challenge / deny / throttle. Nothing reads it to act.
-   **Exit contract (D3):** review with the traffic mix's (2026-12-22): how
+   **Exit contract (D3):** a first read on 2026-11-25 (a rehearsal: does
+   the rule or the way it is checked need fixing), the review on
+   **2026-12-02** (a week of fleet data), not the traffic mix's 2026-12-22:
+   a label costs nothing until an operator acts on it, so it needs data, not
+   a long burn-in. The review asks how
    often it fires fleet-wide, and for each firing UA whether a spot-check of
    the access log shows a scraper (requests per IP, static share, origin
    cost) or visitors (a CDN-fronted site with page-per-visit traffic would
