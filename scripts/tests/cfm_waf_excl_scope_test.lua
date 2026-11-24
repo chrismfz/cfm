@@ -96,6 +96,28 @@ do
       "scope_hosts " .. tostring(sh) .. " reads as no scope")
   end
 
+  -- Hot path: a row's scope is compiled once and kept on the row, and only
+  -- for a row whose value matched (a scoped cPanel row's scope is the
+  -- account's whole vhost set; walking it per request cost ~5 ms/request at
+  -- 100 rows x 200 hosts).
+  do
+    local real, n = wx.compile_scope, 0
+    wx.compile_scope = function(sc) n = n + 1; return real(sc) end
+    local big = {}
+    for i = 1, 200 do big[i] = "site" .. i .. ".gr" end
+    local h2, p2 = wx.rows_from_entries({
+      { type = "host", value = "site1.gr", scope_hosts = big },
+      { type = "path", value = "/p/", scope_hosts = big, rule_ids = { 402 } },
+    })
+    for _ = 1, 50 do wx.skip_for(h2, p2, "unrelated.example.com", "/index.php") end
+    check(n == 0, "no scope compiled for rows whose value never matched (n=" .. n .. ")")
+    for _ = 1, 50 do wx.skip_for(h2, p2, "site150.gr", "/p/x") end
+    check(n == 1, "the matching row's scope compiled once (n=" .. n .. ")")
+    local _, ids2 = wx.skip_for(h2, p2, "site150.gr", "/p/x")
+    check(ids2 and ids2[402], "the compiled scope still takes its host")
+    wx.compile_scope = real
+  end
+
   -- No host, no exclude (Go MatchWAFRules returns nothing for host "").
   local all0, ids0 = wx.skip_for({}, { { v = "/import/" } }, "", "/import/x")
   check(all0 == false and ids0 == nil, "an empty host gets no exclude, as in Go")

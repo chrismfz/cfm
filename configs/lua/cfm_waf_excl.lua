@@ -37,7 +37,7 @@
 --   wx.paths     -- array   : decoded path-rule rows {v, rule_ids?, scope?}
 --   wx.rows_from_entries(entries) -> hosts, paths   (the /nginx/waf/excludes rows)
 --   wx.skip_for(hosts, paths, host, uri) -> skip_all, skip_ids
---   wx.scope_takes(host, scope) / wx.normalize_scope(list)
+--   wx.scope_takes(host, scope) / wx.compile_scope(scope) / wx.normalize_scope(list)
 --
 -- Mutated directly by load_waf_excludes_local_cache in cfm.lua. This
 -- module deliberately exposes the state as plain table fields rather
@@ -240,25 +240,56 @@ local function scope_glob_to_lua_pattern(glob)
 end
 _M.scope_glob_to_lua_pattern = scope_glob_to_lua_pattern
 
--- scope_takes(host, scope): does an exclude whose normalised scope is `scope`
--- apply to a request on `host`? nil / empty scope = every host.
-function _M.scope_takes(host, scope)
-  if type(scope) ~= "table" or #scope == 0 then return true end
-  host = lower(tostring(host or ""))
+-- compile_scope(scope): a normalised scope list -> { set = {host=true},
+-- globs = {lua pattern...} }, or nil for no scope (every host). An unusable
+-- glob is left out; a scope left with nothing takes no host (set and globs
+-- both empty, not nil).
+function _M.compile_scope(scope)
+  if type(scope) ~= "table" or #scope == 0 then return nil end
+  local c = { set = {}, globs = {} }
   for _, h in ipairs(scope) do
     if type(h) == "string" then
       if h:find("[%*%?%[%]]") then
         local p = scope_glob_to_lua_pattern(h)
-        if p then
-          local ok, res = pcall(string.match, host, p)
-          if ok and res ~= nil then return true end
-        end
-      elseif h == host then
-        return true
+        if p then c.globs[#c.globs+1] = p end
+      else
+        c.set[h] = true
       end
     end
   end
+  return c
+end
+
+-- takes(c, host): compiled scope c (nil = every host) takes the lowercased host.
+local function takes(c, host)
+  if c == nil then return true end
+  if c.set[host] then return true end
+  for _, p in ipairs(c.globs) do
+    local ok, res = pcall(string.match, host, p)
+    if ok and res ~= nil then return true end
+  end
   return false
+end
+
+-- scope_takes(host, scope): does an exclude whose normalised scope is `scope`
+-- apply to a request on `host`? nil / empty scope = every host. (skip_for
+-- compiles a row's scope once instead; this is the one-off form.)
+function _M.scope_takes(host, scope)
+  return takes(_M.compile_scope(scope), lower(tostring(host or "")))
+end
+
+-- row_takes(row, host): the row's scope, compiled on first use and kept on the
+-- row (the per-worker cache keeps its rows across requests, so each snapshot
+-- compiles once). A row is only read here, never re-encoded into the shdict.
+local NOSCOPE = {}
+local function row_takes(row, host)
+  local c = row._scope_c
+  if c == nil then
+    c = _M.compile_scope(row.scope) or NOSCOPE
+    row._scope_c = c
+  end
+  if c == NOSCOPE then return true end
+  return takes(c, host)
 end
 
 -- rows_from_entries(entries): the `entries` array of /nginx/waf/excludes
@@ -300,8 +331,10 @@ function _M.skip_for(hosts, paths, host, uri)
     -- row without `scope` is global too (an entry without scope_hosts).
     if type(row) == "string" then row = { v = row } end
     if type(row) ~= "table" then return false end
-    if not _M.scope_takes(host, row.scope) then return false end
+    -- The value first: it is cheap and rarely matches, while a scoped
+    -- cPanel row's scope is the account's whole vhost set.
     if not _M.matches_rule(target, row.v, kind) then return false end
+    if not row_takes(row, host) then return false end
     if type(row.rule_ids) ~= "table" or #row.rule_ids == 0 then
       return true -- whole-WAF skip; signal caller to short-circuit
     end
