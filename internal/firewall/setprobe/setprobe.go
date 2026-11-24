@@ -16,6 +16,7 @@
 package setprobe
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -49,7 +50,7 @@ func Holds(set, elem string) (bool, error) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(Timeout))
 
-	data, err := request("cfm", set, key)
+	data, err := request("cfm", set, key, 0)
 	if err != nil {
 		return false, err
 	}
@@ -69,8 +70,11 @@ func Holds(set, elem string) (bool, error) {
 	return false, fmt.Errorf("setprobe: get %s in %s: %w", elem, set, err)
 }
 
-// request is the message body: nfgenmsg (inet, v0) and the element list.
-func request(table, set string, key []byte) ([]byte, error) {
+// request is the body of a single-element NFT_MSG_GETSETELEM: nfgenmsg
+// (inet, v0) and the element list holding key, with elemFlags (0 or
+// NFT_SET_ELEM_INTERVAL_END) when set. Holds, Lookup and HostTimes all build
+// their gets here.
+func request(table, set string, key []byte, elemFlags uint32) ([]byte, error) {
 	ae := netlink.NewAttributeEncoder()
 	ae.String(unix.NFTA_SET_ELEM_LIST_TABLE, table)
 	ae.String(unix.NFTA_SET_ELEM_LIST_SET, set)
@@ -80,6 +84,10 @@ func request(table, set string, key []byte) ([]byte, error) {
 				k.Bytes(unix.NFTA_DATA_VALUE, key)
 				return nil
 			})
+			if elemFlags != 0 {
+				e.ByteOrder = binary.BigEndian
+				e.Uint32(unix.NFTA_SET_ELEM_FLAGS, elemFlags)
+			}
 			return nil
 		})
 		return nil

@@ -864,6 +864,9 @@ func runDaemon(args []string) {
 	// drop never sees. Loaded from disk, then narrowed to what nft still
 	// blocks every two minutes; it answers nothing until the first reconcile.
 	edgeStore := edgeban.New(edgeban.DefaultPath)
+	// One file write per edgeBanSaveDelay at most, flushed on a stop signal
+	// (watchTTLBanShutdown): each write marshals every ban.
+	edgeStore.SetSaveDelay(edgeBanSaveDelay)
 	edgeStore.Load()
 	edgeban.SetDefault(edgeStore)
 
@@ -930,8 +933,9 @@ func runDaemon(args []string) {
 	blocklists.SetActive(blMgr) // read by GET /api/v1/firewall/feeds
 
 	// The node's own allow/block sets for the proxied-client filter
-	// (internal/proxyipfilter): the feeds arrive from the manager above, these
-	// are re-read from the kernel every minute.
+	// (internal/proxyipfilter): the feeds arrive from the manager above, the
+	// ban sets from the edge ban reconcile's read (every two minutes), and the
+	// rest are re-read from the kernel every minute.
 	proxyipfilter.StartLocalRefresh(context.Background(), be.ListSetElementsRaw, proxyipfilter.LocalRefreshEvery)
 
 	// Start scheduler

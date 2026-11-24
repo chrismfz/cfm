@@ -16,8 +16,10 @@ import (
 // and one netlink transaction per address on nftlib. An automatic single block
 // goes through ExtendBlock (a one-entry batch: it never shortens; AddBlock is
 // the manual path), and a batch — a fleet blocklist delta, a bulk API call —
-// would fork per address. AddBlockBatch instead reads
-// each block set once and writes the whole batch in one transaction (exec: one
+// would fork per address. AddBlockBatch instead reads what each block set
+// holds of the batch once (ReadHostElems: per-address netlink gets for up to
+// HostProbeMax addresses, a dump of the set above that or when a get fails)
+// and writes the whole batch in one transaction (exec: one
 // `nft -f -` run; nftlib: one per 1000 addresses): a few kernel round trips for
 // any batch size, more only when the set changed between the read and the
 // write and the write is retried.
@@ -249,8 +251,9 @@ var ErrBlockRead = errors.New("set read failed")
 // 2026-10-09). kept reports an existing block at least as long (or
 // permanent), left unchanged; the address is blocked either way.
 //
-// The batch has to read the set first (`nft -j list set` on the exec
-// backend, a command that can time out under load). When that read fails it
+// The batch has to read the address first (a netlink get, ReadHostElems; when
+// that fails, the whole set: `nft -j list set` on the exec backend, a command
+// that can time out under load). When that read fails it
 // still blocks: with one exclusive create where the backend has it
 // (BlockCreator, exec: an existing ban stays), else with AddBlock (nftlib: a
 // ban that may cut a longer one short beats no ban at all).

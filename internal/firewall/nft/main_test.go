@@ -19,6 +19,14 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	selfIPsLuaPath = filepath.Join(dir, "lua", "cfm_self_ips.lua")
+	// Off by default, so a unit test that reaches a block batch without the
+	// fake-nft helper (which turns it off itself, integration run or not) never
+	// reads the host's own block sets. The live tests keep it, against the
+	// netns they run in.
+	if os.Getenv("CFM_NFT_INTEGRATION") != "1" {
+		hostProbe = nil
+		clientNetProbe = nil
+	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

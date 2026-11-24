@@ -9,6 +9,7 @@ import (
 	"cfm/internal/edgeengine"
 	"cfm/internal/firewall"
 	"cfm/internal/logging"
+	"cfm/internal/proxyipfilter"
 	"cfm/internal/ttlban"
 )
 
@@ -72,11 +73,19 @@ func loadEdgeBanTrustedProxies() {
 func readEdgeBanSnapshot(be firewall.Backend) (edgeban.Snapshot, error) {
 	snap := edgeban.Snapshot{}
 	var err error
-	if snap.ReadAt, snap.Blocks, err = readBlockSets(be); err != nil {
+	var bySet map[string][]firewall.SetElementTimed
+	if snap.ReadAt, bySet, err = readBlockSetsBySet(be); err != nil {
 		return snap, err
 	}
+	for _, set := range edgeBanBlockSets {
+		snap.Blocks = append(snap.Blocks, bySet[set]...)
+	}
 	// The block sets are complete: refresh the persisted TTL bans
-	// (internal/ttlban) from them, whatever the allow sets' read does next.
+	// (internal/ttlban) and the proxied-client filter's ban sets from them,
+	// whatever the allow sets' read does next. The filter reads no ban set
+	// itself (proxyipfilter.SetLocalBans): this read is the one every two
+	// minutes already pays.
+	feedProxyIPFilterBans(snap.ReadAt, bySet)
 	if ts := ttlban.Default(); ts != nil {
 		if err := ts.Snapshot(snap.ReadAt, snap.Blocks); err != nil {
 			logging.Logf("[ttlban] snapshot save failed: %v", err)
@@ -98,16 +107,43 @@ func readEdgeBanSnapshot(be firewall.Backend) (edgeban.Snapshot, error) {
 // read began. The edge ban reconcile and the TTL ban shutdown snapshot share
 // it.
 func readBlockSets(be firewall.Backend) (time.Time, []firewall.SetElementTimed, error) {
-	readAt := time.Now()
+	readAt, bySet, err := readBlockSetsBySet(be)
+	if err != nil {
+		return readAt, nil, err
+	}
 	var out []firewall.SetElementTimed
+	for _, set := range edgeBanBlockSets {
+		out = append(out, bySet[set]...)
+	}
+	return readAt, out, nil
+}
+
+// readBlockSetsBySet is readBlockSets keeping each set's elements apart.
+func readBlockSetsBySet(be firewall.Backend) (time.Time, map[string][]firewall.SetElementTimed, error) {
+	readAt := time.Now()
+	out := make(map[string][]firewall.SetElementTimed, len(edgeBanBlockSets))
 	for _, set := range edgeBanBlockSets {
 		elems, err := be.ListSetElementsTimed(set)
 		if err != nil {
 			return readAt, nil, fmt.Errorf("%s: %w", set, err)
 		}
-		out = append(out, elems...)
+		out[set] = elems
 	}
 	return readAt, out, nil
+}
+
+// feedProxyIPFilterBans hands a complete read of the block sets to the
+// proxied-client filter (proxyipfilter.SetLocalBans).
+func feedProxyIPFilterBans(readAt time.Time, bySet map[string][]firewall.SetElementTimed) {
+	in := make(map[string][]proxyipfilter.BanElem, len(bySet))
+	for set, elems := range bySet {
+		out := make([]proxyipfilter.BanElem, len(elems))
+		for i, e := range elems {
+			out[i] = proxyipfilter.BanElem{Elem: e.Elem, Left: e.Expires}
+		}
+		in[set] = out
+	}
+	proxyipfilter.SetLocalBans(readAt, in)
 }
 
 // edgeBanReconcileOnce runs one reconcile and returns the failed reads in a

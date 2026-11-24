@@ -33,12 +33,20 @@ regression ruled out. So these lists live in the daemon, never in Lua.
   TTL (`|TTL=`) is not applied: in nft it times only the per-feed set, while
   the base rules drop on the union sets, which carry none. A feed holds until
   its next apply, there as here.
-- **Local sets.** The node's own sets of `inet cfm input` are read from the
-  kernel every minute (`StartLocalRefresh` with the backend's
-  `ListSetElementsRaw`, started in `cmd/cfm`): `block_v4/v6`,
-  `block_v4/v6_nets`, `allow_v4/v6`, `allow_v4/v6_nets`, `allow_dyn_v4/v6`. A
-  set that cannot be read keeps what it had (the error is logged when it
-  changes). Not read: `self_*`, `ignore_*`, `ps_pairs_*`, `th_*`,
+- **Local sets.** The node's own sets of `inet cfm input`. The small ones are
+  read from the kernel every minute (`StartLocalRefresh` with the backend's
+  `ListSetElementsRaw`, started in `cmd/cfm`): `block_v4/v6_nets`,
+  `allow_v4/v6`, `allow_v4/v6_nets`, `allow_dyn_v4/v6`. The ban sets
+  (`block_v4/v6`, `block_v6_clients`: every automatic ban, `cfm.deny`, the TTL
+  bans) are not read here: the edge ban reconcile hands over the read it makes
+  every two minutes anyway (`SetLocalBans`), with each element's time left,
+  and every minute's refresh drops the bans that ended since. With 50 000 bans
+  a dump of `block_v4` every minute was a steady share of the daemon's CPU
+  (2026-11-24). A new ban reaches this filter within two minutes (a web ban
+  reaches the edge ban store, checked first, at once); an ended one leaves it
+  within a minute, as before. A set that cannot be read keeps what it had (the
+  error is logged when it changes); a failed reconcile read leaves the ban
+  sets as they were, still dropping what ends. Not read: `self_*`, `ignore_*`, `ps_pairs_*`, `th_*`,
   `throttled_*` (no address verdict). On nftlib the dump runs on the read
   connection without the backend's write lock, so these reads never hold up a
   ban or a feed write.
@@ -48,11 +56,11 @@ regression ruled out. So these lists live in the daemon, never in Lua.
   direct client.
 - **Unblocks apply at once.** `edgeban.Unban`, which every unblock and allow
   path of an address calls, also clears the address from every block source
-  (`Forget`) for two refreshes (2 min), by when the sets read show the
+  (`Forget`) for two reads of the ban sets (4 min), by when the sets read show the
   kernel's own view. A network the daemon applies from `cfm.allow` (where a
   permanent `cfm allow 203.0.113.0/24` lands) is cleared the same way; a timed
   network allow is seen at the next minute's read. A ban the address earns
-  again inside those 2 minutes reaches this filter when the override ends;
+  again inside those 4 minutes reaches this filter when the override ends;
   nft's own drop of a direct client is immediate.
 - **Where.** The nginx bridge's decision (`writeEdgeBan`, `nginx_bridge.go`),
   for a web-scope request that came through a trusted proxy (`px=1`), after

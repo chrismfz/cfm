@@ -6,11 +6,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 
 	"cfm/internal/firewall"
+	"cfm/internal/firewall/setprobe"
 )
 
 // blockBatchStmtElems bounds the elements in one create/delete statement of
@@ -33,9 +35,17 @@ const blockBatchAttempts = 3
 // Process-wide, not per Backend: the daemon builds more than one.
 var hostBatchMu sync.Mutex
 
+// hostProbe answers a small batch's read with per-address netlink gets
+// instead of `nft -j list set` (firewall.ReadHostElems): on EL8's nft 1.0.4,
+// with 50 000 bans, that list and its JSON parse ran on every automatic ban.
+// The package's TestMain turns it off for the unit tests, whose fakes stand
+// in for nft, not for netlink.
+var hostProbe firewall.HostProbe = setprobe.HostProbe
+
 // AddBlockBatch blocks many host addresses in one `nft -f -` transaction,
-// after one `nft -j list set` per address family: three nft processes per
-// attempt at most, whatever the batch size, where AddBlock forks two per
+// after one read per address family (firewall.ReadHostElems: per-address
+// netlink gets for a small batch, else `nft -j list set`): three nft processes
+// per attempt at most, whatever the batch size, where AddBlock forks two per
 // address (four when it hits an existing element). It only adds or extends,
 // never shortens
 // (firewall.PlanBlockBatch).
@@ -166,7 +176,10 @@ func (b *Backend) hostBatchScript(set4, set6 string, v4, v6 []firewall.BlockEntr
 		if len(fam.want) == 0 {
 			continue
 		}
-		current, err := b.ListSetElementsTimed(fam.set)
+		set := fam.set
+		current, err := firewall.ReadHostElems(set, fam.want, hostProbe, func() ([]firewall.SetElementTimed, error) {
+			return b.ListSetElementsTimed(set)
+		})
 		if err != nil {
 			return "", res, fmt.Errorf("%w: %s %s %s: %w", firewall.ErrBlockRead, family, tableName, fam.set, err)
 		}
@@ -249,4 +262,21 @@ func (b *Backend) RemoveBlockBatch(ips []net.IP) error {
 		lastErr = &nftBatchError{msg: nftFirstError(r.Stdout+r.Stderr, err), err: err}
 	}
 	return fmt.Errorf("nft unblock batch (%d v4, %d v6), %d attempts: %w", len(v4), len(v6), blockBatchAttempts, lastErr)
+}
+
+// clientNetProbe is setprobe.IntervalHas for block_v6_clients; off (nil)
+// with hostProbe in the unit tests (TestMain, the fake-nft helper).
+var clientNetProbe = setprobe.IntervalHas
+
+// ClientNetHas tells whether block_v6_clients holds p without `nft -j list
+// set block_v6_clients` (firewall.ClientNetReader): an IPv6 client's ban
+// listed the set on every ban.
+func (b *Backend) ClientNetHas(p netip.Prefix) (bool, error) {
+	if hostProbe == nil || clientNetProbe == nil {
+		return false, firewall.ErrNoProbe
+	}
+	lo, hi := firewall.PrefixRange(p)
+	ctx, cancel := context.WithTimeout(context.Background(), setprobe.Timeout)
+	defer cancel()
+	return clientNetProbe(ctx, tableName, firewall.BlockV6Clients, lo, hi)
 }

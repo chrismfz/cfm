@@ -41,15 +41,19 @@ func TestFirewallSelfTest_AvailableOnNftlib(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 	var body struct {
-		OK        bool                    `json:"ok"`
-		Available bool                    `json:"available"`
-		SelfTest  firewall.NftlibSelfTest `json:"selftest"`
+		OK        bool                     `json:"ok"`
+		Available bool                     `json:"available"`
+		SelfTest  firewall.NftlibSelfTest  `json:"selftest"`
+		HostProbe *firewall.HostProbeStats `json:"host_probe"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if !body.OK || !body.Available {
 		t.Fatalf("expected ok+available, got %+v", body)
+	}
+	if body.HostProbe == nil || body.HostProbe.MaxAddrs != firewall.HostProbeMax {
+		t.Fatalf("host_probe missing on nftlib: %+v", body.HostProbe)
 	}
 	if body.SelfTest.Engine != "nftlib" || body.SelfTest.Samples != 2 {
 		t.Fatalf("selftest payload wrong: %+v", body.SelfTest)
@@ -85,6 +89,10 @@ func TestFirewallSelfTest_UnavailableOnExecNft(t *testing.T) {
 	}
 	if _, has := body["selftest"]; has {
 		t.Fatalf("no selftest payload expected when unavailable: %v", body)
+	}
+	// The ban path's probe counters are engine-agnostic: exec-nft has them too.
+	if hp, ok := body["host_probe"].(map[string]any); !ok || hp["max_addrs"] == nil {
+		t.Fatalf("host_probe missing on exec-nft: %v", body["host_probe"])
 	}
 }
 

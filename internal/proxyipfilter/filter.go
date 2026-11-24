@@ -193,10 +193,10 @@ func setLocal(set string, allow bool, elems []string) {
 	mu.Unlock()
 }
 
-// forgetFor is how long Forget overrides the lists: two local refreshes, by
-// when the sets read show the unblock (the block gone, or the allow an
-// unblock adds for a feed-listed address).
-const forgetFor = 2 * LocalRefreshEvery
+// forgetFor is how long Forget overrides the lists: two reads of the slowest
+// source (the ban sets, BanFeedEvery), by when the sets read show the unblock
+// (the block gone, or the allow an unblock adds for a feed-listed address).
+const forgetFor = 2 * BanFeedEvery
 
 type netForget struct {
 	p   netip.Prefix
@@ -558,6 +558,9 @@ func ResetForTest() {
 	feeds, locals = map[string]*source{}, map[string]*source{}
 	publishLocked()
 	mu.Unlock()
+	bansMu.Lock()
+	bans = map[string][]timedElem{}
+	bansMu.Unlock()
 	logSeen.Range(func(k, _ any) bool { logSeen.Delete(k); return true })
 	nLogKeys.Store(0)
 	modeFeed.Store(ModeLog)

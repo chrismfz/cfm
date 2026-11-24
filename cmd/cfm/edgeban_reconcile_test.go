@@ -1,11 +1,13 @@
 package main
 
 import (
+	"cfm/internal/proxyipfilter"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"testing"
 	"time"
 
@@ -163,5 +165,15 @@ func TestLoadEdgeBanTrustedProxies(t *testing.T) {
 	}
 	if b, _ := s.Banned("203.0.113.5"); !b {
 		t.Error("an ordinary banned address is not")
+	}
+}
+
+// The proxied-client filter takes its ban sets from the reconcile's read
+// (feedProxyIPFilterBans) and reads none of them itself: its list must be the
+// reconcile's, or a ban set would be read by neither (never filtered) or
+// waited for forever.
+func TestProxyIPFilterBanSetsAreTheReconciles(t *testing.T) {
+	if got, want := proxyipfilter.BanSets(), edgeBanBlockSets; !slices.Equal(got, want) {
+		t.Fatalf("proxyipfilter ban sets %v, reconcile reads %v", got, want)
 	}
 }

@@ -261,28 +261,11 @@ func (p *nlKernel) setInfo() (flags, klen uint32, err error) {
 // NFT_SET_ELEM_INTERVAL_END) and returns the element the kernel answered
 // with: its key and flags, found=false on ENOENT.
 func (p *nlKernel) get(key netip.Addr, elemFlags uint32) (netip.Addr, uint32, bool, error) {
-	ae := netlink.NewAttributeEncoder()
-	ae.String(unix.NFTA_SET_ELEM_LIST_TABLE, p.table)
-	ae.String(unix.NFTA_SET_ELEM_LIST_SET, p.set)
-	ae.Nested(unix.NFTA_SET_ELEM_LIST_ELEMENTS, func(l *netlink.AttributeEncoder) error {
-		l.Nested(unix.NFTA_LIST_ELEM, func(e *netlink.AttributeEncoder) error {
-			e.Nested(unix.NFTA_SET_ELEM_KEY, func(k *netlink.AttributeEncoder) error {
-				k.Bytes(unix.NFTA_DATA_VALUE, key.AsSlice())
-				return nil
-			})
-			if elemFlags != 0 {
-				e.ByteOrder = binary.BigEndian
-				e.Uint32(unix.NFTA_SET_ELEM_FLAGS, elemFlags)
-			}
-			return nil
-		})
-		return nil
-	})
-	attrs, err := ae.Encode()
+	data, err := request(p.table, p.set, key.AsSlice(), elemFlags)
 	if err != nil {
-		return netip.Addr{}, 0, false, fmt.Errorf("setprobe: encode: %w", err)
+		return netip.Addr{}, 0, false, err
 	}
-	msgs, err := p.execute(unix.NFT_MSG_GETSETELEM, append([]byte{unix.NFPROTO_INET, unix.NFNETLINK_V0, 0, 0}, attrs...))
+	msgs, err := p.execute(unix.NFT_MSG_GETSETELEM, data)
 	if errors.Is(err, unix.ENOENT) {
 		return netip.Addr{}, 0, false, nil
 	}
@@ -319,51 +302,11 @@ func (p *prober) getEnd(key netip.Addr) (netip.Addr, uint32, bool, error) {
 	return k, f, ok, err
 }
 
-// parseElem reads the first element of a NEWSETELEM reply: its key and flags.
+// parseElem reads the first element of a NEWSETELEM reply: its key and flags
+// (parseElemReply, which HostTimes reads the time left from too).
 func parseElem(b []byte) (netip.Addr, uint32, bool, error) {
-	var key netip.Addr
-	var flags uint32
-	var found bool
-	ad, err := netlink.NewAttributeDecoder(b)
-	if err != nil {
-		return key, 0, false, err
-	}
-	ad.ByteOrder = binary.BigEndian
-	for ad.Next() {
-		if ad.Type() != unix.NFTA_SET_ELEM_LIST_ELEMENTS {
-			continue
-		}
-		ad.Nested(func(l *netlink.AttributeDecoder) error {
-			for l.Next() && !found {
-				if l.Type() != unix.NFTA_LIST_ELEM {
-					continue
-				}
-				l.Nested(func(e *netlink.AttributeDecoder) error {
-					e.ByteOrder = binary.BigEndian
-					for e.Next() {
-						switch e.Type() {
-						case unix.NFTA_SET_ELEM_KEY:
-							e.Nested(func(k *netlink.AttributeDecoder) error {
-								for k.Next() {
-									if k.Type() == unix.NFTA_DATA_VALUE {
-										if a, ok := netip.AddrFromSlice(k.Bytes()); ok {
-											key, found = a, true
-										}
-									}
-								}
-								return nil
-							})
-						case unix.NFTA_SET_ELEM_FLAGS:
-							flags = e.Uint32()
-						}
-					}
-					return nil
-				})
-			}
-			return nil
-		})
-	}
-	return key, flags, found, ad.Err()
+	r, found, err := parseElemReply(b)
+	return r.key, r.flags, found, err
 }
 
 // interval finds the interval of an interval set that holds a.

@@ -569,3 +569,61 @@ func TestParseClientTarget(t *testing.T) {
 		}
 	}
 }
+
+// probingNetFake is netFake with a ClientNetReader, as both backends have
+// one: it answers from the same sets, or with err.
+type probingNetFake struct {
+	*netFake
+	err    error
+	probes int
+}
+
+func (f *probingNetFake) ClientNetHas(p netip.Prefix) (bool, error) {
+	f.probes++
+	if f.err != nil {
+		return false, f.err
+	}
+	_, ok := f.set(BlockV6Clients)[p.String()]
+	return ok, nil
+}
+
+// A /64 ban reads block_v6_clients through the backend's probe: a new /64
+// costs no dump; an existing one is dumped for its time left (a 4.18 kernel
+// answers an interval get without the timeout); a backend without a kernel
+// to ask (ErrNoProbe) or a failed probe dumps, and only the failure counts as
+// a fallback.
+func TestClientNetBanReadsThroughTheProbe(t *testing.T) {
+	ip := net.ParseIP("2001:db8:5:5::9")
+	p := netip.MustParsePrefix("2001:db8:5:5::/64")
+
+	f := &probingNetFake{netFake: newNetFake()}
+	if _, kept, err := ExtendClientBlock(f, ip, time.Hour); err != nil || kept {
+		t.Fatalf("new /64: kept=%v err=%v", kept, err)
+	}
+	if f.probes != 1 || f.reads[BlockV6Clients] != 0 {
+		t.Errorf("new /64: probes=%d dumps=%d, want 1 probe and no dump", f.probes, f.reads[BlockV6Clients])
+	}
+	if f.set(BlockV6Clients)[p.String()] != time.Hour {
+		t.Fatalf("new /64 not written for 1h: %v", f.set(BlockV6Clients))
+	}
+	if _, kept, err := ExtendClientBlock(f, ip, 30*time.Minute); err != nil || !kept {
+		t.Fatalf("30m over 1h: kept=%v err=%v, want kept", kept, err)
+	}
+	if f.reads[BlockV6Clients] != 1 {
+		t.Errorf("an existing /64 must be dumped for its time left: %d dumps", f.reads[BlockV6Clients])
+	}
+
+	before := HostProbeSnapshot()
+	for name, perr := range map[string]error{"no probe": ErrNoProbe, "failed": errors.New("no netlink")} {
+		g := &probingNetFake{netFake: newNetFake(), err: perr}
+		if _, _, err := ExtendClientBlock(g, ip, time.Hour); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if g.reads[BlockV6Clients] != 1 || g.set(BlockV6Clients)[p.String()] != time.Hour {
+			t.Errorf("%s: dumps=%d set=%v, want one dump and the /64 written", name, g.reads[BlockV6Clients], g.set(BlockV6Clients))
+		}
+	}
+	if d := HostProbeSnapshot().Fallbacks - before.Fallbacks; d != 1 {
+		t.Errorf("%d fallbacks counted, want 1 (ErrNoProbe is not a failure)", d)
+	}
+}

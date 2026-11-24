@@ -304,3 +304,49 @@ func TestSetEdgeModeDefaultsAndTypos(t *testing.T) {
 		}
 	}
 }
+
+// With a save delay the file is written once per burst, not once per ban
+// (each write marshals every ban: 7 MB with 50 000), while the version moves
+// with every change so the edge sees each ban at once. Flush writes what
+// waits, and a Load sees it.
+func TestSaveDelayCoalescesWrites(t *testing.T) {
+	s, _ := newTestStore(t)
+	s.SetSaveDelay(time.Hour) // the timer never fires in this test: Flush does
+	v0 := Version()
+	for i := 1; i <= 50; i++ {
+		s.Add(net.IPv4(198, 51, 100, byte(i)), dur(time.Hour), "waf_security", false)
+	}
+	if Version() < v0+50 {
+		t.Errorf("version moved %d for 50 bans, want every ban", Version()-v0)
+	}
+	if _, err := os.Stat(s.path); !os.IsNotExist(err) {
+		t.Fatalf("written before the delay or a Flush: %v", err)
+	}
+	s.Flush()
+	s2 := New(s.path)
+	s2.Load()
+	if n := len(s2.m); n != 50 {
+		t.Fatalf("after Flush the file holds %d bans, want 50", n)
+	}
+	st, _ := os.Stat(s.path)
+	s.Flush() // nothing waits: no write
+	if st2, _ := os.Stat(s.path); !st2.ModTime().Equal(st.ModTime()) {
+		t.Error("a Flush with nothing waiting rewrote the file")
+	}
+
+	// The timer writes too.
+	s.SetSaveDelay(10 * time.Millisecond)
+	s.Remove("198.51.100.1")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s3 := New(s.path)
+		s3.Load()
+		if len(s3.m) == 49 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the deferred write never landed (file holds %d)", len(s3.m))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

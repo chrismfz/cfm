@@ -3,6 +3,7 @@
 package nft
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -26,6 +27,12 @@ func fakeNFTSets(t *testing.T, v4JSON, v6JSON string, failWrites int) (logPath s
 // fakeNFTHostSets is fakeNFTSets for the host sets set4/set6.
 func fakeNFTHostSets(t *testing.T, set4, set6, v4JSON, v6JSON string, failWrites int) (logPath string) {
 	t.Helper()
+	// The fake stands in for nft only: a real per-address get would read the
+	// kernel's sets (a netns's under CFM_NFT_INTEGRATION) instead of the
+	// listings below. A test of the probe path sets hostProbe after this.
+	orig, origNet := hostProbe, clientNetProbe
+	hostProbe, clientNetProbe = nil, nil
+	t.Cleanup(func() { hostProbe, clientNetProbe = orig, origNet })
 	dir := t.TempDir()
 	logPath = filepath.Join(dir, "nft.log")
 	for name, body := range map[string]string{"v4.json": v4JSON, "v6.json": v6JSON, "fails": fmt.Sprint(failWrites)} {
@@ -322,5 +329,58 @@ func TestAddAllowBatch_AllowSetsNeverShortened(t *testing.T) {
 	}
 	if strings.Contains(got, "block_v") || strings.Contains(got, "198.51.100.8 ") {
 		t.Errorf("touched a block set or the permanent allow:\n%s", got)
+	}
+}
+
+// An automatic ban is a one-address batch: it plans from the per-address
+// probe (firewall.ReadHostElems), never `nft -j list set`, which with 50 000
+// bans and EL8's nft 1.0.4 cost most of the daemon's CPU. A kept ban runs no
+// nft at all; an extension runs one `nft -f -`. A probe that fails falls
+// back to the listing.
+func TestAddBlockBatch_SmallBatchPlansFromTheProbe(t *testing.T) {
+	log := fakeNFTSets(t, setJSON("block_v4"), setJSON("block_v6"), 0)
+	var asked []string
+	probe := map[string]time.Duration{"198.51.100.7": 7 * 24 * time.Hour, "198.51.100.8": time.Minute}
+	orig := hostProbe
+	hostProbe = func(set string, ips []net.IP) ([]bool, []time.Duration, error) {
+		found, exp := make([]bool, len(ips)), make([]time.Duration, len(ips))
+		for i, ip := range ips {
+			asked = append(asked, set+" "+ip.String())
+			exp[i], found[i] = probe[ip.String()]
+		}
+		return found, exp, nil
+	}
+	t.Cleanup(func() { hostProbe = orig })
+	b := New()
+
+	kept, err := firewall.ExtendBlock(b, net.ParseIP("198.51.100.7"), time.Hour)
+	if err != nil || !kept {
+		t.Fatalf("1h over a 7d ban: kept=%v err=%v, want kept", kept, err)
+	}
+	if _, err := os.Stat(log); !os.IsNotExist(err) {
+		t.Fatalf("a kept ban ran nft:\n%s", readFile(t, log))
+	}
+	if kept, err := firewall.ExtendBlock(b, net.ParseIP("198.51.100.8"), time.Hour); err != nil || kept {
+		t.Fatalf("1h over 1m left: kept=%v err=%v, want extended", kept, err)
+	}
+	got := readFile(t, log)
+	if strings.Contains(got, "list set") || strings.Count(got, "ARGS ") != 1 {
+		t.Fatalf("want one nft -f and no listing:\n%s", got)
+	}
+	if !strings.Contains(got, "delete element inet cfm block_v4 { 198.51.100.8 }") || !strings.Contains(got, "198.51.100.8 timeout 1h") {
+		t.Errorf("extension not written as delete + create:\n%s", got)
+	}
+	if want := []string{"block_v4 198.51.100.7", "block_v4 198.51.100.8"}; strings.Join(asked, ",") != strings.Join(want, ",") {
+		t.Errorf("probed %v, want %v", asked, want)
+	}
+
+	hostProbe = func(string, []net.IP) ([]bool, []time.Duration, error) {
+		return nil, nil, errors.New("no netlink")
+	}
+	if _, err := firewall.ExtendBlock(b, net.ParseIP("198.51.100.9"), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, log); !strings.Contains(got, "ARGS -j list set inet cfm block_v4") {
+		t.Errorf("a failed probe did not fall back to the listing:\n%s", got)
 	}
 }

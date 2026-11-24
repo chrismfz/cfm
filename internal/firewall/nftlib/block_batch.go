@@ -3,7 +3,11 @@
 package nftlib
 
 import (
+	"cfm/internal/firewall/setprobe"
+	"context"
 	"fmt"
+	"net/netip"
+	"time"
 
 	"cfm/internal/firewall"
 
@@ -14,7 +18,8 @@ import (
 const blockBatchAttempts = 3
 
 // AddBlockBatch blocks many host addresses over netlink: one read of each
-// block set, then one transaction per setWriteChunk addresses (the netlink
+// block set (firewall.ReadHostElems: per-address gets for a small batch, else
+// a dump), then one transaction per setWriteChunk addresses (the netlink
 // message-size bound) — both families in the same transaction — where
 // AddBlock costs one transaction per address. It only adds or extends, never
 // shortens (firewall.PlanBlockBatch).
@@ -73,11 +78,18 @@ func (b *Backend) hostBatch(op, set4, set6 string, entries []firewall.BlockEntry
 			if len(f.want) == 0 {
 				continue
 			}
-			elems, err := b.conn.GetSetElements(f.set)
+			set := f.set
+			current, err := firewall.ReadHostElems(f.name, f.want, b.hostProbe, func() ([]firewall.SetElementTimed, error) {
+				elems, err := b.conn.GetSetElements(set)
+				if err != nil {
+					return nil, err
+				}
+				return elemsToTimed(elems, set.Interval), nil
+			})
 			if err != nil {
 				return res, fmt.Errorf("%w: nftlib %s %s: %w", firewall.ErrBlockRead, op, f.name, err)
 			}
-			plan := firewall.PlanBlockBatch(f.want, elemsToTimed(elems, f.set.Interval))
+			plan := firewall.PlanBlockBatch(f.want, current)
 			planned = planned.Add(plan.Result())
 			for _, w := range plan.Writes {
 				writes = append(writes, blockWrite{set: f.set, PlannedBlock: w})
@@ -156,4 +168,23 @@ func (b *Backend) writeBlockBatch(writes []blockWrite) (int, error) {
 		}
 	}
 	return len(writes), nil
+}
+
+// ClientNetHas tells whether block_v6_clients holds p, without a dump of
+// the set (firewall.ClientNetReader), counted with the backend's netlink
+// calls. A Backend a unit test builds (no hostProbe) has no kernel to ask.
+func (b *Backend) ClientNetHas(p netip.Prefix) (bool, error) {
+	if b.hostProbe == nil {
+		return false, firewall.ErrNoProbe
+	}
+	lo, hi := firewall.PrefixRange(p)
+	ctx, cancel := context.WithTimeout(context.Background(), setprobe.Timeout)
+	defer cancel()
+	start := time.Now()
+	b.nl.mu.Lock()
+	b.nl.dials++
+	b.nl.mu.Unlock()
+	has, err := setprobe.IntervalHas(ctx, cfmTableName, firewall.BlockV6Clients, lo, hi)
+	b.nl.record("ClientNetHas", start, err)
+	return has, err
 }
