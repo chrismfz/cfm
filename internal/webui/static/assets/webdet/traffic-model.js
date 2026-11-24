@@ -183,9 +183,11 @@ export function clientActions(client) {
 }
 
 // challengeableIPs splits the client's top IPs for the per-IP challenge,
-// which keys on an exact address: an IPv6 client is counted as its /64 by
-// the traffic mix, and a /64 cannot be challenged per IP (a deny or throttle
-// rule takes it).
+// which keys on an exact address. The traffic mix lists exact addresses
+// (IPv6 included; it groups an IPv6 client by its /64 only for its own
+// behaviour count), so `prefixes` is empty in practice: a guard, in case a
+// list ever carries a prefix, which a deny or throttle rule takes and the
+// per-IP challenge cannot.
 export function challengeableIPs(ips) {
   const ok = [];
   const prefixes = [];
