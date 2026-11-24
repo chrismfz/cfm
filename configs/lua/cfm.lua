@@ -2294,7 +2294,8 @@ end
 -- [R1] Throttle
 if rule_action == "throttle" then
   if rules_ok and rules and rules.apply then
-    local r = rules.apply({ rule_action = rule_action, throttle_profile = throttle_profile },
+    local r = rules.apply({ rule_action = rule_action, throttle_profile = throttle_profile,
+        rule_id = rule_id, throttle_rate = d.throttle_rate, throttle_per = d.throttle_per },
       { ip = ip, host = host, uri = uri, method = method, profile = throttle_profile })
     if r and r.action == "throttle" then
       ngx.header["X-CFM-Action"] = "throttle"

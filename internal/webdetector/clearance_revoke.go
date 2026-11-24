@@ -77,8 +77,11 @@ func clearanceRevokeArms(reason string) bool {
 }
 
 // clearanceRevokeMax caps the list (the edge writes one dict key per entry).
-// A malpath challenge lives minutes; a node holds tens at a time. At the cap
-// a new revocation is not recorded (fails toward the old behaviour).
+// A malpath challenge lives minutes; a node holds tens at a time. An
+// operator's manual per-IP challenge (challenge_ip_manual.go) adds up to 500
+// per call for up to 24 h, so the cap is reachable there: at the cap a new
+// revocation is not recorded (fails toward the old behaviour), and
+// revokeClearanceLocked says so for the caller to report.
 const clearanceRevokeMax = 4096
 
 // newClearanceRevokeEpoch names one bridge's list (NewNginxBridge): a
@@ -92,10 +95,11 @@ func newClearanceRevokeEpoch() string {
 }
 
 // revokeClearanceLocked records (or extends) ip's revocation until `until`
-// and drops its okState. Caller holds b.mu.
-func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) {
+// and drops its okState. It answers false when the list is full and nothing
+// was recorded. Caller holds b.mu.
+func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) bool {
 	if ip == "" {
-		return
+		return false
 	}
 	if b.clrRevoked == nil {
 		b.clrRevoked = make(map[string]time.Time)
@@ -109,7 +113,7 @@ func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) {
 			}
 		}
 		if len(b.clrRevoked) >= clearanceRevokeMax {
-			return
+			return false
 		}
 	}
 	wasLive := had && cur.After(now)
@@ -132,6 +136,7 @@ func (b *NginxBridge) revokeClearanceLocked(ip string, until, now time.Time) {
 	// okState is not scanned here (O(okState) under the write lock, once per
 	// newly revoked IP — a botnet sweep is thousands): handleDecision skips
 	// it for a revoked IP, and no touch writes it while the revocation lives.
+	return true
 }
 
 // unrevokeClearanceLocked ends ip's revocation. Caller holds b.mu.

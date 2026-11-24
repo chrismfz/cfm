@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CFM — Web Traffic</title>
+  <link rel="stylesheet" href="/cfm-admin/assets/style.css" />
+  <style>
+    /* Web Traffic only: a card never grows past the viewport (its tables scroll
+       inside), and a link styled as a button looks like one. */
+    .layout > .card { min-width: 0; }
+    a.btn-quiet { display: inline-block; text-decoration: none; }
+  </style>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20viewBox=%270%200%2032%2032%27%3E%3Crect%20width=%2732%27%20height=%2732%27%20rx=%277%27%20fill=%27%23141b2d%27/%3E%3Cpath%20d=%27M16%206l8.7%205v10L16%2026l-8.7-5V11z%27%20fill=%27none%27%20stroke=%27%234da3ff%27%20stroke-width=%272.4%27/%3E%3C/svg%3E" />
+  <script>document.documentElement.dataset.theme=(function(){try{return localStorage.getItem("cfm-theme")||"dark"}catch(e){return"dark"}})();</script>
+  <script src="/cfm-admin/assets/vendor/echarts-5.6.0.min.js"></script>
+  <script type="module" src="/cfm-admin/assets/shared/nav.js"></script>
+  <script type="module">
+    import "../../assets/shared/constants.js";
+    import "../../assets/shared/auth-context.js";
+    import "../../assets/shared/auth-mode.js";
+    import "../../assets/shared/api-client.js";
+    import "../../assets/shared/controller-bootstrap.js";
+    import "../../assets/shared/ui-scope.js";
+    import "../../assets/shared/chart-theme.js";
+    import "../../assets/traffic.js";
+  </script>
+</head>
+<body>
+<div class="shell">
+<aside class="sidebar" data-shared-nav></aside>
+<div class="main">
+<div id="app">
+    <header class="topbar">
+      <button class="nav-burger" type="button" data-nav-burger aria-label="Toggle navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <h1>CFM Admin</h1>
+      <div class="meta">
+        <label for="windowSelect" class="muted">Window</label>
+        <select id="windowSelect" class="input">
+          <option value="15m">15 min</option>
+          <option value="1h" selected>1 hour</option>
+          <option value="6h">6 hours</option>
+          <option value="24h">24 hours</option>
+        </select>
+        <span class="muted">Auto-refresh: <strong id="autoState">ON</strong></span>
+        <button id="refreshBtn" class="btn-quiet" type="button">Refresh now</button>
+        <button id="toggleAutoBtn" class="btn-quiet" type="button">Stop</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="card wide">
+        <h2>Web Traffic — who the traffic is and what it costs the origin</h2>
+        <p class="muted">
+          Every request is labelled by its User-Agent and behaviour: known crawlers, other bots and tools,
+          <strong>browser UAs with no static files or XHR</strong> (a browser-looking scraper) and likely humans.
+          The labels never act by themselves; the actions below are yours. A browser UA is never offered a
+          UA rule (every real Chrome of that version sends the same string): act on its IPs instead.
+          <span id="windowNote"></span>
+        </p>
+        <span id="actionMsg" class="pill" style="display:none" role="status" aria-live="polite"></span>
+        <button id="undoBtn" type="button" class="btn-quiet btn-sm" style="display:none">Undo</button>
+        <div class="summary-grid" id="tiles"></div>
+      </section>
+
+      <section class="card wide">
+        <h2>Traffic mix: requests vs origin time</h2>
+        <div class="tr-legend" id="legend"></div>
+        <div id="mixBars"></div>
+        <p class="muted" id="mixNote"></p>
+      </section>
+
+      <section class="card wide">
+        <h2>Requests over time, by class</h2>
+        <div id="seriesChart" class="echart-box" style="height: 260px;" role="img" aria-label="Requests per 5 minutes, stacked by class"></div>
+      </section>
+
+      <section class="card wide">
+        <h2>Clients to act on</h2>
+        <p class="muted">Sorted by origin time. Browser-UA clients show the raw User-Agent; IPs are the last hour's.</p>
+        <div class="table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Client</th>
+                <th>Requests</th>
+                <th>Rate</th>
+                <th>Traffic</th>
+                <th>Origin time</th>
+                <th>IPs (1 h)</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="clientsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Bots vs humans per vhost</h2>
+        <p class="muted">Top vhosts by origin time; the bar is that vhost's origin time by class.</p>
+        <div class="table-wrap wide-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Vhost</th>
+                <th>Requests</th>
+                <th>Origin time</th>
+                <th style="min-width: 220px;">Origin time by class</th>
+                <th>Bots</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="hostsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card wide">
+        <h2>Active UA rules</h2>
+        <p class="muted">Box-wide UA rules (<code>cfm bots</code>); they expire by themselves. Per-IP challenges live on each IP (Forensics). The full UA console: <a href="/cfm-admin/webdetector/bots/">Web Bots</a>.</p>
+        <div class="table-wrap wide-table-wrap">
+          <table>
+            <thead><tr><th>UA</th><th>Action</th><th>Expires in</th><th>Hits</th><th>By</th><th>Reason</th><th></th></tr></thead>
+            <tbody id="rulesBody"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div class="modal-backdrop" id="ipDialog" style="display:none" role="dialog" aria-modal="true" aria-labelledby="ipDialogTitle">
+      <div class="modal-card">
+        <h2 id="ipDialogTitle">Challenge its IPs</h2>
+        <p class="muted" id="ipDialogClient" style="word-break: break-all;"></p>
+        <div class="form-grid">
+          <label for="ipCount">How many of its top IPs</label>
+          <select id="ipCount" class="input">
+            <option value="10">10</option>
+            <option value="25">25</option>
+            <option value="50" selected>50</option>
+            <option value="100">100</option>
+          </select>
+          <label for="ipTTL">Challenge for</label>
+          <select id="ipTTL" class="input">
+            <option value="3600" selected>1 hour</option>
+            <option value="21600">6 hours</option>
+            <option value="86400">24 hours</option>
+          </select>
+          <label for="ipReason">Reason</label>
+          <input id="ipReason" class="input input-wide" type="text" placeholder="goes to the challenge log" />
+        </div>
+        <p id="ipDialogPreview"></p>
+        <p class="muted">Each IP gets a per-IP challenge, not the vhost: other visitors see nothing. A client on it that had already solved a challenge must solve again (its clearance is revoked for the challenge's length). Anyone there who solves passes (and lifts it for that IP). An IP already challenged for longer is left as it is. With <code>CHALLENGE_UNSOLVED_HOLD = enforce</code>, an IP that keeps loading the challenge without solving stays challenged. Never a ban.</p>
+        <div class="toolbar">
+          <button id="ipDialogApply" class="btn-quiet" type="button">Challenge</button>
+          <button id="ipDialogCancel" class="btn-quiet" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div><!-- /.main -->
+</div><!-- /.shell -->
+</body>
+</html>

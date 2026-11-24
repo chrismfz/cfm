@@ -57,6 +57,36 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   package (`make release` regenerates it from the same, narrower sources).
 
 ### Added
+- **Traffic rules: an expiry and a total throttle, for incidents.** A rule can
+  carry `match.until` (RFC3339): past it the rule matches nothing, and it is
+  deleted a day later; cfm-admin's editor offers 1 h / 6 h / 24 h / 7 d. The
+  new `throttle_total` action gives ALL matching clients one budget
+  (`rate_rps`, per vhost or for the whole node) instead of a per-client limit,
+  which a crawler spread over hundreds of IPs walks past (on titan a per-IP
+  limit cut 0–4% of Meta's load, a 5 r/s node total cut 65%). `ip_any` now
+  takes up to 500 entries (a scraper's top IPs). **Downgrade:** an older cfm
+  never enforces a rule with an expiry or a total throttle (it lists it
+  unsupported and keeps it), and an older edge applies the per-client
+  `soft_bot` throttle for a total one; this build also freezes a stored rule
+  whose action carries a key it does not know.
+- **cfm-admin: Web Traffic page** (`/cfm-admin/webdetector/traffic/`, in the
+  nav in place of Web Bots, whose UA console stays reachable from it). Built
+  on the traffic mix: the bots' share of the origin time, requests vs origin
+  time vs traffic by class, a 5-minute chart, the clients to act on (rate,
+  traffic, origin share, IPs) and the bots-vs-humans split per vhost. Actions:
+  challenge a client's top IPs (a per-IP challenge, never the whole vhost and
+  never a ban), a box-wide UA throttle/block for UA families only (a browser
+  UA is never offered one: every real Chrome of that version sends the same
+  string), lift a manual vhost challenge, undo a UA rule.
+- **`POST /api/v1/challenge/ip/add` and `/remove`** (admin-only): the
+  operator's per-IP challenge on a list of up to 500 IPs (TTL 5 m to 24 h,
+  default 1 h), and lifting it (the page's Undo). It also revokes the IP's
+  clearance for the challenge's length, so a client that had already solved
+  (a solving farm) is challenged too; a person there re-solves once. A live,
+  longer challenge is never shortened and keeps its own reason (a shorter
+  one is extended, and an undo leaves it alone); IGNORE_IPS and blocked IPs are
+  skipped with the reason. With `CHALLENGE_UNSOLVED_HOLD = enforce`, an IP that
+  keeps loading the challenge without solving stays challenged.
 - **Traffic mix: who the web traffic is and what it costs the origin, for
   24 h** (`GET /api/v1/webdet/traffic-mix`, MCP `traffic_mix`, admin-only).
   Every request lands in one of four classes: known crawlers (by UA), other
@@ -163,17 +193,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   a burn-in; review by 2026-12-08 (`docs/abuse-defense-master-plan.md` §5).
 
 ### Fixed
-- **sslcollector: edge workers hand the memory of replaced certificates back
-  to the OS.** The full collect after each ingest frees the old pairs, but
-  glibc kept their pages: with traffic allocations in between it could not
-  reuse them whole. On titan (3500 names) a worker's RSS rose in three steps
-  over the first hourly ingests (333 → 524 MB), then crept ~4 MB/h. A
-  `malloc_trim(0)` now follows the collect; in a container it brought the
-  settled RSS from 227 to 165 MB for ~25-40 ms. It runs on the worker's event
-  loop (in the background timer, but the worker serves nothing meanwhile), and
-  titan's real cost is read from the log. The
-  `[sslcollector] gc` line reports it as `trim_ms=` (`-` where glibc's
-  malloc_trim is absent).
 - **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
   current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
   Chrome/145 … (compatible; meta-externalagent/1.1 (+https://…))`, the UA

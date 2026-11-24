@@ -206,6 +206,18 @@
               </select>
               <p class="muted form-hint">Per client IP, per vhost. Requests over the limit get <code>429</code> with <code>Retry-After</code>.</p>
             </div>
+            <div class="form-grid" v-if="ruleForm.actionType === 'throttle_total'">
+              <label for="rule-total-rate">Total rate</label>
+              <div class="inline-field">
+                <input id="rule-total-rate" class="input input-small" type="number" min="0.1" max="10000" step="0.1" v-model.number="ruleForm.throttleRate" />
+                <span class="muted">requests per second, all matching clients together (10 s window)</span>
+              </div>
+              <label for="rule-total-per">Budget</label>
+              <select id="rule-total-per" class="input" v-model="ruleForm.throttlePer">
+                <option v-for="p in throttleTotalPer" :key="p.key" :value="p.key">{{ p.label }}</option>
+              </select>
+              <p class="muted form-hint">Over the budget a request gets <code>429</code> with <code>Retry-After</code>, whatever IP it came from. Match the crawler narrowly (its User-Agent): a match on browsers would throttle visitors too. A window's whole budget can pass at once (up to twice the rate around a window edge). On a <code>*</code> scope prefer <em>whole node</em>: per vhost is keyed on the request's Host.</p>
+            </div>
 
             <!-- Step 2 -->
             <div class="step-title">2 · Which requests?</div>
@@ -290,6 +302,14 @@
               </div>
               <label for="rule-enabled">Enabled</label>
               <label class="muted form-check"><input id="rule-enabled" type="checkbox" v-model="ruleForm.enabled" /> enforce immediately after save <span v-if="!ruleForm.enabled">(off: saved, visible to the simulator as “would match”, not enforced)</span></label>
+              <label for="rule-until">Expires</label>
+              <div class="inline-field">
+                <select id="rule-until" class="input" v-model="ruleUntilChoice" @change="applyUntilChoice">
+                  <option v-if="ruleUntilOrig" value="keep">keep: {{ ruleUntilOrig }}</option>
+                  <option v-for="c in untilChoices" :key="c.key" :value="c.key">{{ c.label }}</option>
+                </select>
+                <span class="muted" v-if="ruleForm.until">ends by itself at {{ ruleForm.until }} (UTC); an older cfm does not enforce an expiring rule at all</span>
+              </div>
               <label for="rule-note">Note</label>
               <input id="rule-note" class="input" type="text" v-model.trim="ruleForm.note" placeholder="Why this rule exists" />
             </div>
@@ -360,6 +380,8 @@
                 <td>
                   <span class="pill" :class="actionTone(row.action?.type)">{{ row.action?.type || '-' }}</span>
                   <span class="muted" v-if="row.action?.profile" :title="throttleProfileLabel(row.action.profile)">{{ row.action.profile }}</span>
+                  <span class="muted" v-if="row.action?.type === 'throttle_total'">{{ row.action.rate_rps }} r/s {{ row.action.per === 'node' ? 'node' : 'per vhost' }}</span>
+                  <span class="pill" :class="ruleIsExpired(row) ? '' : 'warn'" v-if="row.match?.until" :title="'match.until ' + row.match.until">{{ ruleIsExpired(row) ? 'expired' : 'until ' + row.match.until.replace('T', ' ').replace(/:\d\dZ$/, 'Z') }}</span>
                 </td>
                 <td><code>{{ (row.scope?.vhosts || []).join(', ') }}</code></td>
                 <td>{{ ruleMatchSummary(row) }}</td>

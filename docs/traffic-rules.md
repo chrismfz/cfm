@@ -2,7 +2,9 @@
 
 Per-vhost rules the edge applies to every request that reaches rule
 evaluation (`cfm.lua` Step 3): `block`, `challenge`, `challenge_v2`,
-`throttle` (with a `throttle_profile`) or `allow`. Managed from cfm-admin
+`throttle` (with a `throttle_profile`), `throttle_total` (one budget for all
+matching clients, see [Emergency rules](#emergency-rules-expiry-and-a-total-throttle))
+or `allow`. Managed from cfm-admin
 (Traffic rules, with its Recipes tab), `cfm webtop rules …` or the API. The
 engine is `internal/webdetector/traffic_rules.go`; the cfm-admin model is
 `rules-model.js`, kept in step with it. UX review and the remaining
@@ -36,14 +38,15 @@ an empty `match` matches every request on the scoped vhosts):
 
 | Field | Matches when… | Notes |
 |---|---|---|
-| `country_in` | the client's country is one of the codes | ISO 3166-1 alpha-2, ≤20 |
+| `country_in` | the client's country is one of the codes | ISO 3166-1 alpha-2, ≤64 |
 | `country_not_in` | the client's country is known and **not** one of the codes | mutually exclusive with `country_in`; an unknown country (`""` — geo not resolved / geo module down / panel requests) does **not** match, so a geo hiccup never turns the fence into a block of everyone |
-| `ip_any` | the client IP is inside one of the IPv4/IPv6 CIDRs | a bare address is `/32` / `/128`; stored masked+canonical (v4-mapped v6 becomes plain v4); no/invalid client IP never matches |
+| `ip_any` | the client IP is inside one of the IPv4/IPv6 CIDRs | ≤500 (a scraper's top IPs); a bare address is `/32` / `/128`; stored masked+canonical (v4-mapped v6 becomes plain v4); no/invalid client IP never matches |
 | `verified_bot` | the client IP is an **FCrDNS-verified crawler** (Googlebot, Bingbot, Yahoo, Applebot, Yandex, Meta — `goodBotPTRSuffixes` minus the generic `google` verdict, Google's special-case crawlers such as AdsBot (`rate-limited-proxy-*`); Google's user-triggered fetchers, `google-proxy-*`, verify as nothing since 2026-11-24) | the PTR must forward-confirm to the IP; a User-Agent string earns nothing. On the decision path the verdict is cache-only and consulted only for hosts an enabled `verified_bot` rule covers: a first-seen crawler IP (and every crawler IP after a daemon restart — the verdict cache is in-memory) matches from about its third request (request 1 fetches the PTR, request 2 kicks the forward-confirm), then an expired verdict is served stale while it re-verifies (dropped at once if the PTR no longer looks like a crawler). A cached PTR *failure* (resolver timeout / SERVFAIL, not a definitive "no PTR") is retried every 5 min rather than pinned for the 24 h geo TTL. The simulate API resolves it inline (its own small slot bound, direct reverse DNS — never the shared enrich cache), honours a caller-supplied `verified_bot` name as an override, and echoes the verdict (`verified_bot`; `verified_bot_excluded` for the generic google verdict; `verified_bot_inconclusive` = `timeout` / `transient` / `no_resolver` / `no_bridge` / `not_checked` when it could not tell — never a silent negative; alongside a name it flags a stale verdict) in the result |
 | `ua_any` | the User-Agent matches a case-insensitive `*`-glob, or contains the value when it has no wildcard | a lone `-` means "no User-Agent header" |
 | `path_any` | the decoded path has the value as a prefix (or matches the glob); a `?k=v` suffix matches per query parameter | |
 | `methods` | the HTTP method is listed | |
 | `has_qs` / `qs_not_rx` | a query string is present / the query does **not** match the RE2 regex | `qs_not_rx` applies whenever a query is present, independently of `has_qs` |
+| `until` | (not a condition) the rule matches **nothing** from this RFC3339 time on | the rule's expiry, see [Emergency rules](#emergency-rules-expiry-and-a-total-throttle) |
 
 A rule whose `match` or `scope` carries a key the running binary does not know
 — or whose `action.type` is a value it does not know — (written by a newer
@@ -54,6 +57,55 @@ older than 2026-09 drops `country_not_in` / `ip_any` silently, and one older
 than 2026-09-22 **deletes** a `challenge_v2` rule from disk on its next save
 (the action-value freeze shipped together with the action) — disable such
 rules before downgrading below those versions.
+
+## Emergency rules: expiry and a total throttle
+
+For an incident (a crawler on hundreds of IPs loading a node) a rule can end by
+itself and can cap the matching traffic as a whole. Like every rule, it never
+sees a client that leaves `cfm.lua` earlier: an address in
+`challenge_waf_bypass.conf` (Google, Bing and the other listed crawler and CDN
+ranges, Step 0) or a client holding a valid clearance cookie (Step 2b). A
+throttle on `*Googlebot*` therefore does nothing; Meta's crawlers are not on
+that list, so a Meta throttle bites.
+
+- **`match.until`** (RFC3339, stored UTC): past it the rule matches nothing,
+  with no restart or save needed (`ruleMatchFilters`; a Challenge Access entry
+  refuses an `until`). An add, an import or an update that sets a past `until`
+  is refused; an update that keeps the rule's own past `until` (disabling an
+  expired rule) is not. The
+  expired rule stays listed (cfm-admin shows `expired`) and is deleted by the
+  first rule write a day after it expired. The expiry is a **match** key on
+  purpose: a cfm older than this one freezes a rule carrying it (listed
+  `unsupported`, never enforced), so a downgrade leaves an emergency rule
+  inert, never permanent.
+- **`throttle_total`** (`action.rate_rps` 0.1–10000, `action.per` `vhost` |
+  `node`): one budget for every client the rule matches, per vhost or for the
+  whole node (all the vhosts the rule covers together), counted over 10 s
+  windows at the edge (`cfm_rules.lua` `total_hit`, key
+  `trt|<rule id>|<host or *>|<window>`; the limit is `rate × 10` requests a
+  window). Over it a request gets `429` + `Retry-After`, whatever IP it came
+  from. It is a fixed window: a window's whole budget can pass at once, and up
+  to twice the rate in the second around a window edge. Per vhost is keyed on
+  the request's Host, so on a `*` scope a client that reaches rule evaluation
+  with Host values of its own choosing gets a budget per value: use `node`
+  there. A per-client throttle does not stop a crawler spread over hundreds of
+  IPs: on titan (2026-11-24) a per-IP or per-vhost limit cut 0–4% of Meta's
+  origin load, a node total of 5 r/s cut 65%. Match it narrowly (a User-Agent):
+  legitimate clients that match share the budget. It ends evaluation like a
+  `throttle` (a later rule never runs for what it matches) and sits in the same
+  priority band. On the wire it is `rule_action: "throttle"` plus
+  `throttle_rate`, `throttle_per` and `rule_id`; an older edge ignores those
+  and applies the per-client `soft_bot` throttle. A cfm older than this one
+  freezes a `throttle_total` rule (unknown action type), and this one freezes a
+  rule whose `action` carries a key it does not know.
+
+```bash
+UNTIL=$(date -u -d '+6 hours' +%Y-%m-%dT%H:%M:%SZ)
+curl -sS -X POST "$CFM_API/api/v1/webdet/rules/add" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"enabled":true,"priority":5,"scope":{"vhosts":["*"]},
+  "match":{"ua_any":["*meta-externalagent*"],"until":"'"$UNTIL"'"},
+  "action":{"type":"throttle_total","rate_rps":5,"per":"node"},"note":"incident: Meta load"}' | jq
+```
 
 ## API
 

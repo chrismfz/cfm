@@ -394,38 +394,15 @@ do
     live[d] = true
     return d
   end
-  -- malloc_trim runs right after each collect, never alone. The module reaches
-  -- it through the FFI, so a fake "ffi" stands in for the module's load: the
-  -- test sees every call wherever the module makes it, and never runs glibc's.
-  local trims, trim_after, collects_seen = 0, true, 0
-  local trim_impl = function()
-    trims = trims + 1
-    if trims ~= collects_seen then trim_after = false end
-    return 0
-  end
-  local function fake_ffi(has_symbol)
-    local C = setmetatable({}, { __index = function(_, k)
-      if k == "malloc_trim" and has_symbol then return function(...) return trim_impl(...) end end
-      error("missing declaration for symbol '" .. tostring(k) .. "'")
-    end })
-    return { os = "Linux", cdef = function() end, C = C }
-  end
-  local real_ffi = package.loaded["ffi"]
-  package.loaded["ffi"] = fake_ffi(true)
   local M6 = fresh_module()
-  package.loaded["ffi"] = fake_ffi(false)
-  local M7 = fresh_module()          -- a node without glibc's malloc_trim
-  package.loaded["ffi"] = real_ffi
   local ingest6 = find_upvalue(M6.start_background, "ingest_dumpall")
   local do_dumpall6 = find_upvalue(M6.start_background, "do_dumpall")
   local snap6 = find_upvalue(M6.start_background, "safe_load_snapshot")
-  local do_dumpall7 = find_upvalue(M7.start_background, "do_dumpall")
   local function n6() local e, w = M6.cert_counts(); return e + w end
   local real_gc = collectgarbage
   local collects = {}
   _G.collectgarbage = function(opt, ...)
     if opt == "collect" then
-      collects_seen = collects_seen + 1
       local r = real_gc(opt, ...)
       local held = 0
       for _ in pairs(live) do held = held + 1 end
@@ -451,8 +428,6 @@ do
     check(c.lock == nil, "g1: the shared lock was released before the collect")
     check(logged("gc src=dumpall gc_ms="), "g1: the gc line reports gc_ms=")
     check(logged("lua_kb=") and logged("rss_mb="), "g1: the gc line reports lua_kb= and rss_mb=")
-    check(trims == 1 and trim_after, "g1: one malloc_trim, right after the collect (trims=" .. trims .. ")")
-    check(logged("trim_ms=") and not logged("trim_ms=-"), "g1: the gc line reports trim_ms=")
 
     next_payload = function() return { version = "g2", complete = false, exact = names("x", 2, "B"), wild = {} } end
     do_dumpall6(false)
@@ -463,7 +438,6 @@ do
       exact = { { host = "g1.example", cert_pem = "BAD", key_pem = "K" } } } end
     do_dumpall6(false)
     check(#collects == 2, "g3: no collect when the store did not change (got " .. #collects .. ")")
-    check(trims == 2, "g3: no trim when the store did not change (trims=" .. trims .. ")")
 
     -- The snapshot at boot: same rule.
     io.open = function(path, mode)
@@ -478,23 +452,7 @@ do
     c = collects[3] or {}
     check(c.n == 4 and c.held == 0, "g4: after the swap, the snapshot payload out of reach (n=" ..
           tostring(c.n) .. " held=" .. tostring(c.held) .. ")")
-    check(trims == 3 and trim_after, "g4: the snapshot load trims too (trims=" .. trims .. ")")
 
-    -- A malloc_trim that throws is skipped: the line says trim_ms=-, the ingest goes on.
-    trim_impl = function() error("trim failed") end
-    warn_lines = {}
-    next_payload = function() return { version = "g5", complete = true, exact = names("t", 3, "D"), wild = {} } end
-    do_dumpall6(false)
-    check(logged("trim_ms=-"), "g5: a throwing malloc_trim logs trim_ms=-")
-    check(n6() == 3, "g5: the ingest was taken (store " .. n6() .. ")")
-    -- None at all (not glibc): the module loads, collects, logs trim_ms=-.
-    trims = 0
-    trim_impl = function() trims = trims + 1; return 0 end
-    warn_lines = {}
-    next_payload = function() return { version = "g6", complete = true, exact = names("u", 3, "E"), wild = {} } end
-    do_dumpall7(false)
-    check(logged("gc src=dumpall") and logged("trim_ms=-"), "g6: no malloc_trim: collected, logs trim_ms=-")
-    check(trims == 0, "g6: no malloc_trim: nothing called (trims=" .. trims .. ")")
   end)
   _G.collectgarbage = real_gc
   io.open = real_open

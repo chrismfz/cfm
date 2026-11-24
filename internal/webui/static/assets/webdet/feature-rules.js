@@ -21,6 +21,8 @@ import {
   KNOWN_METHODS,
   RECIPES,
   THROTTLE_PROFILES,
+  THROTTLE_TOTAL_PER,
+  UNTIL_CHOICES,
   VERIFIED_BOT_LABEL,
   actionInfo,
   buildRulePayload,
@@ -35,9 +37,11 @@ import {
   recipe as recipeByKey,
   recipeOf,
   recipeVarsDefaults,
+  ruleExpired,
   shadowingRules,
   simulateInputFromRule,
   suggestPriority,
+  untilIn,
   validateRecipeVars,
   validateRuleForm,
 } from "./rules-model.js";
@@ -77,6 +81,12 @@ export const rulesMixin = {
       ruleActions: ACTIONS,
       botGroups: BOT_GROUPS,
       throttleProfiles: THROTTLE_PROFILES,
+      throttleTotalPer: THROTTLE_TOTAL_PER,
+      untilChoices: UNTIL_CHOICES,
+      // The Expires select: "" never, seconds from now, or "keep" (an edited
+      // rule's own until). Applied to ruleForm.until on change.
+      ruleUntilChoice: "",
+      ruleUntilOrig: "", // the loaded rule's own until, offered as "keep"
       knownMethods: KNOWN_METHODS,
       recipes: RECIPES,
 
@@ -134,7 +144,7 @@ export const rulesMixin = {
       return buildRulePayload(this.ruleForm);
     },
     ruleValidation() {
-      return validateRuleForm(this.ruleForm, { rules: this.rules, editId: this.ruleEditID });
+      return validateRuleForm(this.ruleForm, { rules: this.rules, editId: this.ruleEditID, keptUntil: this.ruleEditID ? this.ruleUntilOrig : "" });
     },
     ruleSentence() {
       const p = this.rulePayload;
@@ -326,8 +336,16 @@ export const rulesMixin = {
       if (!p.action.type) return;
       this.ruleForm.priority = suggestPriority(p.action.type, this.rules, p.scope.vhosts);
     },
+    applyUntilChoice() {
+      this.ruleForm.until = this.ruleUntilChoice === "keep" ? this.ruleUntilOrig : untilIn(this.ruleUntilChoice);
+    },
+    ruleIsExpired(row) {
+      return ruleExpired(row);
+    },
     resetRuleForm() {
       this.ruleEditID = "";
+      this.ruleUntilChoice = "";
+      this.ruleUntilOrig = "";
       this.ruleForm = emptyForm();
       this.ruleChips = chipsFromForm(this.ruleForm);
       this.priorityAuto = true;
@@ -337,6 +355,8 @@ export const rulesMixin = {
       this.editorMode = "editor";
       this.ruleEditID = String(row.id || "");
       this.ruleForm = formFromRule(row);
+      this.ruleUntilOrig = this.ruleForm.until;
+      this.ruleUntilChoice = this.ruleForm.until ? "keep" : "";
       this.ruleChips = chipsFromForm(this.ruleForm);
       this.priorityAuto = false;
     },
@@ -345,6 +365,8 @@ export const rulesMixin = {
       this.editorMode = "editor";
       this.ruleEditID = "";
       this.ruleForm = formFromRule(row);
+      this.ruleUntilOrig = this.ruleForm.until;
+      this.ruleUntilChoice = this.ruleForm.until ? "keep" : "";
       this.ruleForm.enabled = false;
       this.ruleForm.priority = 0;
       this.ruleForm.note = this.ruleNoteText(row) ? `copy of ${this.ruleNoteText(row)}` : `copy of ${row.id}`;
@@ -368,6 +390,9 @@ export const rulesMixin = {
       this.rules = this.extractRows(payload, "rows");
     },
     async saveRule() {
+      // A relative expiry ("in 1 hour") counts from the save, not from when
+      // it was picked in the select.
+      if (this.ruleUntilChoice && this.ruleUntilChoice !== "keep") this.applyUntilChoice();
       const v = this.ruleValidation;
       if (v.errors.length) {
         this.actionMsg = `Rule not saved: ${v.errors[0]}`;

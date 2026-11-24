@@ -313,7 +313,7 @@ test("country cap: a Europe-wide fence fits one rule, one past the cap is refuse
 });
 
 test("static tables are consistent", () => {
-  assert.deepEqual(ACTIONS.map((a) => a.key), ["allow", "block", "challenge", "challenge_v2", "throttle"]);
+  assert.deepEqual(ACTIONS.map((a) => a.key), ["allow", "block", "challenge", "challenge_v2", "throttle", "throttle_total"]);
   // Every action key must have a priority band (suggestPriority depends on it).
   for (const a of ACTIONS) assert.ok(PRIORITY_BANDS[a.key], `band for ${a.key}`);
   assert.deepEqual(THROTTLE_PROFILES.map((p) => p.key), ["soft_bot", "medium_bot", "hard_bot"]);
