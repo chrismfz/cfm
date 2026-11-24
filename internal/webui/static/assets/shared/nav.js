@@ -38,7 +38,7 @@ const MENU_GROUPS = [
   ]},
   { title: "Web protection", items: [
     { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },
-    { label: "Vhost live", href: "/cfm-admin/webdetector/vhost/", icon: "globe" },
+    { label: "Vhost", href: "/cfm-admin/webdetector/vhost/", icon: "globe" },
     { label: "Forensics", href: "/cfm-admin/webdetector/forensics/", icon: "search" },
     { label: "Web Traffic", href: "/cfm-admin/webdetector/traffic/", icon: "bot" },
   ]},
@@ -249,7 +249,7 @@ function fetchKnownVhosts(onReady) {
 function hostActions(host) {
   const h = encodeURIComponent(host);
   return [
-    { label: `Vhost live: ${host}`, hint: "Live charts", href: `/cfm-admin/webdetector/vhost/?host=${h}` },
+    { label: `Vhost: ${host}`, hint: "What applies, traffic, live", href: `/cfm-admin/webdetector/vhost/?host=${h}` },
     { label: `History for ${host}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?host=${h}#history-card` },
     { label: `Controls for ${host}`, hint: "WAF / Challenge / HTTP3 / Clam", href: `/cfm-admin/webdetector/controls/?vhost=${h}` },
     { label: `Traffic rules for ${host}`, hint: "Rules filtered to this vhost", href: `/cfm-admin/webdetector/rules/?vhost=${h}` },
