@@ -35,9 +35,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   default 1 h), and lifting it (the page's Undo). It also revokes the IP's
   clearance for the challenge's length, so a client that had already solved
   (a solving farm) is challenged too; a person there re-solves once. A live,
-  longer challenge is never shortened and keeps its own reason; IGNORE_IPS and
-  blocked IPs are skipped with the reason. With `CHALLENGE_UNSOLVED_HOLD = enforce`, an IP that keeps loading the
-  challenge without solving stays challenged.
+  longer challenge is never shortened and keeps its own reason (a shorter
+  one is extended, and an undo leaves it alone); IGNORE_IPS and blocked IPs are
+  skipped with the reason. With `CHALLENGE_UNSOLVED_HOLD = enforce`, an IP that
+  keeps loading the challenge without solving stays challenged.
 - **Traffic mix: who the web traffic is and what it costs the origin, for
   24 h** (`GET /api/v1/webdet/traffic-mix`, MCP `traffic_mix`, admin-only).
   Every request lands in one of four classes: known crawlers (by UA), other

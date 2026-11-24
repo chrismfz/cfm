@@ -336,7 +336,9 @@ import {
         }),
       });
       const skipped = Array.isArray(r.skipped) ? r.skipped.length : 0;
-      flash(`✓ challenged ${r.done ? r.done.length : 0} IP(s)${skipped ? `, ${skipped} skipped (already challenged longer, blocked or never challenged here)` : ""}`, "ok");
+      const extended = Array.isArray(r.extended) ? r.extended.length : 0;
+      flash(`✓ challenged ${r.done ? r.done.length : 0} IP(s)${extended ? `, extended ${extended} existing` : ""}${skipped ? `, ${skipped} skipped (already challenged longer, blocked or never challenged here)` : ""}`, "ok");
+      // Undo lifts only the challenges this click set, never one it extended.
       offerUndo(Array.isArray(r.done) ? r.done : []);
       closeIPDialog();
     } catch (err) {

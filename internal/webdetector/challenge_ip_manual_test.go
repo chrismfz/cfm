@@ -67,9 +67,14 @@ func TestChallengeIPManual(t *testing.T) {
 	if code, out := call(e.handleChallengeIPAdd, CtxRoleAdmin, "/api/v1/challenge/ip/add", `{"ips":["198.51.100.7"],"ttl_seconds":3600}`); code != http.StatusOK || len(out.Done) != 0 || len(out.Skipped) != 1 {
 		t.Fatalf("a longer live challenge: done=%v skipped=%+v", out.Done, out.Skipped)
 	}
+	if !b.ClearanceRevoked("198.51.100.7") {
+		t.Fatal("an IP skipped as already challenged kept its clearance")
+	}
 	b.ChallengeIPWithReason("198.51.100.8", 10*time.Minute, "waf")
-	if _, out := call(e.handleChallengeIPAdd, CtxRoleAdmin, "/api/v1/challenge/ip/add", `{"ips":["198.51.100.8"],"ttl_seconds":3600}`); len(out.Done) != 1 {
-		t.Fatalf("a shorter live challenge is extended: %+v", out)
+	// A shorter live challenge is extended, and reported apart from Done: an
+	// undo of Done must not lift a challenge the operator did not set.
+	if _, out := call(e.handleChallengeIPAdd, CtxRoleAdmin, "/api/v1/challenge/ip/add", `{"ips":["198.51.100.8"],"ttl_seconds":3600}`); len(out.Done) != 0 || len(out.Extended) != 1 {
+		t.Fatalf("a shorter live challenge: done=%v extended=%v, want it extended, not in done", out.Done, out.Extended)
 	}
 	if en, _ := ipEntry(b, "198.51.100.8"); en.Reason != "waf" || time.Until(en.Expires) < 50*time.Minute {
 		t.Fatalf("extended entry = %+v, want its own reason and ~1h", en)

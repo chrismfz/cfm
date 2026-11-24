@@ -49,8 +49,12 @@ type manualIPChallengeSkip struct {
 }
 
 type manualIPChallengeResult struct {
-	Action     string                  `json:"action"`
-	Done       []string                `json:"done"`
+	Action string   `json:"action"`
+	Done   []string `json:"done"` // newly challenged (add) or lifted (remove): what an undo reverses
+	// Extended (add only): IPs that already had a shorter live challenge,
+	// now extended. Not in Done: an undo must not lift a challenge the
+	// operator did not set (a WAF or malpath one, with its holds and marks).
+	Extended   []string                `json:"extended,omitempty"`
 	Skipped    []manualIPChallengeSkip `json:"skipped,omitempty"`
 	TTLSeconds int                     `json:"ttl_seconds,omitempty"`
 }
@@ -137,12 +141,18 @@ func (e *Engine) handleChallengeIPAdd(w http.ResponseWriter, r *http.Request) {
 		// reason and WAF rule: the solved hook and history read them): a
 		// live one only ever gets extended, with no reason of ours.
 		why := manualIPChallengeReason
+		extended := false
 		if live && cur.Action == "challenge" {
 			if !cur.Expires.Before(now.Add(ttl)) {
-				out.Skipped = append(out.Skipped, manualIPChallengeSkip{IP: ip, Why: "already challenged until " + cur.Expires.UTC().Format(time.RFC3339)})
+				// Its challenge already outlasts ours; the operator still
+				// wants a client that had solved to face it.
+				b.mu.Lock()
+				b.revokeClearanceLocked(ip, now.Add(ttl), now)
+				b.mu.Unlock()
+				out.Skipped = append(out.Skipped, manualIPChallengeSkip{IP: ip, Why: "already challenged until " + cur.Expires.UTC().Format(time.RFC3339) + "; clearance revoked for the chosen time"})
 				continue
 			}
-			why = ""
+			why, extended = "", true
 		}
 		b.ChallengeIPWithReason(ip, ttl, why)
 		// The edge passes a valid clearance cookie before it asks the daemon
@@ -152,10 +162,14 @@ func (e *Engine) handleChallengeIPAdd(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		b.revokeClearanceLocked(ip, now.Add(ttl), now)
 		b.mu.Unlock()
-		out.Done = append(out.Done, ip)
+		if extended {
+			out.Extended = append(out.Extended, ip)
+		} else {
+			out.Done = append(out.Done, ip)
+		}
 	}
-	logging.LogfCHALLENGES("[challenge] manual_ip action=challenge ips=%d skipped=%d ttl=%s reason=%q first=%s",
-		len(out.Done), len(out.Skipped), ttl, truncateForLog(reason, 160), strings.Join(firstN(out.Done, 5), ","))
+	logging.LogfCHALLENGES("[challenge] manual_ip action=challenge ips=%d extended=%d skipped=%d ttl=%s reason=%q first=%s",
+		len(out.Done), len(out.Extended), len(out.Skipped), ttl, truncateForLog(reason, 160), strings.Join(firstN(out.Done, 5), ","))
 	writeJSON(w, http.StatusOK, out)
 }
 
