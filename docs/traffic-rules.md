@@ -61,11 +61,18 @@ rules before downgrading below those versions.
 ## Emergency rules: expiry and a total throttle
 
 For an incident (a crawler on hundreds of IPs loading a node) a rule can end by
-itself and can cap the matching traffic as a whole.
+itself and can cap the matching traffic as a whole. Like every rule, it never
+sees a client that leaves `cfm.lua` earlier: an address in
+`challenge_waf_bypass.conf` (Google, Bing and the other listed crawler and CDN
+ranges, Step 0) or a client holding a valid clearance cookie (Step 2b). A
+throttle on `*Googlebot*` therefore does nothing; Meta's crawlers are not on
+that list, so a Meta throttle bites.
 
 - **`match.until`** (RFC3339, stored UTC): past it the rule matches nothing,
-  with no restart or save needed (`ruleMatchFilters`, so a Challenge Access
-  entry honours it too). An add or update with a past `until` is refused. The
+  with no restart or save needed (`ruleMatchFilters`; a Challenge Access entry
+  refuses an `until`). An add, an import or an update that sets a past `until`
+  is refused; an update that keeps the rule's own past `until` (disabling an
+  expired rule) is not. The
   expired rule stays listed (cfm-admin shows `expired`) and is deleted by the
   first rule write a day after it expired. The expiry is a **match** key on
   purpose: a cfm older than this one freezes a rule carrying it (listed

@@ -82,7 +82,7 @@ func TestTrafficRuleUntil(t *testing.T) {
 	}
 }
 
-// Challenge Access entries share the match grammar: an until there is honoured too.
+// The shared matcher honours an until (traffic rules; Challenge Access refuses one at normalize).
 func TestUntilInSharedMatcher(t *testing.T) {
 	m, err := normalizeMatch(TrafficRuleMatch{UAAny: []string{"*x*"}, Until: time.Now().Add(-time.Hour).Format(time.RFC3339)})
 	if err != nil {

@@ -144,7 +144,7 @@ export const rulesMixin = {
       return buildRulePayload(this.ruleForm);
     },
     ruleValidation() {
-      return validateRuleForm(this.ruleForm, { rules: this.rules, editId: this.ruleEditID });
+      return validateRuleForm(this.ruleForm, { rules: this.rules, editId: this.ruleEditID, keptUntil: this.ruleEditID ? this.ruleUntilOrig : "" });
     },
     ruleSentence() {
       const p = this.rulePayload;
@@ -390,6 +390,9 @@ export const rulesMixin = {
       this.rules = this.extractRows(payload, "rows");
     },
     async saveRule() {
+      // A relative expiry ("in 1 hour") counts from the save, not from when
+      // it was picked in the select.
+      if (this.ruleUntilChoice && this.ruleUntilChoice !== "keep") this.applyUntilChoice();
       const v = this.ruleValidation;
       if (v.errors.length) {
         this.actionMsg = `Rule not saved: ${v.errors[0]}`;

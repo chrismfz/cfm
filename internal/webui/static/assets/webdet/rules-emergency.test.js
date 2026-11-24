@@ -83,3 +83,12 @@ test("ruleExpired and shadowingRules: a total throttle ends evaluation; an expir
   const gone = { ...tt, id: "gone", match: { ...tt.match, until: "2000-01-01T00:00:00Z" } };
   assert.deepEqual(shadowingRules(row, [gone]), []);
 });
+
+test("validateRuleForm: an edited rule may keep its own past until (as the daemon's Update)", () => {
+  const f = emptyForm({ vhosts: "*", uas: "*a*", actionType: "block", until: "2026-11-24T11:00:00Z" });
+  const kept = validateRuleForm(f, { now: NOW, editId: "r1", keptUntil: "2026-11-24T11:00:00Z" });
+  assert.ok(!kept.errors.some((e) => /past/.test(e)), kept.errors.join("; "));
+  assert.ok(kept.warnings.some((w) => /expired/.test(w)));
+  const changed = validateRuleForm({ ...f, until: "2026-11-24T10:00:00Z" }, { now: NOW, editId: "r1", keptUntil: "2026-11-24T11:00:00Z" });
+  assert.ok(changed.errors.some((e) => /past/.test(e)));
+});

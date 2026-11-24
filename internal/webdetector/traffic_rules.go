@@ -112,7 +112,8 @@ type TrafficRuleMatch struct {
 	// an older cfm that reads a rule with an unknown match key freezes it
 	// (decodeStoredRule) and never enforces it, so on a downgrade an expiring
 	// rule goes inert instead of becoming permanent. Checked in
-	// ruleMatchFilters, so Challenge Access entries honour it too.
+	// ruleMatchFilters (shared with Challenge Access, whose normalizer
+	// refuses an until: an exemption has no expiry UI and is never pruned).
 	Until string `json:"until,omitempty"`
 
 	qsNotRxCompiled *regexp.Regexp // pre-compiled from QSNotRx; set by normalizeTrafficRule

@@ -537,7 +537,10 @@ export function re2Rejects(rx) {
 //    would silently do something surprising) ───────────────────────────────
 // Returns { errors, warnings, hints }. `errors` block the save; `warnings`
 // are shown but allowed; `hints` are facts about what the rule will do.
-export function validateRuleForm(form, { rules = [], editId = "", now = Date.now() } = {}) {
+// keptUntil: the edited rule's own stored until. Like the daemon's Update, an
+// unchanged past until is accepted (the rule is inert; disabling it or fixing
+// its note must not need a new expiry); any other past until is refused.
+export function validateRuleForm(form, { rules = [], editId = "", now = Date.now(), keptUntil = "" } = {}) {
   const errors = [];
   const warnings = [];
   const hints = [];
@@ -563,7 +566,8 @@ export function validateRuleForm(form, { rules = [], editId = "", now = Date.now
   if (p.match.until) {
     const t = Date.parse(p.match.until);
     if (!Number.isFinite(t) || !/^\d{4}-\d{2}-\d{2}T/.test(p.match.until)) errors.push(`Expiry "${p.match.until}" is not an RFC3339 time.`);
-    else if (t <= now) errors.push("The expiry is in the past — pick a new one (or never).");
+    else if (t <= now && p.match.until !== keptUntil) errors.push("The expiry is in the past — pick a new one (or never).");
+    else if (t <= now) warnings.push("This rule has expired: it matches nothing. Pick a new expiry to bring it back.");
   }
 
   if (!p.scope.vhosts.length) errors.push("At least one vhost is required.");
