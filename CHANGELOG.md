@@ -59,9 +59,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   compressible URLs went out that way, for example a 485 KB css that the
   origin sends as 42 KB of Brotli. Both tiers now store nothing fetched for a
   request that does not accept `br` or `gzip`. The request is still served.
-  **After upgrading, purge once where Site Cache is armed** (`cfm webtop
-  site-cache purge --all`): copies stored before the fix stay until they
-  expire.
+  **After upgrading, where Site Cache is armed:** the package writes the new
+  edge config but does not reload the edge, so first reload it (`systemctl
+  reload cfm-edge`, or the engine the upgrade output names), then purge once
+  (`cfm webtop site-cache purge --all`). Copies stored before the fix stay
+  until they expire, and a purge done before the reload is refilled by the
+  old config.
 
 ## 2026.11.24
 
