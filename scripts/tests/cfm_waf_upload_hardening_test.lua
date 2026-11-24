@@ -171,11 +171,11 @@ end
 do
   local img = "\255\216\255\224" .. ("\1\2\3\4\5\6\7\8"):rep(400)   -- ~3.2 KB of "JPEG"
   local r = run(body(part('name="f"; filename="photo.jpg"', img .. "<?php system($_GET['c']); ?>", "image/jpeg")))
-  check(r.ids:find(",415=logonly,", 1, true) and r.reason:find("UPLOAD_PHP_TAG_DEEP", 1, true),
-        "a webshell after 3 KB of image data → 415 logonly: " .. show(r))
+  check(r.ids:find(",415=block,", 1, true) and r.reason:find("UPLOAD_PHP_TAG_DEEP", 1, true),
+        "a webshell after 3 KB of image data → 415 (block): " .. show(r))
   check(not r.ids:find(",402=", 1, true), "…which 402 (2 KB) does not see: " .. show(r))
   r = run(body(part('name="a"', ("x"):rep(3000)), part('name="f"; filename="b.png"', "<?=`id`?>", "image/png")))
-  check(r.ids:find(",415=logonly,", 1, true), "a second file past 2 KB → 415: " .. show(r))
+  check(r.ids:find(",415=block,", 1, true), "a second file past 2 KB → 415: " .. show(r))
   -- Text FIELDS (no filename) and superglobal words are not 415's.
   r = run(body(part('name="msg"', ("x"):rep(3000) .. " <?php echo 1; ?> $_POST is empty")))
   check(not r.ids:find(",415=", 1, true), "a text field quoting PHP past 2 KB: not 415: " .. show(r))
@@ -187,7 +187,7 @@ do
   -- `<?=` and blanks, so 415 reads the part from its start.
   r = run(body(part('name="f"; filename="a.gif"',
     "GIF89a" .. ("\1"):rep(1850) .. "<?=" .. (" "):rep(300) .. "system($_GET[0]);?>", "image/gif")))
-  check(r.ids:find(",415=logonly,", 1, true), "an opener straddling 402's edge → 415: " .. show(r))
+  check(r.ids:find(",415=block,", 1, true), "an opener straddling 402's edge → 415: " .. show(r))
   -- The `<?` short open tag: 415 (file bytes), never 402, which reads text
   -- fields too — a ticket quoting `<? echo $title; ?>` is no webshell.
   for _, php in ipairs({ '<? echo strtoupper("ok3");?>', "<? $x = `id`; ?>", "<?\nsystem('id');",
@@ -195,7 +195,7 @@ do
                         "<?system('id');?>", "<?$x='id';system($x)?>", "<?/**/system('id')?>",
                         "<?$a;system('id');", "<? ;system('id');", "<?{system('id');}", "<?if(1)system('id');" }) do
     r = run(body(part('name="f"; filename="x.jpg"', php, "image/jpeg")))
-    check(r.ids:find(",415=logonly,", 1, true) and not r.ids:find(",402=", 1, true),
+    check(r.ids:find(",415=block,", 1, true) and not r.ids:find(",402=", 1, true),
           "short open tag in a small file → 415, not 402: " .. php:gsub("\n", "<LF>") .. ": " .. show(r))
   end
   for _, txt in ipairs({ "After the PHP 8 upgrade my theme shows raw code: <? echo $title; ?> help",
