@@ -49,6 +49,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   cfm` no longer empties it. A crash loses at most 5 minutes; a file from
   another version or a corrupt one starts the page empty, as before.
 
+### Fixed
+- **Site Cache no longer serves CSS/JS uncompressed to every visitor.** The
+  cache key leaves out `Accept-Encoding` and relies on the origin's `Vary`,
+  but LiteSpeed answers a request that accepts no compression (a bot, `curl`)
+  with the full uncompressed body and no `Vary`. When such a request filled a
+  key first, that copy was stored and served to everyone, for as long as the
+  asset's `max-age` (often a year). On orion, 53% of the bytes of the heaviest
+  compressible URLs went out that way, for example a 485 KB css that the
+  origin sends as 42 KB of Brotli. Both tiers now store nothing fetched for a
+  request that does not accept `br` or `gzip`. The request is still served.
+  **After upgrading, purge once where Site Cache is armed** (`cfm webtop
+  site-cache purge --all`): copies stored before the fix stay until they
+  expire.
+
 ## 2026.11.24
 
 ### Security

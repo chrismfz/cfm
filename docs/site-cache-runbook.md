@@ -33,6 +33,9 @@ Caching is bypass-by-default. What is never cached, whatever a policy says
     shop that relies on server-side Conversions API deduplication should
     know before arming micro);
   - a non-200 response;
+  - a response fetched for a request that accepts neither `br` nor `gzip`
+    (a bot, `curl`): it is served, never stored, because the origin may
+    answer it uncompressed without `Vary`;
   - panel and webmail hosts;
   - methods other than GET/HEAD;
   - script paths (`.php` and the like, so `wp-login.php` too; Tier A's
