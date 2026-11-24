@@ -21,6 +21,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **Bypass-list crawlers are micro-cached.** Googlebot, Bingbot, Applebot,
+  DuckDuckBot, Skroutz and the other crawlers of the bypass list used to go
+  straight to the origin on every request, so a crawl storm reached PHP and
+  MySQL in full even on a micro-armed vhost. On a micro-armed vhost they are
+  now served from the micro-cache, in their own keyspace: a page stored for
+  a crawler is never served to a visitor (an SEO prerender, or a hacked
+  site's spam shown to Googlebot only), nor a visitor's page to a crawler.
+  Every micro rail still applies (cookies, method, admin paths, uncacheable
+  pages); a purge drops both. A CDN of the list (QUIC.cloud) is not cached
+  and now logs `mwhy="cdn"`. Crawlers off the list (Meta, Amazon, the AI
+  crawlers) were already micro-cached like visitors on an armed vhost.
 - **Traffic rules: an expiry and a total throttle, for incidents.** A rule can
   carry `match.until` (RFC3339): past it the rule matches nothing, and it is
   deleted a day later; cfm-admin's editor offers 1 h / 6 h / 24 h / 7 d. The

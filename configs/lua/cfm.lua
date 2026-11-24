@@ -303,10 +303,15 @@ local function micro_skip(why)
   if cache_ok and cfm_cache and cfm_cache.note_skip then pcall(cfm_cache.note_skip, why) end
 end
 
+-- A crawler of the bypass list (Step 0, kind "1") is micro-cached in its own
+-- keyspace (ngx.ctx.cfm_micro_class = "crawler"; cfm_cache.micro_gate keys it
+-- apart): it skipped the WAF, and a page an origin renders for a crawler (an
+-- SEO prerender, a hacked site's spam cloaked for Googlebot) must never reach a
+-- visitor, nor a visitor's page a crawler.
 local function micro_cache_target()
   if ngx.ctx.cfm_no_micro then micro_skip("waf"); return nil end
   if not cache_ok or not cfm_cache or not cfm_cache.micro_gate then return nil end
-  local ok, target = pcall(cfm_cache.micro_gate)
+  local ok, target = pcall(cfm_cache.micro_gate, ngx.ctx.cfm_micro_class)
   if ok and type(target) == "string" then return target end
   return nil
 end
@@ -1376,18 +1381,32 @@ pcall(strip_cdn_bust_arg)
 -- by a site (a sitemap link carrying SQLi) would otherwise trip an armed rule,
 -- and waf_security, which has no good-bot exemption, would nft-ban Googlebot
 -- for the whole node, outliving the lockdown. The challenge is all it meets.
+-- A crawler ("1") on a micro-armed vhost is served from the micro-cache (the
+-- crawler keyspace, see micro_cache_target), so a crawl storm costs the origin
+-- one fetch per page per TTL instead of every request. This is the second
+-- micro entry, besides Step 4, and safe here because nothing below applies to
+-- a bypassed client: the bypass already sends it to the origin unchecked, and
+-- the entries it reads were stored by crawler requests only. A held crawler
+-- keeps the crawler keyspace when it reaches Step 4. A CDN ("2") fetches for
+-- a site's visitors and is never micro-cached here.
 local lockdown_held = false
 do
   local bp = ngx.var.cfm_bypass_ip
   if bp == "1" or bp == "2" then
     local held = false
-    if bp == "1" and lockdown_ok and lockdown then
-      local ok, act = pcall(lockdown.active, host)
-      held = ok and act == true
+    if bp == "1" then
+      ngx.ctx.cfm_micro_class = "crawler"
+      if lockdown_ok and lockdown then
+        local ok, act = pcall(lockdown.active, host)
+        held = ok and act == true
+      end
     end
     lockdown_held = held
     if not held then
       ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
+      if bp == "2" then micro_skip("cdn") return end
+      local crawler_target = micro_cache_target()
+      if crawler_target then return ngx.exec(crawler_target) end
       return
     end
   end
@@ -2318,7 +2337,8 @@ ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
 if CFG.log_allows or CFG.debug then
   log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " pass=" .. ngx.var.cfm_pass .. cache_flag)
 end
--- Site Cache Tier B: plain-allow path — the ONLY micro-cache entry
+-- Site Cache Tier B: plain-allow path — the micro-cache entry for every client
+-- but a bypass-list crawler (Step 0 has that one)
 -- (the Step 2b clearance fast-path is deferred, see there). A no-op unless
 -- MICRO_CACHE_ENFORCE is armed and this request matched the HTTPS `location /`
 -- (the $cfm_micro_conf sentinel). ngx.exec to the @cfm_micro_<n>s bucket is the

@@ -124,7 +124,12 @@ function H.run(req)
   end
   package.preload["cfm_pcw"] = function() error("no") end
   package.loaded["cfm_cache"] = nil
-  if req.micro then
+  -- req.micro: true for a gate that always routes to @cfm_micro_5s, or a
+  -- table { gate = function(class) ... end, skip = function(why) ... end }
+  -- standing in for cfm_cache.micro_gate / note_skip.
+  if type(req.micro) == "table" then
+    package.preload["cfm_cache"] = function() return { micro_gate = req.micro.gate, note_skip = req.micro.skip } end
+  elseif req.micro then
     package.preload["cfm_cache"] = function() return { micro_gate = function() return "@cfm_micro_5s" end } end
   else
     package.preload["cfm_cache"] = function() error("no") end
