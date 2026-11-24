@@ -261,6 +261,28 @@ The live shape Signal C must catch, and why it beats the vhost-aggregate score:
   shoppers (gclid referrers) and verified crawlers untouched. Candidate initial
   shadow rule: `per_ip_rps >= max(FLOOR, K × median_per_ip_rps)` with `ip_skew ≥
   S`; tune K/FLOOR/S from the shadow log.
+- **Cost tier (2026-11-24, shadow).** A plain outlier is mostly browsers: on
+  the morning a Chrome/152 scraper on Greek residential IPs drove titan and
+  orion past load 100, 275 of titan's 469 outliers that day looked like
+  browsers. Two more facts on the line separate them, measured on 8 nodes:
+  - `static=0`: the IP fetched no static asset in the window. A browser loads
+    a page's css/js/images; a client fetching HTML only does not.
+  - `origin=` at or above `ABUSE_SHADOW_RATE_COST` (default 0.5): the IP's
+    origin time over the window, as average concurrent requests.
+
+  An outlier with both reads `tier=cost`. Those outliers were 30–50 % of the
+  origin time in the incident hours and about none at normal hours. Only 5
+  IPs fleet-wide among them had human solve evidence (site owners with
+  cached assets).
+
+  `origin_busy=` is the node's own origin time over the window. It is logged
+  so a per-node baseline, and a pressure gate on it, can be chosen from a
+  week of lines before anything is enforced. In the read the gate was a
+  ratio: the incident hours sat at 2–6× each node's normal hours.
+
+  `static=` is the client's to send, so the tier is a measurement only: it
+  never clears anyone. A scraper that also fetches one asset per window
+  leaves the tier.
 - **Datacenter additive-only, validated:** the SAME vhost carries verified
   Googlebot (PTR `crawl-…googlebot.com`), Bingbot (`…search.msn.com`), Facebook
   meta-agent, AdsBot — several on cloud ASNs (AS15169, AS8075). A datacenter

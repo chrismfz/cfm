@@ -466,3 +466,34 @@ func TestSummarizeOrigin403(t *testing.T) {
 		t.Errorf("the verdict-less verified_crawler note must not count: total=%d, want 4", s.Total)
 	}
 }
+
+// The rate_outlier cost tier: its keys parse, tier=cost lines are counted and
+// ranked by origin share, and a line from an older daemon (no such keys) or a
+// tier=- line stays out of the tier.
+func TestSummarizeRateOutlierCostTier(t *testing.T) {
+	lines := []string{
+		lineOutlier1, // older daemon: no cost keys
+		"2026-11-24 08:00:00 [abuse-shadow] signal=rate_outlier host=a.gr ip=2.84.188.143 rps=0.5 median_rps=0.008 ratio=60.0 skew=60.0 reqs=60 asn=6799 cc=GR provider=- good_bot=- verdict=would_challenge static=0 origin=3.80 origin_busy=86.0 tier=cost",
+		"2026-11-24 08:02:00 [abuse-shadow] signal=rate_outlier host=a.gr ip=2.84.188.143 rps=0.5 median_rps=0.008 ratio=60.0 skew=60.0 reqs=60 asn=6799 cc=GR provider=- good_bot=- verdict=would_challenge static=0 origin=4.20 origin_busy=92.0 tier=cost",
+		"2026-11-24 08:03:00 [abuse-shadow] signal=rate_outlier host=b.gr ip=45.66.43.21 rps=0.4 median_rps=0.008 ratio=50.0 skew=50.0 reqs=48 asn=1 cc=GR provider=- good_bot=- verdict=would_challenge static=0 origin=0.90 origin_busy=92.0 tier=cost",
+		"2026-11-24 08:04:00 [abuse-shadow] signal=rate_outlier host=b.gr ip=5.5.5.5 rps=0.4 median_rps=0.008 ratio=50.0 skew=50.0 reqs=48 asn=1 cc=GR provider=- good_bot=- verdict=would_challenge static=12 origin=2.00 origin_busy=92.0 tier=-",
+	}
+	e, ok := Parse(lines[1])
+	if !ok || e.Static != 0 || e.Origin != 3.8 || e.OriginBusy != 86 || e.Tier != "cost" {
+		t.Fatalf("parse = %+v", e)
+	}
+	if e, _ := Parse(lines[4]); e.Tier != "" || e.Static != 12 {
+		t.Fatalf("tier=- must parse as no tier, got %+v", e)
+	}
+	s := Summarize(lines)
+	if s.WouldChallenge != 5 || s.WouldChallengeCost != 3 {
+		t.Fatalf("would_challenge=%d cost=%d, want 5/3", s.WouldChallenge, s.WouldChallengeCost)
+	}
+	if len(s.TopCostTier) != 2 {
+		t.Fatalf("top_cost_tier = %+v, want 2 entities", s.TopCostTier)
+	}
+	top := s.TopCostTier[0]
+	if top.IP != "2.84.188.143" || top.CostHits != 2 || top.MaxOrigin != 4.2 || top.MaxOriginBusy != 92 {
+		t.Errorf("top cost entity = %+v", top)
+	}
+}

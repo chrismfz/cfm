@@ -48,6 +48,15 @@ type Entry struct {
 	GoodBot  string  `json:"good_bot"`
 	Verdict  string  `json:"verdict"`
 
+	// rate_outlier cost tier (the keys ride on lines from daemons that write
+	// them): Static = the IP's static-asset requests in the window, Origin =
+	// its origin seconds / window seconds, OriginBusy = the node's, Tier =
+	// "cost" when it fetched no static asset and Origin cleared the bar.
+	Static     int     `json:"static,omitempty"`
+	Origin     float64 `json:"origin,omitempty"`
+	OriginBusy float64 `json:"origin_busy,omitempty"`
+	Tier       string  `json:"tier,omitempty"`
+
 	// Vhost-level signal metrics (facet/cost/dc). These lines carry
 	// verdict=would_shadow and their own keys instead of the rate-outlier's
 	// ip/ratio/provider; zero when the line is a different signal.
@@ -147,6 +156,14 @@ func Parse(line string) (Entry, bool) {
 			e.GoodBot = dash(v)
 		case "verdict":
 			e.Verdict = v
+		case "static":
+			e.Static, _ = strconv.Atoi(v)
+		case "origin":
+			e.Origin, _ = strconv.ParseFloat(v, 64)
+		case "origin_busy":
+			e.OriginBusy, _ = strconv.ParseFloat(v, 64)
+		case "tier":
+			e.Tier = dash(v)
 		case "urls":
 			e.Urls, _ = strconv.Atoi(v)
 		case "paths":
@@ -226,6 +243,11 @@ type topEntity struct {
 	CC       string  `json:"cc,omitempty"`
 	Provider string  `json:"provider,omitempty"`
 	GoodBot  string  `json:"good_bot,omitempty"`
+	// CostHits counts its tier=cost lines; MaxOrigin is the peak origin share
+	// of those lines and MaxOriginBusy the node's origin_busy on that line.
+	CostHits      int     `json:"cost_hits,omitempty"`
+	MaxOrigin     float64 `json:"max_origin,omitempty"`
+	MaxOriginBusy float64 `json:"max_origin_busy,omitempty"`
 }
 
 // origin403Entity is one (host, ip) the origin_403_burst signal would have
@@ -274,6 +296,12 @@ type Summary struct {
 	ByCountry      []kv        `json:"by_country"`  // ISO-2 country distribution (would_challenge only)
 	ByGoodbot      []kv        `json:"by_good_bot"` // which good bots were exempted
 	TopWouldBlock  []topEntity `json:"top_would_challenge"`
+
+	// rate_outlier cost tier: the would_challenge lines with tier=cost, and
+	// the top (host, ip) among them by peak origin share. Omitted when the
+	// tier never fired in the window (or the daemon predates it).
+	WouldChallengeCost int         `json:"would_challenge_cost,omitempty"`
+	TopCostTier        []topEntity `json:"top_cost_tier,omitempty"`
 
 	// origin_403_burst: would_ban lines (a per-IP burst of POSTs the origin
 	// answered 403), and the top (host, ip) by peak per-minute count. Omitted
@@ -645,6 +673,13 @@ func Summarize(lines []string) Summary {
 			if e.Reqs > t.MaxReqs {
 				t.MaxReqs = e.Reqs
 			}
+			if e.Tier == "cost" {
+				s.WouldChallengeCost++
+				t.CostHits++
+				if e.Origin > t.MaxOrigin {
+					t.MaxOrigin, t.MaxOriginBusy = e.Origin, e.OriginBusy
+				}
+			}
 		case "would_ban":
 			s.WouldBan++
 			if e.Signal == "origin_403_burst" {
@@ -701,6 +736,25 @@ func Summarize(lines []string) Summary {
 		}
 		return tops[i].MaxReqs > tops[j].MaxReqs
 	})
+	var costTops []topEntity
+	for _, t := range tops {
+		if t.CostHits > 0 {
+			costTops = append(costTops, t)
+		}
+	}
+	sort.Slice(costTops, func(i, j int) bool {
+		if costTops[i].MaxOrigin != costTops[j].MaxOrigin {
+			return costTops[i].MaxOrigin > costTops[j].MaxOrigin
+		}
+		if costTops[i].Host != costTops[j].Host {
+			return costTops[i].Host < costTops[j].Host
+		}
+		return costTops[i].IP < costTops[j].IP
+	})
+	if len(costTops) > 25 {
+		costTops = costTops[:25]
+	}
+	s.TopCostTier = costTops
 	if len(tops) > 25 {
 		tops = tops[:25]
 	}

@@ -211,6 +211,16 @@ type bucketSW struct {
 	// shop read as a 24-31x outlier every hour (vol2.gr, 2026-11-18).
 	ipsDyn map[string]int
 
+	// Signal C's cost tier (abuse_shadow.go), maintained with ipsDyn and only
+	// while it is: ipsStatic counts an IP's static-asset requests (a browser
+	// fetches them, a scraper of HTML pages does not), ipsDynOrigin the origin
+	// seconds its ipsDyn requests cost (originSeconds), and originSec the
+	// origin seconds of every request in the bucket, for the node-wide
+	// origin_busy the shadow line reports as the pressure context.
+	ipsStatic    map[string]int
+	ipsDynOrigin map[string]float64
+	originSec    float64
+
 	// Keep a few representative raw lines per IP for alert samples.
 	// (We store the first line seen per IP per bucket.)
 	ipSample map[string]string
@@ -1792,11 +1802,28 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		// narrow isChallengeExemptEndpoint list) are left out: an integration's
 		// steady sync out-rates a quiet shop's visitors by design (the vol2.gr
 		// e|connect bridge read as a 24-31x outlier every hour, 2026-11-18).
-		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && countsTowardRateOutlier(rec.URI) {
-			if b.ipsDyn == nil {
-				b.ipsDyn = make(map[string]int)
+		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier {
+			path, _, _ := strings.Cut(rec.URI, "?")
+			origin := originSeconds(rec)
+			b.originSec += origin
+			switch {
+			case isStaticAssetPath(path):
+				if b.ipsStatic == nil {
+					b.ipsStatic = make(map[string]int)
+				}
+				b.ipsStatic[rec.IP]++
+			case countsTowardRateOutlier(rec.URI):
+				if b.ipsDyn == nil {
+					b.ipsDyn = make(map[string]int)
+				}
+				b.ipsDyn[rec.IP]++
+				if origin > 0 {
+					if b.ipsDynOrigin == nil {
+						b.ipsDynOrigin = make(map[string]float64)
+					}
+					b.ipsDynOrigin[rec.IP] += origin
+				}
 			}
-			b.ipsDyn[rec.IP]++
 		}
 
 		if b.ipSample == nil {
@@ -4231,6 +4258,28 @@ func pathHasScriptExt(lp string) bool {
 // isStaticAssetPath returns true for common static asset URLs that should not
 // contribute to "unique paths" counters (prevents WP admin false positives).
 // Input MUST be the normalized path (no query string).
+// originSeconds is what one request cost the site's origin, for Signal C's
+// cost tier: its upstream time when the edge proxied it to the origin
+// (UpstreamName "cfm_apache*", or empty on an edge whose log has no such
+// column), 0 when the edge answered it itself or sent it to CFM's challenge
+// server. URT is the origin's own time; a retried request logs "0.1, 0.2",
+// which parses as 0, so the request time stands in for it then.
+func originSeconds(rec LogRec) float64 {
+	if !rec.Upstream {
+		return 0
+	}
+	if rec.UpstreamName != "" && !strings.HasPrefix(rec.UpstreamName, "cfm_apache") {
+		return 0
+	}
+	if rec.URT > 0 {
+		return rec.URT
+	}
+	if rec.RT > 0 {
+		return rec.RT
+	}
+	return 0
+}
+
 func isStaticAssetPath(p string) bool {
 	if p == "" || p == "-" {
 		return false

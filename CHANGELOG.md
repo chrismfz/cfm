@@ -71,6 +71,24 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   rule-scoped exclude. Webmail is not exempt: an email over 2 KB quoting PHP gets a
   403 there. See `docs/waf.md`, "Rule 415" and "Rule 417".
 ### Added
+- **`rate_outlier` shadow lines show what an outlier costs the origin.**
+  Each line now also carries:
+  - `static=`: the IP's static-asset requests in the window;
+  - `origin=`: its origin time over the window, as average concurrent
+    origin requests;
+  - `origin_busy=`: the same for the whole node, as the pressure context;
+  - `tier=cost`: set when the IP fetched no static asset and `origin=` is
+    at least `ABUSE_SHADOW_RATE_COST` (default 0.5, i.e. 60 s in 2 min).
+
+  The `abuse_shadow` MCP tool counts these lines (`would_challenge_cost`)
+  and ranks them (`top_cost_tier`). Nothing is enforced. This is the
+  week-long measurement before deciding on a per-IP challenge.
+
+  Why: on the 2026-11-24 morning a scraper drove titan and orion past load
+  100. A plain outlier is mostly browsers (275 of titan's 469 that day). The
+  cost-tier outliers were 30–50 % of the origin time in those hours, about
+  none at normal hours, and only 5 IPs fleet-wide carried human solve
+  evidence.
 - **A per-IP challenge that is loaded again and again but never solved can
   now be held instead of running out** (`[webdetector]
   CHALLENGE_UNSOLVED_HOLD`, default `log`). On titan a facet scraper on Greek

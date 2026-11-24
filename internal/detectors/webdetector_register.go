@@ -736,6 +736,7 @@ func init() {
 			AbuseShadowRateFloor:     kvFlt(kv, "ABUSE_SHADOW_RATE_FLOOR", 0),
 			AbuseShadowRateSkewMin:   kvFlt(kv, "ABUSE_SHADOW_RATE_SKEW_MIN", 0),
 			AbuseShadowRateMinReq:    kvInt(kv, "ABUSE_SHADOW_RATE_MINREQ", 0),
+			AbuseShadowRateCost:      kvFlt(kv, "ABUSE_SHADOW_RATE_COST", 0),
 
 			// Signal F (facet / query-cardinality expansion). Default-on under the
 			// AbuseShadow master, so an already-deployed ABUSE_SHADOW=1 starts

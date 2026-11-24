@@ -31,6 +31,10 @@ type shadowRateCfg struct {
 	Floor   float64 // …and ≥ this absolute rps (guards tiny/idle vhosts)
 	SkewMin float64 // …on a vhost whose max/median ≥ this (real concentration)
 	MinReq  int     // …from an IP with ≥ this many requests (kills tiny samples)
+	// Cost is the cost tier's bar: an outlier that fetched no static asset in
+	// the window and kept the origin busy ≥ Cost on average (its origin
+	// seconds / window seconds; 0.5 = 60 s of origin time in a 2-minute window).
+	Cost float64
 }
 
 func (e *Engine) shadowRateCfg() shadowRateCfg {
@@ -39,6 +43,7 @@ func (e *Engine) shadowRateCfg() shadowRateCfg {
 		Floor:   e.cfg.AbuseShadowRateFloor,
 		SkewMin: e.cfg.AbuseShadowRateSkewMin,
 		MinReq:  e.cfg.AbuseShadowRateMinReq,
+		Cost:    e.cfg.AbuseShadowRateCost,
 	}
 	if c.K <= 0 {
 		c.K = 20
@@ -52,7 +57,31 @@ func (e *Engine) shadowRateCfg() shadowRateCfg {
 	if c.MinReq <= 0 {
 		c.MinReq = 20
 	}
+	if c.Cost <= 0 {
+		c.Cost = 0.5
+	}
 	return c
+}
+
+// rateCostTier reports whether a rate outlier also clears the cost tier: no
+// static asset fetched in the window (a browser loads a page's css/js/images,
+// a client fetching HTML only does not) and an origin share ≥ c.Cost. The
+// 2026-11-24 read: on the morning a scraper drove titan and orion past load
+// 100, the outliers that passed both were 30-50 % of the fleet's origin time
+// and near none of it at normal hours, with 5 IPs carrying human solve
+// evidence among them fleet-wide, against 275 of titan's 469 plain outliers
+// that day looking like browsers. Static is the client's own to send, so a
+// scraper that also fetches one asset per window leaves the tier: it is a
+// measurement, never a reason to clear anyone.
+func rateCostTier(static int, originShare float64, c shadowRateCfg) bool {
+	return static == 0 && originShare >= c.Cost
+}
+
+// rateIP is one IP's Signal C counts on one vhost over the window.
+type rateIP struct {
+	dyn    int     // dynamic requests (ipsDyn)
+	static int     // static-asset requests (ipsStatic)
+	origin float64 // origin seconds of the dynamic requests (ipsDynOrigin)
 }
 
 // medianInt returns the median of a slice of counts (0 if empty). Sorts a copy.
@@ -116,19 +145,43 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 	cfg := e.shadowRateCfg()
 
 	// Snapshot per-vhost per-IP request totals (mirrors the §2 aggregation, but
-	// kept per-host so the median/skew are per-vhost).
-	snap := make(map[string]map[string]int)
+	// kept per-host so the median/skew are per-vhost), plus the node-wide origin
+	// seconds of the window for origin_busy (only buckets still in the window:
+	// a vhost's buckets are pruned when it next logs, so a quiet one keeps
+	// stale ones).
+	snap := make(map[string]map[string]*rateIP)
+	var originSec float64
+	winStart := now.Add(-time.Duration(winSec * float64(time.Second)))
 	e.mu.RLock()
 	for host, hs := range e.hosts {
 		if hs == nil {
 			continue
 		}
-		m := make(map[string]int)
+		m := make(map[string]*rateIP)
 		for i := range hs.buckets {
+			b := &hs.buckets[i]
+			if b.to.After(winStart) {
+				originSec += b.originSec
+			}
 			// ipsDyn = dynamic requests only (static assets excluded), so a
 			// human's per-pageview asset fan-out doesn't read as a rate outlier.
-			for ip, n := range hs.buckets[i].ipsDyn {
-				m[ip] += n
+			for ip, n := range b.ipsDyn {
+				r := m[ip]
+				if r == nil {
+					r = &rateIP{}
+					m[ip] = r
+				}
+				r.dyn += n
+				r.origin += b.ipsDynOrigin[ip]
+			}
+		}
+		// Static counts only for the IPs that sent a dynamic request: an
+		// assets-only IP is never a candidate.
+		for i := range hs.buckets {
+			for ip, n := range hs.buckets[i].ipsStatic {
+				if r := m[ip]; r != nil {
+					r.static += n
+				}
 			}
 		}
 		if len(m) > 0 {
@@ -136,6 +189,7 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 		}
 	}
 	e.mu.RUnlock()
+	originBusy := originSec / winSec
 
 	// Bound the enrichment/DNS work per tick. Each new outlier that clears the
 	// throttle does a cold reverse-DNS (and, for good-bot-looking PTRs, a 2s
@@ -156,15 +210,16 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			continue
 		}
 		totals := make([]int, 0, len(perIP))
-		for _, n := range perIP {
-			totals = append(totals, n)
+		for _, r := range perIP {
+			totals = append(totals, r.dyn)
 		}
 		medianRPS := medianInt(totals) / winSec
 		skew := ipSkew(totals)
 		if skew < cfg.SkewMin {
 			continue // flat/distributed vhost — Signal C is not the tool (uniqIP is)
 		}
-		for ip, tot := range perIP {
+		for ip, r := range perIP {
+			tot := r.dyn
 			ipRPS := float64(tot) / winSec
 			if !rateOutlier(tot, ipRPS, medianRPS, skew, cfg) {
 				continue
@@ -215,9 +270,17 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			if medianRPS > 0 {
 				ratio = ipRPS / medianRPS
 			}
-			logging.LogfABUSESHADOW(
-				"[abuse-shadow] signal=rate_outlier host=%s ip=%s rps=%.3f median_rps=%.4f ratio=%.1f skew=%.1f reqs=%d asn=%d cc=%s provider=%s good_bot=%s verdict=%s",
-				host, ip, ipRPS, medianRPS, ratio, skew, tot, asn, orDash(cc), orDash(provider), orDash(goodBot), verdict,
+			// The cost tier rides on its own key, so verdict keeps its meaning
+			// for every reader: tier=cost marks a would_challenge (never an
+			// exempt good bot) that also clears rateCostTier.
+			originShare := r.origin / winSec
+			tier := "-"
+			if verdict == "would_challenge" && rateCostTier(r.static, originShare, cfg) {
+				tier = "cost"
+			}
+			abuseShadowRateLogf(
+				"[abuse-shadow] signal=rate_outlier host=%s ip=%s rps=%.3f median_rps=%.4f ratio=%.1f skew=%.1f reqs=%d asn=%d cc=%s provider=%s good_bot=%s verdict=%s static=%d origin=%.2f origin_busy=%.1f tier=%s",
+				host, ip, ipRPS, medianRPS, ratio, skew, tot, asn, orDash(cc), orDash(provider), orDash(goodBot), verdict, r.static, originShare, originBusy, tier,
 			)
 		}
 	}
@@ -235,6 +298,9 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 		MarkAbuseShadowBulk(marks, ttl)
 	}
 }
+
+// abuseShadowRateLogf writes Signal C's lines (a var so a test can read them).
+var abuseShadowRateLogf = logging.LogfABUSESHADOW
 
 func orDash(s string) string {
 	if s == "" {
