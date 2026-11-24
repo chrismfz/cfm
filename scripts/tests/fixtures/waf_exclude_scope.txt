@@ -1,0 +1,66 @@
+# The WAF-exclude scope test (scope_hosts), run by both sides:
+#   the in-path WAF, configs/lua/cfm_waf_excl.lua scope_takes / skip_for
+#   (scripts/tests/cfm_waf_excl_scope_test.lua), and the Go matcher,
+#   internal/webdetector/exclude_store.go compiledScopeMatcher /
+#   MatchWAFRules (TestWAFExcludeScope_EdgeParity).
+# Columns: SCOPE HOST EXPECT. SCOPE is the entry's scope_hosts, comma
+# separated, "-" = none (every host). HOST is the request host. EXPECT 1 = an
+# exclude with that scope applies on HOST.
+#
+# No scope: every host.
+-                      shop.gr           1
+-                      other.example     1
+# A literal scope host is that host and its www. alias (cPanel lists a
+# domain without it): no other subdomain, no substring, no reverse alias.
+shop.gr                shop.gr           1
+shop.gr                www.shop.gr       1
+shop.gr                WWW.SHOP.GR       1
+shop.gr                shop.shop.gr      0
+shop.gr                www.www.shop.gr   0
+shop.gr                wwwshop.gr        0
+www.shop.gr            shop.gr           0
+www.shop.gr            www.shop.gr       1
+shop.gr                myshop.gr         0
+shop.gr                shop.gr.evil.com  0
+shop.gr                other.example     0
+SHOP.GR                shop.gr           1
+shop.gr                SHOP.GR           1
+shop.gr,shop.gr        shop.gr           1
+a.gr,b.gr              b.gr              1
+a.gr,b.gr              c.gr              0
+xn--shop-9ta.gr        xn--shop-9ta.gr   1
+# Globs are anchored; a host has no "/", so * crosses dots.
+*.shop.gr              www.shop.gr       1
+*.shop.gr              a.b.shop.gr       1
+*.shop.gr              shop.gr           0
+*.shop.gr              evilshop.gr       0
+*.SHOP.GR              www.shop.gr       1
+shop.gr,*.shop.gr      shop.gr           1
+shop.gr,*.shop.gr      www.shop.gr       1
+*                      anything.example  1
+shop.g?                shop.gr           1
+shop.g?                shop.gre          0
+# Globs get no www. alias (Go matchExact: literal scope hosts only).
+shop.g?                www.shop.gr       0
+a+*.gr                 a+x.gr            1
+a+*.gr                 aax.gr            0
+a%*.gr                 a%x.gr            1
+a\.*                   a.gr              1
+a\.*                   axgr              0
+# Bracket classes (the characters a host name holds).
+shop[0-9].gr           shop1.gr          1
+shop[0-9].gr           shopa.gr          0
+shop[!0-9].gr          shopa.gr          1
+shop[!0-9].gr          shop1.gr          0
+shop[^ab].gr           shopc.gr          1
+shop[^ab].gr           shopa.gr          0
+[ab]x.gr               ax.gr             1
+[ab]x.gr               cx.gr             0
+[a-c.]x.gr             .x.gr             1
+# An unusable glob takes no host, and a scope made only of them takes none
+# (it must never read as "no scope").
+shop[a.gr              shop.gr           0
+shop[a.gr              shopa.gr          0
+shop*\                 shop.gr           0
+shop[a.gr,b.gr         b.gr              1
+shop[a.gr,b.gr         shop.gr           0

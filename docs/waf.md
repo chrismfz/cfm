@@ -1513,6 +1513,20 @@ entry admin-global (all vhosts), as before. **Admin-only in effect:** a scoped
 widen or redirect an exclude to another tenant's vhost. Because the qualifier
 can only *add* a host filter, it never broadens an exclude.
 
+A scope host is matched more narrowly than a `--type host` value: a literal is
+that host and its `www.` alias only (`--scope shop.gr` takes `www.shop.gr`,
+not `shop.shop.gr`; cPanel lists a domain without its `www.` name, and a
+tenant's exclude written before 2026-11-19 holds only the bare domain), and one
+containing `* ? [ ]` is an anchored glob with no alias (`*.shop.gr` takes every
+sub-host, not `shop.gr` itself). A scope whose every
+host is an unusable glob (`shop[a`, a trailing `\`) takes no host; it does not
+fall back to "every vhost". The in-path WAF (`cfm_waf_excl.lua`) and the Go
+matcher apply the same rules, and both run
+`scripts/tests/fixtures/waf_exclude_scope.txt`. Until the release whose
+CHANGELOG says "the in-path WAF honours an exclude's `scope_hosts`", the edge
+ignored them: a scoped path exclude applied on that path of every vhost, and a
+scoped host exclude on every sub-host its value covers.
+
 Rule-ID spec accepts:
 
 - Bare ID: `--rule 320`

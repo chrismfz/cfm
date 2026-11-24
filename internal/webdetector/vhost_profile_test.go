@@ -88,11 +88,14 @@ func TestVhostProfile_WhatApplies(t *testing.T) {
 	if !e.WAFExcludeAdd("host", "other.com", nil) {
 		t.Fatal("waf other exclude")
 	}
-	// An admin narrowed a path exclude to another vhost. The edge applies it
-	// on every host anyway (waf_skip_for never reads scope_hosts), so it is
-	// listed, flagged as outside its scope.
+	// An admin narrowed a path exclude to another vhost: neither the edge nor
+	// MatchWAFRules applies it here, so it is not listed. One narrowed to this
+	// host is.
 	if !e.WAFExcludeAddRules("path", "/import/", map[string]struct{}{"migrating.example.org": {}}, []int{402}) {
 		t.Fatal("waf scoped path exclude")
+	}
+	if !e.WAFExcludeAddRules("path", "/export/", map[string]struct{}{"www.example.com": {}}, []int{402}) {
+		t.Fatal("waf path exclude scoped to www")
 	}
 	// Challenge: an apex exclude covers www.
 	if !e.ChallengeExcludeAdd("host", "example.com", nil) {
@@ -112,21 +115,31 @@ func TestVhostProfile_WhatApplies(t *testing.T) {
 	www := profileFor(t, mux, "www.example.com")
 
 	if len(www.WAFExcludes) != 3 {
-		t.Fatalf("www waf excludes = %+v, want the 402 host exclude and the two path excludes", www.WAFExcludes)
+		t.Fatalf("www waf excludes = %+v, want the 402 host exclude, the unscoped path exclude and /export/", www.WAFExcludes)
 	}
 	for _, x := range www.WAFExcludes {
 		switch x.Value {
 		case "other.com":
 			t.Fatalf("other.com's exclude listed for www.example.com")
 		case "/import/":
-			if x.ScopeTakesHost {
-				t.Fatalf("a path exclude scoped to migrating.example.org must not read as scoped to www.example.com")
-			}
-		default:
-			if !x.ScopeTakesHost {
-				t.Fatalf("an unscoped exclude takes every host: %+v", x)
-			}
+			t.Fatalf("a path exclude scoped to migrating.example.org listed for www.example.com")
 		}
+	}
+	// The profile follows the enforcement path: /import/ applies on its own
+	// scope host only.
+	if _, ids := e.wafExcludes.MatchWAFRules("unrelated.example.net", "/import/x"); ids != nil {
+		t.Fatalf("MatchWAFRules applied /import/ outside its scope: %v", ids)
+	}
+	if _, ids := e.wafExcludes.MatchWAFRules("migrating.example.org", "/import/x"); ids == nil {
+		t.Fatal("MatchWAFRules did not apply /import/ on its scope host")
+	}
+	mig := profileFor(t, mux, "migrating.example.org")
+	found := false
+	for _, x := range mig.WAFExcludes {
+		found = found || x.Value == "/import/"
+	}
+	if !found {
+		t.Fatalf("migrating.example.org's profile lacks its scoped /import/ exclude: %+v", mig.WAFExcludes)
 	}
 	if !www.Controls.WAFEnabled {
 		t.Fatalf("a rule-scoped exclude must leave the WAF on")

@@ -53,8 +53,12 @@ type compiledExcludeEntry struct {
 }
 
 type compiledScopeMatcher struct {
-	exact map[string]struct{}
-	wild  []*regexp.Regexp
+	// scoped: the entry named scope hosts. Without it the matcher takes every
+	// host; with it, only the hosts below, so a scope whose every glob failed
+	// to compile takes no host (it once read as "no scope" = every host).
+	scoped bool
+	exact  map[string]struct{}
+	wild   []*regexp.Regexp
 }
 
 type compiledValueMatcher struct {
@@ -62,8 +66,6 @@ type compiledValueMatcher struct {
 	kind    string // "host" or "path" — boundary semantics for a literal
 	wild    *regexp.Regexp
 }
-
-var hostScopeMatcherCache sync.Map // key(string) -> compiledScopeMatcher
 
 func newExcludeStore(path string) *excludeStore {
 	s := &excludeStore{
@@ -297,28 +299,14 @@ func excludeEntryLess(a, b excludeEntry) bool {
 	return ruleIDsKey(a.RuleIDs) < ruleIDsKey(b.RuleIDs)
 }
 
-func hostInScope(host string, scopeHosts []string) bool {
-	start, profEnabled := globalExcludeProfiler.start()
-	defer globalExcludeProfiler.end("host_in_scope", start, profEnabled)
-	if len(scopeHosts) == 0 {
-		return true
-	}
-	key := strings.Join(scopeHosts, "\x00")
-	if cached, ok := hostScopeMatcherCache.Load(key); ok {
-		return cached.(compiledScopeMatcher).Match(host)
-	}
-	compiled := compileScopeMatcher(scopeHosts)
-	hostScopeMatcherCache.Store(key, compiled)
-	return compiled.Match(host)
-}
-
 func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
 	if len(scopeHosts) == 0 {
 		return compiledScopeMatcher{}
 	}
 	m := compiledScopeMatcher{
-		exact: make(map[string]struct{}),
-		wild:  make([]*regexp.Regexp, 0),
+		scoped: true,
+		exact:  make(map[string]struct{}),
+		wild:   make([]*regexp.Regexp, 0),
 	}
 	for _, scopeHost := range scopeHosts {
 		if strings.ContainsAny(scopeHost, "*?[]") {
@@ -332,8 +320,12 @@ func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
 	return m
 }
 
+// Match reports whether an entry with this scope applies on host (lowercased
+// by the caller). The in-path WAF runs the same semantics
+// (cfm_waf_excl.lua scope_takes); both run
+// scripts/tests/fixtures/waf_exclude_scope.txt.
 func (m compiledScopeMatcher) Match(host string) bool {
-	if len(m.exact) == 0 && len(m.wild) == 0 {
+	if !m.scoped {
 		return true
 	}
 	if _, ok := m.exact[host]; ok {
@@ -352,9 +344,9 @@ func (m compiledScopeMatcher) Match(host string) bool {
 // (literal) value:
 //
 //   - host: exact host, or a dot-boundary subdomain suffix — `shop.gr` matches
-//     `shop.gr` and `www.shop.gr`, NOT `myshop.gr` / `shop.gr.evil.com`. This
-//     mirrors matchHostExclude (the reporting-side matcher), which the old
-//     enforcement matcher silently disagreed with.
+//     `shop.gr` and `www.shop.gr`, NOT `myshop.gr` / `shop.gr.evil.com`. (The
+//     vhost controls' old reporting-side matcher used these semantics while
+//     the old enforcement matcher silently disagreed; both now use this one.)
 //   - path: exact path, or a path-segment prefix — `/admin` matches `/admin`
 //     and `/admin/x`, NOT `/administrator`. Path values carry a leading `/`
 //     (added at store time by normalize).
@@ -505,10 +497,24 @@ func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
 	return "", false
 }
 
+// wafScopeTakes is the WAF excludes' scope test (MatchWAFRules, the vhost
+// controls' WAF column, the vhost profile; the edge's cfm_waf_excl.lua
+// scope_takes): the scope takes host, or host is the www. alias of a literal
+// scope host. The alias is challengePathScopeCovers': cPanel lists a domain
+// without its www. name, and a tenant's exclude written before the token's
+// vhosts carried web aliases (2026-11-19) holds only the bare domain.
+func (e compiledExcludeEntry) wafScopeTakes(host string) bool {
+	if e.Scope.Match(host) {
+		return true
+	}
+	apex, ok := strings.CutPrefix(host, "www.")
+	return ok && apex != "" && e.Scope.matchExact(apex)
+}
+
 // wafCovers is MatchWAFRules' per-entry test: the entry's scope takes host,
 // and its value matches host (a host entry) or path (a path entry).
 func (e compiledExcludeEntry) wafCovers(host, path string) bool {
-	if !e.Scope.Match(host) {
+	if !e.wafScopeTakes(host) {
 		return false
 	}
 	switch e.Type {
@@ -535,35 +541,29 @@ func (e compiledExcludeEntry) challengePathScopeCovers(host string) bool {
 	return ok && apex != "" && e.Scope.matchExact(apex)
 }
 
-// WAFHostMatch is one WAF exclude that the in-path WAF applies on a host.
-type WAFHostMatch struct {
-	excludeEntry
-	// ScopeTakesHost: the entry's scope_hosts (empty = every vhost) list this
-	// host, as MatchWAFRules requires. When false the entry is listed anyway:
-	// the edge's waf_skip_for (cfm.lua) matches on the value alone and never
-	// reads scope_hosts, so it applies the entry on this host regardless.
-	ScopeTakesHost bool `json:"scope_takes_host"`
-}
-
 // WAFEntriesForHost lists the WAF excludes the in-path WAF applies to a
-// request on host: every host entry whose value covers host (the same value
-// matcher as cfm_waf_excl.lua matches_rule) and every path entry (it applies
-// on that path of every host). Read-only, for the vhost profile.
-func (s *excludeStore) WAFEntriesForHost(host string) []WAFHostMatch {
+// request on host: every entry whose scope_hosts take host (empty = every
+// vhost) and whose value covers it (a host entry) or that can cover one of its
+// paths (a path entry). The scope test is MatchWAFRules' and the edge's
+// (cfm_waf_excl.lua skip_for), so the profile lists what both apply.
+// Read-only, for the vhost profile.
+func (s *excludeStore) WAFEntriesForHost(host string) []excludeEntry {
 	host = strings.ToLower(strings.TrimSpace(host))
 	if s == nil || host == "" {
 		return nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var out []WAFHostMatch
+	var out []excludeEntry
 	for _, e := range s.wafEntries {
-		switch {
-		case e.Type == "host" && e.Value.Match(host), e.Type == "path":
-			out = append(out, WAFHostMatch{excludeEntry: e.Entry, ScopeTakesHost: e.Scope.Match(host)})
+		if !e.wafScopeTakes(host) {
+			continue
+		}
+		if e.Type == "path" || (e.Type == "host" && e.Value.Match(host)) {
+			out = append(out, e.Entry)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return excludeEntryLess(out[i].excludeEntry, out[j].excludeEntry) })
+	sortExcludeEntries(out)
 	return out
 }
 
@@ -605,6 +605,30 @@ func (s *excludeStore) FirstChallengeHostMatch(host string) (excludeEntry, bool)
 	found := false
 	for _, e := range s.challengeEntries {
 		if e.challengeHostCovers(host) && (!found || excludeEntryLess(e.Entry, best)) {
+			best, found = e.Entry, true
+		}
+	}
+	return best, found
+}
+
+// FirstWAFHostMatch is the vhost controls' WAF column test: the first
+// (List order) WHOLE-WAF host entry that MatchWAFRules would apply on host,
+// scope_hosts included. Rule-scoped entries leave the WAF on, so they do not
+// count.
+func (s *excludeStore) FirstWAFHostMatch(host string) (excludeEntry, bool) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if s == nil || host == "" {
+		return excludeEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best excludeEntry
+	found := false
+	for _, e := range s.wafEntries {
+		if e.Type != "host" || len(e.RuleIDs) > 0 || !e.wafScopeTakes(host) || !e.Value.Match(host) {
+			continue
+		}
+		if !found || excludeEntryLess(e.Entry, best) {
 			best, found = e.Entry, true
 		}
 	}

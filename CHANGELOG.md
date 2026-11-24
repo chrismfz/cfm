@@ -101,6 +101,35 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   honours the entry's scope) still challenged it. The column now uses the
   decision's own matcher.
 
+### Security
+- **WAF excludes: the in-path WAF honours an exclude's `scope_hosts`.** An
+  admin `--scope <host>` (`scope_hosts=` on `/api/v1/waf/exclude/add`) and
+  every scoped cPanel token's write narrow an exclude to those vhosts, and
+  the docs and the Go matcher said so, but the edge kept only the value and
+  `rule_ids`: a path exclude narrowed to one site switched those rules (or,
+  without `--rule`, the whole WAF) off on that path of **every** vhost, and a
+  host exclude applied on sub-hosts its scope does not list. The edge now
+  skips an exclude whose scope does not take the request host, with the Go
+  semantics (a scope host is that host and its `www.` alias, which a
+  tenant's exclude written before 2026-11-19 needs, or an anchored glob; no
+  scope = every vhost), pinned by a fixture both sides run. **Operator impact:** a
+  scope-qualified WAF exclude stops applying on the vhosts it does not list;
+  if one of them was relying on it, re-add the exclude with those vhosts in
+  `--scope` (or without it, admin-global). Unscoped excludes are unchanged.
+  It takes effect at the edge's first request after the upgrade's reload
+  (the snapshot moved to new shdict keys, so a worker still draining after
+  the reload cannot write the old scope-less rows back). The vhost profile
+  (`/api/v1/webdet/vhost-profile` and its cfm-admin page) now lists only the
+  WAF excludes whose scope takes the host, and drops `scope_takes_host`; the
+  vhost controls' WAF column (`/webdet/vhosts`, the Vhost page's WAF tile)
+  follows the scope too, so a scoped exclude no longer shows the WAF off on
+  a sub-host the edge guards. The panel ports' WAF reads no excludes and was
+  not affected.
+- **A WAF / challenge exclude scope made only of unusable globs no longer
+  applies everywhere.** `--scope 'shop[a'` (an unterminated class, a trailing
+  `\`) compiled to an empty matcher that read as "no scope" (every vhost); it
+  now takes no host in the daemon, and the edge reads it the same way.
+
 ## 2026.11.24
 
 ### Security

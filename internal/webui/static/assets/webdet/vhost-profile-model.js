@@ -137,15 +137,11 @@ export function wafTile(p) {
   out.pills.push(pill("On", "ok"));
   const ruleScoped = ex.filter((e) => arr(e.rule_ids).length > 0);
   const whole = ex.filter((e) => arr(e.rule_ids).length === 0);
-  const outside = ex.filter((e) => e.scope_takes_host === false);
   if (ex.length) out.pills.push(pill(`${ex.length} exclude${ex.length === 1 ? "" : "s"}`, "warn"));
   const parts = [];
   if (ruleScoped.length) parts.push(`${ruleScoped.length} rule-scoped`);
   if (whole.length) parts.push(`${whole.length} whole-WAF on a path`);
   out.why = parts.length ? `${parts.join(", ")}. See What applies.` : "No exclude applies to this host.";
-  if (outside.length) {
-    out.why += ` ${outside.length} applied here although scoped to other hosts (the edge ignores an exclude's scope).`;
-  }
   out.inherited = ex.some((e) => e.type === "host" && str(e.value) !== host);
   return out;
 }
@@ -300,9 +296,9 @@ export function ruleRows(p, now = new Date()) {
   }));
 }
 
-// excludeRows lists the WAF and challenge excludes the profile reports. WAF
-// rows carry scope_takes_host: false is an entry the edge applies here
-// although its scope names other hosts.
+// excludeRows lists the WAF and challenge excludes the profile reports. Each
+// one's scope takes this host: the profile lists no other (the edge and the
+// Go matcher both honour an exclude's scope_hosts).
 export function excludeRows(p) {
   const host = str(p && p.host);
   const row = (kind, e) => ({
@@ -312,7 +308,6 @@ export function excludeRows(p) {
     rules: arr(e.rule_ids).length ? `rules ${arr(e.rule_ids).join(", ")}` : (kind === "WAF" ? "whole WAF" : "challenge"),
     scope: arr(e.scope_hosts).length ? arr(e.scope_hosts).join(", ") : "every vhost",
     exact: e.type === "host" && str(e.value) === host,
-    outsideScope: e.scope_takes_host === false,
   });
   return [
     ...arr(p && p.waf_excludes).map((e) => row("WAF", e)),

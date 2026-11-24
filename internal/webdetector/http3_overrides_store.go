@@ -206,8 +206,8 @@ func (s *http3OverrideStore) IsEnabled(host string) bool {
 //                    would be confusing).
 //
 // CRITICAL: this is the ONLY function the UI should use for deciding
-// "is this host opted in?". Earlier versions reused matchHostExclude
-// which expanded `cdn.example.com` into a suffix match against every
+// "is this host opted in?". Earlier versions reused the exclude host matcher
+// (since removed), which expanded `cdn.example.com` into a suffix match against every
 // subdomain — the Lua data path never honored that, so the UI lied. The
 // matching rules here (exact + filepath.Match wildcards) MUST stay in
 // step with the Lua glob_match in cfm_h3_config.lua.

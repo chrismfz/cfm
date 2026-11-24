@@ -1097,59 +1097,60 @@ decision = require("cfm_decision").new(CFG, {
 })
 
 
+-- WAF-excludes module: the per-worker cache state, the row builder and the
+-- matcher. The cache state MUST be in a require'd module — it once was
+-- `local wx_local_ts = 0` etc. here, but top-level locals reset on every
+-- request under access_by_lua_file (see the "PITFALL" block at the top of
+-- this file). The reset made the timestamp-equality shortcut in
+-- load_waf_excludes_local_cache a permanent miss, so every WAF-eligible
+-- request paid an unnecessary cjson.decode of the shdict snapshot. Moving the
+-- state to a require'd module restores the cache.
+local wx = require "cfm_waf_excl"
+
 -- WAF excludes snapshot
 --
--- Each entry from /nginx/waf/excludes has shape {type, value, rule_ids?}.
--- rule_ids is an optional array of integers; absent/empty means "whole-WAF
--- skip" (legacy semantics). Present means "skip only these rule IDs when
--- the WAF runs". The two cached lists below carry the rule_ids alongside
--- the value so per-request matching can route to either path.
+-- Each entry from /nginx/waf/excludes has shape {type, value, scope_hosts?,
+-- rule_ids?}. rule_ids is an optional array of integers; absent/empty means
+-- "whole-WAF skip" (legacy semantics). Present means "skip only these rule
+-- IDs when the WAF runs". scope_hosts narrows the entry to those vhosts
+-- (absent = every vhost). The two cached lists carry both alongside the
+-- value (cfm_waf_excl.rows_from_entries) so per-request matching honours
+-- them the way the Go matcher does.
+--
+-- The shdict keys carry a "2" (wxsnap2_ts / wxsnap2_lock / wxhosts2 /
+-- wxpaths2) since rows carry the scope: the shdict outlives a reload, and an
+-- old worker still draining connections after one would otherwise keep
+-- rewriting the snapshot with scope-less rows (every scoped exclude global
+-- again, each time it refreshed). With its own keys the new code ignores
+-- them and refreshes on its first request.
 local function refresh_waf_excludes_if_needed()
   if not SH then return end
   local now = ngx.now()
-  local last = tonumber(SH:get("wxsnap_ts") or "0") or 0
+  local last = tonumber(SH:get("wxsnap2_ts") or "0") or 0
   if (now - last) < CFG.waf_excl_refresh_sec then return end
-  if not SH:add("wxsnap_lock", "1", 1) then return end
+  if not SH:add("wxsnap2_lock", "1", 1) then return end
   local body, _ = decision:rpc("waf_excludes", "GET", "/nginx/waf/excludes")
   if not body then
-    SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
-    SH:delete("wxsnap_lock"); return
+    SH:set("wxsnap2_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
+    SH:delete("wxsnap2_lock"); return
   end
   local entries = (cjson.decode(body) or {}).entries or {}
-  local hosts, paths = {}, {}
-  for _, e in ipairs(entries) do
-    local t = lower(e.type or ""); local v = lower(tostring(e.value or ""))
-    if v ~= "" then
-      local row = { v = v, rule_ids = e.rule_ids }
-      if t == "host" then hosts[#hosts+1] = row
-      elseif t == "path" then paths[#paths+1] = row end
-    end
-  end
-  SH:set("wxhosts", cjson.encode(hosts), math.max(1, CFG.waf_excl_meta_ttl_sec))
-  SH:set("wxpaths", cjson.encode(paths), math.max(1, CFG.waf_excl_meta_ttl_sec))
-  SH:set("wxsnap_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
-  SH:delete("wxsnap_lock")
+  local hosts, paths = wx.rows_from_entries(entries)
+  SH:set("wxhosts2", cjson.encode(hosts), math.max(1, CFG.waf_excl_meta_ttl_sec))
+  SH:set("wxpaths2", cjson.encode(paths), math.max(1, CFG.waf_excl_meta_ttl_sec))
+  SH:set("wxsnap2_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
+  SH:delete("wxsnap2_lock")
 end
 
--- WAF-excludes per-worker cache state. MUST be in a require'd module —
--- previously these were `local wx_local_ts = 0` etc. on this line, but
--- top-level locals reset on every request under access_by_lua_file
--- (see the "PITFALL" block at the top of this file). The reset made
--- the timestamp-equality shortcut in load_waf_excludes_local_cache a
--- permanent miss, so every WAF-eligible request paid an unnecessary
--- cjson.decode of the shdict snapshot. Moving the state to a require'd
--- module restores the cache.
-local wx = require "cfm_waf_excl"
-
--- Exclude value matching lives in cfm_waf_excl (the excludes module) so it is
--- unit-testable and has one canonical Lua home; it mirrors the Go enforcement
--- matcher (internal/webdetector/exclude_store.go compiledValueMatcher). See
--- that module for the host/path boundary semantics.
-local matches_rule = wx.matches_rule
+-- Exclude matching (scope, then value) lives in cfm_waf_excl (the excludes
+-- module) so it is unit-testable and has one canonical Lua home; it mirrors
+-- the Go enforcement matcher (internal/webdetector/exclude_store.go
+-- MatchWAFRules: compiledScopeMatcher + compiledValueMatcher). See that
+-- module for the scope and host/path boundary semantics.
 
 local function load_waf_excludes_local_cache()
   if not SH then wx.ts = 0; wx.hosts = {}; wx.paths = {}; return end
-  local ts = tonumber(SH:get("wxsnap_ts") or "0") or 0
+  local ts = tonumber(SH:get("wxsnap2_ts") or "0") or 0
   -- This shortcut is the whole point of the cache; before the
   -- access_by_lua_file pitfall fix, wx.ts (then `wx_local_ts`) reset
   -- to 0 on every request and this comparison was always false. Now
@@ -1158,54 +1159,24 @@ local function load_waf_excludes_local_cache()
   -- short-circuit here without re-decoding the shdict snapshot.
   if ts == wx.ts then return end
   wx.ts = ts
-  wx.hosts = cjson.decode(SH:get("wxhosts") or "[]") or {}
-  wx.paths = cjson.decode(SH:get("wxpaths") or "[]") or {}
+  wx.hosts = cjson.decode(SH:get("wxhosts2") or "[]") or {}
+  wx.paths = cjson.decode(SH:get("wxpaths2") or "[]") or {}
 end
 
--- waf_skip_for(host, uri) returns:
---   skip_all (bool)     true if any matching exclude is whole-WAF (no rule_ids)
+-- waf_skip_for(host, uri) returns (cfm_waf_excl.skip_for):
+--   skip_all (bool)     true if any matching exclude whose scope_hosts take
+--                        host is whole-WAF (no rule_ids)
 --   skip_ids (table)    set of waf_rule_id integers to suppress when WAF runs;
 --                        nil if no rule-scoped exclude applies
 -- A whole-WAF exclude short-circuits: caller skips the WAF entirely. Otherwise
 -- the WAF runs and skip_ids is passed through ctx.skip_rule_ids so cfm_waf
--- silently drops any rule-fire whose ID is in the set.
+-- silently drops any rule-fire whose ID is in the set. An exclude narrowed to
+-- other vhosts (scope_hosts) is skipped. A bare-string row (the cache shape of
+-- a Lua before rule_ids) stays a whole-WAF exclude on every host, its old
+-- meaning.
 local function waf_skip_for(host, uri)
   refresh_waf_excludes_if_needed(); load_waf_excludes_local_cache()
-  host = lower(host or ""); uri = lower(tostring(uri or "/"))
-  local skip_ids = nil
-  local function consider(target, row, kind)
-    -- Back-compat: previous Lua versions cached this list as bare strings.
-    -- A graceful nginx reload during upgrade can briefly hand the new code
-    -- the old cache shape (≤ waf_excl_refresh_sec until the next refresh
-    -- overwrites). Treat a string entry as a whole-WAF exclude — its old
-    -- meaning — so excludes don't silently lapse during the upgrade window.
-    if type(row) == "string" then row = { v = row } end
-    if not matches_rule(target, row.v, kind) then return false end
-    if not row.rule_ids or #row.rule_ids == 0 then
-      return true -- whole-WAF skip; signal caller to short-circuit
-    end
-    if not skip_ids then skip_ids = {} end
-    for _, id in ipairs(row.rule_ids) do
-      local n = tonumber(id)
-      if n then skip_ids[n] = true end
-    end
-    return false
-  end
-  for _, r in ipairs(wx.hosts) do
-    if consider(host, r, "host") then return true, nil end
-  end
-  for _, r in ipairs(wx.paths) do
-    if consider(uri, r, "path") then return true, nil end
-  end
-  return false, skip_ids
-end
-
--- Back-compat shim: callers that just need the bool answer (existing
--- behavior was "skip whole WAF or not"). True only for whole-WAF excludes,
--- never for rule-scoped ones.
-local function waf_is_excluded(host, uri)
-  local skip_all, _ = waf_skip_for(host, uri)
-  return skip_all
+  return wx.skip_for(wx.hosts, wx.paths, host, uri)
 end
 
 -- ─────────────────────────────────────────────────────────────────────────────

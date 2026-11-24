@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -123,8 +122,8 @@ type vhostControlInputs struct {
 	challengeEntries []string
 	wafEntries       []string
 	// ClamAV per-vhost overrides, EXACT hosts: cfm_clamav.lua keys its
-	// override set by exact hostname, so matchHostExclude's suffix expansion
-	// would lie about runtime behaviour.
+	// override set by exact hostname, so the exclude matcher's subdomain suffix
+	// expansion would lie about runtime behaviour.
 	clamOverride     map[string]struct{}
 	clamModeOverride map[string]struct{}
 	clamGlobal       bool
@@ -153,18 +152,24 @@ func (e *Engine) vhostControlInputs() vhostControlInputs {
 // vhostControlRow is one host's row of the controls table (and the controls
 // block of the vhost profile).
 func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhostControlRow {
-	// The challenge column follows MatchChallenge (the decision's own test,
-	// scope_hosts included): matchHostExclude ignores an entry's scope, so a
-	// tenant's exclude on example.com read as covering www.example.com,
-	// which is still challenged.
+	// The challenge and WAF columns follow the decision's own tests
+	// (MatchChallenge / MatchWAFRules, scope_hosts included). A value-only
+	// match read a tenant's exclude on example.com as covering
+	// www.example.com, which is still challenged, and a scoped whole-WAF
+	// exclude as switching the WAF off on sub-hosts the edge still guards.
 	chEntry, challengeMatched := e.challengeExcludes.FirstChallengeHostMatch(normalizeControlHost(host))
 	challengeValue, challengeExact := "", false
 	if challengeMatched {
 		challengeValue = chEntry.Value
 		challengeExact = chEntry.Value == normalizeControlHost(host)
 	}
-	wafMatched, wafValue, wafExact := matchHostExclude(in.wafEntries, host)
-	// HTTP/3 does NOT use matchHostExclude: its suffix expansion (treat
+	wafEntry, wafMatched := e.wafExcludes.FirstWAFHostMatch(normalizeControlHost(host))
+	wafValue, wafExact := "", false
+	if wafMatched {
+		wafValue = wafEntry.Value
+		wafExact = wafEntry.Value == normalizeControlHost(host)
+	}
+	// HTTP/3 does NOT use the exclude matcher: its suffix expansion (treat
 	// "cdn.example.com" as matching every "*.cdn.example.com") would lie
 	// about the runtime behaviour — cfm_h3_config.lua matches only exact
 	// hosts and explicit "*.suffix" wildcards. The store's MatchInfo mirrors
@@ -172,7 +177,7 @@ func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhost
 	http3Matched, http3Pattern, http3Exact := e.HTTP3OverrideMatchInfo(host)
 
 	// Normalize the lookup key: collectKnownVhosts seeds some hosts
-	// (cPanel userdata) un-normalized, and matchHostExclude normalizes its
+	// (cPanel userdata) un-normalized, and the exclude stores normalize their
 	// host internally — the exact clam membership check must too, or a
 	// mixed-case/trailing-dot host would miss its own override.
 	_, clamPresent := in.clamOverride[normalizeControlHost(host)]
@@ -235,28 +240,6 @@ func hostExcludeValues(entries []excludeEntry) []string {
 		}
 	}
 	return out
-}
-
-func matchHostExclude(excludes []string, host string) (matched bool, matchedValue string, exact bool) {
-	host = normalizeControlHost(host)
-	if host == "" {
-		return false, "", false
-	}
-	for _, ex := range excludes {
-		ok, err := filepath.Match(ex, host)
-		if err == nil && ok {
-			return true, ex, ex == host
-		}
-		if !strings.ContainsAny(ex, "*?") {
-			if host == ex {
-				return true, ex, true
-			}
-			if strings.HasSuffix(host, "."+ex) {
-				return true, ex, false
-			}
-		}
-	}
-	return false, "", false
 }
 
 func parseVhostFilterWithAliases(r *http.Request) map[string]struct{} {

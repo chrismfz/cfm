@@ -10,7 +10,7 @@ import { describeMatch, describeAction } from "./rules-model.js";
 
 // A real GET /api/v1/webdet/vhost-profile?host=www.example.com body (from
 // VhostProfile in a test engine: an apex WAF rule exclude, a WAF path exclude
-// scoped to another host, a scoped challenge path exclude, a *.example.com
+// scoped to this host, a scoped challenge path exclude, a *.example.com
 // cache policy and two rules), trimmed of timestamps the model never reads.
 const PROFILE = {
   schema: "webdet.vhost_profile.v1",
@@ -29,8 +29,8 @@ const PROFILE = {
     rung_source: "", rung_trigger: "", solver_farm: false, state: "normal",
   },
   waf_excludes: [
-    { type: "host", value: "example.com", rule_ids: [402], scope_takes_host: true },
-    { type: "path", value: "/import/", scope_hosts: ["other.example.org"], rule_ids: [402], scope_takes_host: false },
+    { type: "host", value: "example.com", rule_ids: [402] },
+    { type: "path", value: "/import/", scope_hosts: ["www.example.com"], rule_ids: [402] },
   ],
   challenge_excludes: [{ type: "path", value: "/feed/", scope_hosts: ["example.com"] }],
   site_cache: {
@@ -79,11 +79,11 @@ test("challenge tile: off, manual with lockdown, automatic, excluded", () => {
   assert.match(ex.why, /example\.com/);
 });
 
-test("WAF tile counts the excludes and names the ones the edge applies outside their scope", () => {
+test("WAF tile counts the excludes", () => {
   const t = wafTile(PROFILE);
   assert.deepEqual(tileTexts(t), ["On", "2 excludes"]);
   assert.match(t.why, /2 rule-scoped/);
-  assert.match(t.why, /1 applied here although scoped to other hosts/);
+  assert.doesNotMatch(t.why, /scoped to other hosts/);
   assert.equal(t.inherited, true); // the host exclude is the apex's
 
   const off = wafTile({ ...PROFILE, controls: { ...PROFILE.controls, waf_enabled: false, waf_matched_exclude: "www.example.com" } });
@@ -155,15 +155,15 @@ test("rule rows: rules-model.js wording, inherited scope, state", () => {
   assert.equal(rows[1].state, "disabled");
 });
 
-test("exclude rows: WAF first, scope words, outside-scope flag", () => {
+test("exclude rows: WAF first, scope words", () => {
   const rows = excludeRows(PROFILE);
   assert.deepEqual(rows.map((r) => r.kind), ["WAF", "WAF", "Challenge"]);
   assert.equal(rows[0].rules, "rules 402");
   assert.equal(rows[0].scope, "every vhost");
   assert.equal(rows[0].exact, false);
-  assert.equal(rows[1].outsideScope, true);
+  assert.equal(rows[1].scope, "www.example.com");
   assert.equal(rows[2].scope, "example.com");
-  assert.equal(rows[2].outsideScope, false);
+  assert.equal("outsideScope" in rows[1], false);
 });
 
 test("related hosts keep the profile's order and always hold the host", () => {
