@@ -48,6 +48,19 @@ do
   check(sc == rec, "the recorded line is exactly the Set-Cookie line on the response: " .. tostring(sc))
 end
 
+-- a second edge line in the same request is appended "\n"-joined: the
+-- filter's exact-line set reads both (cfm_cache.micro_setcookie_filter)
+do
+  local g = gate("@cfm_micro_30s")
+  local r = H.run{ clearance = true, vars = with(CLEARED, { cfm_edge_sc = "cfm_prev=1; Path=/" }), verdict = CHAL, micro = g.micro }
+  local rec = r.vars.cfm_edge_sc
+  check(r.ok and r.execd == "@cfm_micro_30s", "cleared visitor with a prior edge line → micro exec: " .. desc(r))
+  local lines = {}
+  for l in (rec or ""):gmatch("[^\n]+") do lines[#lines + 1] = l end
+  check(#lines == 2 and lines[1] == "cfm_prev=1; Path=/" and lines[2]:find("^cfm_clearance=minted;") ~= nil,
+        "two edge lines recorded, newline-joined, in order: " .. tostring(rec))
+end
+
 -- the same, gate says no (vhost not armed, or a request rail): the origin
 do
   local g = gate(nil)

@@ -296,9 +296,9 @@ local cache_ok, cfm_cache = pcall(require, "cfm_cache")
 -- went to the origin uncached before they went on to Step 4, and the cache
 -- must not keep a response to a payload the WAF flagged or never saw.
 -- micro_skip: record why a micro-armed request will not be micro-cached when
--- it is allowed before Step 4, the micro entry for every client but a
--- bypass-list crawler, which Step 0 enters itself (one a vhost lockdown holds
--- reaches Step 4, with the crawler class) (mwhy= in the access log;
+-- it is allowed before a micro entry (Step 4; Step 2b for a clearance holder,
+-- Step 0 for a bypass-list crawler, one a vhost lockdown holds reaching Step 4
+-- with the crawler class) (mwhy= in the access log;
 -- cfm_cache.note_skip writes only on a micro-armed vhost and a conf that
 -- declares the variable). Under a pcall: logging never breaks an allow path.
 local function micro_skip(why)
@@ -2357,8 +2357,8 @@ if CFG.log_allows or CFG.debug then
   log_route(ngx.INFO, "allow ip=" .. ip .. " host=" .. host .. " pass=" .. ngx.var.cfm_pass .. cache_flag)
 end
 -- Site Cache Tier B: plain-allow path — the micro-cache entry for every client
--- but a bypass-list crawler (Step 0 has that one)
--- (the Step 2b clearance fast-path is deferred, see there). A no-op unless
+-- that neither holds a clearance cookie (Step 2b has that one) nor is a
+-- bypass-list crawler (Step 0 has that one). A no-op unless
 -- MICRO_CACHE_ENFORCE is armed and this request matched the HTTPS `location /`
 -- (the $cfm_micro_conf sentinel). ngx.exec to the @cfm_micro_<n>s bucket is the
 -- last thing here (it never returns).

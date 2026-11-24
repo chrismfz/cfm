@@ -1368,10 +1368,11 @@ local function note_micro_why(why)
 end
 _M._note_micro_why = note_micro_why
 
--- note_skip: cfm.lua allowed the request before Step 4 (the micro entry for
--- every client but a bypass-list crawler, which Step 0 enters itself): the
--- clearance fast-path, a WAF logonly hit or an uninspected request, the
--- self-IP / well-known bypasses. micro_gate never ran: record that as the
+-- note_skip: cfm.lua allowed the request before any micro entry (Step 4,
+-- Step 2b for a clearance holder, Step 0 for a bypass-list crawler): a WAF
+-- logonly hit or an uninspected request, the self-IP / well-known bypasses,
+-- a CDN of the bypass list, the clearance fast path on an older conf (no
+-- $cfm_edge_sc). micro_gate never ran: record that as the
 -- reason, for a micro-armed vhost only (on any other vhost mwhy stays "-",
 -- as for every request micro has nothing to say about). One policy lookup;
 -- never raises past the caller's pcall.
