@@ -76,11 +76,13 @@ export function entries(rows, ctx = {}, query = "", limit = 200) {
     const c = chips(row, ctx);
     list.push({ host, chips: c, weight: weight(c) });
   }
-  list.sort((a, b) => b.weight - a.weight || exactFirst(a.host, b.host, q) || a.host.localeCompare(b.host));
-  return { items: list.slice(0, Math.max(0, limit | 0)), total: list.length };
+  // The host typed exactly comes first whatever the others' weight: Enter
+  // opens the first item, and it must be the host the user typed.
+  list.sort((a, b) => exactFirst(a.host, b.host, q) || b.weight - a.weight || a.host.localeCompare(b.host));
+  return { items: list.slice(0, limit === Infinity ? list.length : Math.max(0, limit | 0)), total: list.length };
 }
 
-// An exact match of the query sorts above the other quiet hosts.
+// An exact match of the query sorts above every other host.
 function exactFirst(a, b, q) {
   if (!q) return 0;
   return (b === q) - (a === q);
@@ -89,7 +91,6 @@ function exactFirst(a, b, q) {
 // attentionCount is how many hosts carry a weighted chip (the picker's
 // summary line: "3 need attention").
 export function attentionCount(rows, ctx = {}) {
-  let n = 0;
-  for (const row of Array.isArray(rows) ? rows : []) if (weight(chips(row, ctx)) > 0) n++;
-  return n;
+  // Counted over the same de-duplicated hosts entries() lists.
+  return entries(rows, ctx, "", Infinity).items.filter((i) => i.weight > 0).length;
 }

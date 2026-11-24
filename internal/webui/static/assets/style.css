@@ -1042,8 +1042,10 @@ td > .chip-pills { display: flex; margin-top: .25rem; }
    wide table can keep its first column (the host, the name) in view while
    it scrolls sideways (.sticky-first, Vhost controls). */
 td, th { font-variant-numeric: tabular-nums; }
-.table-wrap tbody tr:hover > td { background: var(--card-hover); }
+/* Not on a row that carries its own state colour (a bulk selection, the row
+   being edited): the hover must not hide it. */
+.table-wrap tbody tr:not(.bulk-selected):not(.row-editing):hover > td { background: var(--card-hover); }
 .sticky-first th:first-child,
 .sticky-first td:first-child { position: sticky; left: 0; z-index: 1; background: var(--card); }
 .sticky-first thead th:first-child { z-index: 3; }
-.table-wrap .sticky-first tbody tr:hover > td:first-child { background: var(--card-hover); }
+.table-wrap .sticky-first tbody tr:not(.bulk-selected):not(.row-editing):hover > td:first-child { background: var(--card-hover); }

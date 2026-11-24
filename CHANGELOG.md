@@ -43,6 +43,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   only the rules they can see are counted).
 
 ### Changed
+- **`/api/v1/webdet/suspicious` honours `?limit=`** (1–500, default 50; it
+  always returned 50), so the Vhost page picker and Vhost controls mark every
+  suspicious host on a busy node, not only the top 50.
 - **cfm-admin: tables and colours.** Numbers line up in every table column,
   the row under the pointer is marked, and Vhost controls keeps the host
   column in view while the table scrolls sideways on a phone. Colours that
