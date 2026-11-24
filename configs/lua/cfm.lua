@@ -403,11 +403,22 @@ local function with_query_arg(u, k, v)
   return u .. sep .. tostring(k or "") .. "=" .. esc(v or "")
 end
 
+-- append_set_cookie: add one Set-Cookie line the EDGE sets (cfm_clearance),
+-- and record it in $cfm_edge_sc ("\n"-joined; a header line never holds a
+-- newline). That variable survives the ngx.exec into an @cfm_micro_<n>s
+-- location (ngx.ctx does not), so cfm_cache.micro_setcookie_filter can leave
+-- the edge's own lines out of "may this response be stored?" while keeping them
+-- on the response: the cookie is the visitor's own, added to every response,
+-- HIT included, and never part of the stored copy (nginx stores the origin's
+-- headers). An older conf does not declare the variable (reading it gives nil,
+-- writing it would raise): nothing is recorded, and Step 2b stays out of micro.
 local function append_set_cookie(v)
   local h = ngx.header["Set-Cookie"]
-  if not h then ngx.header["Set-Cookie"] = v; return end
-  if type(h) == "table" then table.insert(h, v); ngx.header["Set-Cookie"] = h; return end
-  ngx.header["Set-Cookie"] = { h, v }
+  if not h then ngx.header["Set-Cookie"] = v
+  elseif type(h) == "table" then table.insert(h, v); ngx.header["Set-Cookie"] = h
+  else ngx.header["Set-Cookie"] = { h, v } end
+  local e = ngx.var.cfm_edge_sc
+  if e ~= nil then ngx.var.cfm_edge_sc = (e == "") and v or (e .. "\n" .. v) end
 end
 
 local function real_ip()
@@ -2198,16 +2209,22 @@ if clearance_allow then
   end
   ngx.header["X-CFM-Action"] = waf_allow_action or "allow_cookie"
   ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
-  micro_skip("clearance")
-  -- Site Cache Tier B: micro-cache is deliberately NOT wired on this
-  -- clearance fast-path yet. `refresh_clearance_cookie` above sets the sliding
-  -- cfm_clearance Set-Cookie via ngx.header in THIS access phase; whether that
-  -- survives an ngx.exec internal redirect to the @cfm_micro_<n>s location is the
-  -- open clearance-cookie-ordering item (design §5.5.1) — if the refresh is lost,
-  -- a cleared visitor served from micro-cache stops re-arming their clearance.
-  -- Per that design note, micro-cache ships on the Step 4 (plain-allow) path only
-  -- and this dominant cleared path is added once the ordering is verified on a
-  -- live edge (the refresh must move to a header_filter that runs on cache HITs).
+  -- Site Cache Tier B: the clearance fast path is a micro entry (design
+  -- §5.5.1), in the visitor keyspace: the WAF ran (Step 2) before this step,
+  -- so what a cleared visitor stores is what a Step 4 visitor would. The
+  -- refreshed cfm_clearance line above is set in this access phase and
+  -- survives the ngx.exec, HIT included (verified on nginx 1.24 + lua-nginx
+  -- 0.10.26); recorded in $cfm_edge_sc by append_set_cookie, it is left out of
+  -- the store decision and never part of the stored copy, so every cleared
+  -- visitor gets their own cookie back. An older conf without $cfm_edge_sc
+  -- keeps the old behaviour (origin, mwhy=clearance): there the edge's line
+  -- would keep $cfm_sc_unsafe at "1" and nothing would be stored anyway.
+  if ngx.var.cfm_edge_sc ~= nil then
+    local clearance_target = micro_cache_target()
+    if clearance_target then return ngx.exec(clearance_target) end
+  else
+    micro_skip("clearance")
+  end
   return
 end
 

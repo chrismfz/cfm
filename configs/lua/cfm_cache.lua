@@ -592,9 +592,8 @@ end
 -- IGNORE-list of cookies treated as anonymous (CFM's own cfm_* cookies — incl.
 -- cfm_clearance — and common analytics/consent cookies). A cleared but
 -- app-anonymous visitor (only cfm_clearance) passes these rails — that
--- post-challenge burst is what micro-cache exists to absorb — but as built a
--- cleared visitor returns at cfm.lua's Step 2b, which is not a micro entry
--- (design §5.5), so it is not micro-cached yet.
+-- post-challenge burst is what micro-cache exists to absorb; cfm.lua's Step 2b
+-- (the clearance fast path) is a micro entry (design §5.5.1).
 
 -- Exact lowercase auth-cookie names + name PREFIX / SUFFIX families. A request
 -- carrying any of these bypasses micro-cache (never stored), on every vhost.
@@ -890,6 +889,20 @@ local function response_setcookie()
     return sc, not (type(sc) == "table" and #sc >= SETCOOKIE_READ_CAP)
 end
 
+-- edge_setcookie_lines: the Set-Cookie lines CFM's edge added itself to this
+-- response (cfm.lua append_set_cookie records each, "\n"-joined, in
+-- $cfm_edge_sc: the refreshed cfm_clearance of the Step 2b fast path), as a
+-- set of exact lines, or nil. A line only counts when it is EXACTLY what the
+-- edge set: an origin cannot guess a freshly minted clearance value, so it can
+-- never exempt a cookie of its own this way.
+local function edge_setcookie_lines(v)
+    local e = v.cfm_edge_sc
+    if type(e) ~= "string" or e == "" then return nil end
+    local set = {}
+    for l in e:gmatch("[^\n]+") do set[l] = true end
+    return set
+end
+
 function _M.micro_setcookie_filter()
     local v = ngx.var
     if v.cfm_upstream ~= "cfm_apache_micro" then return end
@@ -900,17 +913,24 @@ function _M.micro_setcookie_filter()
         return
     end
     local lines = type(sc) == "table" and sc or { sc }
-    local keep = {}
+    local edge = edge_setcookie_lines(v)
+    -- keep: every line but the tracking ones (stripped from every micro
+    -- response); unsafe: the kept lines the edge did not set itself. The edge's
+    -- own lines stay on the response but never make it unstorable.
+    local keep, unsafe = {}, 0
     for _, l in ipairs(lines) do
         local name = setcookie_name(l)
-        if not (name and setcookie_is_tracking(name)) then keep[#keep + 1] = l end
+        if not (name and setcookie_is_tracking(name)) then
+            keep[#keep + 1] = l
+            if not (edge and edge[l]) then unsafe = unsafe + 1 end
+        end
     end
     if #keep < #lines then
         if #keep == 0 then ngx.header["Set-Cookie"] = nil
         elseif #keep == 1 then ngx.header["Set-Cookie"] = keep[1]
         else ngx.header["Set-Cookie"] = keep end
     end
-    if #keep == 0 then v.cfm_sc_unsafe = "" end
+    if unsafe == 0 then v.cfm_sc_unsafe = "" end
 end
 
 -- Request paths never micro-cached even for an anonymous client. A plain
@@ -1364,8 +1384,8 @@ end
 
 -- micro_gate: ACCESS-phase hook for Tier B (micro-cache of anonymous
 -- HTML). Called from cfm.lua at the Step 4 plain-allow return, AFTER $cfm_pass is
--- set. (The Step 2b clearance fast-path is deferred until the §5.5.1 clearance-
--- cookie-across-ngx.exec ordering is verified on a live edge — see cfm.lua.)
+-- set, at the Step 2b clearance fast path (design §5.5.1) and at the Step 0
+-- crawler bypass (class "crawler").
 -- RETURNS the internal location
 -- to serve from ("@cfm_micro_<n>s") when this request should be micro-cached, or
 -- nil to proceed normally. The caller ngx.exec()s the returned target OUTSIDE
