@@ -85,12 +85,16 @@ const (
 	tmOldMaxHosts   = 256                // per bucket older than an hour (compactBucket)
 	tmOldMaxClients = 64                 // per class per bucket older than an hour
 	tmMaxClientIPs  = 512                // per client per bucket
-	tmMaxIPState    = 100000
-	tmIPStateSweep  = 30 * time.Second
-	tmOtherKey      = "_other"
-	tmMaxClientLen  = 200
-	tmDefaultHosts  = 20
-	tmDefaultClient = 20
+	// tmMaxHumanClientIPs bounds a browser-UA ("human") client's IPs per
+	// bucket: enough to tell a population spread over hundreds of addresses
+	// (the distributed tell) from one visitor's, at an eighth of the memory.
+	tmMaxHumanClientIPs = 64
+	tmMaxIPState        = 100000
+	tmIPStateSweep      = 30 * time.Second
+	tmOtherKey          = "_other"
+	tmMaxClientLen      = 200
+	tmDefaultHosts      = 20
+	tmDefaultClient     = 20
 
 	tmAutomationDynPerMin = 20
 	tmHumanEvidenceTTL    = 10 * time.Minute
@@ -118,6 +122,7 @@ type tmSmall struct{ Req, OriginMs, Bytes int64 }
 
 type tmClient struct {
 	tmSmall
+	ev  int64            // requests a person's browser sends (static, POST, XHR: tmHumanEvidence)
 	ips map[string]int64 // last hour only; nil otherwise
 }
 
@@ -325,7 +330,7 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 	cl := cm[ck]
 	if cl == nil {
 		cl = &tmClient{}
-		if cls == tmAutomation || cls == tmBot {
+		if cls == tmAutomation || cls == tmBot || cls == tmHuman {
 			cl.ips = make(map[string]int64)
 		}
 		cm[ck] = cl
@@ -333,11 +338,62 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 	cl.Req++
 	cl.OriginMs += c.OriginMs
 	cl.Bytes += c.Bytes
+	if tmHumanEvidence(rec.Method, rec.URI) {
+		cl.ev++
+	}
 	if cl.ips != nil && rec.IP != "" {
-		if _, ok := cl.ips[rec.IP]; ok || len(cl.ips) < tmMaxClientIPs {
+		if _, ok := cl.ips[rec.IP]; ok || len(cl.ips) < tmClientIPCap(cls) {
 			cl.ips[rec.IP]++
 		}
 	}
+}
+
+// The distributed tell (a READING, never an enforcement decision): one exact
+// browser UA whose last hour came from many addresses, a few requests each,
+// with almost nothing a person's browser sends. Measured on titan
+// (2026-11-24, the edge access log, one hour): the Mac Chrome 131/133/136
+// population was 421-469 IPs at 1.2-2.3 requests per IP with 0-8% static /
+// POST / XHR and 2.7-4.7 s of origin per request; real Android / Windows
+// Chrome 157-158 populations were 152-319 IPs at 78-101 requests per IP with
+// 67-81%. Both conditions are needed: a site behind a CDN serves its visitors'
+// static files from the CDN (little evidence at the edge), but its visitors
+// still browse many pages each.
+const (
+	tmDistMinRequests = 200
+	tmDistMinIPs      = 50
+	tmDistMaxReqPerIP = 3.0
+	tmDistMaxEvidence = 0.10
+)
+
+// distributedTell reads one browser-UA client's last hour: ips are the
+// addresses kept (each bucket keeps its first tmMaxHumanClientIPs, so on a
+// population past that cap they are a sample), sampled the requests those
+// addresses made, hourReq / hourEv every request and those with evidence.
+// Requests per IP come from the sample (all requests over a capped IP count
+// would overstate it and hide exactly the biggest populations); the evidence
+// share comes from every request. The sample can only UNDERSTATE requests
+// per IP (an address kept in one bucket loses its requests in a later bucket
+// that was full when it came back), which leans toward flagging a big
+// population: what keeps real visitors out there is the evidence share,
+// counted over every request (TestTrafficMix_DistributedTellBusyVisitors).
+func distributedTell(ips int, sampled, hourReq, hourEv int64) *TrafficMixDistributed {
+	if hourReq < tmDistMinRequests || ips < tmDistMinIPs || sampled <= 0 {
+		return nil
+	}
+	perIP := float64(sampled) / float64(ips)
+	ev := float64(hourEv) / float64(hourReq)
+	if perIP >= tmDistMaxReqPerIP || ev >= tmDistMaxEvidence {
+		return nil
+	}
+	return &TrafficMixDistributed{IPs: ips, Requests: hourReq, ReqPerIP: perIP, EvidenceShare: ev}
+}
+
+// tmClientIPCap is how many IPs one client keeps per bucket.
+func tmClientIPCap(cls int) int {
+	if cls == tmHuman {
+		return tmMaxHumanClientIPs
+	}
+	return tmMaxClientIPs
 }
 
 // browserClassLocked decides automation vs human for a browser-UA request
@@ -474,6 +530,7 @@ func compactBucket(b *tmBucket) {
 			other.Req += v.Req
 			other.OriginMs += v.OriginMs
 			other.Bytes += v.Bytes
+			other.ev += v.ev
 			delete(cm, e.k)
 		}
 		cm[tmOtherKey] = other
@@ -531,6 +588,21 @@ type TrafficMixClient struct {
 	Bytes     int64          `json:"bytes"`
 	IPs       int            `json:"ips_last_hour,omitempty"`
 	TopIPs    []TrafficMixIP `json:"top_ips_last_hour,omitempty"`
+	// EvidenceShare (browser-UA clients) is the share of its last hour's
+	// requests a person's browser sends: static files, POSTs, XHR.
+	EvidenceShare *float64 `json:"evidence_share,omitempty"`
+	// Distributed is set on a browser-UA ("human") client whose last hour of
+	// the window (all of it when shorter) reads as a scraper spread over many
+	// addresses (distributedTell): a LABEL, never an enforcement decision.
+	Distributed *TrafficMixDistributed `json:"distributed,omitempty"`
+}
+
+// TrafficMixDistributed is the distributed-population tell's evidence.
+type TrafficMixDistributed struct {
+	IPs           int     `json:"ips"`
+	Requests      int64   `json:"requests"`
+	ReqPerIP      float64 `json:"req_per_ip"`
+	EvidenceShare float64 `json:"evidence_share"`
 }
 
 type TrafficMixPoint struct {
@@ -640,6 +712,12 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 		key string
 	}
 	clients := map[ck]*tmClient{}
+	// The last hour of the window, per client: requests and evidence (the
+	// distributed tell reads the hour its IPs cover). A window shorter than
+	// an hour is read whole: its thresholds (200 requests, 50 IPs) then apply
+	// to less time, so a 15-minute view flags fewer populations than the 1 h
+	// default, never more.
+	hourStat := map[ck]*[2]int64{}
 	var series []TrafficMixPoint
 	var peak [tmClasses]float64
 	var peakAt [tmClasses]int64
@@ -713,6 +791,16 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 				acc.Req += cl.Req
 				acc.OriginMs += cl.OriginMs
 				acc.Bytes += cl.Bytes
+				acc.ev += cl.ev
+				if id > lastB-tmIPBuckets {
+					hs := hourStat[k]
+					if hs == nil {
+						hs = &[2]int64{}
+						hourStat[k] = hs
+					}
+					hs[0] += cl.Req
+					hs[1] += cl.ev
+				}
 				if cl.ips != nil && id > lastB-tmIPBuckets {
 					if acc.ips == nil {
 						acc.ips = map[string]int64{}
@@ -796,8 +884,32 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 
 	for k, cl := range clients {
 		c := TrafficMixClient{Class: tmClassKeys[k.cls], Client: k.key, Requests: cl.Req, OriginSec: msToSec(cl.OriginMs), Bytes: cl.Bytes}
+		var hourReq, hourEv int64
+		if hs := hourStat[k]; hs != nil {
+			hourReq, hourEv = hs[0], hs[1]
+		}
+		if (k.cls == tmHuman || k.cls == tmAutomation) && hourReq > 0 {
+			e := float64(hourEv) / float64(hourReq)
+			c.EvidenceShare = &e
+		}
+		if k.cls == tmHuman && k.key != tmOtherKey {
+			var sampled int64 // requests of the IPs kept (the first tmMaxHumanClientIPs per bucket)
+			for _, n := range cl.ips {
+				sampled += n
+			}
+			c.Distributed = distributedTell(len(cl.ips), sampled, hourReq, hourEv)
+		}
+		// A browser-UA client's addresses are listed only when the tell
+		// fires (they are visitors' otherwise): its count is enough.
+		listIPs := k.cls != tmHuman || c.Distributed != nil
+		ipCap := 50
+		if c.Distributed != nil {
+			ipCap = manualIPChallengeMax // every address the operator may challenge at once
+		}
 		if len(cl.ips) > 0 {
 			c.IPs = len(cl.ips)
+		}
+		if len(cl.ips) > 0 && listIPs {
 			for ip, n := range cl.ips {
 				c.TopIPs = append(c.TopIPs, TrafficMixIP{IP: ip, Requests: n})
 			}
@@ -807,8 +919,8 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 				}
 				return c.TopIPs[i].IP < c.TopIPs[j].IP
 			})
-			if len(c.TopIPs) > 50 {
-				c.TopIPs = c.TopIPs[:50]
+			if len(c.TopIPs) > ipCap {
+				c.TopIPs = c.TopIPs[:ipCap]
 			}
 		}
 		out.Clients = append(out.Clients, c)

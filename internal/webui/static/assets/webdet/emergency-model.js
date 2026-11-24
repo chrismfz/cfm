@@ -10,8 +10,9 @@
 // Guardrails (the same doctrine as traffic-model.js clientActions):
 //   - A browser UA (classes "automation" and "human") is never a UA target:
 //     every real Chrome of that version sends the same string. A browser-
-//     looking scraper is targeted by its IPs (ip_any, IPv6 as /64 prefixes,
-//     as the traffic mix counts them); "human" clients are offered nothing.
+//     looking scraper is targeted by its IPs (ip_any, the exact addresses the
+//     traffic mix lists, IPv6 included); "human" clients are offered
+//     nothing unless the node's distributed tell fired on them.
 //   - A UA target is the traffic mix's UA family (NormalizeUA, a lower-case
 //     token of the raw UA), matched as the substring glob `*<family>*`; a
 //     client with no User-Agent is ua_any ["-"].
@@ -76,10 +77,12 @@ export function uaPattern(client) {
   return `*${fam}*`;
 }
 
-// ipTargets is the client's busiest addresses (last hour), at most n: IPv4
-// addresses and IPv6 /64s, as the traffic mix counts them.
+// ipTargets is the client's busiest addresses (last hour), at most n: the
+// exact IPv4 / IPv6 addresses the traffic mix lists.
 export function ipTargets(client, n) {
-  if (!client || !IP_TARGET_CLASSES.includes(client.class)) return [];
+  // A browser-UA ("human") client is an IP target only when the node's
+  // distributed tell fired on it (a scraper population, not visitors).
+  if (!client || !(IP_TARGET_CLASSES.includes(client.class) || (client.class === "human" && client.distributed))) return [];
   const list = Array.isArray(client.top_ips_last_hour) ? client.top_ips_last_hour : [];
   const cap = Math.min(Math.max(0, n | 0), LIMITS.ipsPerRule);
   return list.slice(0, cap).map((r) => String(r.ip || "").trim()).filter(Boolean);

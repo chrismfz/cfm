@@ -108,3 +108,14 @@ test("client sorts map to the API's sort values; rate ranks as requests; anythin
   assert.equal(clientSort(null), "origin");
   assert.equal(clientSort("__proto__"), "origin");
 });
+
+test("a browser-UA client the distributed tell flagged gets IP actions; an unflagged one nothing", async () => {
+  const { clientActions } = await import("./traffic-model.js");
+  const { targetsFor, uaPattern } = await import("./emergency-model.js");
+  const ips = [{ ip: "203.0.113.1", requests: 2 }];
+  const flagged = { class: "human", client: CHROME152, top_ips_last_hour: ips, distributed: { ips: 460, req_per_ip: 1.4, evidence_share: 0 } };
+  assert.deepEqual(clientActions(flagged).map((a) => a.id), ["challenge_ips", "throttle", "deny"]);
+  assert.deepEqual(targetsFor(flagged), ["ips"], "its IPs only: the UA is every visitor's too");
+  assert.equal(uaPattern(flagged), "");
+  assert.deepEqual(clientActions({ class: "human", client: CHROME152, top_ips_last_hour: ips }), [], "unflagged visitors: nothing");
+});

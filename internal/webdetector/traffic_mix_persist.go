@@ -60,6 +60,7 @@ type tmFileBucket struct {
 
 type tmFileClient struct {
 	tmSmall
+	Ev  int64            `json:"ev,omitempty"` // a file from before the evidence count reads 0
 	IPs map[string]int64 `json:"ips,omitempty"`
 }
 
@@ -90,7 +91,7 @@ func (s *trafficMixStore) snapshotFile(now time.Time) tmFile {
 			}
 			fb.Clients[c] = make(map[string]tmFileClient, len(b.clients[c]))
 			for k, cl := range b.clients[c] {
-				fc := tmFileClient{tmSmall: cl.tmSmall}
+				fc := tmFileClient{tmSmall: cl.tmSmall, Ev: cl.ev}
 				if len(cl.ips) > 0 {
 					fc.IPs = make(map[string]int64, len(cl.ips))
 					for ip, n := range cl.ips {
@@ -258,12 +259,13 @@ func mergeFileBucket(b *tmBucket, fb tmFileBucket) {
 			cl.Req += fc.Req
 			cl.OriginMs += fc.OriginMs
 			cl.Bytes += fc.Bytes
-			if len(fc.IPs) > 0 && !b.compact && (c == tmAutomation || c == tmBot) {
+			cl.ev += fc.Ev
+			if len(fc.IPs) > 0 && !b.compact && (c == tmAutomation || c == tmBot || c == tmHuman) {
 				if cl.ips == nil {
 					cl.ips = make(map[string]int64)
 				}
 				for ip, n := range fc.IPs {
-					if _, ok := cl.ips[ip]; ok || len(cl.ips) < tmMaxClientIPs {
+					if _, ok := cl.ips[ip]; ok || len(cl.ips) < tmClientIPCap(c) {
 						cl.ips[ip] += n
 					}
 				}

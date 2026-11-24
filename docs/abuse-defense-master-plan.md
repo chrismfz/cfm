@@ -985,6 +985,34 @@ already opened.
    5 minutes and on shutdown to `/var/lib/cfm/traffic_mix.json.gz`, 0600,
    restored at start). cfm-web keeps the per-class 5-minute requests for
    14 days (`fleet:poll-traffic`).
+   **The distributed tell** (2026-11-25, `distributedTell`): a second
+   READING on the `human` class, per exact browser UA over the last hour:
+   50+ addresses, under 3 requests per address, under 10% static / POST /
+   XHR. Written from titan's 2026-11-24 access log: the Mac Chrome
+   131/133/136 population (421-469 IPs, 1.2-2.3 req/IP, 0-8% evidence,
+   2.7-4.7 s origin per request, ~25% of the node's origin time) read as
+   `human` because no single address passed 20 dynamic requests a minute;
+   real Chrome 157/158 populations were 78-101 req/IP with 67-81% evidence.
+   Replayed on 2026-11-25 over the last hour of titan's and orion's edge
+   logs: titan flags 5 populations (Mac Chrome 131/133/136, Mac Chrome 142
+   with 12,342 IPs at 1.0 req/IP, an iOS 13.2.3 Safari on 255 vhosts), orion
+   1 (Mac Chrome 142, 507 IPs, 43 s of origin per request); no current
+   Chrome/Safari population of either node is flagged (all 45-105 req/IP,
+   85-98% evidence). Not flagged on orion: six old Chrome 86-89 UAs at ~3,000
+   IPs and 3.6 req/IP each, 0% evidence, already answered by the edge
+   (origin time 0). Known blind spot: the edge log carries no "came through
+   a CDN" bit, so a population seen only on CDN-fronted vhosts (static
+   served by the CDN) reads as no-evidence; a real browser UA spans the
+   node's other vhosts too, which is why none was flagged.
+   The client keeps its class; `distributed` is a label on it, and the Web
+   Traffic page offers its addresses (never its UA) to the operator's
+   per-IP challenge / deny / throttle. Nothing reads it to act.
+   **Exit contract (D3):** review with the traffic mix's (2026-12-22): how
+   often it fires fleet-wide, and for each firing UA whether a spot-check of
+   the access log shows a scraper (requests per IP, static share, origin
+   cost) or visitors (a CDN-fronted site with page-per-visit traffic would
+   be the false positive to look for). Outcomes: keep as a label / feed a
+   would-challenge shadow signal / retune / retire.
    **Exit contract (D3):** review by **2026-12-22**, operator decides. It must
    show, fleet-wide: how often `automation` fires on a vhost whose traffic the
    operator judged human (spot-check the top automation clients against the
