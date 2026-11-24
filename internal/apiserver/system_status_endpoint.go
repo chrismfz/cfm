@@ -627,7 +627,8 @@ func handleSystemWAFFPHunt(w http.ResponseWriter, r *http.Request) {
 // MCP abuse_shadow tool: it tails /var/log/cfm/cfm.abuse_shadow.log (the
 // entity-abuse burn-in lines, docs/webdetector-refactor.md) and returns
 // aggregates — would_challenge vs exempt_goodbot counts, top would-challenge
-// (host,ip) outliers by peak ratio, the datacenter/good-bot splits, and per-vhost
+// (host,ip) outliers by peak ratio, the datacenter/good-bot splits, the
+// rate_outlier cost tier (would_challenge_cost / top_cost_tier), and per-vhost
 // breakdowns for the vhost-level signals (top_facet/top_cost/top_dc) — so an
 // operator can judge "what would each signal have challenged, and how much is
 // verified-bot/datacenter?" before promoting any of them to a real challenge.

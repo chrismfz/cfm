@@ -114,7 +114,7 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	if rt > 10000 {
 		rt = rt / 1_000_000.0
 	}
-	ut, _ := strconv.ParseFloat(zero(f[9]), 64)
+	ut := parseUpstreamTime(f[9])
 
 	return LogRec{
 		TS:     ts,
@@ -135,6 +135,21 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 		Bypass:       bypass,
 		Auth:         auth,
 	}, true
+}
+
+// parseUpstreamTime reads the edge's $upstream_response_time: one value, or
+// one per upstream tried ("0.100, 0.200" after a retry, "0.1 : 0.2" across an
+// internal redirect), which it sums, so a retried request keeps its origin
+// time instead of reading as 0. "-", unparsable, negative and infinite parts
+// count 0.
+func parseUpstreamTime(s string) float64 {
+	var sum float64
+	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ':' || r == ' ' }) {
+		if v, err := strconv.ParseFloat(part, 64); err == nil && v > 0 && !math.IsInf(v, 0) {
+			sum += v
+		}
+	}
+	return sum
 }
 
 func zero(s string) string {
@@ -210,6 +225,24 @@ type bucketSW struct {
 	// are left out too (countsTowardRateOutlier): an integration polling a quiet
 	// shop read as a 24-31x outlier every hour (vol2.gr, 2026-11-18).
 	ipsDyn map[string]int
+
+	// Signal C's cost tier (abuse_shadow.go), maintained with ipsDyn and only
+	// while it is: ipsStatic counts an IP's static-asset requests (a browser
+	// fetches them, a scraper of HTML pages does not), ipsDynOrigin the origin
+	// seconds its ipsDyn requests cost (originSeconds), and originSec the
+	// origin seconds of every request in the bucket, for the node-wide
+	// origin_busy the shadow line reports as the pressure context.
+	ipsStatic    map[string]int
+	ipsDynOrigin map[string]float64
+	originSec    float64
+	// staticTotal counts every static-asset request in the bucket (any IP),
+	// for the vhost's own static share on the line (host_static=): a vhost
+	// behind a CDN, or with its assets on another host, serves next to none
+	// at the edge, so its visitors read static=0 too.
+	staticTotal int
+	// upstreamSeen is set once a request in the bucket reported where the
+	// edge sent it (upstreamReported); without it origin time is unmeasured.
+	upstreamSeen bool
 
 	// Keep a few representative raw lines per IP for alert samples.
 	// (We store the first line seen per IP per bucket.)
@@ -1796,16 +1829,37 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 		// Dynamic-only mirror for Signal C — maintained ONLY when the shadow
 		// signal that reads it is enabled (off by default), so it adds no map
 		// and no per-request work on the hot path otherwise. isStaticAssetPath
-		// tolerates a query string, so rec.URI (== p below) is safe here.
+		// reads the path (the query cut off) for both splits.
 		// Server-to-server endpoints (WooCommerce REST, payment webhooks: the
 		// narrow isChallengeExemptEndpoint list) are left out: an integration's
 		// steady sync out-rates a quiet shop's visitors by design (the vol2.gr
 		// e|connect bridge read as a 24-31x outlier every hour, 2026-11-18).
-		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier && countsTowardRateOutlier(rec.URI) {
-			if b.ipsDyn == nil {
-				b.ipsDyn = make(map[string]int)
+		if e.cfg.AbuseShadow && e.cfg.AbuseShadowRateOutlier {
+			path, _, _ := strings.Cut(rec.URI, "?")
+			origin := originSeconds(rec)
+			b.originSec += origin
+			if upstreamReported(rec) {
+				b.upstreamSeen = true
 			}
-			b.ipsDyn[rec.IP]++
+			switch {
+			case isStaticAssetPath(path):
+				b.staticTotal++
+				if b.ipsStatic == nil {
+					b.ipsStatic = make(map[string]int)
+				}
+				b.ipsStatic[rec.IP]++
+			case !isChallengeExemptEndpoint(path): // == countsTowardRateOutlier here
+				if b.ipsDyn == nil {
+					b.ipsDyn = make(map[string]int)
+				}
+				b.ipsDyn[rec.IP]++
+				if origin > 0 {
+					if b.ipsDynOrigin == nil {
+						b.ipsDynOrigin = make(map[string]float64)
+					}
+					b.ipsDynOrigin[rec.IP] += origin
+				}
+			}
 		}
 
 		if b.ipSample == nil {
@@ -4235,6 +4289,33 @@ func pathHasScriptExt(lp string) bool {
 		}
 	}
 	return false
+}
+
+// originSeconds is what one request cost the site's origin, for Signal C's
+// cost tier: its upstream time when the edge proxied it to the origin
+// (UpstreamName "cfm_apache*", or empty on an edge whose log has no such
+// column), 0 when the edge answered it itself or sent it to CFM's challenge
+// server. URT is the origin's own time (every try summed, parseUpstreamTime);
+// the request time is never used, as it adds the client's own transfer.
+func originSeconds(rec LogRec) float64 {
+	if !rec.Upstream {
+		return 0
+	}
+	if rec.UpstreamName != "" && !strings.HasPrefix(rec.UpstreamName, "cfm_apache") {
+		return 0
+	}
+	if rec.URT > 0 {
+		return rec.URT
+	}
+	return 0
+}
+
+// upstreamReported reports whether the log line says where the edge sent the
+// request (an upstream time or an upstream name). The combined and Apache
+// formats say neither, so there origin time is not measured at all, which
+// the shadow line must show as such rather than as a zero.
+func upstreamReported(rec LogRec) bool {
+	return rec.Upstream || rec.UpstreamName != ""
 }
 
 // isStaticAssetPath returns true for common static asset URLs that should not
