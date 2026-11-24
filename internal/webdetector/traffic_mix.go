@@ -580,6 +580,22 @@ var TrafficMixSorts = []string{TrafficMixSortOrigin, TrafficMixSortRequests, Tra
 // happens before the cap, so "by requests" returns the busiest clients, not
 // the costliest ones reordered.
 func (s *trafficMixStore) SnapshotSorted(now time.Time, window time.Duration, host string, mergeWWW bool, hostLimit, clientLimit int, sortBy string) TrafficMix {
+	return s.snapshot(now.Unix(), false, window, host, mergeWWW, hostLimit, clientLimit, sortBy)
+}
+
+// SnapshotUntil is the window that ENDS at until (a bucket boundary, in the
+// past): every bucket and minute before until, none after it. It answers
+// "what was the hour 09:00-10:00" exactly, as many times as asked (cfm-web's
+// hourly history), where Snapshot's window always ends at a "now" inside a
+// bucket that is still filling.
+func (s *trafficMixStore) SnapshotUntil(until time.Time, window time.Duration, host string, mergeWWW bool, hostLimit, clientLimit int, sortBy string) TrafficMix {
+	return s.snapshot(until.Unix(), true, window, host, mergeWWW, hostLimit, clientLimit, sortBy)
+}
+
+// snapshot is Snapshot's body: the window ends at nowSec, inclusive (the
+// bucket and minute holding it count) or, with closedEnd, exclusive (nowSec
+// is a bucket boundary and nothing from it on counts).
+func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Duration, host string, mergeWWW bool, hostLimit, clientLimit int, sortBy string) TrafficMix {
 	if window < tmBucketSec*time.Second {
 		window = tmBucketSec * time.Second
 	}
@@ -601,13 +617,16 @@ func (s *trafficMixStore) SnapshotSorted(now time.Time, window time.Duration, ho
 			hostKeys = []string{base, "www." + base}
 		}
 	}
-	nowSec := now.Unix()
 	// The window starts at the boundary of the bucket holding since (rounded
 	// DOWN), and since / window_sec report that span: every figure, the
 	// averages included, is exact over what is counted, and a short window
 	// asked just after a boundary still covers at least what was asked.
 	sinceSec := nowSec - int64(window/time.Second)
 	firstB, lastB := sinceSec/tmBucketSec, nowSec/tmBucketSec
+	lastMin := nowSec / 60
+	if closedEnd {
+		lastB, lastMin = nowSec/tmBucketSec-1, nowSec/60-1
+	}
 	if lastB-firstB >= tmBuckets { // never more buckets than the ring holds
 		firstB = lastB - tmBuckets + 1
 	}
@@ -711,7 +730,7 @@ func (s *trafficMixStore) SnapshotSorted(now time.Time, window time.Duration, ho
 	if host == "" {
 		peakWin = 60
 		s.mu.Lock()
-		for m := sinceSec / 60; m <= nowSec/60; m++ {
+		for m := sinceSec / 60; m <= lastMin; m++ {
 			mm := &s.minutes[m%tmMinutes]
 			if mm.id != m {
 				continue
@@ -861,7 +880,10 @@ func tmClassOut(i int, c tmCounters, secs, peak float64, peakAt int64, full bool
 // handleTrafficMix serves GET /api/v1/webdet/traffic-mix
 // ?window=<5m..24h, default 1h>&host=<vhost>&merge_www=1&hosts=<n>&clients=<n>
 // &sort=<origin|requests|bytes|ips> (which clients make the top n, and their
-// order; default origin time; anything else is a 400).
+// order; default origin time; anything else is a 400)
+// &until=<unix seconds> (the window ENDS there instead of now: a 5-minute
+// boundary within the last 24 h, so a finished hour reads the same every
+// time; anything else is a 400).
 // Admin-only (docs/endpoint_scope_inventory.md): the node-wide view names
 // other tenants' vhosts, clients and IPs.
 func (e *Engine) handleTrafficMix(w http.ResponseWriter, r *http.Request) {
@@ -892,6 +914,16 @@ func (e *Engine) handleTrafficMix(w http.ResponseWriter, r *http.Request) {
 	}
 	if !slices.Contains(TrafficMixSorts, sortBy) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sort: one of " + strings.Join(TrafficMixSorts, ", ")})
+		return
+	}
+	if v := strings.TrimSpace(q.Get("until")); v != "" {
+		until, err := strconv.ParseInt(v, 10, 64)
+		now := time.Now().Unix()
+		if err != nil || until%tmBucketSec != 0 || until > now || until <= now-24*3600 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "until: unix seconds on a 5-minute boundary, in the past, within the last 24 h"})
+			return
+		}
+		writeJSON(w, http.StatusOK, trafficMix.SnapshotUntil(time.Unix(until, 0), window, q.Get("host"), mergeWWW, atoi("hosts"), atoi("clients"), sortBy))
 		return
 	}
 	writeJSON(w, http.StatusOK, trafficMix.SnapshotSorted(time.Now(), window, q.Get("host"), mergeWWW, atoi("hosts"), atoi("clients"), sortBy))
