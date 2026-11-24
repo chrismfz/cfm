@@ -49,10 +49,13 @@ type Entry struct {
 	Verdict  string  `json:"verdict"`
 
 	// rate_outlier cost tier (the keys ride on lines from daemons that write
-	// them): Static = the IP's static-asset requests in the window, Origin =
-	// its origin seconds / window seconds, OriginBusy = the node's, Tier =
-	// "cost" when it fetched no static asset and Origin cleared the bar.
+	// them): Static = the IP's static-asset requests in the window,
+	// HostStatic = the vhost's static share of its requests, Origin = the
+	// IP's origin seconds / window seconds, OriginBusy = the node's ("-" on
+	// the line when the log reports no upstream: unmeasured, left 0 here),
+	// Tier = "cost" when it fetched no static asset and Origin cleared the bar.
 	Static     int     `json:"static,omitempty"`
+	HostStatic float64 `json:"host_static,omitempty"`
 	Origin     float64 `json:"origin,omitempty"`
 	OriginBusy float64 `json:"origin_busy,omitempty"`
 	Tier       string  `json:"tier,omitempty"`
@@ -158,6 +161,8 @@ func Parse(line string) (Entry, bool) {
 			e.Verdict = v
 		case "static":
 			e.Static, _ = strconv.Atoi(v)
+		case "host_static":
+			e.HostStatic, _ = strconv.ParseFloat(v, 64)
 		case "origin":
 			e.Origin, _ = strconv.ParseFloat(v, 64)
 		case "origin_busy":
@@ -676,7 +681,7 @@ func Summarize(lines []string) Summary {
 			if e.Tier == "cost" {
 				s.WouldChallengeCost++
 				t.CostHits++
-				if e.Origin > t.MaxOrigin {
+				if t.CostHits == 1 || e.Origin > t.MaxOrigin {
 					t.MaxOrigin, t.MaxOriginBusy = e.Origin, e.OriginBusy
 				}
 			}

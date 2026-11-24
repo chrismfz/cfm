@@ -283,6 +283,25 @@ The live shape Signal C must catch, and why it beats the vhost-aggregate score:
   `static=` is the client's to send, so the tier is a measurement only: it
   never clears anyone. A scraper that also fetches one asset per window
   leaves the tier.
+
+  Other details of the line:
+  - The tier is judged on every tick. Its first `tier=cost` logs under its
+    own throttle key, so it is not held back by the `tier=-` line the IP
+    logged when it first crossed the rate bar (with only ~MinReq requests in
+    the window).
+  - `host_static=` is the vhost's own static share. It is near 0 when a CDN
+    serves the assets or they live on another host. There every visitor
+    reads `static=0`, so before any enforcement the tier needs a vhost that
+    serves its assets at the edge.
+  - `origin=`/`origin_busy=` read `-` on a log that reports no upstream
+    (combined/Apache): unmeasured, never 0.
+  - Origin time is the upstream time with every try summed, never the
+    request time, which adds the client's own transfer.
+
+  **Before enforcing, re-key on `firewall.CountKey`.** Signal C's counters
+  key on the full address, like the rest of `ipsDyn`. A direct IPv6 scraper
+  rotating inside its /64 spreads its requests and origin time over
+  addresses (CLAUDE.md §5, "A per-client key").
 - **Datacenter additive-only, validated:** the SAME vhost carries verified
   Googlebot (PTR `crawl-…googlebot.com`), Bingbot (`…search.msn.com`), Facebook
   meta-agent, AdsBot — several on cloud ASNs (AS15169, AS8075). A datacenter

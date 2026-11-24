@@ -74,11 +74,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **`rate_outlier` shadow lines show what an outlier costs the origin.**
   Each line now also carries:
   - `static=`: the IP's static-asset requests in the window;
+  - `host_static=`: the vhost's own static share. It is near 0 behind a CDN
+    or with the assets on another host, where every visitor reads
+    `static=0`;
   - `origin=`: its origin time over the window, as average concurrent
-    origin requests;
-  - `origin_busy=`: the same for the whole node, as the pressure context;
+    origin requests (every upstream try summed);
+  - `origin_busy=`: the same for the whole node, as the pressure context.
+    Both read `-` on a log that reports no upstream (unmeasured, not 0);
   - `tier=cost`: set when the IP fetched no static asset and `origin=` is
-    at least `ABUSE_SHADOW_RATE_COST` (default 0.5, i.e. 60 s in 2 min).
+    at least `ABUSE_SHADOW_RATE_COST` (default 0.5 of the window, i.e. 60 s
+    in the default 2 min). The tier is checked every tick, so an IP that
+    first crossed the rate bar cheap still logs its `tier=cost` line.
 
   The `abuse_shadow` MCP tool counts these lines (`would_challenge_cost`)
   and ranks them (`top_cost_tier`). Nothing is enforced. This is the
@@ -87,8 +93,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   Why: on the 2026-11-24 morning a scraper drove titan and orion past load
   100. A plain outlier is mostly browsers (275 of titan's 469 that day). The
   cost-tier outliers were 30–50 % of the origin time in those hours, about
-  none at normal hours, and only 5 IPs fleet-wide carried human solve
-  evidence.
+  none at normal hours, and only 5 IPs among them fleet-wide carried human
+  solve evidence.
 - **A per-IP challenge that is loaded again and again but never solved can
   now be held instead of running out** (`[webdetector]
   CHALLENGE_UNSOLVED_HOLD`, default `log`). On titan a facet scraper on Greek

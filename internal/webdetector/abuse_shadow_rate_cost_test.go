@@ -18,7 +18,7 @@ func TestOriginSeconds(t *testing.T) {
 	}{
 		{"origin, urt", LogRec{Upstream: true, UpstreamName: "cfm_apache", URT: 2.5, RT: 2.6}, 2.5},
 		{"origin tls upstream", LogRec{Upstream: true, UpstreamName: "cfm_apache_ssl", URT: 1}, 1},
-		{"retried urt parses 0: rt stands in", LogRec{Upstream: true, UpstreamName: "cfm_apache", RT: 0.4}, 0.4},
+		{"fast origin: never the request time", LogRec{Upstream: true, UpstreamName: "cfm_apache", RT: 0.4}, 0},
 		{"older edge, no upstream column", LogRec{Upstream: true, URT: 0.7}, 0.7},
 		{"challenge server", LogRec{Upstream: true, UpstreamName: "cfm_challenge", URT: 0.1, RT: 0.1}, 0},
 		{"edge answered itself", LogRec{Upstream: false, UpstreamName: "-", RT: 0.001}, 0},
@@ -130,5 +130,121 @@ func TestRateOutlierCostTierLine(t *testing.T) {
 	s := abuseshadow.Summarize(lines)
 	if s.WouldChallengeCost != 1 || len(s.TopCostTier) != 1 || s.TopCostTier[0].IP != "192.0.2.1" {
 		t.Errorf("summary cost tier = %d %+v, want 1 line for 192.0.2.1", s.WouldChallengeCost, s.TopCostTier)
+	}
+}
+
+// A vhost that stopped logging keeps its buckets until its next line: they
+// must not re-log an outlier that has stopped, nor feed origin_busy.
+func TestRateOutlierIgnoresStaleBuckets(t *testing.T) {
+	var lines []string
+	prev := abuseShadowRateLogf
+	abuseShadowRateLogf = func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { abuseShadowRateLogf = prev })
+
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute,
+		AbuseShadow: true, AbuseShadowRateOutlier: true})
+	old := float64(time.Now().Add(-10 * time.Minute).Unix())
+	for i := 0; i < 10; i++ {
+		e.ingest(LogRec{TS: old, IP: fmt.Sprintf("10.0.0.%d", i+1), Host: "quiet.example.gr", Method: "get",
+			URI: "/", Status: 200, Upstream: true, UpstreamName: "cfm_apache", URT: 0.2}, "raw")
+	}
+	for i := 0; i < 40; i++ {
+		e.ingest(LogRec{TS: old + float64(i)*0.01, IP: "192.0.2.1", Host: "quiet.example.gr", Method: "get",
+			URI: fmt.Sprintf("/shop/?p=%d", i), Status: 200, Upstream: true, UpstreamName: "cfm_apache", URT: 3}, "raw")
+	}
+	e.emitAbuseShadowRateOutliers(time.Now())
+	if len(lines) != 0 {
+		t.Errorf("stale buckets logged %q", lines)
+	}
+}
+
+func TestParseUpstreamTime(t *testing.T) {
+	for in, want := range map[string]float64{
+		"": 0, "-": 0, "0.000": 0, "1.250": 1.25,
+		"0.100, 0.200": 0.3, "0.5 : 1.5": 2, "-, 0.4": 0.4, "x": 0,
+	} {
+		if got := parseUpstreamTime(in); got < want-1e-9 || got > want+1e-9 {
+			t.Errorf("parseUpstreamTime(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func captureRateLines(t *testing.T) *[]string {
+	t.Helper()
+	var lines []string
+	prev := abuseShadowRateLogf
+	abuseShadowRateLogf = func(format string, args ...interface{}) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	t.Cleanup(func() { abuseShadowRateLogf = prev })
+	return &lines
+}
+
+// The tier is judged every tick: an IP that first crossed the rate bar cheap
+// (tier=-, line throttled for the holddown) still logs its tier=cost line
+// once it has cost the origin enough, and only once.
+func TestRateOutlierCostTierNotHeldByFirstLine(t *testing.T) {
+	lines := captureRateLines(t)
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute,
+		AbuseShadow: true, AbuseShadowRateOutlier: true})
+	now := float64(time.Now().Unix())
+	const host = "shop.example.gr"
+	req := func(ip string, i int, urt float64) {
+		e.ingest(LogRec{TS: now + float64(i)*0.01, IP: ip, Host: host, Method: "get", URI: fmt.Sprintf("/p/%d", i),
+			Status: 200, Upstream: true, UpstreamName: "cfm_apache", URT: urt}, "raw")
+	}
+	for i := 0; i < 10; i++ {
+		req(fmt.Sprintf("10.0.0.%d", i+1), i, 0.1)
+	}
+	for i := 0; i < 25; i++ {
+		req("192.0.2.1", i, 1) // 25 s of origin: 0.21 of the window
+	}
+	e.emitAbuseShadowRateOutliers(time.Now())
+	for i := 25; i < 100; i++ {
+		req("192.0.2.1", i, 1) // now 100 s: 0.83
+	}
+	e.emitAbuseShadowRateOutliers(time.Now())
+	e.emitAbuseShadowRateOutliers(time.Now())
+	var tiers []string
+	for _, ln := range *lines {
+		en, _ := abuseshadow.Parse(ln)
+		tiers = append(tiers, en.Tier)
+	}
+	if len(tiers) != 2 || tiers[0] != "" || tiers[1] != "cost" {
+		t.Errorf("tiers = %q, want [\"\" \"cost\"] (lines %q)", tiers, *lines)
+	}
+}
+
+// A log that reports no upstream (combined/Apache) measures no origin time:
+// the line says "-", never 0, and never tier=cost. host_static is the
+// vhost's own static share.
+func TestRateOutlierUnmeasuredOrigin(t *testing.T) {
+	lines := captureRateLines(t)
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute,
+		AbuseShadow: true, AbuseShadowRateOutlier: true})
+	now := float64(time.Now().Unix())
+	const host = "apache.example.gr"
+	for i := 0; i < 10; i++ {
+		ip := fmt.Sprintf("10.0.0.%d", i+1)
+		e.ingest(LogRec{TS: now, IP: ip, Host: host, Method: "get", URI: "/", Status: 200, RT: 0.3}, "raw")
+		e.ingest(LogRec{TS: now, IP: ip, Host: host, Method: "get", URI: "/a.css", Status: 200}, "raw")
+	}
+	for i := 0; i < 40; i++ {
+		e.ingest(LogRec{TS: now + float64(i)*0.01, IP: "192.0.2.1", Host: host, Method: "get",
+			URI: fmt.Sprintf("/p/%d", i), Status: 200, RT: 3}, "raw")
+	}
+	e.emitAbuseShadowRateOutliers(time.Now())
+	if len(*lines) != 1 {
+		t.Fatalf("lines = %q, want 1", *lines)
+	}
+	ln := (*lines)[0]
+	if !strings.Contains(ln, " origin=- origin_busy=- tier=-") {
+		t.Errorf("unmeasured origin must log '-': %q", ln)
+	}
+	en, _ := abuseshadow.Parse(ln)
+	if d := en.HostStatic - 10.0/60; d > 0.01 || d < -0.01 {
+		t.Errorf("host_static = %v, want %.2f", en.HostStatic, 10.0/60)
 	}
 }
