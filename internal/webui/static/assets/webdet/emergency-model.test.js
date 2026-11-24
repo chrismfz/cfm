@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   EMERGENCY_TAG, EMERGENCY_BAND, uaPattern, ipTargets, targetsFor, suggestTotalRate, throttleCut,
-  emergencyPriority, buildEmergencyRule, extendedUntil, activeEmergencyRules, describeEmergency, isEmergencyRule,
+  emergencyPriority, buildEmergencyRule, familyInBrowserUA, extendedUntil, activeEmergencyRules, describeEmergency, isEmergencyRule,
 } from "./emergency-model.js";
 import { validateRuleForm, formFromRule, LIMITS } from "./rules-model.js";
 
@@ -22,6 +22,17 @@ test("targets: a browser UA is never a UA target; humans get nothing", () => {
   for (const bad of ["mozilla", "_other", "go", "a*b", "x y", ""]) assert.equal(uaPattern({ class: "bot", client: bad }), "", bad);
 });
 
+test("a family found inside a real browser's UA is never a UA target (`*android*` would hit every Android visitor)", () => {
+  for (const fam of ["android", "safari", "webkit", "applewebkit", "app", "linux", "mobile", "chrome", "gecko", "khtml", "windows", "iphone", "firefox", "version"]) {
+    assert.equal(uaPattern({ class: "bot", client: fam }), "", fam);
+    assert.ok(familyInBrowserUA(fam), fam);
+  }
+  assert.deepEqual(targetsFor({ class: "bot", client: "android", top_ips_last_hour: [{ ip: "203.0.113.1" }] }), ["ips"], "still actionable by its IPs");
+  for (const fam of ["meta-externalagent", "python-requests", "go-http-client", "curl", "bytespider", "dalvik", "okhttp"]) {
+    assert.notEqual(uaPattern({ class: "bot", client: fam }), "", fam);
+  }
+});
+
 test("ipTargets: busiest first, /64s kept, capped at the rule limit", () => {
   assert.deepEqual(ipTargets(SCRAPER, 2), ["83.212.158.22", "2a02:587:1:2::/64"]);
   const many = { class: "bot", client: "x-bot", top_ips_last_hour: Array.from({ length: 600 }, (_, i) => ({ ip: `10.0.${i >> 8}.${i & 255}` })) };
@@ -37,13 +48,21 @@ test("suggested cap and its cut", () => {
   assert.equal(throttleCut(1, 5), 0);
 });
 
-test("emergencyPriority: first free 1–9 on overlapping vhosts, 0 when full", () => {
-  assert.equal(emergencyPriority(["*"], []), EMERGENCY_BAND.from);
-  const rules = [{ priority: 1, scope: { vhosts: ["shop.gr"] } }, { priority: 2, scope: { vhosts: ["other.gr"] } }];
-  assert.equal(emergencyPriority(["*"], rules), 3, "* overlaps every vhost");
-  assert.equal(emergencyPriority(["other.gr"], rules), 1);
-  const full = Array.from({ length: 9 }, (_, i) => ({ priority: i + 1, scope: { vhosts: ["*"] } }));
-  assert.equal(emergencyPriority(["shop.gr"], full), 0);
+test("emergencyPriority: first free 1–9 on overlapping vhosts, above the operator's own rules", () => {
+  const em = (p, h, until) => ({ priority: p, scope: { vhosts: [h] }, note: "emergency: x", match: until ? { until } : {} });
+  assert.equal(emergencyPriority(["*"], [], NOW), EMERGENCY_BAND.from);
+  const rules = [em(1, "shop.gr"), em(2, "other.gr")];
+  assert.equal(emergencyPriority(["*"], rules, NOW), 3, "* overlaps every vhost");
+  assert.equal(emergencyPriority(["other.gr"], rules, NOW), 1);
+  const full = Array.from({ length: 9 }, (_, i) => em(i + 1, "*"));
+  assert.equal(emergencyPriority(["shop.gr"], full, NOW), 0);
+  const expired = Array.from({ length: 9 }, (_, i) => em(i + 1, "*", "2026-11-24T11:00:00Z"));
+  assert.equal(emergencyPriority(["shop.gr"], expired, NOW), 1, "an expired rule's slot is free");
+  // The operator's own allow at 3: an emergency rule must land above it.
+  const own = [{ priority: 3, scope: { vhosts: ["*"] }, note: "monitor" }, em(1, "*")];
+  assert.equal(emergencyPriority(["shop.gr"], own, NOW), 2);
+  assert.equal(emergencyPriority(["shop.gr"], [...own, em(2, "*")], NOW), 0, "no slot above it left");
+  assert.equal(emergencyPriority(["shop.gr"], [{ priority: 50, scope: { vhosts: ["*"] }, note: "allow crawlers" }], NOW), 1);
 });
 
 test("buildEmergencyRule: a UA total throttle node-wide for 1 h", () => {
@@ -75,7 +94,7 @@ test("buildEmergencyRule: a deny on the scraper's IPs; refusals", () => {
   assert.match(buildEmergencyRule({ ...base, vhosts: [] }).error, /where/);
   assert.match(buildEmergencyRule({ ...base, action: "throttle_total", rate: 0, per: "node" }).error, /between/);
   assert.match(buildEmergencyRule({ ...base, action: "throttle", profile: "nope" }).error, /profile/);
-  const full = Array.from({ length: 9 }, (_, i) => ({ priority: i + 1, scope: { vhosts: ["*"] } }));
+  const full = Array.from({ length: 9 }, (_, i) => ({ priority: i + 1, scope: { vhosts: ["*"] }, note: "emergency: x" }));
   assert.match(buildEmergencyRule({ ...base, rules: full }).error, /slot/);
   const long = buildEmergencyRule({ ...base, reason: "ε".repeat(300) }).rule;
   assert.ok(new TextEncoder().encode(long.note).length <= LIMITS.noteLen);

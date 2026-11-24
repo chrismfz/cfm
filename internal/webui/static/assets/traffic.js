@@ -470,7 +470,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
       // the cut reads directly; per vhost each vhost gets the rate, so the cut
       // is at most this.
       const cut = fmtPct(throttleCut(rps, o.rate), 0);
-      parts.push(`It does ${escapeHTML(fmtRate(rps))} on average now, all vhosts together. At ${escapeHTML(fmtRate(o.rate))} ${el.emPer.value === "node" ? "for the node" : "per vhost"}, about <strong>${el.emPer.value === "node" ? "" : "up to "}${escapeHTML(cut)}</strong> of it would get 429 (more in bursts).`);
+      parts.push(`It averaged ${escapeHTML(fmtRate(rps))} over the ${escapeHTML(el.windowSelect.options[el.windowSelect.selectedIndex]?.text || "window")} shown, all vhosts together (a recent surge is higher: pick a shorter window for a closer figure). At ${escapeHTML(fmtRate(o.rate))} ${el.emPer.value === "node" ? "for the node" : "per vhost"}, about <strong>${el.emPer.value === "node" ? "" : "up to "}${escapeHTML(cut)}</strong> of it would get 429 (more in bursts).`);
     }
     if (built.error) parts.push(`<span class="pill danger">${escapeHTML(built.error)}</span>`);
     el.emPreview.innerHTML = parts.join(" ");
@@ -480,7 +480,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     if (deny && ips) cav.push("A deny returns 403 to everyone on those addresses: a real visitor behind the same carrier NAT or /64 is refused too. For residential addresses prefer the challenge.");
     if (deny && !ips) cav.push("Every client sending that User-Agent gets 403, on every IP.");
     if (!ips && c.class === "crawler") cav.push("A crawler whose IPs are on the static crawler bypass list (Google, Bing, Apple, DuckDuckGo, …) never reaches traffic rules: the rule will have no effect on it.");
-    cav.push("The rule runs before your own rules (including allows) and ends by itself; end or extend it under Active emergency rules. Clients holding a clearance cookie are not affected.");
+    cav.push("The rule runs before your own rules on those vhosts (allows included) and ends by itself; end or extend it under Active emergency rules. Clients holding a clearance cookie are not affected.");
     el.emCaveat.textContent = cav.join(" ");
   }
 
@@ -522,9 +522,12 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     if (built.error) { flash(`✖ ${built.error}`, "danger"); return; }
     st.busy = true;
     try {
-      await api("/v1/webdet/rules/add", {
+      const out = await api("/v1/webdet/rules/add", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(built.rule),
       });
+      // Hold its slot until the list reloads: a second action made before
+      // that must not pick the same priority.
+      st.trules = [...st.trules, (out && out.rule) || built.rule];
       const d = describeEmergency(built.rule);
       flash(`✓ ${d.how}: ${d.what}, until ${new Date(built.rule.match.until).toLocaleTimeString()}`, "ok");
       closeEmergency();
@@ -538,8 +541,12 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
 
   async function extendEmergency(r) {
     if (!r) return;
-    const next = { ...r, match: { ...r.match, until: extendedUntil(r, 3600) } };
     try {
+      // Extend the rule as it is NOW (an edit made meanwhile in Traffic Rules
+      // must not be reverted), changing only its until.
+      const cur = await api(`/v1/webdet/rules/get?id=${encodeURIComponent(r.id)}`);
+      const live = (cur && cur.rule) || r;
+      const next = { ...live, match: { ...live.match, until: extendedUntil(live, 3600) } };
       await api(`/v1/webdet/rules/update?id=${encodeURIComponent(r.id)}`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next),
       });

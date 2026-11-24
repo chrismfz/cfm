@@ -36,6 +36,29 @@ export const EMERGENCY_MAX_SEC = 604800;
 export const EMERGENCY_DEFAULT_SEC = 3600;
 
 const UA_TARGET_CLASSES = Object.freeze(["crawler", "bot"]);
+
+// Real browsers' User-Agents. A family is the UA's first token, but the rule
+// matches it ANYWHERE in the UA (`*<family>*`), so a family that occurs in a
+// browser's UA (an app sending `Android 14; …` reads as family "android";
+// "safari", "webkit", "app", "linux", "mobile"…) would match every visitor.
+// Such a family is never a UA target.
+export const BROWSER_UA_SAMPLES = Object.freeze([
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 Edg/152.0.0.0",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/19.1 Safari/605.1.15",
+  "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Mobile Safari/537.36",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 19_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/19.1 Mobile/15E148 Safari/604.1",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 19_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/152.0.0.0 Mobile/15E148 Safari/604.1",
+  "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:146.0) Gecko/20100101 Firefox/146.0",
+  "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/29.0 Chrome/140.0.0.0 Mobile Safari/537.36",
+  "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+].map((u) => u.toLowerCase()));
+
+export function familyInBrowserUA(fam) {
+  const f = String(fam || "").toLowerCase();
+  return !!f && BROWSER_UA_SAMPLES.some((u) => u.includes(f));
+}
 const IP_TARGET_CLASSES = Object.freeze(["automation", "bot", "crawler"]);
 
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
@@ -49,6 +72,7 @@ export function uaPattern(client) {
   if (fam === "(no user-agent)") return "-";
   if (!fam || fam === "_other" || fam === "mozilla" || fam === "-") return "";
   if (/[*?\s]/.test(fam) || fam.length < 3) return "";
+  if (familyInBrowserUA(fam)) return "";
   return `*${fam}*`;
 }
 
@@ -98,16 +122,18 @@ export function isEmergencyRule(rule) {
   return String(rule?.note || "").startsWith(EMERGENCY_TAG);
 }
 
-// emergencyPriority is the first priority in EMERGENCY_BAND that no rule on an
-// overlapping vhost uses (a tie runs in id order, which nobody can predict),
-// or 0 when the band is full there.
-export function emergencyPriority(vhosts, rules = []) {
-  const taken = new Set(
-    (rules || [])
-      .filter((r) => (r?.scope?.vhosts || []).some((a) => (vhosts || []).some((b) => vhostPatternsOverlap(a, b))))
-      .map((r) => Number(r.priority)),
-  );
-  for (let p = EMERGENCY_BAND.from; p <= EMERGENCY_BAND.to; p++) if (!taken.has(p)) return p;
+// emergencyPriority is the first priority in EMERGENCY_BAND that no live rule
+// on an overlapping vhost uses (a tie runs in id order, which nobody can
+// predict), and that is above every one of the operator's own rules there
+// (so an emergency rule really runs before them, allows included); 0 when
+// there is no such slot. An expired rule matches nothing, so its slot is free.
+export function emergencyPriority(vhosts, rules = [], now = Date.now()) {
+  const there = (rules || []).filter((r) => !r?.unsupported && !ruleExpired(r, now) &&
+    (r?.scope?.vhosts || []).some((a) => (vhosts || []).some((b) => vhostPatternsOverlap(a, b))));
+  const taken = new Set(there.map((r) => Number(r.priority)));
+  const own = there.filter((r) => !isEmergencyRule(r)).map((r) => Number(r.priority));
+  const below = own.length ? Math.min(...own) : Infinity;
+  for (let p = EMERGENCY_BAND.from; p <= EMERGENCY_BAND.to && p < below; p++) if (!taken.has(p)) return p;
   return 0;
 }
 
@@ -166,8 +192,8 @@ export function buildEmergencyRule(opts) {
     return { error: "Choose deny or throttle." };
   }
 
-  const priority = emergencyPriority(vhosts, o.rules);
-  if (!priority) return { error: `Every emergency slot (priority ${EMERGENCY_BAND.from}–${EMERGENCY_BAND.to}) is taken on these vhosts: end one first.` };
+  const priority = emergencyPriority(vhosts, o.rules, o.now == null ? Date.now() : o.now);
+  if (!priority) return { error: `No free emergency slot (priority ${EMERGENCY_BAND.from}–${EMERGENCY_BAND.to}, above your own rules) on these vhosts: end an emergency rule, or move your own rule in that range.` };
 
   const why = String(o.reason || "").trim() || `web traffic: ${c.client}`;
   return {
