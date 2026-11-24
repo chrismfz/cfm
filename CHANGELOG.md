@@ -103,8 +103,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   without `--rule`, the whole WAF) off on that path of **every** vhost, and a
   host exclude applied on sub-hosts its scope does not list. The edge now
   skips an exclude whose scope does not take the request host, with the Go
-  semantics (a scope host is that exact host, or an anchored glob; no scope =
-  every vhost), pinned by a fixture both sides run. **Operator impact:** a
+  semantics (a scope host is that host and its `www.` alias, which a
+  tenant's exclude written before 2026-11-19 needs, or an anchored glob; no
+  scope = every vhost), pinned by a fixture both sides run. **Operator impact:** a
   scope-qualified WAF exclude stops applying on the vhosts it does not list;
   if one of them was relying on it, re-add the exclude with those vhosts in
   `--scope` (or without it, admin-global). Unscoped excludes are unchanged.

@@ -29,6 +29,7 @@ func TestFirstWAFHostMatch(t *testing.T) {
 		{"rule-scoped leaves the WAF on", []entry{{value: "foo.com", rules: []int{402}}}, "foo.com", false, ""},
 		{"scope takes the host", []entry{{value: "foo.com", scope: []string{"foo.com", "www.foo.com"}}}, "www.foo.com", true, "foo.com"},
 		{"scope does not take a sub-host", []entry{{value: "foo.com", scope: []string{"foo.com", "www.foo.com"}}}, "shop.foo.com", false, ""},
+		{"an old tenant scope (bare domain) covers www.", []entry{{value: "foo.com", scope: []string{"foo.com"}}}, "www.foo.com", true, "foo.com"},
 		{"scope glob", []entry{{value: "foo.com", scope: []string{"*.foo.com"}}}, "shop.foo.com", true, "foo.com"},
 	}
 	for _, tt := range tests {

@@ -1514,9 +1514,11 @@ widen or redirect an exclude to another tenant's vhost. Because the qualifier
 can only *add* a host filter, it never broadens an exclude.
 
 A scope host is matched more narrowly than a `--type host` value: a literal is
-that **exact** host only (`--scope shop.gr` does not take `www.shop.gr`; list
-both, or use `*.shop.gr`), and one containing `* ? [ ]` is an anchored glob
-(`*.shop.gr` takes every sub-host, not `shop.gr` itself). A scope whose every
+that host and its `www.` alias only (`--scope shop.gr` takes `www.shop.gr`,
+not `shop.shop.gr`; cPanel lists a domain without its `www.` name, and a
+tenant's exclude written before 2026-11-19 holds only the bare domain), and one
+containing `* ? [ ]` is an anchored glob with no alias (`*.shop.gr` takes every
+sub-host, not `shop.gr` itself). A scope whose every
 host is an unusable glob (`shop[a`, a trailing `\`) takes no host; it does not
 fall back to "every vhost". The in-path WAF (`cfm_waf_excl.lua`) and the Go
 matcher apply the same rules, and both run

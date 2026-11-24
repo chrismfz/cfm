@@ -10,9 +10,16 @@
 # No scope: every host.
 -                      shop.gr           1
 -                      other.example     1
-# An exact scope host is that host only: no subdomain suffix, no substring.
+# A literal scope host is that host and its www. alias (cPanel lists a
+# domain without it): no other subdomain, no substring, no reverse alias.
 shop.gr                shop.gr           1
-shop.gr                www.shop.gr       0
+shop.gr                www.shop.gr       1
+shop.gr                WWW.SHOP.GR       1
+shop.gr                shop.shop.gr      0
+shop.gr                www.www.shop.gr   0
+shop.gr                wwwshop.gr        0
+www.shop.gr            shop.gr           0
+www.shop.gr            www.shop.gr       1
 shop.gr                myshop.gr         0
 shop.gr                shop.gr.evil.com  0
 shop.gr                other.example     0
@@ -33,6 +40,8 @@ shop.gr,*.shop.gr      www.shop.gr       1
 *                      anything.example  1
 shop.g?                shop.gr           1
 shop.g?                shop.gre          0
+# Globs get no www. alias (Go matchExact: literal scope hosts only).
+shop.g?                www.shop.gr       0
 a+*.gr                 a+x.gr            1
 a+*.gr                 aax.gr            0
 a%*.gr                 a%x.gr            1

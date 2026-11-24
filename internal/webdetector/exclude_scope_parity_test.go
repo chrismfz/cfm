@@ -68,8 +68,9 @@ func scopeSetOf(hosts []string) map[string]struct{} {
 func TestWAFExcludeScope_EdgeParity(t *testing.T) {
 	for _, c := range readWAFExcludeScopeFixture(t) {
 		host := strings.ToLower(c.host)
-		if got := compileScopeMatcher(normalizeScopeHosts(c.scope)).Match(host); got != c.want {
-			t.Errorf("scope %q host %q: Match = %v, want %v", c.scope, c.host, got, c.want)
+		e := compiledExcludeEntry{Scope: compileScopeMatcher(normalizeScopeHosts(c.scope)), Scoped: len(c.scope) > 0}
+		if got := e.wafScopeTakes(host); got != c.want {
+			t.Errorf("scope %q host %q: wafScopeTakes = %v, want %v", c.scope, c.host, got, c.want)
 		}
 
 		// The whole enforcement path, as the edge runs it: a whole-WAF path

@@ -67,8 +67,6 @@ type compiledValueMatcher struct {
 	wild    *regexp.Regexp
 }
 
-var hostScopeMatcherCache sync.Map // key(string) -> compiledScopeMatcher
-
 func newExcludeStore(path string) *excludeStore {
 	s := &excludeStore{
 		path:    strings.TrimSpace(path),
@@ -301,21 +299,6 @@ func excludeEntryLess(a, b excludeEntry) bool {
 	return ruleIDsKey(a.RuleIDs) < ruleIDsKey(b.RuleIDs)
 }
 
-func hostInScope(host string, scopeHosts []string) bool {
-	start, profEnabled := globalExcludeProfiler.start()
-	defer globalExcludeProfiler.end("host_in_scope", start, profEnabled)
-	if len(scopeHosts) == 0 {
-		return true
-	}
-	key := strings.Join(scopeHosts, "\x00")
-	if cached, ok := hostScopeMatcherCache.Load(key); ok {
-		return cached.(compiledScopeMatcher).Match(host)
-	}
-	compiled := compileScopeMatcher(scopeHosts)
-	hostScopeMatcherCache.Store(key, compiled)
-	return compiled.Match(host)
-}
-
 func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
 	if len(scopeHosts) == 0 {
 		return compiledScopeMatcher{}
@@ -514,10 +497,24 @@ func (s *excludeStore) MatchChallengePath(host, path string) (string, bool) {
 	return "", false
 }
 
+// wafScopeTakes is the WAF excludes' scope test (MatchWAFRules, the vhost
+// controls' WAF column, the vhost profile; the edge's cfm_waf_excl.lua
+// scope_takes): the scope takes host, or host is the www. alias of a literal
+// scope host. The alias is challengePathScopeCovers': cPanel lists a domain
+// without its www. name, and a tenant's exclude written before the token's
+// vhosts carried web aliases (2026-11-19) holds only the bare domain.
+func (e compiledExcludeEntry) wafScopeTakes(host string) bool {
+	if e.Scope.Match(host) {
+		return true
+	}
+	apex, ok := strings.CutPrefix(host, "www.")
+	return ok && apex != "" && e.Scope.matchExact(apex)
+}
+
 // wafCovers is MatchWAFRules' per-entry test: the entry's scope takes host,
 // and its value matches host (a host entry) or path (a path entry).
 func (e compiledExcludeEntry) wafCovers(host, path string) bool {
-	if !e.Scope.Match(host) {
+	if !e.wafScopeTakes(host) {
 		return false
 	}
 	switch e.Type {
@@ -559,7 +556,7 @@ func (s *excludeStore) WAFEntriesForHost(host string) []excludeEntry {
 	defer s.mu.RUnlock()
 	var out []excludeEntry
 	for _, e := range s.wafEntries {
-		if !e.Scope.Match(host) {
+		if !e.wafScopeTakes(host) {
 			continue
 		}
 		if e.Type == "path" || (e.Type == "host" && e.Value.Match(host)) {
@@ -628,7 +625,7 @@ func (s *excludeStore) FirstWAFHostMatch(host string) (excludeEntry, bool) {
 	var best excludeEntry
 	found := false
 	for _, e := range s.wafEntries {
-		if e.Type != "host" || len(e.RuleIDs) > 0 || !e.Scope.Match(host) || !e.Value.Match(host) {
+		if e.Type != "host" || len(e.RuleIDs) > 0 || !e.wafScopeTakes(host) || !e.Value.Match(host) {
 			continue
 		}
 		if !found || excludeEntryLess(e.Entry, best) {

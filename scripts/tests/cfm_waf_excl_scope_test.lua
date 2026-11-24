@@ -77,8 +77,17 @@ do
   check(not all and ids and ids[402], "positive: rule 402 skipped on the scoped vhost")
   all, ids = wx.skip_for(hosts, paths, "victim.gr", "/wp-admin/admin-ajax.php")
   check(not all and ids == nil, "negative: the same path on another vhost keeps rule 402")
+  all, ids = wx.skip_for(hosts, paths, "shop.shop.gr", "/wp-admin/admin-ajax.php")
+  check(not all and ids == nil, "negative: a literal scope host does not take another subdomain")
   all, ids = wx.skip_for(hosts, paths, "www.shop.gr", "/wp-admin/admin-ajax.php")
-  check(not all and ids == nil, "negative: an exact scope host does not take its subdomain")
+  check(not all and ids and ids[402], "positive: a literal scope host takes its www. alias")
+
+  -- A tenant's exclude written before tokens carried web aliases
+  -- (2026-11-19): its scope lists the bare domain only, and must keep
+  -- covering www. (the site's usual host).
+  local oh = wx.rows_from_entries({ { type = "host", value = "old.gr", scope_hosts = { "old.gr", "other.gr" } } })
+  check(wx.skip_for(oh, {}, "www.old.gr", "/") == true, "positive: an old tenant exclude still covers www.")
+  check(wx.skip_for(oh, {}, "shop.old.gr", "/") == false, "negative: but not another sub-host")
 
   check(wx.skip_for(hosts, paths, "tenant.gr", "/") == true, "positive: host exclude on a host in its scope")
   check(wx.skip_for(hosts, paths, "www.tenant.gr", "/") == true, "positive: second scope host")

@@ -159,8 +159,8 @@ end
 -- exclude_store.go), pinned by scripts/tests/fixtures/waf_exclude_scope.txt,
 -- which both sides run:
 --   * no scope (absent / empty after normalisation) = every host;
---   * a scope host without `* ? [ ]` matches that exact host only (no
---     subdomain suffix: `shop.gr` does NOT take `www.shop.gr`);
+--   * a scope host without `* ? [ ]` matches that exact host and its www.
+--     alias only (`shop.gr` takes `www.shop.gr`, NOT `shop.shop.gr`);
 --   * one with them is an anchored glob (compileGlob): `*` = `[^/]*`,
 --     `?` = `[^/]` (a host has no `/`, so `*` crosses dots), `[...]` a class;
 --   * a scope whose every host is an unusable glob takes NO host.
@@ -260,10 +260,14 @@ function _M.compile_scope(scope)
   return c
 end
 
--- takes(c, host): compiled scope c (nil = every host) takes the lowercased host.
+-- takes(c, host): compiled scope c (nil = every host) takes the lowercased
+-- host, or host is the www. alias of a literal scope host (Go wafScopeTakes:
+-- cPanel lists a domain without its www. name, and a tenant's exclude written
+-- before the token's vhosts carried web aliases holds only the bare domain).
 local function takes(c, host)
   if c == nil then return true end
   if c.set[host] then return true end
+  if host:sub(1, 4) == "www." and #host > 4 and c.set[host:sub(5)] then return true end
   for _, p in ipairs(c.globs) do
     local ok, res = pcall(string.match, host, p)
     if ok and res ~= nil then return true end
