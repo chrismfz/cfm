@@ -20,6 +20,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **Traffic mix: who the web traffic is and what it costs the origin, for
+  24 h** (`GET /api/v1/webdet/traffic-mix`, MCP `traffic_mix`, admin-only).
+  Every request lands in one of four classes: known crawlers (by UA), other
+  bots and tools, browser-UA automation (an IP making 20+ dynamic requests a
+  minute with no static file, POST or XHR in 10 minutes) and likely humans.
+  Each class reports requests, origin seconds, bytes, status mix, edge-served
+  requests, and average and peak r/s, with a 5-minute series, the top vhosts
+  by origin time and the top clients (the raw UA for browser-looking ones)
+  with their top IPs over the last hour. On titan on 2026-11-24 this is the
+  table that showed Meta and a Chrome/152 scraper at a third of the requests
+  but ~61% of the origin time. The classes are labels, never an enforcement
+  decision; the counters survive a config reload, not a restart.
+
 ### Changed
 - **WAF rules 307 (XXE) and 416 (a PHP file as the request body) now ban.**
   Both block since 2026-11-17 with their `waf_security` ban held for a
