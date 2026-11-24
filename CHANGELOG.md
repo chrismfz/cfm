@@ -21,6 +21,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **One API call for everything that applies to a vhost.**
+  `GET /api/v1/webdet/vhost-profile?host=` (admin) returns one host's
+  settings and what decided each: challenge (manual or automatic, tier and
+  its source, lockdown, under attack), WAF on/off and the excludes that cover
+  the host (`example.com`'s exclude also covers `www.example.com`), HTTP/3,
+  ClamAV, the Site Cache policy that decides it (its own or a covering
+  `*.example.com`) with the node switches, and every traffic rule whose scope
+  takes it, with its state (enabled, disabled, expired). It also lists the
+  other known hosts of the same domain. Each part comes from the code the
+  edge and the existing pages already use, so it cannot disagree with them.
+  It backs the coming per-vhost page in cfm-admin.
 - **Big responses are never micro-cached.** A response of 5 MB or more
   (by its `Content-Length`) is served but not stored in the micro-cache. A
   dynamic download that reaches the micro tier (a PHP-served zip, PDF or
@@ -55,6 +66,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   are inside) and restored at start, so an upgrade or a `systemctl reload
   cfm` no longer empties it. A crash loses at most 5 minutes; a file from
   another version or a corrupt one starts the page empty, as before.
+
+### Fixed
+- **Vhost controls: a tenant's challenge exclude no longer reads as
+  covering its other hosts.** The Challenge column matched an exclude by its
+  value alone, so an exclude a cPanel user added for `example.com` showed
+  `www.example.com` as not challenged, although the challenge decision (which
+  honours the entry's scope) still challenged it. The column now uses the
+  decision's own matcher.
 
 ## 2026.11.24
 
