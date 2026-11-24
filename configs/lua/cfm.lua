@@ -1179,14 +1179,6 @@ local function waf_skip_for(host, uri)
   return wx.skip_for(wx.hosts, wx.paths, host, uri)
 end
 
--- Back-compat shim: callers that just need the bool answer (existing
--- behavior was "skip whole WAF or not"). True only for whole-WAF excludes,
--- never for rule-scoped ones.
-local function waf_is_excluded(host, uri)
-  local skip_all, _ = waf_skip_for(host, uri)
-  return skip_all
-end
-
 -- ─────────────────────────────────────────────────────────────────────────────
 -- GEO LOOKUP (lazy, per-worker singleton — see cfm_geo.lua)
 --

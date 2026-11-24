@@ -97,8 +97,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (the snapshot moved to new shdict keys, so a worker still draining after
   the reload cannot write the old scope-less rows back). The vhost profile
   (`/api/v1/webdet/vhost-profile` and its cfm-admin page) now lists only the
-  WAF excludes whose scope takes the host, and drops `scope_takes_host`. The
-  panel ports' WAF reads no excludes and was not affected.
+  WAF excludes whose scope takes the host, and drops `scope_takes_host`; the
+  vhost controls' WAF column (`/webdet/vhosts`, the Vhost page's WAF tile)
+  follows the scope too, so a scoped exclude no longer shows the WAF off on
+  a sub-host the edge guards. The panel ports' WAF reads no excludes and was
+  not affected.
 - **A WAF / challenge exclude scope made only of unusable globs no longer
   applies everywhere.** `--scope 'shop[a'` (an unterminated class, a trailing
   `\`) compiled to an empty matcher that read as "no scope" (every vhost); it

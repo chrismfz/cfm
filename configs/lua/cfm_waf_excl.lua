@@ -287,9 +287,10 @@ end
 --   skip_ids (table)  set of waf_rule_id integers to suppress when the WAF
 --                     runs; nil if no rule-scoped exclude applies
 -- Mirrors Go excludeStore.MatchWAFRules: the scope first, then the value
--- (the host for a host row, the uri for a path row).
+-- (the host for a host row, the uri for a path row); no host, no exclude.
 function _M.skip_for(hosts, paths, host, uri)
   host = lower(tostring(host or "")); uri = lower(tostring(uri or "/"))
+  if host == "" then return false, nil end
   local skip_ids = nil
   local function consider(target, row, kind)
     -- Back-compat: Lua before rule_ids cached this list as bare strings. The

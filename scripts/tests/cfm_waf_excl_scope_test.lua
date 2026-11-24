@@ -96,6 +96,10 @@ do
       "scope_hosts " .. tostring(sh) .. " reads as no scope")
   end
 
+  -- No host, no exclude (Go MatchWAFRules returns nothing for host "").
+  local all0, ids0 = wx.skip_for({}, { { v = "/import/" } }, "", "/import/x")
+  check(all0 == false and ids0 == nil, "an empty host gets no exclude, as in Go")
+
   -- Malformed entries are dropped, not fatal.
   hosts, paths = wx.rows_from_entries({ "x", { type = "path" }, { type = "path", value = "" }, { type = "nope", value = "/a" } })
   check(#hosts == 0 and #paths == 0, "malformed entries dropped")

@@ -361,9 +361,9 @@ func (m compiledScopeMatcher) Match(host string) bool {
 // (literal) value:
 //
 //   - host: exact host, or a dot-boundary subdomain suffix — `shop.gr` matches
-//     `shop.gr` and `www.shop.gr`, NOT `myshop.gr` / `shop.gr.evil.com`. This
-//     mirrors matchHostExclude (the reporting-side matcher), which the old
-//     enforcement matcher silently disagreed with.
+//     `shop.gr` and `www.shop.gr`, NOT `myshop.gr` / `shop.gr.evil.com`. (The
+//     vhost controls' old reporting-side matcher used these semantics while
+//     the old enforcement matcher silently disagreed; both now use this one.)
 //   - path: exact path, or a path-segment prefix — `/admin` matches `/admin`
 //     and `/admin/x`, NOT `/administrator`. Path values carry a leading `/`
 //     (added at store time by normalize).
@@ -608,6 +608,30 @@ func (s *excludeStore) FirstChallengeHostMatch(host string) (excludeEntry, bool)
 	found := false
 	for _, e := range s.challengeEntries {
 		if e.challengeHostCovers(host) && (!found || excludeEntryLess(e.Entry, best)) {
+			best, found = e.Entry, true
+		}
+	}
+	return best, found
+}
+
+// FirstWAFHostMatch is the vhost controls' WAF column test: the first
+// (List order) WHOLE-WAF host entry that MatchWAFRules would apply on host,
+// scope_hosts included. Rule-scoped entries leave the WAF on, so they do not
+// count.
+func (s *excludeStore) FirstWAFHostMatch(host string) (excludeEntry, bool) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if s == nil || host == "" {
+		return excludeEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best excludeEntry
+	found := false
+	for _, e := range s.wafEntries {
+		if e.Type != "host" || len(e.RuleIDs) > 0 || !e.Scope.Match(host) || !e.Value.Match(host) {
+			continue
+		}
+		if !found || excludeEntryLess(e.Entry, best) {
 			best, found = e.Entry, true
 		}
 	}
