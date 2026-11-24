@@ -168,10 +168,25 @@ ingest's caller, `do_dumpall` (after the shared lock is released) or the
 snapshot load, once `ingest_dumpall` has returned: inside it the raw body
 (~20 MB on titan) and the decoded payload were still referenced and survived
 it. It runs only when the payload stored at least one pair, in a timer, never
-on a handshake (~50 ms for 3000 pairs). It logs its own line,
-`gc src=dumpall|snapshot gc_ms= lua_kb= rss_mb=`: the wall time of the
-collect, the Lua heap after it, and the worker's resident set (from
-`/proc/self/status`), which is where the OpenSSL side shows.
+on a handshake (~50 ms for 3000 pairs).
+
+**Then `malloc_trim(0)`** (glibc, through the FFI). The collect frees the
+pairs, but glibc keeps the freed pages, and the worker's traffic allocations
+living between them stop it from reusing them whole: on titan (collect only,
+2026-11-23) RSS climbed in steps to the peak of an ingest, 118 → 238 → 337 →
+440 MB over three hourly ingests. malloc_trim hands the free pages back to
+the OS, the middle of the heap included. In a container (3500 pairs, a 17.6 MB
+payload, live allocations between 16 ingests) collect only settled at 227 MB,
+collect + trim at 165 MB, for ~25-40 ms more. Where it does not exist (no
+glibc, no FFI) it is skipped. It is thread-safe, and CFM's edge config runs
+no thread pool on any engine (no `aio` / `thread_pool`), so the arena locks
+it takes contend with nothing.
+
+The collect logs its own line,
+`gc src=dumpall|snapshot gc_ms= trim_ms= lua_kb= rss_mb=`: the wall time of
+the collect and of the trim (`-` when none ran), the Lua heap after them, and
+the worker's resident set (from `/proc/self/status`), which is where the
+OpenSSL side shows.
 
 ---
 

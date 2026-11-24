@@ -36,6 +36,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   a burn-in; review by 2026-12-08 (`docs/abuse-defense-master-plan.md` §5).
 
 ### Fixed
+- **sslcollector: edge workers hand the memory of replaced certificates back
+  to the OS.** The full collect after each ingest frees the old pairs, but
+  glibc kept their pages: with traffic allocations in between it could not
+  reuse them whole, so a worker's RSS climbed to the peak of an ingest and
+  stayed there (titan, 3500 names: 118 → 440 MB over three hourly ingests). A
+  `malloc_trim(0)` now follows the collect (~25-40 ms, in the background
+  timer); in a container it brought the settled RSS from 227 to 165 MB. The
+  `[sslcollector] gc` line reports it as `trim_ms=` (`-` where glibc's
+  malloc_trim is absent).
 - **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
   current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
   Chrome/145 … (compatible; meta-externalagent/1.1 (+https://…))`, the UA
