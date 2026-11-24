@@ -29,8 +29,6 @@ do
     { name = "crawler, no lockdown",            bp = "1", lock = {},     want = "bypass" },
     { name = "crawler, locked vhost",           bp = "1", lock = locked, want = "held" },
     { name = "CDN, locked vhost",               bp = "2", lock = locked, want = "bypass" },
-    { name = "fetcher, no lockdown",            bp = "3", lock = {},     want = "bypass" },
-    { name = "fetcher, locked vhost",           bp = "3", lock = locked, want = "held" },
     { name = "crawler, another vhost locked",   bp = "1", lock = { ["other.gr"] = true }, want = "bypass" },
     { name = "crawler, module fails to load",   bp = "1", lock = nil,    want = "bypass" },
     { name = "crawler, module check raises",    bp = "1", lock = "raise", want = "bypass" },

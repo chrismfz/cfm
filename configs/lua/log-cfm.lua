@@ -62,7 +62,7 @@
 --                                         still on the old module sends 12). An
 --                                         older daemon would fold it into ua, so
 --                                         the package ships both together.
---   13   bp      ngx.var.cfm_bypass_ip    "1" (a crawler), "2" (a CDN) or "3" (a fetcher for a person) when
+--   13   bp      ngx.var.cfm_bypass_ip    "1" (a crawler) or "2" (a CDN) when
 --                                         the client is on
 --                                         challenge_waf_bypass.conf (cfm.lua
 --                                         Step 0 passes it before any

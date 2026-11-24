@@ -146,36 +146,6 @@ def test_render_cdn() -> None:
     check(blp.CDN_SOURCES <= set(blp.SOURCES), "CDN_SOURCES must name SOURCES entries")
 
 
-def test_render_fetcher() -> None:
-    """A user fetcher's prefixes are written as 3 (a crawler's bypass, never its
-    micro-cache keyspace); a prefix also in a crawler feed is 3, one also in a
-    CDN source is 2."""
-    crawler = blp.SourceResult(name="crawler", kind="json", origin="https://c.example/x.json",
-                               prefixes={"66.249.66.0/24", "198.51.100.0/24", "192.0.2.0/24"})
-    fetch = blp.SourceResult(name="google-user-triggered-fetchers", kind="google-json",
-                             origin="https://f.example/x.json",
-                             prefixes={"66.249.80.0/24", "198.51.100.0/24", "203.0.113.0/24"}, fetcher=True)
-    cdn = blp.SourceResult(name="cdn", kind="txt", origin="https://cdn.example/ips",
-                           prefixes={"203.0.113.0/24"}, cdn=True)
-    union = crawler.prefixes | fetch.prefixes | cdn.prefixes
-    with tempfile.TemporaryDirectory() as d:
-        out = os.path.join(d, "challenge_waf_bypass.conf")
-        blp.render_output([crawler, fetch, cdn], out, union)
-        with open(out) as fh:
-            text = fh.read()
-        got = {ln.rsplit(" ", 1)[0]: ln.rsplit(" ", 1)[1] for ln in text.splitlines()
-               if ln and not ln.startswith("#")}
-        check(got == {"66.249.66.0/24": "1;", "192.0.2.0/24": "1;", "66.249.80.0/24": "3;",
-                      "198.51.100.0/24": "3;", "203.0.113.0/24": "2;"},
-              f"crawler=1 / fetcher=3 / crawler+fetcher=3 / fetcher+cdn=2 expected, got {got}")
-        check(sorted(blp.existing_prefixes(out)) == sorted(union),
-              "existing_prefixes must read the 3 lines too (shrink / growth guards)")
-        check("class: user fetcher" in text, "the fetcher source carries its class line")
-    # Every fetcher feed must be a feed the google-all source expands to.
-    check(blp.USER_FETCHER_FEEDS <= {f"google-{n}" for n in blp.GOOGLE_FEEDS},
-          "USER_FETCHER_FEEDS must name google-all result names (a typo would tag nothing)")
-
-
 # ── 2. validate the COMMITTED file with the generator's own rules ────────────
 def test_committed_file() -> None:
     check(os.path.exists(CONF), f"missing {CONF}")
@@ -189,8 +159,8 @@ def test_committed_file() -> None:
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
-            ok_line = s.endswith(" 1;") or s.endswith(" 2;") or s.endswith(" 3;")
-            check(ok_line, f"{CONF}:{ln}: not a `<cidr> 1;` / `2;` / `3;` line: {s!r}")
+            ok_line = s.endswith(" 1;") or s.endswith(" 2;")
+            check(ok_line, f"{CONF}:{ln}: not a `<cidr> 1;` / `<cidr> 2;` line: {s!r}")
             if not ok_line:
                 continue
             cidr = s[:-3].strip()
@@ -217,12 +187,6 @@ def test_committed_file() -> None:
         with open(CONF) as fh:
             n_cdn = sum(1 for line in fh if line.strip().endswith(" 2;"))
         check(n_cdn > 0, f"{CONF}: no `<cidr> 2;` line although CDN_SOURCES is set")
-    # Likewise a user fetcher's prefixes keep visitors off the crawler
-    # micro-cache keyspace only as 3 lines.
-    if blp.USER_FETCHER_FEEDS:
-        with open(CONF) as fh:
-            n_fetch = sum(1 for line in fh if line.strip().endswith(" 3;"))
-        check(n_fetch > 0, f"{CONF}: no `<cidr> 3;` line although USER_FETCHER_FEEDS is set")
     print(f"  committed file: {total} prefixes, all bounded & canonical")
 
 
@@ -452,7 +416,7 @@ def main() -> int:
     # pass they are noise that reads like a broken release (`make release`
     # runs this), so each test's output is kept only if that test failed.
     for fn in (test_normalize_prefix, test_thresholds, test_oneline,
-               test_render_no_injection, test_render_cdn, test_render_fetcher, test_walk_for_prefixes, test_retry_and_strict,
+               test_render_no_injection, test_render_cdn, test_walk_for_prefixes, test_retry_and_strict,
                test_source_shrink, test_space_growth):
         before = len(_failures)
         buf = io.StringIO()

@@ -193,9 +193,7 @@ access log:
   `cfm_clearance` cookie takes the fast path, which never micro-caches, by
   design §5.5.1), `waf` (a logonly WAF hit or an uninspected request) and
   `self-ip` (the node's own addresses), and `cdn` for a CDN of the bypass list
-  (QUIC.cloud), which is never micro-cached, and `fetcher` for Google's
-  user-triggered fetchers (kind `3`), which fetch a page for a person and so
-  never read the crawler copy. A crawler of the bypass list
+  (QUIC.cloud), which is never micro-cached. A crawler of the bypass list
   (Googlebot, Bingbot, Applebot, …) on a micro-armed vhost IS micro-cached,
   in its own keyspace (`up=cfm_apache_micro`; its entries never reach a
   visitor; `site-cache stats` counts its HITs with the visitors'). It carries a cookie's NAME only, never its value, with

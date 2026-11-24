@@ -167,12 +167,6 @@ do
   local cdn = raw0:find('if%s+bp%s*==%s*"2"%s+then%s+micro_skip%s*%(%s*"cdn"%s*%)%s+return%s+end')
   local entry = raw0:find("micro_cache_target%s*%(")
   check(cdn ~= nil and entry ~= nil and cdn < entry, "at Step 0 a CDN (\"2\") client must return before the crawler micro entry")
-  -- and so does a fetcher for a person ("3"), which a cloaked crawler page
-  -- must never reach
-  local fetcher = raw0:find('if%s+bp%s*==%s*"3"%s+then%s+micro_skip%s*%(%s*"fetcher"%s*%)%s+return%s+end')
-  check(fetcher ~= nil and entry ~= nil and fetcher < entry, "at Step 0 a fetcher (\"3\") client must return before the crawler micro entry")
-  check(raw0:find('if%s+held%s+and%s+bp%s*==%s*"3"%s+then%s+ngx%.ctx%.cfm_no_micro%s*=%s*true%s+end') ~= nil,
-        "a held fetcher (\"3\") is never micro-cached (it skips the WAF and has no keyspace)")
 end
 
 -- The call hands its target straight to ngx.exec, and that is the last

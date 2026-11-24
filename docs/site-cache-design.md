@@ -376,9 +376,7 @@ public entry points are `static_gate`, `micro_gate`, `observe`,
 Micro-cache (Tier B) is decided at the **allow-return**, after all
 enforcement: **Step 4** (Step 2b waits on §5.5.1), plus the **Step 0
 static bypass for a crawler** of the bypass list (kind `1`: Google, Bing,
-Apple, DuckDuckGo, Skroutz, …; a CDN `2` and a user fetcher `3`, Google's
-user-triggered fetchers that show the page to a person, are never cached
-there, and a held `3` is never micro-cached at all).
+Apple, DuckDuckGo, Skroutz, …; a CDN `2` is never cached there).
 `cfm_micro_entry_structure_test.lua` pins both. The crawler entry is safe
 before the WAF because nothing below Step 0 applies to a bypassed client
 anyway, and because a crawler gets its **own keyspace**: `micro_gate("crawler")`
