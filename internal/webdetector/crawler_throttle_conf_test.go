@@ -141,9 +141,12 @@ func TestCrawlerThrottleStaticBudgetCoversStaticLocation(t *testing.T) {
 	}
 }
 
-// The node-wide meta-externalagent cap (2026-11-24): one key for the whole
-// node, pages only, meta-externalagent only, applied wherever the per-vhost
-// page limits are.
+// The node-wide caps (2026-11-24): one key per crawler for the whole node,
+// pages only, applied wherever the per-vhost page limits are. Two crawlers
+// take one: meta-externalagent and meta-webindexer, each under its own key
+// (neither spends the other's budget). Link previews, ads, the catalog and
+// the in-app browsers never do. meta-webindexer is a Meta crawler (2) on the
+// per-vhost budgets too: it was in none.
 func TestMetaExternalAgentNodeCap(t *testing.T) {
 	for _, path := range append(crawlerThrottleConfs, "../../configs/cfm-edge.conf") {
 		raw, err := os.ReadFile(path)
@@ -152,8 +155,11 @@ func TestMetaExternalAgentNodeCap(t *testing.T) {
 		}
 		conf := string(raw)
 		for _, want := range []string{
-			`"~*meta-externalagent" 1;`,
-			`"1|0|0" "meta-externalagent";`,
+			`"~*meta-externalagent" "meta-externalagent";`,
+			`"~*meta-webindexer"    "meta-webindexer";`,
+			`"meta-externalagent|0|0" "meta-externalagent";`,
+			`"meta-webindexer|0|0"    "meta-webindexer";`,
+			`"~*meta-webindexer"      2;`,
 			`limit_req_zone  $meta_ext_node_key zone=meta_ext_node_rps:1m rate=2r/s;`,
 			`limit_conn_zone $meta_ext_node_key zone=meta_ext_node_conn:1m;`,
 		} {

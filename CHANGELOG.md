@@ -150,6 +150,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
     budgets never bound it, since it spreads over every shop. Link previews
     (facebookexternalhit), ads (meta-externalads), the in-app browsers and
     its images are not affected.
+  - meta-webindexer (Meta AI's search indexer) gets the same node budget
+    under its own key, and the per-vhost Meta budgets. It was in no budget
+    at all and was Meta's second largest origin cost on 2026-11-24: about 2
+    origin requests at a time on titan and on orion, mostly at night, ~8
+    across seven nodes, against ~21 for meta-externalagent and under 4 for
+    link previews, ads and the catalog together.
   See `docs/waf.md`, "Rule 530".
 
 ### Changed

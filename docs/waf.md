@@ -1376,6 +1376,27 @@ the `fbsv.net` forward proxies) never take this key. The rates are in the
 confs (`meta_ext_node_rps`, `meta_ext_node_conn`), so a change is a conf
 change.
 
+**meta-webindexer takes the same node cap, under its own key (since
+2026-11-24).** Meta AI's search indexer was in no Meta budget at all, per
+vhost or per node. A read of 7 nodes on 2026-11-23/24 put the origin cost
+of each Meta crawler at:
+
+| Crawler | Average concurrent origin requests | Budget |
+|---|---|---|
+| meta-externalagent | ~21 across the fleet (5.3 on titan, 5.6 on orion) | node cap |
+| meta-webindexer | ~8 (2.1 on titan, 1.8 on orion), mostly at night | node cap (new) |
+| facebookexternalhit (link previews) | ~3.5 | per vhost |
+| meta-externalads (ads) | ~0.45 | per vhost |
+| facebookcatalog | ~0 | per vhost |
+
+On titan the Meta crawlers together kept ~8 origin requests busy, against
+12–25 for the whole node at a normal hour. meta-webindexer now counts as a
+Meta crawler on the per-vhost budgets (`$is_meta_crawler` 2), and on the node
+gets 2 pages/s, burst 10, 6 connections of its own: the two crawlers' keys
+share the zones, never a budget. Link previews, ads, the catalog and the
+in-app browsers keep their per-vhost budgets only: they are the paid and
+user-facing side, and cost little.
+
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
 Family `WAF_AUTH_BURST`, all `block`: 510 `system.multicall`, 511
