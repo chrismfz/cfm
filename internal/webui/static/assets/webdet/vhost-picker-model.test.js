@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hostSet, chips, entries, attentionCount } from "./vhost-picker-model.js";
+import { hostSet, chips, entries, attentionCount, without, weight, CHIP_KEYS } from "./vhost-picker-model.js";
 
 // /api/v1/webdet/vhosts rows (webdetVhostControlRow), as the daemon sends them.
 const ROWS = [
@@ -46,4 +46,12 @@ test("entries: duplicates dropped, limit caps what is rendered but not the total
 test("attention count", () => {
   assert.equal(attentionCount(ROWS, CTX), 3);
   assert.equal(attentionCount(ROWS, {}), 2); // shop.gr (attack, WAF off), myip.gr (excluded)
+});
+
+test("without drops the chips a page shows as columns; weight still counts them all", () => {
+  const shop = chips(ROWS[3], CTX);
+  const extra = without(shop, ["attack", "lockdown", "waf-off", "challenge-excluded", "h3", "clam"]);
+  assert.deepEqual(texts(extra), ["challenged"]);
+  assert.ok(weight(shop) > weight(extra));
+  for (const r of ROWS) for (const c of chips(r, CTX)) assert.ok(CHIP_KEYS.includes(c.key), c.key);
 });

@@ -21,6 +21,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **Vhost controls: what is going on at each host, and a "Needs attention"
+  filter.** Each host links to its Vhost page and carries the chips the
+  table has no column for (challenged, suspicious, cache / micro cache,
+  live rules), the same ones as the Vhost page's picker. "Needs attention"
+  filters, and "Attention" sorts, by the same verdict (under attack,
+  lockdown, challenged, suspicious, WAF off, challenge excluded). The
+  "challenged" chip is admin-only: a cPanel user sees the others.
 - **Vhost page: pick a host from a list that says what is going on.** The
   host field opens every host you may see (a cPanel user: their own domains),
   each with chips: under attack, lockdown, challenged (v2), suspicious, WAF
@@ -29,6 +36,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   filters; arrows and Enter pick. The `/api/v1/webdet/vhosts` rows now carry
   `site_cache_static` / `site_cache_micro` and `rules` (for a cPanel user,
   only the rules they can see are counted).
+
+### Fixed
+- **Vhost controls: an OFF toggle no longer looks like the most important
+  button on the page.** The HTTP/3 and ClamAV OFF / not-scanned buttons used
+  a style that was never defined and fell back to the solid blue primary
+  look; they are now quiet (dashed, muted).
 
 ## 2026.11.24
 
