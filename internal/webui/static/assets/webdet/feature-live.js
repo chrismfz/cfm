@@ -241,6 +241,9 @@ export const liveMixin = {
       }
     },
     renderVhostCharts() {
+      // Hidden behind a profile tab (feature-vhost-profile.js): keep
+      // collecting the series, draw when the Live tab opens.
+      if (this.vpShowLive === false) return;
       if (!window.echarts || !Array.isArray(this.activeVhostSeries) || this.activeVhostSeries.length < 2) {
         return;
       }
