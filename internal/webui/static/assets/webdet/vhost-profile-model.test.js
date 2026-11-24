@@ -2,10 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   PROFILE_SCHEMA, tab, parseTime, postureTiles, challengeTile, wafTile, protoTile, cacheTile, rulesTile, clamTile,
-  headPills, ruleRows, excludeRows, matchSummary, actionLabel, relatedHosts, trafficTiles, botClients,
+  headPills, ruleRows, excludeRows, relatedHosts, trafficTiles, botClients,
   distributedClients, stackedArea, niceStep, securityTiles, wafRuleRows, editURL,
 } from "./vhost-profile-model.js";
 import { OTHER_KEY } from "./traffic-model.js";
+import { describeMatch, describeAction } from "./rules-model.js";
 
 // A real GET /api/v1/webdet/vhost-profile?host=www.example.com body (from
 // VhostProfile in a test engine: an apex WAF rule exclude, a WAF path exclude
@@ -70,9 +71,10 @@ test("challenge tile: off, manual with lockdown, automatic, excluded", () => {
   assert.deepEqual(tileTexts(auto), ["v2", "auto", "under attack"]);
   assert.match(auto.why, /^Automatic \(under attack\) since/);
 
-  // An apex exclude decides www: the tile says so and is inherited.
-  const ex = challengeTile({ ...PROFILE, controls: { ...PROFILE.controls, challenge_enabled: false, challenge_matched_exclude: "example.com" } });
-  assert.deepEqual(tileTexts(ex), ["Excluded"]);
+  // An apex exclude decides www: the tile says so and is inherited, and an
+  // attack still shows.
+  const ex = challengeTile({ ...PROFILE, controls: { ...PROFILE.controls, challenge_enabled: false, challenge_matched_exclude: "example.com", under_attack: true } });
+  assert.deepEqual(tileTexts(ex), ["Excluded", "under attack"]);
   assert.equal(ex.inherited, true);
   assert.match(ex.why, /example\.com/);
 });
@@ -143,17 +145,14 @@ test("head pills", () => {
   assert.deepEqual(hot.map((p) => p.text), ["UNDER ATTACK", "lockdown", "solver farm"]);
 });
 
-test("rule rows word the match and action, and mark the inherited scope", () => {
+test("rule rows: rules-model.js wording, inherited scope, state", () => {
   const rows = ruleRows(PROFILE);
-  assert.equal(rows[0].match, "path /wp-json/wp/v2/users");
+  assert.equal(rows[0].match, describeMatch(PROFILE.rules[0].match));
+  assert.equal(rows[0].action, describeAction(PROFILE.rules[0].action));
   assert.equal(rows[0].inherited, true);
   assert.equal(rows[0].actionTone, "danger");
-  assert.equal(rows[1].match, "path /checkout · country CN");
+  assert.match(rows[1].match, /from CN to \/checkout/);
   assert.equal(rows[1].state, "disabled");
-  assert.equal(matchSummary({}), "any request");
-  assert.equal(actionLabel({ type: "throttle", profile: "soft_bot" }), "throttle (soft_bot)");
-  assert.equal(actionLabel({ type: "throttle_total", rate_rps: 5, per: "node" }), "throttle 5 r/s per node");
-  assert.equal(actionLabel({ type: "challenge_v2" }), "challenge v2");
 });
 
 test("exclude rows: WAF first, scope words, outside-scope flag", () => {

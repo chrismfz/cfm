@@ -9,9 +9,11 @@
 // It decides NOTHING about enforcement: every verdict (is the challenge on,
 // which policy caches this host, does a rule take it) is the daemon's, read
 // from the profile. This file only words it. The bot classes, palette and the
-// per-client action guardrails are traffic-model.js's, reused, never copied.
+// per-client action guardrails are traffic-model.js's, and a rule's wording
+// is rules-model.js's (describeMatch / describeAction): reused, never copied.
 
 import { CLASS_ORDER, BOT_CLASSES, OTHER_KEY, classMap, share } from "./traffic-model.js";
+import { describeMatch, describeAction } from "./rules-model.js";
 
 export const PROFILE_SCHEMA = "webdet.vhost_profile.v1";
 
@@ -89,6 +91,7 @@ export function challengeTile(p, now = new Date()) {
   if (c.challenge_enabled === false) {
     const ex = str(c.challenge_matched_exclude);
     out.pills.push(pill("Excluded", "warn"));
+    if (c.under_attack) out.pills.push(pill("under attack", "attack"));
     out.why = ex ? `Exclude ${ex} takes this host: no vhost challenge here.` : "An exclude takes this host: no vhost challenge here.";
     out.inherited = ex !== "" && ex !== host;
     return out;
@@ -270,47 +273,12 @@ export function headPills(p) {
 
 // ── What applies ─────────────────────────────────────────────────────────
 
-const ACTION_LABELS = Object.freeze({
-  block: "block",
-  allow: "allow",
-  challenge: "challenge",
-  challenge_v2: "challenge v2",
-  throttle: "throttle",
-  throttle_total: "throttle (total)",
-});
-
-export function actionLabel(a) {
-  if (!a) return "";
-  const t = str(a.type);
-  let label = ACTION_LABELS[t] || t;
-  if (t === "throttle" && a.profile) label += ` (${a.profile})`;
-  if (t === "throttle_total" && num(a.rate_rps) > 0) label = `throttle ${num(a.rate_rps)} r/s per ${str(a.per) || "vhost"}`;
-  return label;
-}
-
 export function actionTone(a) {
   const t = str(a && a.type);
   if (t === "block") return "danger";
   if (t === "allow") return "ok";
   if (t.startsWith("challenge") || t.startsWith("throttle")) return "warn";
   return "";
-}
-
-// matchSummary words a rule's match block, one clause per field set.
-export function matchSummary(m) {
-  if (!m) return "any request";
-  const parts = [];
-  const list = (k, label) => { if (arr(m[k]).length) parts.push(`${label} ${arr(m[k]).join(", ")}`); };
-  list("path_any", "path");
-  list("ua_any", "UA");
-  list("country_in", "country");
-  if (arr(m.country_not_in).length) parts.push(`country not ${arr(m.country_not_in).join(", ")}`);
-  list("ip_any", "IP");
-  list("methods", "method");
-  if (m.verified_bot) parts.push("verified crawler");
-  if (m.has_qs) parts.push("with a query string");
-  if (m.qs_not_rx) parts.push(`query not ${m.qs_not_rx}`);
-  return parts.length ? parts.join(" · ") : "any request";
 }
 
 const STATE_TONES = Object.freeze({ enabled: "ok", disabled: "", expired: "", unsupported: "warn" });
@@ -321,10 +289,10 @@ export function ruleRows(p, now = new Date()) {
     id: str(r.id),
     priority: num(r.priority),
     note: str(r.note),
-    match: matchSummary(r.match),
+    match: describeMatch(r.match),
     matchedBy: str(r.matched_by),
     inherited: str(r.matched_by) !== host,
-    action: actionLabel(r.action),
+    action: describeAction(r.action),
     actionTone: actionTone(r.action),
     state: str(r.state),
     stateTone: STATE_TONES[str(r.state)] ?? "",

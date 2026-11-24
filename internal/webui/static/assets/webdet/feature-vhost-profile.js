@@ -87,6 +87,7 @@ export const vhostProfileMixin = {
   watch: {
     activeHost(h) { if (this.vpEnabled && h) this.vpLoad(h); },
     vpEnabled(on) { if (on && this.activeHost) this.vpLoad(this.activeHost); },
+    vpMix() { if (this.vpTab === "traffic") this.$nextTick(() => this.vpMeasureChart()); },
     // A window change reloads the mix only. It has its own sequence: bumping
     // vpLoadSeq here would orphan a running vpLoad, which then never cleared
     // vpLoading and the minute refresh stopped for good.
@@ -113,12 +114,13 @@ export const vhostProfileMixin = {
         window.history.replaceState({}, "", url.toString());
       } catch { /* no URL */ }
       if (this.vpTab === "live") {
-        // The live charts were drawn into a hidden box: size them now.
+        // The live charts are not drawn while hidden: draw and size them now.
         this.$nextTick(() => {
-          this.resizeVhostCharts?.();
           this.renderVhostCharts?.();
+          this.resizeVhostCharts?.();
         });
       }
+      if (this.vpTab === "traffic") this.$nextTick(() => this.vpMeasureChart());
     },
     vpOpenHost(host) {
       if (!host || host === this.activeHost) return;
@@ -187,9 +189,6 @@ export const vhostProfileMixin = {
     this.vpResize = () => this.vpMeasureChart();
     window.addEventListener("resize", this.vpResize);
     this.$nextTick(() => this.vpMeasureChart());
-  },
-  updated() {
-    if (this.vpTab === "traffic") this.vpMeasureChart();
   },
   beforeUnmount() {
     if (this.vpTimer) clearInterval(this.vpTimer);
