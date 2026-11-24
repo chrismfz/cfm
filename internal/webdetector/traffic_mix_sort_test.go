@@ -1,6 +1,7 @@
 package webdetector
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -88,5 +89,26 @@ func TestTrafficMix_SortsMirroredInTrafficModel(t *testing.T) {
 	sort.Strings(want)
 	if !slices.Equal(params, want) {
 		t.Fatalf("traffic-model.js sends %v, the API takes %v", params, want)
+	}
+}
+
+// The summed tail of a class never heads a ranking: under requests it would.
+func TestTrafficMix_OtherClientTrails(t *testing.T) {
+	s := newTrafficMixStore()
+	now := tmBase()
+	for i := 0; i < 20; i++ { // a named client first (the cap is first come)
+		tmFeed(s, tmOrigin("198.51.100.8", "a.gr", "GET", "/", "busybot/1", 200, 0.01), now)
+	}
+	for i := 0; i < tmMaxClients+40; i++ { // past the per-bucket cap: the rest fold into _other
+		tmFeed(s, tmOrigin("198.51.100.9", "a.gr", "GET", "/", fmt.Sprintf("tool%03d/1", i), 200, 0.01), now)
+	}
+	m := s.SnapshotSorted(now.Add(time.Minute), 6*time.Hour, "", false, 10, 3, TrafficMixSortRequests)
+	if m.Clients[0].Client != "busybot" {
+		t.Fatalf("top by requests = %q, want busybot (the _other tail holds 40+ requests)", m.Clients[0].Client)
+	}
+	for _, c := range m.Clients {
+		if c.Client == tmOtherKey {
+			t.Fatal("_other took a top-3 slot ahead of named clients")
+		}
 	}
 }
