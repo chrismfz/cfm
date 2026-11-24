@@ -724,6 +724,24 @@ function _M.php_request_fields(method, args, body, headers, want)
   return f
 end
 
+-- The query string without every field PHP registers as `name` (decoded,
+-- php_var_name: `add.to.cart` is not `add-to-cart`, `add-to-cart[]` is). The
+-- kept pairs stay as the client sent them, in order. Returns the new query
+-- and how many pairs were dropped. Rule 530's redirect (cfm.lua) strips
+-- `add-to-cart` with it, through the same reader the rule detected it with.
+function _M.query_without_field(args, name)
+  if not args or args == "" then return "", 0 end
+  local kept, dropped = {}, 0
+  for part in args:gmatch("[^&]+") do
+    local eq = part:find("=", 1, true)
+    local k = eq and part:sub(1, eq - 1) or part
+    if k:find("[%%+]") then k = _form_unescape(k) end
+    if k:find("[%z %.%[]") then k = php_var_name(k) end
+    if k == name then dropped = dropped + 1 else kept[#kept + 1] = part end
+  end
+  return table.concat(kept, "&"), dropped
+end
+
 -- get_fields is cfm_waf.check's lazy php_request_fields getter, so the
 -- field-keyed rules share one parse; a standalone caller passes nil.
 local function request_fields(method, args, body, headers, get_fields)

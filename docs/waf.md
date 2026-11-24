@@ -1333,10 +1333,40 @@ in the push key and the window is an hour (`PUSH_COOLDOWN_FAMILY`, logonly
 tier only): at ~1 request per IP per minute a 60 s window pushed ~80 k history
 rows a day on mars. The burn-in counts clients per hour, not requests.
 
-**Next.** After the burn-in (`waf_activity` / `cfm.waf.log`, `node="all"`),
-the likely `CRAWLER` action is an answer that skips the cart write (a 403, or
-a redirect without `add-to-cart`), not a block, shipped per tag. No family
-block rule is planned, so `waf_security` never arms the family.
+**The `CRAWLER` redirect (since 2026-11-24).** After the burn-in (~416 000
+hits in 96 h on seven nodes, meta-externalagent the top source on every one),
+a request tagged `CRAWLER` gets a **301 to the same URL without
+`add-to-cart`** (`cfm.lua`, right after the WAF): the shop writes no session
+and cart, and the page stays reachable. On 2026-11-24 meta-externalagent
+alone made ~27 000 such writes on titan in three hours. The hit is still
+logged and pushed as logonly (`X-CFM-Action: cart_crawl_redirect`, `up=cfm_redirect`
+in the access log). The redirect:
+- only follows a logonly verdict: a stronger hit keeps its own answer;
+- never applies behind a trusted proxy (Cloudflare): a CDN cache rule that
+  ignores `Cache-Control` could serve it to shoppers on the same URL (the
+  anastasiadi.gr incident, CLAUDE.md §6). It carries `Cache-Control:
+  no-store` and `Vary: User-Agent` for any other cache;
+- strips every field PHP registers as `add-to-cart` (an array form, an
+  encoded name) through the same reader that found it, keeps the other
+  fields as sent, and sends a path with leading slashes collapsed (`//x/`
+  would be another site's URL).
+
+`NO_REFERER` and `XSITE` stay logonly: real shoppers from ad campaigns may be
+among them. `wc_cart_crawl_redirect = false` in `cfm_waf_config.lua` turns
+the redirect off (next edge reload). No family block rule is planned, so
+`waf_security` never arms the family.
+
+**meta-externalagent's node cap (since 2026-11-24).** The per-vhost Meta
+budgets (10 pages/s, 30 connections per vhost) never bound it: it spreads over
+every shop on a node, ~0.4 pages/s each. On 2026-11-24 it sent titan ~530
+pages a minute for three hours at ~1.5 s of PHP each (~13 PHP workers, 16% of
+the origin's time), and titan and orion hit 100% CPU. The edge confs give it
+one budget for the whole node: **2 pages/s, burst 10, 6 connections**, then
+429 (in `throttle.log`). Pages only: its images / css / js keep the image
+budget. facebookexternalhit, meta-externalads and the in-app browsers (FB_IAB,
+the `fbsv.net` forward proxies) never take this key. The rates are in the
+confs (`meta_ext_node_rps`, `meta_ext_node_conn`), so a change is a conf
+change.
 
 ## XML-RPC rules (510-512) and the Jetpack carve-out
 
