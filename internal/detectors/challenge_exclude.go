@@ -253,6 +253,9 @@ func (ce *ChallengeExclude) eval(ip, host, ua string, lz *excludeLookup, ruleNam
         if !decided && r.ptr != "" {
             ptrL := lz.ptr()
             m := globMatch(r.ptr, ptrL)
+            if m && goodbot.NotGoodBotPTR(ptrL) {
+                m = false // refused below anyway: spend no forward-confirm on it
+            }
             if m && r.verifyFcrdns {
                 m = forwardConfirmPTR(ip, ptrL)
             }
@@ -262,15 +265,21 @@ func (ce *ChallengeExclude) eval(ip, host, ua string, lz *excludeLookup, ruleNam
             continue
         }
         if (r.modeAny && matched) || (!r.modeAny && !failed) {
-            // A rule that names a CLIENT (ua / asn / ptr) never exempts one
-            // of Google's user-triggered fetchers (goodbot.NotGoodBotPTR):
-            // they fetch whatever URL a user hands Google, with the user's
-            // own UA, from Google's own ASN, so `ptr=*.google.com` or
-            // `asn=as15169; ua=*…*` would let anyone through them. A host-only
-            // rule (a per-vhost free pass) is about the site, not the client,
-            // and stays. The PTR is the lazy one the rule already uses (the
-            // enrich cache on the serve path): an unknown PTR cannot refuse.
-            if (r.ua != "" || r.asn != "" || r.ptr != "") && goodbot.NotGoodBotPTR(lz.ptr()) {
+            // A rule that names a CLIENT (any ua / asn / ptr condition, even
+            // in mode=any) never exempts one of Google's user-triggered
+            // fetchers (goodbot.NotGoodBotPTR): they fetch whatever URL a
+            // user hands Google, with the user's own UA, from Google's own
+            // ASN, so `ptr=*.google.com` or `asn=as15169; ua=*…*` would let
+            // anyone through them. A rule with no client condition (a
+            // per-vhost free pass) is about the site and stays. Asked only
+            // from AS15169, where they live (an mmdb read; a ptr rule has
+            // its PTR already), so other networks' rules fetch no PTR. The
+            // PTR is the lazy one the rule uses: cache-only on the serve
+            // path, so an IP whose PTR is not cached yet cannot be refused
+            // (its first request or two; the cache fills in the background),
+            // and none on the vhost uniqIP count, which passes no PTR by
+            // design (vhostChallengeExemptClient: no DNS, no cache reads).
+            if (r.ua != "" || r.asn != "" || r.ptr != "") && (r.ptr != "" || lz.asn() == "as15169") && goodbot.NotGoodBotPTR(lz.ptr()) {
                 continue
             }
             return r, true

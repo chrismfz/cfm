@@ -130,8 +130,9 @@ ptr=rate-limited-proxy-*.google.com; verify_fcrdns=1; action=skip
 #    `ptr=*.google.com` or an `asn=as15169; ua=*google-read-aloud*` rule (both
 #    here until 2026-11-24) let anyone through them: ~440 of them walked a
 #    forum on orion for days. CFM refuses any ua / asn / ptr rule match for
-#    such a PTR in code (goodbot.NotGoodBotPTR), so an edited copy of this
-#    file with the old lines cannot bring it back.
+#    such a PTR in code (goodbot.NotGoodBotPTR) once the PTR is cached, so an
+#    edited copy of this file with the old lines grants them nothing past an
+#    IP's first request or two.
 #    google-xrawler: the fetcher Google Merchant Center / Google Ads use for a
 #    shop's product feed (csv_feed*.php and similar). Its addresses (173.194.x,
 #    74.125.x) have NO PTR at all, so the FCrDNS rules above can never match

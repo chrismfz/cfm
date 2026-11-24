@@ -40,8 +40,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
     node whose `/etc/cfm/webdetector_challenge_exclude.txt` was edited keeps
     its copy (the new default lands as `.dpkg-dist` / `.rpmnew`). CFM refuses,
     in code, any `ua=` / `asn=` / `ptr=` rule match for a `google-proxy-*`
-    client, so the old lines grant nothing there either. Removing them by hand
-    is still tidier.
+    client once its PTR is cached, so the old lines grant nothing past an IP's
+    first request or two. Remove them by hand. A Challenge Access-Control
+    entry is not covered: an operator's `asn_in: [15169]` entry (the
+    product-feed recipe) still lets them reach the paths it names.
 
   Why: from 2026-11-21, ~440 of them walked `www.mathematica.gr`'s phpBB
   forum on orion. They sent ~2M requests (671k on the 11-24 morning) with no
