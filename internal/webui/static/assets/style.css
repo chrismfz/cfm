@@ -36,6 +36,15 @@
   --sidebar-muted: #8493ab;
   --sidebar-border: #1e2a40;
   --sidebar-active: rgba(77, 163, 255, .16);
+  --accent-2: #38bdd4;
+  --v2: #b18cf0;
+  --v2-soft: rgba(177, 140, 240, .14);
+  /* Web Traffic classes: webdet/traffic-model.js CLASS_COLORS (pinned equal
+     by traffic-model.test.js). */
+  --c-automation: #d95926;
+  --c-crawler: #3987e5;
+  --c-bot: #c98500;
+  --c-human: #199e70;
 }
 
 :root[data-theme="light"] {
@@ -59,6 +68,13 @@
   --border-soft: #e4e9f2;
   --shadow: 0 10px 30px rgba(31, 42, 68, .1);
   --topbar-bg: rgba(242, 244, 249, .9);
+  --accent-2: #1f9bb3;
+  --v2: #7c4dcc;
+  --v2-soft: rgba(124, 77, 204, .12);
+  --c-automation: #eb6834;
+  --c-crawler: #2a78d6;
+  --c-bot: #eda100;
+  --c-human: #1baf7a;
 }
 
 * { box-sizing: border-box; }
@@ -248,6 +264,8 @@ body {
 }
 .tab-status { margin-top: -.2rem; }
 .danger-text { color: var(--danger); }
+.ok-text { color: var(--ok); }
+.warn-text { color: var(--warn); }
 
 /* ── Controls ──────────────────────────────────────────────────────────── */
 button {
@@ -464,6 +482,7 @@ tr.bulk-selected:hover { background: var(--danger-soft); }
 /* UNDER_ATTACK — one tier ABOVE the outlined "challenged" danger pill: a solid
    fill so the escalation from CHALLENGED reads as more severe at a glance (see
    Under-Attack Mode). White on the saturated danger red is legible in both themes. */
+.pill.v2 { color: var(--v2); border-color: var(--v2); background: var(--v2-soft); }
 .pill.attack { color: #fff; border-color: var(--danger); background: var(--danger); }
 /* Observation, not enforcement state — e.g. the WebDetector "farm" badge, which
    says a detector currently sees something on this row while nothing is being
@@ -612,7 +631,7 @@ code { cursor: copy; }
 .progress > span {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, #38bdd4, var(--accent));
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
 }
 
 .long-score {
@@ -955,3 +974,78 @@ tr.row-editing td { background: var(--accent-soft); }
   .callout-row { grid-template-columns: 1fr; }
   .action-cards { grid-template-columns: 1fr; }
 }
+
+/* ── Pill rows ────────────────────────────────────────────────────────────
+   A wrapping row of .pill chips: the Vhost page picker, Vhost controls'
+   host cells and the Ctrl-K palette (vhost-picker-model.js chips). */
+.chip-pills { display: inline-flex; flex-wrap: wrap; gap: .2rem; vertical-align: middle; }
+.chip-pills .pill { margin-right: 0; }
+.chip-pills:empty { display: none; }
+td > .chip-pills { display: flex; margin-top: .25rem; }
+.palette-item .chip-pills { margin-left: .5rem; }
+
+/* ── Vhost controls ───────────────────────────────────────────────────── */
+.ctl-host { min-width: 13rem; }
+
+/* ── Vhost page (feature-vhost-profile.js, feature-vhost-picker.js) ───── */
+.vp-dom { display: flex; flex-wrap: wrap; gap: .75rem; align-items: flex-start; justify-content: space-between; }
+.vp-host { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 1.2rem; word-break: break-all; }
+.vp-sub { margin: .2rem 0 .4rem; }
+.vp-posture { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .6rem; margin-top: .6rem; }
+.vp-tile { border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg-inset); padding: .65rem .7rem; display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
+.vp-tile.inherit { border-style: dashed; border-color: var(--border); }
+.vp-k { font-size: .7rem; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); }
+.vp-v { display: flex; flex-wrap: wrap; gap: .25rem; }
+.vp-v .pill { margin-right: 0; }
+.vp-why { font-size: .78rem; color: var(--muted); line-height: 1.4; }
+.vp-edit { margin-top: auto; font-size: .78rem; }
+.vp-note { font-size: .76rem; margin: .6rem 0 0; }
+.vp-tabs { display: flex; gap: .25rem; padding: .35rem; overflow-x: auto; }
+.vp-tab { background: transparent; color: var(--muted); border: 1px solid transparent; font-weight: 600; white-space: nowrap; }
+.vp-tab:hover { color: var(--fg); filter: none; }
+.vp-tab.on { color: var(--accent-strong); border-color: var(--accent); background: var(--accent-soft); }
+.vp-tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; margin-bottom: .8rem; }
+.vp-big { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.vp-bar-row { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: .6rem; align-items: center; margin: .35rem 0; font-size: .8rem; }
+.vp-bar { display: flex; height: 20px; border-radius: 6px; overflow: hidden; background: var(--border-soft); gap: 2px; }
+.vp-bar span { display: block; height: 100%; flex-grow: 0; flex-shrink: 0; }
+.vp-legend { display: flex; flex-wrap: wrap; gap: .8rem; font-size: .76rem; color: var(--muted); margin-top: .5rem; }
+.vp-legend i, .vp-cls i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: .3rem; vertical-align: -1px; }
+.vp-cls { white-space: nowrap; }
+.vp-r { text-align: right; font-variant-numeric: tabular-nums; }
+.vp-client { max-width: 34ch; word-break: break-all; }
+.vp-minibar-cell { min-width: 120px; }
+.vp-minibar-cell .muted { font-size: .74rem; }
+.vp-minibar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .8; }
+.vp-series { width: 100%; overflow: hidden; }
+.vp-series svg { display: block; max-width: 100%; height: auto; }
+.vp-series text { fill: var(--muted); font-size: 10px; }
+.vp-grid { stroke: var(--border-soft); stroke-width: 1; }
+.vp-dim td { opacity: .65; }
+.vpk { position: relative; flex: 1 1 22rem; max-width: 34rem; min-width: 0; }
+.vpk .input { width: 100%; }
+.vpk-list { position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px); margin: 0; padding: .25rem; list-style: none; max-height: 420px; overflow-y: auto;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); }
+.vpk-head { font-size: .74rem; padding: .3rem .5rem .4rem; }
+.vpk-opt { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .3rem .6rem; padding: .4rem .5rem; border-radius: 7px; cursor: pointer; }
+.vpk-opt.on { background: var(--accent-soft); }
+.vpk-opt.current .vpk-host { font-weight: 700; }
+.vpk-host { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .86rem; word-break: break-all; }
+.vpk-empty { padding: .5rem; font-size: .8rem; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; }
+@media (max-width: 1300px) { .vp-posture { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .vp-posture { grid-template-columns: repeat(2, minmax(0, 1fr)); } .vp-bar-row { grid-template-columns: 1fr; gap: .2rem; } }
+@media (max-width: 420px) { .vp-posture { grid-template-columns: 1fr; } }
+
+/* ── Tables ───────────────────────────────────────────────────────────────
+   Digits line up in every column; the row under the pointer is marked; a
+   wide table can keep its first column (the host, the name) in view while
+   it scrolls sideways (.sticky-first, Vhost controls). */
+td, th { font-variant-numeric: tabular-nums; }
+/* Not on a row that carries its own state colour (a bulk selection, the row
+   being edited): the hover must not hide it. */
+.table-wrap tbody tr:not(.bulk-selected):not(.row-editing):hover > td { background: var(--card-hover); }
+.sticky-first th:first-child,
+.sticky-first td:first-child { position: sticky; left: 0; z-index: 1; background: var(--card); }
+.sticky-first thead th:first-child { z-index: 3; }
+.table-wrap .sticky-first tbody tr:not(.bulk-selected):not(.row-editing):hover > td:first-child { background: var(--card-hover); }

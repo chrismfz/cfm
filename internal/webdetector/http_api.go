@@ -316,7 +316,12 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ?limit=N (1..suspiciousMaxLimit; default 50): the Vhost page picker and
+	// Vhost controls ask for the whole list to mark every suspicious host.
 	limit := 50
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = min(n, suspiciousMaxLimit)
+	}
 	minScore := e.cfg.MinScore
 	if minScore <= 0 {
 		// The same default the config fills in ([webdetector] MIN_SCORE);
@@ -325,6 +330,9 @@ func (e *Engine) handleSuspicious(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, e.suspiciousRows(r, limit, minScore))
 }
+
+// suspiciousMaxLimit caps /webdet/suspicious?limit=.
+const suspiciousMaxLimit = 500
 
 // suspiciousRows is the long-window top list for r: the vhost filter applies
 // before the limit (see handleTopShort).

@@ -55,3 +55,14 @@ test("without drops the chips a page shows as columns; weight still counts them 
   assert.ok(weight(shop) > weight(extra));
   for (const r of ROWS) for (const c of chips(r, CTX)) assert.ok(CHIP_KEYS.includes(c.key), c.key);
 });
+
+test("an exact match comes first even above a host that needs attention", () => {
+  const rows = [{ host: "example.com" }, { host: "www.example.com", under_attack: true }];
+  assert.deepEqual(entries(rows, {}, "example.com").items.map((i) => i.host), ["example.com", "www.example.com"]);
+  assert.deepEqual(entries(rows, {}, "").items.map((i) => i.host), ["www.example.com", "example.com"]);
+});
+
+test("attention count de-duplicates hosts like entries()", () => {
+  const rows = [{ host: "a.gr", under_attack: true }, { host: "A.gr", under_attack: true }];
+  assert.equal(attentionCount(rows, {}), 1);
+});

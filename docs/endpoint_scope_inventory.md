@@ -175,7 +175,7 @@ is what the handler adds on top. Handler files are under `internal/webdetector/`
 
 - `/api/v1/webdet/top-short`, `/api/v1/webdet/top` (alias) (`handleTopShort`,
   `http_api.go:246`; `validateScopedVhostQuery` on `?vhosts=` + `parseVhostFilter`).
-  `/api/v1/webdet/suspicious` (`handleSuspicious`, `http_api.go:308`) and
+  `/api/v1/webdet/suspicious` (`handleSuspicious`, `http_api.go:308`; `?limit=` 1..500, default 50, since 2026-11-24) and
   `/api/v1/webdet/long-top` (`handleLongTop`, `http_api.go:352`) share
   `suspiciousRows` (`:326`). Since 2026-11-18 the vhost filter (a scoped
   caller's scope, or an admin's `?vhosts=`) is applied BEFORE the limit

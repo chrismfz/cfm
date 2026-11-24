@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import {
   CLASS_ORDER, CLASS_COLORS, share, fmtPct, fmtBytes, fmtMbps, fmtRate, classMap, summary,
@@ -118,4 +119,24 @@ test("a browser-UA client the distributed tell flagged gets IP actions; an unfla
   assert.deepEqual(targetsFor(flagged), ["ips"], "its IPs only: the UA is every visitor's too");
   assert.equal(uaPattern(flagged), "");
   assert.deepEqual(clientActions({ class: "human", client: CHROME152, top_ips_last_hour: ips }), [], "unflagged visitors: nothing");
+});
+
+// The class colours live in two places on purpose: here for the canvas charts
+// (ECharts needs values) and as --c-* tokens in style.css for the pages' CSS.
+// They must be the same colours in each theme.
+test("CLASS_COLORS equal the --c-* tokens in style.css, both themes", () => {
+  const css = readFileSync(new URL("../style.css", import.meta.url), "utf8");
+  const block = (sel) => {
+    const i = css.indexOf(sel);
+    assert.ok(i >= 0, sel);
+    return css.slice(i, css.indexOf("}", i));
+  };
+  const blocks = { dark: block(":root {"), light: block(':root[data-theme="light"] {') };
+  for (const theme of ["dark", "light"]) {
+    for (const k of CLASS_ORDER) {
+      const m = blocks[theme].match(new RegExp(`--c-${k}:\\s*(#[0-9a-fA-F]{6})`));
+      assert.ok(m, `${theme} --c-${k}`);
+      assert.equal(m[1].toLowerCase(), CLASS_COLORS[theme][k].toLowerCase(), `${theme} ${k}`);
+    }
+  }
 });

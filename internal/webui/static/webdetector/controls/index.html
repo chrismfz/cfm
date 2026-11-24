@@ -12,13 +12,6 @@
   <script type="module">
     import "../../assets/webdet/pages/controls.js";
   </script>
-  <style>
-    /* Host-cell chips (feature-controls.js controlsChips). */
-    .ctl-host { min-width: 13rem; }
-    .ctl-chips { display: flex; flex-wrap: wrap; gap: .2rem; margin-top: .25rem; }
-    .ctl-chips:empty { display: none; }
-    .ctl-chips .pill { margin-right: 0; }
-  </style>
 </head>
 <body>
 <div class="shell">
@@ -155,7 +148,7 @@
         </div>
         <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
         <div class="table-wrap">
-          <table>
+          <table class="sticky-first">
             <thead>
               <tr>
                 <th><button class="btn-quiet btn-sm" @click="setControlsSort('host')">Vhost {{ controlsSortArrow('host') }}</button> <button class="btn-quiet btn-sm" @click="setControlsSort('attention')" title="Sort by what needs attention">Attention {{ controlsSortArrow('attention') }}</button></th>
@@ -171,7 +164,7 @@
               <tr v-for="row in vhostControlsFiltered" :key="row.host">
                 <td class="ctl-host">
                   <a :href="vhostLiveURL(row.host)" title="Open this vhost: what applies, traffic, live"><code>{{ row.host }}</code></a>
-                  <div class="ctl-chips"><span v-for="c in controlsChips(row)" :key="c.key" class="pill" :class="c.tone">{{ c.text }}</span></div>
+                  <div class="chip-pills"><span v-for="c in controlsChips(row)" :key="c.key" class="pill" :class="c.tone">{{ c.text }}</span></div>
                 </td>
                 <td>
                   <button type="button" class="tgl" :class="['tone-' + vhostControlState(row, 'challenge').tone, { locked: vhostControlState(row, 'challenge').locked }]" role="switch" :aria-checked="vhostControlState(row, 'challenge').on ? 'true' : 'false'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')" :aria-label="'Challenge for ' + row.host"><span class="tgl-track" aria-hidden="true"><span class="tgl-knob"></span></span><span class="tgl-word">{{ vhostControlState(row, 'challenge').word }}</span></button>

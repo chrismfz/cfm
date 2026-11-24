@@ -34,6 +34,14 @@ export const vhostPickerMixin = {
     vpkAttention() { return attentionCount(this.vpkRows, this.vpkCtx); },
   },
 
+  watch: {
+    // A refresh or a narrower query can shrink the list under the
+    // highlighted row: keep the index on a row that exists.
+    "vpkList.items.length"(n) {
+      if (this.vpkIndex >= n) this.vpkIndex = Math.max(0, n - 1);
+    },
+  },
+
   methods: {
     async vpkLoad(force = false) {
       if (this.vpkLoading) return;
@@ -79,12 +87,21 @@ export const vhostPickerMixin = {
         if (el) el.scrollIntoView({ block: "nearest" });
       });
     },
-    // Enter opens the highlighted host once the user typed or moved through
-    // the list; otherwise it opens what the field holds (an unknown host too).
+    // Enter opens:
+    //  - the highlighted host, once the user moved through the list;
+    //  - the host typed, when it is a known one (it sorts first) or a whole
+    //    hostname (it has a dot): an unknown host opens as typed, never as a
+    //    known host it happens to be part of;
+    //  - otherwise (a fragment such as "vol") the first match.
     vpkEnter() {
       const item = this.vpkOpen ? this.vpkList.items[this.vpkIndex] : null;
-      if (item && (this.vpkQuery || this.vpkMoved)) this.vpkPick(item.host);
-      else { this.vpkOpen = false; this.applyVhostFocus(); }
+      const typed = String(this.vpkQuery || "").trim().toLowerCase();
+      if (item && (this.vpkMoved || (typed && (item.host === typed || !typed.includes("."))))) {
+        this.vpkPick(item.host);
+        return;
+      }
+      this.vpkOpen = false;
+      this.applyVhostFocus();
     },
     vpkPick(host) {
       this.vhostFocusHost = host;

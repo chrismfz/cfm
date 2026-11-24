@@ -5,6 +5,8 @@
 // theme toggle, logout) and wires the mobile burger + backdrop via document
 // delegation so Vue re-renders can't detach the handlers.
 
+import { chips, weight } from "../webdet/vhost-picker-model.js";
+
 const ICONS = {
   gauge: '<path d="M12 15l3.5-5.5"/><path d="M20.5 14a8.5 8.5 0 1 0-17 0"/><path d="M2 14h2m16 0h2"/>',
   radar: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><path d="M12 12l6-6.5"/>',
@@ -227,8 +229,12 @@ const HOST_RX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)
 
 // Known vhosts for palette suggestions, fetched lazily when the palette
 // first opens (cookie-authed; a scoped token's list is already scoped
-// server-side). Failure just means no suggestions.
+// server-side). Failure just means no suggestions. The rows are kept for
+// their chips (vhost-picker-model.js, the Vhost page picker's wording): the
+// palette shows only what the row itself says (under attack, lockdown, WAF
+// off, excluded, cache, rules…), never a second request.
 let knownVhosts = null;
+let knownVhostRows = new Map();
 let knownVhostsFetching = false;
 function fetchKnownVhosts(onReady) {
   if (knownVhosts !== null || knownVhostsFetching) return;
@@ -238,12 +244,17 @@ function fetchKnownVhosts(onReady) {
     .then((data) => {
       const rows = Array.isArray(data) ? data : (data?.rows || []);
       knownVhosts = rows.map((r) => String(r?.host || "").trim()).filter(Boolean).sort();
+      knownVhostRows = new Map(rows.map((r) => [String(r?.host || "").trim().toLowerCase(), r]));
     })
     .catch(() => { knownVhosts = []; })
     .finally(() => {
       knownVhostsFetching = false;
       if (typeof onReady === "function") onReady();
     });
+}
+
+function hostChips(host) {
+  return chips(knownVhostRows.get(String(host || "").toLowerCase()), {});
 }
 
 function hostActions(host) {
@@ -278,7 +289,18 @@ function paletteActions(query) {
     const exact = matches.find((h) => h === ql);
     if (exact && !HOST_RX.test(q)) out.push(...hostActions(exact));
     for (const h of matches.filter((m) => m !== ql).slice(0, 5)) {
-      out.push({ label: h, hint: "vhost — open live", href: `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(h)}`, fill: h });
+      out.push({ label: h, hint: "vhost", href: `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(h)}`, fill: h, chips: hostChips(h) });
+    }
+  }
+  // Nothing typed yet: the hosts that need attention first (at most 5).
+  if (!q && Array.isArray(knownVhosts) && knownVhosts.length) {
+    const hot = knownVhosts
+      .map((h) => ({ h, c: chips(knownVhostRows.get(h.toLowerCase()), {}) }))
+      .filter((x) => weight(x.c) > 0)
+      .sort((a, b) => weight(b.c) - weight(a.c) || a.h.localeCompare(b.h))
+      .slice(0, 5);
+    for (const x of hot) {
+      out.push({ label: x.h, hint: "needs attention", href: `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(x.h)}`, chips: x.c });
     }
   }
   for (const group of MENU_GROUPS) {
@@ -319,6 +341,17 @@ function buildPalette() {
       const h = document.createElement("span");
       h.className = "palette-hint";
       h.textContent = it.hint || "";
+      if (Array.isArray(it.chips) && it.chips.length) {
+        const c = document.createElement("span");
+        c.className = "chip-pills";
+        for (const chip of it.chips.slice(0, 4)) {
+          const p = document.createElement("span");
+          p.className = `pill ${chip.tone || ""}`.trim();
+          p.textContent = chip.text;
+          c.appendChild(p);
+        }
+        l.appendChild(c);
+      }
       row.append(l, h);
       row.addEventListener("mouseenter", () => { active = i; render(); });
       list.appendChild(row);

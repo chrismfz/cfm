@@ -156,6 +156,11 @@ export const controlsMixin = {
     },
   },
 
+  watch: {
+    // The attention lists wait for the caller's identity (refreshControlsAttention).
+    meLoaded(v) { if (v) this.refreshControlsAttention(); },
+  },
+
   methods: {
     // ── Host-cell chips ────────────────────────────────────────────────
     controlsChips(row) { return this.controlsChipInfo.get(row?.host)?.shown || []; },
@@ -163,16 +168,23 @@ export const controlsMixin = {
     // same verdict as on the Vhost page's picker.
     controlsWeight(row) { return this.controlsChipInfo.get(row?.host)?.weight || 0; },
     async refreshControlsAttention() {
+      // Not before the caller's identity is known: isScoped reads false until
+      // then, and a scoped caller must never call the admin-only list.
+      if (!this.meLoaded) return;
       if (Date.now() - this.controlsAttentionAt < ATTENTION_STALE_MS) return;
-      this.controlsAttentionAt = Date.now();
-      const [challenged, suspicious] = await Promise.all([
-        this.isScoped
-          ? Promise.resolve([])
-          : this.fetchJSONSafe("v1/challenge/vhosts?status=active&mode=all&limit=500", []),
-        this.fetchJSONSafe("v1/webdet/suspicious?limit=500", []),
-      ]);
-      this.controlsChallenged = this.extractRows(challenged, "rows");
-      this.controlsSuspicious = this.extractRows(suspicious, "rows");
+      const admin = !this.isScoped;
+      try {
+        const [challenged, suspicious] = await Promise.all([
+          admin ? this.fetchJSON("v1/challenge/vhosts?status=active&mode=all&limit=500") : Promise.resolve([]),
+          this.fetchJSON("v1/webdet/suspicious?limit=500"),
+        ]);
+        this.controlsChallenged = this.extractRows(challenged, "rows");
+        this.controlsSuspicious = this.extractRows(suspicious, "rows");
+        // Stamped on success only: a failed read is retried on the next poll.
+        this.controlsAttentionAt = Date.now();
+      } catch (err) {
+        console.error("[cfm-admin] attention lists failed", err);
+      }
     },
 
     // ── Per-vhost protection toggles ───────────────────────────────────

@@ -25,7 +25,8 @@ import (
 //     lockdown);
 //   - challenge:          vhostChallengeStatus, the /challenge/vhost/status body;
 //   - waf_excludes:       excludeStore.WAFEntriesForHost: what the in-path WAF
-//     (cfm.lua waf_skip_for) and MatchWAFRules apply on the host;
+//     (cfm_waf_excl.lua skip_for, which honours scope_hosts) and
+//     MatchWAFRules apply on the host;
 //   - challenge_excludes: excludeStore.ChallengeEntriesForHost (MatchChallenge /
 //     MatchChallengePath);
 //   - site_cache:         siteCacheStore.PolicyFor (the edge's policy_key_for,

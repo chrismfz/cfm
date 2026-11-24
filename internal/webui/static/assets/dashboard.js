@@ -198,17 +198,12 @@ const el = {
     </svg>`;
   }
 
-  const MODE_COLORS = {
-    block: 'color:#ffc9d3;border-color:#8f3b4d;background:rgba(217,81,111,.15)',
-    challenge: 'color:#ffd27c;border-color:#91651f;background:rgba(170,115,22,.15)',
-    challenge_v2: 'color:#e6c9ff;border-color:#6f3b8f;background:rgba(163,81,217,.15)',
-    logonly: 'color:#8dd0ff;border-color:#2a5f8f;background:rgba(77,163,255,.1)',
-    disabled: 'color:var(--muted);border-color:var(--border);background:transparent',
-  };
+  // A WAF mode as a theme pill (the colours follow light and dark themes).
+  const MODE_TONES = { block: 'danger', challenge: 'warn', challenge_v2: 'v2', logonly: 'info', disabled: '' };
 
   function modeBadge(mode) {
-    const s = MODE_COLORS[mode] || MODE_COLORS.disabled;
-    return `<span class="pill" style="${s}">${escapeHTML(mode || 'disabled')}</span>`;
+    const tone = MODE_TONES[mode] ?? '';
+    return `<span class="pill ${tone}">${escapeHTML(mode || 'disabled')}</span>`;
   }
 
   // ---- Node health (health.snapshot.v1 from /v1/health/snapshot) ----
@@ -571,8 +566,8 @@ const dictSection = `
       ? ` title="${escapeHTML(`last error: ${ssl.last_error} (${fmtAge(ssl.last_error_age_s)})`)}"`
       : '';
     const readyBadge = ssl.ready === '1'
-      ? `<span style="color:#87d45b"${errTitle}>✓ ready</span>`
-      : `<span style="color:#d9516f"${errTitle}>✗ not ready</span>`;
+      ? `<span class="ok-text"${errTitle}>✓ ready</span>`
+      : `<span class="danger-text"${errTitle}>✗ not ready</span>`;
 
     const sslHealthSection = `
       <div style="grid-column:1/-1">
@@ -585,7 +580,7 @@ const dictSection = `
           ${miniCard('wildcard certs', escapeHTML(String(ssl.wild_hosts ?? '-')), 'suffixes', null)}
           ${miniCard('last dumpall', escapeHTML(fmtAge(ssl.last_dumpall_age_s)), escapeHTML(ssl.last_dumpall_src ? `(${ssl.last_dumpall_src})` : ''), null)}
           ${miniCard('last /stats poll', escapeHTML(fmtAge(ssl.last_stats_age_s)), '', null)}
-          ${ssl.ingest_lock ? miniCard('ingest lock', '<span style="color:#ffd27c">active</span>', 'ingesting now', null) : ''}
+          ${ssl.ingest_lock ? miniCard('ingest lock', '<span class="warn-text">active</span>', 'ingesting now', null) : ''}
         </div>
       </div>`;
 

@@ -21,6 +21,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **The Ctrl-K search shows what is going on at each host.** Host
+  suggestions carry the same chips as the Vhost page's picker (under attack,
+  lockdown, WAF off, cache, rules…), and opening it with nothing typed lists
+  up to five hosts that need attention first. No extra request: it reads the
+  host list the search already loads.
 - **Vhost controls: what is going on at each host, and a "Needs attention"
   filter.** Each host links to its Vhost page and carries the chips the
   table has no column for (challenged, suspicious, cache / micro cache,
@@ -38,6 +43,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   only the rules they can see are counted).
 
 ### Changed
+- **`/api/v1/webdet/suspicious` honours `?limit=`** (1–500, default 50; it
+  always returned 50), so the Vhost page picker and Vhost controls mark every
+  suspicious host on a busy node, not only the top 50.
+- **cfm-admin: tables and colours.** Numbers line up in every table column,
+  the row under the pointer is marked, and Vhost controls keeps the host
+  column in view while the table scrolls sideways on a phone. Colours that
+  were made for the dark theme only (the dashboard's WAF mode pills and
+  readiness marks, the detectors editor's warnings and errors) now follow
+  the theme, so they read in the light theme too.
 - **Vhost controls: switches instead of upper-case buttons.** Each
   protection is a switch with a short state (On, Off, Inline, Async, N/A)
   and a muted line saying what decided it ("excluded here", "by *.gr",
