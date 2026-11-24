@@ -233,6 +233,9 @@ type Config struct {
 	AbuseShadowRateFloor   float64 // ABUSE_SHADOW_RATE_FLOOR (absolute rps floor)
 	AbuseShadowRateSkewMin float64 // ABUSE_SHADOW_RATE_SKEW_MIN (min max/median concentration)
 	AbuseShadowRateMinReq  int     // ABUSE_SHADOW_RATE_MINREQ (min per-IP requests)
+	// Cost tier (tier=cost on the line): an outlier with no static asset in the
+	// window whose origin seconds / window seconds is ≥ this (default 0.5).
+	AbuseShadowRateCost float64 // ABUSE_SHADOW_RATE_COST
 
 	// Abuse-shadow Signal F (facet / query-cardinality expansion): a vhost-level
 	// LOG-ONLY signal that sees what PathDiversity is blind to. PathDiversity =

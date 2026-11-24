@@ -2574,6 +2574,16 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 				// this rule in src= — a rule challenge leaves no bridge state.
 				noteRuleChallenge(ip, host, rr.Rule.ID)
 			}
+			if ruleAction == TrafficActionThrottleTotal {
+				// The edge's vocabulary again: a "throttle" whose budget is the
+				// TOTAL of every matching request (per vhost or node, keyed on
+				// the rule id), not each client's (cfm_rules.lua). An older
+				// edge ignores throttle_rate / throttle_per and applies its
+				// per-client soft_bot: weaker, never a block.
+				ruleAction = TrafficActionThrottle
+				resp["throttle_rate"] = rr.Rule.Action.RateRPS
+				resp["throttle_per"] = rr.Rule.Action.Per
+			}
 			resp["rule_action"] = ruleAction
 			resp["rule_id"] = rr.Rule.ID
 			if rr.Profile != "" {

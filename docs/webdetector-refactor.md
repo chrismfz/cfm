@@ -261,6 +261,50 @@ The live shape Signal C must catch, and why it beats the vhost-aggregate score:
   shoppers (gclid referrers) and verified crawlers untouched. Candidate initial
   shadow rule: `per_ip_rps >= max(FLOOR, K × median_per_ip_rps)` with `ip_skew ≥
   S`; tune K/FLOOR/S from the shadow log.
+- **Cost tier (2026-11-24, shadow).** A plain outlier is mostly browsers: on
+  the morning a Chrome/152 scraper on Greek residential IPs drove titan and
+  orion past load 100, 275 of titan's 469 outliers that day looked like
+  browsers. Two more facts on the line separate them, measured on 8 nodes:
+  - `static=0`: the IP fetched no static asset in the window. A browser loads
+    a page's css/js/images; a client fetching HTML only does not.
+  - `origin=` at or above `ABUSE_SHADOW_RATE_COST` (default 0.5): the IP's
+    origin time over the window, as average concurrent requests.
+
+  An outlier with both reads `tier=cost`. Those outliers were 30–50 % of the
+  origin time in the incident hours and about none at normal hours. Only 5
+  IPs fleet-wide among them had human solve evidence (site owners with
+  cached assets).
+
+  `origin_busy=` is the node's own origin time over the window. It is logged
+  so a per-node baseline, and a pressure gate on it, can be chosen from a
+  week of lines before anything is enforced. In the read the gate was a
+  ratio: the incident hours sat at 2–6× each node's normal hours.
+
+  `static=` is the client's to send, so the tier is a measurement only: it
+  never clears anyone. A scraper that also fetches one asset per window
+  leaves the tier.
+
+  Other details of the line:
+  - The tier is judged on every tick. While an IP is in the tier its own
+    throttle key gates the line (and stamps the plain one), so its entry is
+    not held back by the `tier=-` line it logged when it first crossed the
+    rate bar (with only ~MinReq requests in the window). From then on it logs
+    one line per holddown, like any outlier.
+  - `origin=` is measured per vhost (`-` for a vhost whose lines report no
+    upstream); `origin_busy=` is the node's.
+  - `host_static=` is the vhost's own static share. It is near 0 when a CDN
+    serves the assets or they live on another host. There every visitor
+    reads `static=0`, so before any enforcement the tier needs a vhost that
+    serves its assets at the edge.
+  - `origin=`/`origin_busy=` read `-` on a log that reports no upstream
+    (combined/Apache): unmeasured, never 0.
+  - Origin time is the upstream time with every try summed, never the
+    request time, which adds the client's own transfer.
+
+  **Before enforcing, re-key on `firewall.CountKey`.** Signal C's counters
+  key on the full address, like the rest of `ipsDyn`. A direct IPv6 scraper
+  rotating inside its /64 spreads its requests and origin time over
+  addresses (CLAUDE.md §5, "A per-client key").
 - **Datacenter additive-only, validated:** the SAME vhost carries verified
   Googlebot (PTR `crawl-…googlebot.com`), Bingbot (`…search.msn.com`), Facebook
   meta-agent, AdsBot — several on cloud ASNs (AS15169, AS8075). A datacenter

@@ -20,6 +20,53 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **Traffic rules: an expiry and a total throttle, for incidents.** A rule can
+  carry `match.until` (RFC3339): past it the rule matches nothing, and it is
+  deleted a day later; cfm-admin's editor offers 1 h / 6 h / 24 h / 7 d. The
+  new `throttle_total` action gives ALL matching clients one budget
+  (`rate_rps`, per vhost or for the whole node) instead of a per-client limit,
+  which a crawler spread over hundreds of IPs walks past (on titan a per-IP
+  limit cut 0–4% of Meta's load, a 5 r/s node total cut 65%). `ip_any` now
+  takes up to 500 entries (a scraper's top IPs). **Downgrade:** an older cfm
+  never enforces a rule with an expiry or a total throttle (it lists it
+  unsupported and keeps it), and an older edge applies the per-client
+  `soft_bot` throttle for a total one; this build also freezes a stored rule
+  whose action carries a key it does not know.
+- **cfm-admin: Web Traffic page** (`/cfm-admin/webdetector/traffic/`, in the
+  nav in place of Web Bots, whose UA console stays reachable from it). Built
+  on the traffic mix: the bots' share of the origin time, requests vs origin
+  time vs traffic by class, a 5-minute chart, the clients to act on (rate,
+  traffic, origin share, IPs) and the bots-vs-humans split per vhost. Actions:
+  challenge a client's top IPs (a per-IP challenge, never the whole vhost and
+  never a ban), a box-wide UA throttle/block for UA families only (a browser
+  UA is never offered one: every real Chrome of that version sends the same
+  string), lift a manual vhost challenge, undo a UA rule.
+- **`POST /api/v1/challenge/ip/add` and `/remove`** (admin-only): the
+  operator's per-IP challenge on a list of up to 500 IPs (TTL 5 m to 24 h,
+  default 1 h), and lifting it (the page's Undo). It also revokes the IP's
+  clearance for the challenge's length, so a client that had already solved
+  (a solving farm) is challenged too; a person there re-solves once. A live,
+  longer challenge is never shortened and keeps its own reason (a shorter
+  one is extended, and an undo leaves it alone); IGNORE_IPS and blocked IPs are
+  skipped with the reason. With `CHALLENGE_UNSOLVED_HOLD = enforce`, an IP that
+  keeps loading the challenge without solving stays challenged.
+- **Traffic mix: who the web traffic is and what it costs the origin, for
+  24 h** (`GET /api/v1/webdet/traffic-mix`, MCP `traffic_mix`, admin-only).
+  Every request lands in one of four classes: known crawlers (by UA), other
+  bots and tools, browser-UA automation (an IP making 20+ dynamic requests a
+  minute with no static file, POST or XHR in 10 minutes) and likely humans.
+  Each class reports requests, origin seconds, bytes, status mix, edge-served
+  requests, and average and peak r/s, with a 5-minute series, the top vhosts
+  by origin time and the top clients (the raw UA for browser-looking ones)
+  with their top IPs over the last hour. On titan on 2026-11-24 this is the
+  table that showed Meta and a Chrome/152 scraper at a third of the requests
+  but ~61% of the origin time. `?host=` (with `merge_www` for the www. twin)
+  narrows it to one vhost, without a status mix or clients. Beyond the last
+  hour each 5-minute bucket keeps its top 256 vhosts and 64 clients per class,
+  the rest summed under `_other`. The classes are labels, never an enforcement
+  decision; the counters survive a config reload, not a restart.
+
 ### Changed
 - **WAF rules 307 (XXE) and 416 (a PHP file as the request body) now ban.**
   Both block since 2026-11-17 with their `waf_security` ban held for a
@@ -71,6 +118,30 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   rule-scoped exclude. Webmail is not exempt: an email over 2 KB quoting PHP gets a
   403 there. See `docs/waf.md`, "Rule 415" and "Rule 417".
 ### Added
+- **`rate_outlier` shadow lines show what an outlier costs the origin.**
+  Each line now also carries:
+  - `static=`: the IP's static-asset requests in the window;
+  - `host_static=`: the vhost's own static share. It is near 0 behind a CDN
+    or with the assets on another host, where every visitor reads
+    `static=0`;
+  - `origin=`: its origin time over the window, as average concurrent
+    origin requests (every upstream try summed);
+  - `origin_busy=`: the same for the whole node, as the pressure context.
+    Both read `-` on a log that reports no upstream (unmeasured, not 0);
+  - `tier=cost`: set when the IP fetched no static asset and `origin=` is
+    at least `ABUSE_SHADOW_RATE_COST` (default 0.5 of the window, i.e. 60 s
+    in the default 2 min). The tier is checked every tick, so an IP that
+    first crossed the rate bar cheap still logs its `tier=cost` line.
+
+  The `abuse_shadow` MCP tool counts these lines (`would_challenge_cost`)
+  and ranks them (`top_cost_tier`). Nothing is enforced. This is the
+  week-long measurement before deciding on a per-IP challenge.
+
+  Why: on the 2026-11-24 morning a scraper drove titan and orion past load
+  100. A plain outlier is mostly browsers (275 of titan's 469 that day). The
+  cost-tier outliers were 30–50 % of the origin time in those hours, about
+  none at normal hours, and only 5 IPs among them fleet-wide carried human
+  solve evidence.
 - **A per-IP challenge that is loaded again and again but never solved can
   now be held instead of running out** (`[webdetector]
   CHALLENGE_UNSOLVED_HOLD`, default `log`). On titan a facet scraper on Greek
@@ -86,15 +157,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   a burn-in; review by 2026-12-08 (`docs/abuse-defense-master-plan.md` §5).
 
 ### Fixed
-- **sslcollector: edge workers hand the memory of replaced certificates back
-  to the OS.** The full collect after each ingest frees the old pairs, but
-  glibc kept their pages: with traffic allocations in between it could not
-  reuse them whole, so a worker's RSS climbed to the peak of an ingest and
-  stayed there (titan, 3500 names: 118 → 440 MB over three hourly ingests). A
-  `malloc_trim(0)` now follows the collect (~25-40 ms, in the background
-  timer); in a container it brought the settled RSS from 227 to 165 MB. The
-  `[sslcollector] gc` line reports it as `trim_ms=` (`-` where glibc's
-  malloc_trim is absent).
 - **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
   current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
   Chrome/145 … (compatible; meta-externalagent/1.1 (+https://…))`, the UA

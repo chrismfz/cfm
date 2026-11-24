@@ -456,19 +456,6 @@ local function worker_rss_mb()
   return string.format("%.0f", tonumber(kb) / 1024)
 end
 
--- glibc's malloc_trim, or nil where it does not exist (collect_released).
-local malloc_trim
-do
-  local ok, ffi = pcall(require, "ffi")
-  if ok and ffi.os == "Linux" then
-    pcall(ffi.cdef, "int malloc_trim(size_t pad);")
-    local found = pcall(function() return ffi.C.malloc_trim end)
-    if found then
-      malloc_trim = function() return ffi.C.malloc_trim(0) end
-    end
-  end
-end
-
 local function ingest_dumpall(data, src)
   local ver = data.version or data.Version or ""
   if ver ~= "" then
@@ -619,33 +606,27 @@ end
 -- the next ingest allocates on top of them keeps it flat. It runs from the
 -- caller, not inside ingest_dumpall, because there the raw body (~20 MB on
 -- titan) and the decoded payload are still referenced and would survive it.
--- ~50 ms for 3000 pairs, in a timer, never on a handshake.
+-- It runs in a timer, but on the worker's own event loop: while it runs the
+-- worker serves nothing (~50 ms for 3000 pairs in a container; 85-300 ms on
+-- titan, 2026-11-24, on a ~500 MB heap, after an ingest that already blocks
+-- for about a second).
 --
--- Then glibc's malloc_trim(0): the collect frees the pairs, but glibc keeps
--- the freed pages, and with the worker's traffic allocations living between
--- them it cannot reuse them whole, so RSS climbs in steps to the peak of an
--- ingest (titan, 2026-11-23, collect only: 118 -> 238 -> 337 -> 440 MB over
--- three hourly ingests). malloc_trim hands the free pages back, the middle of
--- the heap included. Container, 3500 pairs, a 17.6 MB payload, 16 ingests
--- with live allocations in between: collect only flat at 227 MB, collect +
--- trim flat at 165 MB, ~25-40 ms. It is thread-safe; CFM's edge config runs
--- no thread pool on any engine (no aio / thread_pool), so the arena locks it
--- takes contend with nothing. Absent (not glibc, no FFI) it is skipped:
--- trim_ms=-.
+-- What still stays: glibc's heap holds ~3 stores, not 1. A faithful container
+-- repro (this module, a fake daemon, 3500 pairs, real TLS traffic; 2026-11-24)
+-- read mallinfo after each ingest: in use ~160 MB for a ~53 MB store, steady
+-- from the second ingest, even before any traffic (2 stores after boot), and a
+-- second collect changed nothing. Nothing here keeps the old stores; the
+-- references are outside this module (LuaJIT / lua-resty-core). malloc_trim was
+-- tried after the collect and returned nothing (~30-40 ms per ingest), so it
+-- was dropped. docs/ssl-collector.md and docs/ROADMAP.md hold the detail.
 local function collect_released(src)
   if ngx.update_time then ngx.update_time() end
   local t0 = ngx.now()
   collectgarbage("collect")
   if ngx.update_time then ngx.update_time() end
   local t1 = ngx.now()
-  local trim_ms = "-"
-  if malloc_trim and pcall(malloc_trim) then
-    if ngx.update_time then ngx.update_time() end
-    trim_ms = string.format("%.0f", (ngx.now() - t1) * 1000)
-  end
   ngx.log(ngx.WARN, "[sslcollector] gc src=", (src or "?"),
     " gc_ms=", string.format("%.0f", (t1 - t0) * 1000),
-    " trim_ms=", trim_ms,
     " lua_kb=", string.format("%.0f", collectgarbage("count")),
     " rss_mb=", worker_rss_mb())
 end
