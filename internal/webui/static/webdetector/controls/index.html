@@ -16,6 +16,7 @@
     /* Host-cell chips (feature-controls.js controlsChips). */
     .ctl-host { min-width: 13rem; }
     .ctl-chips { display: flex; flex-wrap: wrap; gap: .2rem; margin-top: .25rem; }
+    .ctl-chips:empty { display: none; }
     .ctl-chips .pill { margin-right: 0; }
   </style>
 </head>
@@ -170,7 +171,7 @@
               <tr v-for="row in vhostControlsFiltered" :key="row.host">
                 <td class="ctl-host">
                   <a :href="vhostLiveURL(row.host)" title="Open this vhost: what applies, traffic, live"><code>{{ row.host }}</code></a>
-                  <div class="ctl-chips" v-if="controlsChips(row).length"><span v-for="c in controlsChips(row)" :key="c.key" class="pill" :class="c.tone">{{ c.text }}</span></div>
+                  <div class="ctl-chips"><span v-for="c in controlsChips(row)" :key="c.key" class="pill" :class="c.tone">{{ c.text }}</span></div>
                 </td>
                 <td>
                   <button :class="vhostControlEnabled(row, 'challenge') ? 'btn-quiet' : 'btn-danger'" @click="toggleVhostProtection(row, 'challenge')" :disabled="loading || !vhostControlToggleable(row, 'challenge')" :title="vhostControlButtonTitle(row, 'challenge')">{{ vhostControlButtonLabel(row, 'challenge') }}</button>

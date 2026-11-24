@@ -77,6 +77,17 @@ export const controlsMixin = {
     controlsChipCtx() {
       return { challenged: hostSet(this.controlsChallenged), suspicious: hostSet(this.controlsSuspicious) };
     },
+    // Each host's chips and weight, built once per data change (the counts,
+    // the filter, the sort comparator and the template all read them; a
+    // 700-host table recomputed them per comparison).
+    controlsChipInfo() {
+      const out = new Map();
+      for (const row of this.vhostControls) {
+        const all = chips(row, this.controlsChipCtx);
+        out.set(row?.host, { shown: without(all, COLUMN_CHIPS), weight: weight(all) });
+      }
+      return out;
+    },
     controlsCounts() {
       let attention = 0;
       for (const row of this.vhostControls) if (this.controlsWeight(row) > 0) attention++;
@@ -126,7 +137,8 @@ export const controlsMixin = {
           const cmp = boolOrder(Boolean(a?.clam_mode_inline)) - boolOrder(Boolean(b?.clam_mode_inline));
           if (cmp !== 0) return cmp * dir;
         } else if (key === "attention") {
-          // Most urgent first on the first click (desc reads as "worst first").
+          // The first click (asc) puts the most urgent first; the second
+          // reverses it.
           const cmp = this.controlsWeight(b) - this.controlsWeight(a);
           if (cmp !== 0) return cmp * dir;
         } else if (key === "underattack") {
@@ -145,10 +157,10 @@ export const controlsMixin = {
 
   methods: {
     // ── Host-cell chips ────────────────────────────────────────────────
-    controlsChips(row) { return without(chips(row, this.controlsChipCtx), COLUMN_CHIPS); },
+    controlsChips(row) { return this.controlsChipInfo.get(row?.host)?.shown || []; },
     // weight counts every chip, the column ones too: "needs attention" is the
     // same verdict as on the Vhost page's picker.
-    controlsWeight(row) { return weight(chips(row, this.controlsChipCtx)); },
+    controlsWeight(row) { return this.controlsChipInfo.get(row?.host)?.weight || 0; },
     async refreshControlsAttention() {
       if (Date.now() - this.controlsAttentionAt < ATTENTION_STALE_MS) return;
       this.controlsAttentionAt = Date.now();
