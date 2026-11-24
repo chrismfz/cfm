@@ -21,6 +21,28 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **cfm-admin: one page per vhost.** The Vhost page (it was "Vhost live";
+  same URL, every link to it still works) now opens with the host's
+  settings at a glance: challenge, WAF, HTTP/3, Site Cache, traffic rules
+  and ClamAV, each saying what decided it (its own entry, the apex, a
+  `*.domain` entry or the node default) with a link to the page that edits
+  it, already filtered to the host. Tabs add who visits the host and what it
+  costs the origin (the Web Traffic labels for this host, bot clients by
+  origin time, distributed browser-UA populations), its WAF hits by rule and
+  challenge outcomes, and every traffic rule and exclude that applies. The
+  host's other subdomains are one click away. The live drilldown is the Live
+  tab. Admins only; a cPanel user's view is unchanged.
+- **One API call for everything that applies to a vhost.**
+  `GET /api/v1/webdet/vhost-profile?host=` (admin) returns one host's
+  settings and what decided each: challenge (manual or automatic, tier and
+  its source, lockdown, under attack), WAF on/off and the excludes that cover
+  the host (`example.com`'s exclude also covers `www.example.com`), HTTP/3,
+  ClamAV, the Site Cache policy that decides it (its own or a covering
+  `*.example.com`) with the node switches, and every traffic rule whose scope
+  takes it, with its state (enabled, disabled, expired). It also lists the
+  other known hosts of the same domain. Each part comes from the code the
+  edge and the existing pages already use, so it cannot disagree with them.
+  It backs the coming per-vhost page in cfm-admin.
 - **Web Traffic: rank the clients by any column.** Click Requests, Rate,
   Traffic, Origin time or IPs: the node picks the top clients by that column
   (the traffic mix API's new `sort=origin|requests|bytes|ips`, also on the MCP
@@ -49,6 +71,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   cfm` no longer empties it. A crash loses at most 5 minutes; a file from
   another version or a corrupt one starts the page empty, as before.
 
+### Fixed
+- **Vhost controls: a tenant's challenge exclude no longer reads as
+  covering its other hosts.** The Challenge column matched an exclude by its
+  value alone, so an exclude a cPanel user added for `example.com` showed
+  `www.example.com` as not challenged, although the challenge decision (which
+  honours the entry's scope) still challenged it. The column now uses the
+  decision's own matcher.
+
 ### Security
 - **WAF excludes: the in-path WAF honours an exclude's `scope_hosts`.** An
   admin `--scope <host>` (`scope_hosts=` on `/api/v1/waf/exclude/add`) and
@@ -65,8 +95,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `--scope` (or without it, admin-global). Unscoped excludes are unchanged.
   It takes effect at the edge's first request after the upgrade's reload
   (the snapshot moved to new shdict keys, so a worker still draining after
-  the reload cannot write the old scope-less rows back). The panel ports'
-  WAF reads no excludes and was not affected.
+  the reload cannot write the old scope-less rows back). The vhost profile
+  (`/api/v1/webdet/vhost-profile` and its cfm-admin page) now lists only the
+  WAF excludes whose scope takes the host, and drops `scope_takes_host`. The
+  panel ports' WAF reads no excludes and was not affected.
 - **A WAF / challenge exclude scope made only of unusable globs no longer
   applies everywhere.** `--scope 'shop[a'` (an unterminated class, a trailing
   `\`) compiled to an empty matcher that read as "no scope" (every vhost); it

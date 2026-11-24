@@ -785,8 +785,15 @@ func normalizeMethods(in []string, max int) ([]string, error) {
 }
 
 func ruleHostMatch(vhosts []string, host string) bool {
+	_, ok := ruleHostMatchPattern(vhosts, host)
+	return ok
+}
+
+// ruleHostMatchPattern is ruleHostMatch that also names the scope pattern
+// that took host (the first one, in scope order).
+func ruleHostMatchPattern(vhosts []string, host string) (string, bool) {
 	if host == "" {
-		return false
+		return "", false
 	}
 	for _, pat := range vhosts {
 		pat = normalizeControlHost(pat)
@@ -794,19 +801,19 @@ func ruleHostMatch(vhosts []string, host string) bool {
 			continue
 		}
 		if ok, err := filepath.Match(pat, host); err == nil && ok {
-			return true
+			return pat, true
 		}
 		if strings.HasPrefix(pat, "*.") {
 			suf := strings.TrimPrefix(pat, "*")
 			if strings.HasSuffix(host, suf) && len(host) > len(suf) {
-				return true
+				return pat, true
 			}
 		}
 		if !strings.ContainsAny(pat, "*?") && host == pat {
-			return true
+			return pat, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // ruleMatchFilters evaluates one rule's match block. ip/ipOK come from a single

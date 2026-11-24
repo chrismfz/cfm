@@ -1010,21 +1010,32 @@ func siteCacheFeedLess(a, b string) bool {
 // wildcard IN THE FEED that covers host — an armed one (its key), or an
 // all-off one a broader armed wildcard covers (an opt-out: nothing).
 func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
+	key, e, ok := s.PolicyFor(host)
+	if !ok || !siteCacheArmed(e) {
+		return "", false
+	}
+	return key, true
+}
+
+// PolicyFor is the feed row that decides host at the edge (policy_key_for):
+// the exact entry when there is one (armed or all-off), else the most
+// specific wildcard in the feed that covers host (armed, or an all-off
+// opt-out a broader armed wildcard covers). ok=false: no row decides host,
+// so the edge caches nothing for it. A row this build cannot load is an
+// all-off stand-in here, as in the feed.
+func (s *siteCacheStore) PolicyFor(host string) (string, SiteCacheEntry, bool) {
 	// The QUERIED host is a request host, not a policy: resolve it exactly as
 	// the edge does (siteCacheEdgeNormalizeHost), not with the strict
 	// create-time validator — the edge counts any host nginx passes it.
 	h := siteCacheEdgeNormalizeHost(host)
 	if h == "" {
-		return "", false
+		return "", SiteCacheEntry{}, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	entries := s.feedEntriesLocked()
 	if e, exact := entries[h]; exact {
-		if siteCacheArmed(e) {
-			return h, true
-		}
-		return "", false
+		return h, e, true
 	}
 	var armedWild []string
 	for k, e := range entries {
@@ -1032,23 +1043,22 @@ func (s *siteCacheStore) StatsKeyFor(host string) (string, bool) {
 			armedWild = append(armedWild, k)
 		}
 	}
-	best, bestArmed := "", false
+	best := ""
 	for k, e := range entries {
 		if !strings.HasPrefix(k, "*.") || !strings.HasSuffix(h, k[1:]) {
 			continue
 		}
-		armed := siteCacheArmed(e)
-		if !armed && !siteCacheWildcardCovers(armedWild, k) {
+		if !siteCacheArmed(e) && !siteCacheWildcardCovers(armedWild, k) {
 			continue // not in the feed
 		}
 		if best == "" || siteCacheFeedLess(k, best) {
-			best, bestArmed = k, armed
+			best = k
 		}
 	}
-	if !bestArmed {
-		return "", false
+	if best == "" {
+		return "", SiteCacheEntry{}, false
 	}
-	return best, true
+	return best, entries[best], true
 }
 
 func (s *siteCacheStore) load() {

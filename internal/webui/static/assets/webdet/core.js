@@ -90,7 +90,7 @@ export function createWebdetApp(config) {
         return "Updated " + this.lastRefreshAt.toLocaleTimeString();
       },
       pageTitle() {
-        if (this.isVhostPage) return "WebDetector / vhost live";
+        if (this.isVhostPage) return "WebDetector / vhost";
         if (this.isForensicsPage) return "WebDetector / forensics";
         if (this.isWAFPage) return "WebDetector / WAF engine";
         if (this.isControlsPage) return "WebDetector / vhost controls";
