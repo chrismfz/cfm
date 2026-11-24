@@ -804,7 +804,7 @@ armed by 402, and a ban for a real file that quotes PHP would be 6 h;
 `RULE_415 = 1` arms it. Held, it runs late with the other held rules
 (after every armed block rule), so a request 402 or an armed rule also catches
 keeps that rule's headline and ban. Exempt on the same legit-archive
-endpoints as 402.
+endpoints as 402. Why straight to block, and the panel ports: "Rule 417".
 
 ### Rule 430 — `rule_htaccess_poisoning`
 
@@ -1116,7 +1116,28 @@ credentials its POST would have written the file. At `block` the edge answers
 editor still scores (a global `exec(` / `system(` plus a superglobal reaches
 5), and that save must cost a 403, not a 6 h ban. Remedy for such a site: a
 rule-scoped exclude on the editor path (`cfm webtop waf exclude add <path>
---type path --rule 417 --scope host`). `RULE_417 = 1` arms the ban.
+--type path --rule 417 --scope host`). `RULE_417 = 1` arms the ban. The code-editor and installer
+endpoints the other body-PHP rules stand down for
+(`is_known_legit_php_upload_endpoint`: Code Snippets and String Locator saves,
+the plugin / theme installer) are exempt.
+
+**Why straight to block, not challenge first** (the ladder is logonly →
+challenge → block; 416, 332 and 10029 took the same exception on the same
+kind of evidence), for 417 and 415 alike:
+- every hit in the burn-in was an exploit tool, and none was a person;
+- the requests are POSTs from scripts or XHR (an editor save, a form upload).
+  A challenge page answers a script with HTML it never solves, and an XHR
+  editor shows it as a failed save, so a challenge tier would not reveal a
+  false positive any better than a 403 does;
+- the ban is held, so a false positive costs one 403 on one request, never a
+  6 h ban.
+
+**Panel ports.** Block tier is enforced on `:2083/:2087/:2096` too
+(`cfm_panel.lua`). cPanel File Manager saves and uploads pass without the WAF
+(`is_panel_api_or_sso`; on `cpanel.X:443`, Step 0d). Roundcube is not on that
+list, so an email over 2 KB that quotes PHP, or an attachment with PHP past
+402's head, gets a 403. The 7-day read saw no hit on a webmail host; watch for
+it, and remedy one with a rule-scoped exclude on the webmail host.
 
 ### Fleet read of 702, 10029 and 415 (2026-11-17, 14 days, 8 nodes)
 

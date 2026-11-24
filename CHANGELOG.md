@@ -33,7 +33,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   through an editor, or a real file quoting PHP, still scores, and that
   must be a 403 rather than a 6 h ban. 415 now runs late with the other
   held rules, so a request an armed rule also catches keeps that rule's ban.
-  See `docs/waf.md`, "Rule 415" and "Rule 417".
+  417 now stands down, like the other body-PHP rules, on the code-editor and
+  installer endpoints (Code Snippets, String Locator, the plugin / theme
+  installer). Webmail is not exempt: an email over 2 KB quoting PHP gets a
+  403 there. See `docs/waf.md`, "Rule 415" and "Rule 417".
 
 ### Fixed
 - **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**

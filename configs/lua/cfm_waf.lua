@@ -2993,7 +2993,12 @@ local function check_impl(ctx, st)
   -- headline and the push from 331, 421-425, 430-439 and 330).
   do
     local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
-    if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit then
+    -- Not on the code-editor / installer endpoints the other body-PHP rules
+    -- stand down for (is_known_legit_php_upload_endpoint: Code Snippets and
+    -- String Locator saves, the plugin / theme installer): there a whole PHP
+    -- file is the request's purpose, and at block it would be a 403.
+    if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit
+       and not legit_archive_upload then
       local head_len = tonumber(CFG.php_webshell_max_scan_len) or CFG.max_scan_len
       local deep_len = tonumber(CFG.php_webshell_deep_scan_len) or 32768
       if deep_len > head_len

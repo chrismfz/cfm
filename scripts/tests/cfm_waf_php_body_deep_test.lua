@@ -280,6 +280,22 @@ do
   e.args = q; e.raw_uri = e.uri .. "?" .. q
   hit, reason, _, action, _, rid = waf.check(e)
   check(hit and rid == 332, "417 + an armed 332: 332 owns the headline (got " .. tostring(rid) .. " " .. tostring(reason) .. ")")
+  -- The code-editor / installer endpoints every body-PHP rule stands down
+  -- for (is_known_legit_php_upload_endpoint) stay exempt at block: 415 since
+  -- its move to the late group, 417 since its promotion.
+  local sl = req('{"content":"' .. string.rep("x", 2500) .. '<?php if(isset($_POST[\\"c\\"])){eval($_POST[\\"c\\"]);}"}',
+                 "/wp-json/string-locator/v1/save", "application/json")
+  hit, reason, _, _, _, rid = waf.check(sl)
+  check(not (hit and (rid == 417 or rid == 404)), "String Locator save: no 404 / 417 (got " .. tostring(reason) .. ")")
+  local cs = req('{"code":"' .. string.rep("x", 2500) .. '<?php system($_GET[c]);"}', "/wp-json/code-snippets/v1/snippets", "application/json")
+  hit, reason, _, _, _, rid = waf.check(cs)
+  check(not (hit and rid == 417), "Code Snippets save: no 417 (got " .. tostring(reason) .. ")")
+  local inst = req("--b\r\nContent-Disposition: form-data; name=\"pluginzip\"; filename=\"x.txt\"\r\nContent-Type: text/plain\r\n\r\n" ..
+                   string.rep("readme ", 500) .. "<?php echo 1; ?>\r\n--b--\r\n",
+                   "/wp-admin/update.php", "multipart/form-data; boundary=b")
+  inst.args = "action=upload-plugin"; inst.raw_uri = "/wp-admin/update.php?action=upload-plugin"
+  hit, reason, _, _, _, rid = waf.check(inst)
+  check(not (hit and rid == 415), "plugin installer upload: no 415 (got " .. tostring(reason) .. ")")
   -- Source order: 415 and 417 are recorded after 332.
   local src = io.open("configs/lua/cfm_waf.lua"):read("*a")
   local at332 = src:find("RULE_IDS.rule_php_code_args)", 1, true)
