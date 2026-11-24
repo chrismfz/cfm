@@ -164,6 +164,7 @@ func TestParseUpstreamTime(t *testing.T) {
 	for in, want := range map[string]float64{
 		"": 0, "-": 0, "0.000": 0, "1.250": 1.25,
 		"0.100, 0.200": 0.3, "0.5 : 1.5": 2, "-, 0.4": 0.4, "x": 0,
+		"-, -": 0, "-1": 0, "+Inf": 0, "NaN": 0,
 	} {
 		if got := parseUpstreamTime(in); got < want-1e-9 || got > want+1e-9 {
 			t.Errorf("parseUpstreamTime(%q) = %v, want %v", in, got, want)
@@ -183,13 +184,17 @@ func captureRateLines(t *testing.T) *[]string {
 }
 
 // The tier is judged every tick: an IP that first crossed the rate bar cheap
-// (tier=-, line throttled for the holddown) still logs its tier=cost line
-// once it has cost the origin enough, and only once.
+// (tier=-, line throttled for the holddown) still logs its tier=cost line once
+// it has cost the origin enough, and from then on ONE line per holddown, as
+// any outlier: the plain key it logged under first must not open on its own
+// clock and log the tier a second time.
 func TestRateOutlierCostTierNotHeldByFirstLine(t *testing.T) {
 	lines := captureRateLines(t)
 	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute,
-		AbuseShadow: true, AbuseShadowRateOutlier: true})
-	now := float64(time.Now().Unix())
+		AbuseShadow: true, AbuseShadowRateOutlier: true,
+		ChallengeSuspiciousHolddown: 30 * time.Second})
+	t0 := time.Now()
+	now := float64(t0.Unix())
 	const host = "shop.example.gr"
 	req := func(ip string, i int, urt float64) {
 		e.ingest(LogRec{TS: now + float64(i)*0.01, IP: ip, Host: host, Method: "get", URI: fmt.Sprintf("/p/%d", i),
@@ -201,19 +206,22 @@ func TestRateOutlierCostTierNotHeldByFirstLine(t *testing.T) {
 	for i := 0; i < 25; i++ {
 		req("192.0.2.1", i, 1) // 25 s of origin: 0.21 of the window
 	}
-	e.emitAbuseShadowRateOutliers(time.Now())
+	e.emitAbuseShadowRateOutliers(t0)
 	for i := 25; i < 100; i++ {
 		req("192.0.2.1", i, 1) // now 100 s: 0.83
 	}
-	e.emitAbuseShadowRateOutliers(time.Now())
-	e.emitAbuseShadowRateOutliers(time.Now())
+	// The tier enters at +15s; the plain key would reopen at +30s and +60s,
+	// the tier's own at +45s.
+	for _, d := range []time.Duration{15, 30, 45, 60} {
+		e.emitAbuseShadowRateOutliers(t0.Add(d * time.Second))
+	}
 	var tiers []string
 	for _, ln := range *lines {
 		en, _ := abuseshadow.Parse(ln)
 		tiers = append(tiers, en.Tier)
 	}
-	if len(tiers) != 2 || tiers[0] != "" || tiers[1] != "cost" {
-		t.Errorf("tiers = %q, want [\"\" \"cost\"] (lines %q)", tiers, *lines)
+	if strings.Join(tiers, ",") != ",cost,cost" {
+		t.Errorf("tiers = %q, want [\"\" cost cost] (lines %q)", tiers, *lines)
 	}
 }
 
@@ -246,5 +254,28 @@ func TestRateOutlierUnmeasuredOrigin(t *testing.T) {
 	en, _ := abuseshadow.Parse(ln)
 	if d := en.HostStatic - 10.0/60; d > 0.01 || d < -0.01 {
 		t.Errorf("host_static = %v, want %.2f", en.HostStatic, 10.0/60)
+	}
+}
+
+// "Measured" is per vhost: a vhost whose lines report no upstream reads "-"
+// even while another vhost on the node is measured (a log-source handover).
+func TestRateOutlierMeasuredPerVhost(t *testing.T) {
+	lines := captureRateLines(t)
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute,
+		AbuseShadow: true, AbuseShadowRateOutlier: true})
+	now := float64(time.Now().Unix())
+	e.ingest(LogRec{TS: now, IP: "10.9.9.9", Host: "edge.example.gr", Method: "get", URI: "/",
+		Status: 200, Upstream: true, UpstreamName: "cfm_apache", URT: 0.5}, "raw")
+	const host = "apache.example.gr"
+	for i := 0; i < 10; i++ {
+		e.ingest(LogRec{TS: now, IP: fmt.Sprintf("10.0.0.%d", i+1), Host: host, Method: "get", URI: "/", Status: 200}, "raw")
+	}
+	for i := 0; i < 40; i++ {
+		e.ingest(LogRec{TS: now + float64(i)*0.01, IP: "192.0.2.1", Host: host, Method: "get",
+			URI: fmt.Sprintf("/p/%d", i), Status: 200, RT: 3}, "raw")
+	}
+	e.emitAbuseShadowRateOutliers(time.Now())
+	if len(*lines) != 1 || !strings.Contains((*lines)[0], " origin=- origin_busy=0.0 tier=-") {
+		t.Errorf("lines = %q, want one line with origin=- (vhost unmeasured) and the node's origin_busy", *lines)
 	}
 }

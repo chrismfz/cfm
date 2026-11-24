@@ -263,6 +263,17 @@ func (e *Engine) belowChallengeRPSFloor(row SuspiciousRow) bool {
 
 // shouldLogVhostSuppress throttles the suppressed_by_exclude audit line to at
 // most once per holddown window per host.
+// stampVhostSuppress marks key as logged at now without asking, for a caller
+// that logged under another key and must hold this one's line back too.
+func (e *Engine) stampVhostSuppress(key string, now time.Time) {
+    e.vhostMu.Lock()
+    defer e.vhostMu.Unlock()
+    if e.vhostSuppressLoggedAt == nil {
+        e.vhostSuppressLoggedAt = make(map[string]time.Time)
+    }
+    e.vhostSuppressLoggedAt[key] = now
+}
+
 func (e *Engine) shouldLogVhostSuppress(host string, now time.Time) bool {
     win := e.cfg.ChallengeSuspiciousHolddown
     if win <= 0 {

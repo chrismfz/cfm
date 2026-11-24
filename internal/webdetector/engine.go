@@ -140,15 +140,12 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 // parseUpstreamTime reads the edge's $upstream_response_time: one value, or
 // one per upstream tried ("0.100, 0.200" after a retry, "0.1 : 0.2" across an
 // internal redirect), which it sums, so a retried request keeps its origin
-// time instead of reading as 0. "-" and unparsable parts count 0.
+// time instead of reading as 0. "-", unparsable, negative and infinite parts
+// count 0.
 func parseUpstreamTime(s string) float64 {
-	if !strings.ContainsAny(s, ",:") {
-		v, _ := strconv.ParseFloat(zero(s), 64)
-		return v
-	}
 	var sum float64
 	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ':' || r == ' ' }) {
-		if v, err := strconv.ParseFloat(part, 64); err == nil && v > 0 {
+		if v, err := strconv.ParseFloat(part, 64); err == nil && v > 0 && !math.IsInf(v, 0) {
 			sum += v
 		}
 	}

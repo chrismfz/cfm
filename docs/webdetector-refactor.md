@@ -285,10 +285,13 @@ The live shape Signal C must catch, and why it beats the vhost-aggregate score:
   leaves the tier.
 
   Other details of the line:
-  - The tier is judged on every tick. Its first `tier=cost` logs under its
-    own throttle key, so it is not held back by the `tier=-` line the IP
-    logged when it first crossed the rate bar (with only ~MinReq requests in
-    the window).
+  - The tier is judged on every tick. While an IP is in the tier its own
+    throttle key gates the line (and stamps the plain one), so its entry is
+    not held back by the `tier=-` line it logged when it first crossed the
+    rate bar (with only ~MinReq requests in the window). From then on it logs
+    one line per holddown, like any outlier.
+  - `origin=` is measured per vhost (`-` for a vhost whose lines report no
+    upstream); `origin_busy=` is the node's.
   - `host_static=` is the vhost's own static share. It is near 0 when a CDN
     serves the assets or they live on another host. There every visitor
     reads `static=0`, so before any enforcement the tier needs a vhost that

@@ -152,6 +152,7 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 	// keeps the figures right for a caller that runs without it.
 	snap := make(map[string]map[string]*rateIP)
 	hostStatic := make(map[string][2]int) // host -> {static, dynamic} requests
+	hostMeasured := make(map[string]bool) // host -> a request reported its upstream
 	var originSec float64
 	upstreamSeen := false
 	winStart := now.Add(-time.Duration(winSec * float64(time.Second)))
@@ -171,6 +172,7 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			hst += b.staticTotal
 			if b.upstreamSeen {
 				upstreamSeen = true
+				hostMeasured[host] = true
 			}
 			// ipsDyn = dynamic requests only (static assets excluded), so a
 			// human's per-pageview asset fan-out doesn't read as a rate outlier.
@@ -259,7 +261,10 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			// own throttle key, so the tier isn't held back by a tier=- line the
 			// same IP logged when it first crossed.
 			originShare := r.origin / winSec
-			costTier := upstreamSeen && rateCostTier(r.static, originShare, cfg)
+			// Measured per vhost: at a log-source handover the node can hold
+			// both kinds of line inside one window.
+			measured := hostMeasured[host]
+			costTier := measured && rateCostTier(r.static, originShare, cfg)
 			// Per-tick enrich cap — checked BEFORE the throttle so hitting the cap
 			// doesn't consume a throttle token (the IP logs on a later tick).
 			// `continue` (not `return`): the detailed line is skipped past the cap,
@@ -269,14 +274,18 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 			}
 			// Throttle BEFORE the (potentially DNS-bound) enrichment, so a
 			// persistent outlier doesn't do a good-bot forward-confirm every tick.
-			// A line that logs with the tier also spends the tier's key, so the
-			// same IP doesn't log a second tier=cost line right after it.
-			logLine := e.shouldLogVhostSuppress("abuseshadow:"+host+"|"+ip, now)
+			// ONE key gates each tick: the tier's while the IP is in it (and a
+			// line under it stamps the plain key too), the plain key otherwise.
+			// So an IP in the tier logs once per holddown, like any outlier,
+			// and its entry into the tier is not held back by the tier=- line
+			// it logged when it first crossed the rate bar.
+			baseKey := "abuseshadow:" + host + "|" + ip
 			if costTier {
-				if logCost := e.shouldLogVhostSuppress("abuseshadow:cost:"+host+"|"+ip, now); !logCost && !logLine {
+				if !e.shouldLogVhostSuppress("abuseshadow:cost:"+host+"|"+ip, now) {
 					continue
 				}
-			} else if !logLine {
+				e.stampVhostSuppress(baseKey, now)
+			} else if !e.shouldLogVhostSuppress(baseKey, now) {
 				continue
 			}
 			enriched++
@@ -313,7 +322,7 @@ func (e *Engine) emitAbuseShadowRateOutliers(now time.Time) {
 				tier = "cost"
 			}
 			originStr := "-"
-			if upstreamSeen {
+			if measured {
 				originStr = strconv.FormatFloat(originShare, 'f', 2, 64)
 			}
 			// host_static = the vhost's own static share of its requests in the
