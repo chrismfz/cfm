@@ -285,20 +285,33 @@ func TestTrafficMix_CompactsOldBuckets(t *testing.T) {
 			break
 		}
 	}
-	if first != fmt.Sprintf("h%03d.example", n-1) {
-		t.Fatalf("top named vhost after compaction: %s, want the costliest", first)
+	if first != fmt.Sprintf("h%03d.example", n-1) || m.Hosts[0].Host == tmOtherKey {
+		t.Fatalf("top vhost after compaction: %s (row 0 %s), want the costliest named one first", first, m.Hosts[0].Host)
+	}
+	if m.Hosts[len(m.Hosts)-1].Host != tmOtherKey {
+		t.Fatalf("_other is not the trailing row: %s", m.Hosts[len(m.Hosts)-1].Host)
+	}
+	if lim := s.Snapshot(t0.Add(2*time.Hour), 24*time.Hour, "", false, 5, 0); len(lim.Hosts) != 6 || lim.Hosts[5].Host != tmOtherKey {
+		t.Fatalf("hosts=5: %d rows, want 5 named + the _other row", len(lim.Hosts))
 	}
 }
 
-// The window starts at the first bucket wholly inside it.
+// The window starts on the boundary of the bucket holding since (rounded
+// down) and reports that span; a short window just after a boundary still
+// covers what was asked.
 func TestTrafficMix_WindowStartsOnABucket(t *testing.T) {
 	s := newTrafficMixStore()
 	b := tmBase().Truncate(tmBucketSec * time.Second)
-	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0), b.Add(time.Minute))    // in the partial bucket
-	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0), b.Add(6*time.Minute)) // inside
+	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0), b.Add(-time.Minute)) // before the window
+	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0), b.Add(time.Minute))
+	tmFeed(s, tmOrigin("203.0.113.1", "a.example", "GET", "/", "curl/8", 200, 0), b.Add(6*time.Minute))
 	m := s.Snapshot(b.Add(17*time.Minute), 15*time.Minute, "", false, 0, 0)
-	if c := tmClassOf(m, "bot"); c.Requests != 1 || m.Since != b.Add(5*time.Minute).Unix() || m.WindowSec != 12*60 {
-		t.Fatalf("requests %d, since %d, window %d s; want 1 from the bucket at +5m, a 12-minute window", c.Requests, m.Since, m.WindowSec)
+	if c := tmClassOf(m, "bot"); c.Requests != 2 || m.Since != b.Unix() || m.WindowSec != 17*60 {
+		t.Fatalf("requests %d, since %d, window %d s; want 2 from the bucket at b, a 17-minute span", c.Requests, m.Since, m.WindowSec)
+	}
+	// 5 seconds after a boundary, a 5m window still covers >= 5 minutes.
+	if m := s.Snapshot(b.Add(10*time.Minute+5*time.Second), 5*time.Minute, "", false, 0, 0); m.WindowSec < 300 {
+		t.Fatalf("a 5m window just after a boundary covers %d s", m.WindowSec)
 	}
 }
 
@@ -386,7 +399,7 @@ func TestTrafficMix_HandlerAdminOnly(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Schema != "webdet.traffic_mix.v1" || m.WindowSec > 900 || m.WindowSec <= 600 || tmClassOf(m, "bot").Requests != 1 || m.Note == "" {
+	if m.Schema != "webdet.traffic_mix.v1" || m.WindowSec < 900 || m.WindowSec >= 1200 || tmClassOf(m, "bot").Requests != 1 || m.Note == "" {
 		t.Fatalf("response: %+v", m)
 	}
 }

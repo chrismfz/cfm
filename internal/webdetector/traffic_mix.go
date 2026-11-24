@@ -580,10 +580,12 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 		}
 	}
 	nowSec := now.Unix()
-	// The window starts at the first bucket wholly inside it: a bucket that
-	// began before since would add up to 5 minutes the averages do not cover.
+	// The window starts at the boundary of the bucket holding since (rounded
+	// DOWN), and since / window_sec report that span: every figure, the
+	// averages included, is exact over what is counted, and a short window
+	// asked just after a boundary still covers at least what was asked.
 	sinceSec := nowSec - int64(window/time.Second)
-	firstB, lastB := (sinceSec+tmBucketSec-1)/tmBucketSec, nowSec/tmBucketSec
+	firstB, lastB := sinceSec/tmBucketSec, nowSec/tmBucketSec
 	sinceSec = firstB * tmBucketSec
 
 	out := TrafficMix{Schema: "webdet.traffic_mix.v1", WindowSec: nowSec - sinceSec, Since: sinceSec, Until: nowSec, Host: host, Note: trafficMixNote}
@@ -721,6 +723,19 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 			}
 			out.Hosts = append(out.Hosts, h)
 		}
+		// The summed tail (_other) is never ranked against real vhosts nor
+		// takes a hosts=N slot: it trails the list.
+		var other *TrafficMixHost
+		named := out.Hosts[:0]
+		for i := range out.Hosts {
+			if out.Hosts[i].Host == tmOtherKey {
+				o := out.Hosts[i]
+				other = &o
+				continue
+			}
+			named = append(named, out.Hosts[i])
+		}
+		out.Hosts = named
 		sort.Slice(out.Hosts, func(i, j int) bool {
 			if out.Hosts[i].Total.OriginSec != out.Hosts[j].Total.OriginSec {
 				return out.Hosts[i].Total.OriginSec > out.Hosts[j].Total.OriginSec
@@ -729,6 +744,9 @@ func (s *trafficMixStore) Snapshot(now time.Time, window time.Duration, host str
 		})
 		if len(out.Hosts) > hostLimit {
 			out.Hosts = out.Hosts[:hostLimit]
+		}
+		if other != nil {
+			out.Hosts = append(out.Hosts, *other)
 		}
 	}
 

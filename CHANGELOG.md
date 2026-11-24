@@ -31,7 +31,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   by origin time and the top clients (the raw UA for browser-looking ones)
   with their top IPs over the last hour. On titan on 2026-11-24 this is the
   table that showed Meta and a Chrome/152 scraper at a third of the requests
-  but ~61% of the origin time. The classes are labels, never an enforcement
+  but ~61% of the origin time. `?host=` (with `merge_www` for the www. twin)
+  narrows it to one vhost, without a status mix or clients. Beyond the last
+  hour each 5-minute bucket keeps its top 256 vhosts and 64 clients per class,
+  the rest summed under `_other`. The classes are labels, never an enforcement
   decision; the counters survive a config reload, not a restart.
 
 ### Changed
