@@ -1013,6 +1013,29 @@ do
   h, u = run("cfm_apache_micro", { "cfm_clearance=B", "_fbp=storedA" }, "1")
   check(h == "cfm_clearance=B" and u == "1",
         "a HIT whose stored _fbp sits next to a cookie set before the micro exec never lets the stored _fbp out")
+  -- The edge's own lines ($cfm_edge_sc, the Step 2b cfm_clearance refresh):
+  -- kept on the response, never counted as unsafe — and only an EXACT match.
+  local EDGE = "cfm_clearance=edgeA; Path=/; Max-Age=2700; HttpOnly; SameSite=Lax; Secure"
+  ngx.var.cfm_edge_sc = EDGE
+  h, u = run("cfm_apache_micro", EDGE, "1")
+  check(h == EDGE and u == "", "only the edge's cookie → kept on the response, storable: " .. tostring(u))
+  h, u = run("cfm_apache_micro", { EDGE, "_ga=1" }, "1")
+  check(h == EDGE and u == "", "edge's cookie + a tracking one → tracking stripped, edge kept, storable")
+  h, u = run("cfm_apache_micro", { EDGE, "PHPSESSID=s" }, "1")
+  check(type(h) == "table" and #h == 2 and u == "1", "edge's cookie + a session → both kept, unsafe")
+  h, u = run("cfm_apache_micro", "cfm_clearance=origin; Path=/", "1")
+  check(h == "cfm_clearance=origin; Path=/" and u == "1", "a cfm_clearance line the edge did not set exactly → unsafe")
+  h, u = run("cfm_apache_micro", EDGE .. "x", "1")
+  check(u == "1", "a line that only starts like the edge's → unsafe")
+  ngx.var.cfm_edge_sc = EDGE .. "\n" .. "cfm_other=1"
+  h, u = run("cfm_apache_micro", { EDGE, "cfm_other=1" }, "1")
+  check(u == "", "several recorded edge lines → all left out of the decision")
+  ngx.var.cfm_edge_sc = ""
+  h, u = run("cfm_apache_micro", EDGE, "1")
+  check(h == EDGE and u == "1", "nothing recorded → the clearance line is unsafe, as before")
+  ngx.var.cfm_edge_sc = nil
+  h, u = run("cfm_apache_micro", EDGE, "1")
+  check(h == EDGE and u == "1", "an older conf (no $cfm_edge_sc) → unsafe, as before")
   h, u = run("cfm_apache_micro", "_fbp=fb.1.x, wordpress_logged_in_x=u", "1")
   check(h == "_fbp=fb.1.x, wordpress_logged_in_x=u" and u == "1", "a comma-joined line is kept whole and unsafe")
   h, u = run("cfm_apache_micro", "noequals", "1")

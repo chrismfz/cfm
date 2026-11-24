@@ -151,7 +151,8 @@ function H.run(req)
   return {
     ok = ok, err = err, exited = exited, redirected = redirected, execd = execd,
     upstream = vars.cfm_upstream, pass = vars.cfm_pass, action = headers_out["X-CFM-Action"],
-    rpcs = table.concat(rpcs, ","), logs = logs, SH = SH, reads = reads,
+    rpcs = table.concat(rpcs, ","), logs = logs, SH = SH, reads = reads, vars = vars,
+    headers = headers_out,
   }
 end
 

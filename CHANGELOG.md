@@ -77,6 +77,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   package (`make release` regenerates it from the same, narrower sources).
 
 ### Added
+- **Visitors who solved a challenge are micro-cached.** A vhost under a
+  challenge (ours, or automatic under heavy traffic) used to send every page
+  of every visitor who had solved it to the origin: the edge's own
+  `cfm_clearance` cookie, refreshed on each request, made the response
+  unstorable. On a micro-armed vhost they are now served from the
+  micro-cache like any anonymous visitor, and each gets only their own
+  clearance cookie back, on a cache HIT too (measured on nginx with three
+  visitors; the stored copy never holds one). The WAF still runs first, and
+  every micro rail applies (session cookies, admin paths, …). Needs the edge
+  conf of this release (`$cfm_edge_sc`); with an older one nothing changes.
 - **Bypass-list crawlers are micro-cached.** Googlebot, Bingbot, Applebot,
   DuckDuckBot, Skroutz and the other crawlers of the bypass list used to go
   straight to the origin on every request, so a crawl storm reached PHP and

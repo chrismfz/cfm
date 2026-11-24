@@ -1,14 +1,16 @@
--- Structural test: the Tier B micro-cache is entered from exactly two places in
--- cfm.lua. Step 4 (plain allow), after every decision step: a micro HIT
+-- Structural test: the Tier B micro-cache is entered from exactly three places
+-- in cfm.lua. Step 4 (plain allow), after every decision step: a micro HIT
 -- answers the request from the cache without the origin, so an entry any
 -- earlier — before the WAF (Step 2), the forced challenge (Step 2.5) or the
 -- bridge decision (Step 3) — would serve a cached page to a request those
 -- steps block or challenge. And the Step 0 static bypass, for a crawler of the
 -- bypass list ("1") only: none of those steps applies to a bypassed client,
 -- and its entries live in the crawler keyspace (ngx.ctx.cfm_micro_class =
--- "crawler", written nowhere else), so a visitor never reads one. (The Step 2b
--- clearance fast-path is deliberately not an entry; docs/site-cache-design.md
--- §5.5.1.) Static reading of the source, with
+-- "crawler", written nowhere else), so a visitor never reads one. And the Step
+-- 2b clearance fast path (docs/site-cache-design.md §5.5.1), after the WAF
+-- (Step 2) and after the cookie refresh, only on a conf that declares
+-- $cfm_edge_sc (the record of the edge's own Set-Cookie lines that keeps the
+-- refreshed cookie out of the store decision). Static reading of the source, with
 -- Lua comments and string contents stripped, so a comment or a log string
 -- can never satisfy (or trip) a check. It pins the plain spellings; a
 -- deliberately obfuscated route (a name computed at run time, a helper
@@ -103,7 +105,7 @@ check(not strip('-- micro_cache_target()\nlocal s = "micro_cache_target()"\n', f
       "the stripper leaves comment / string text in the code")
 
 -- Step headers, in the raw source (they are comments).
-local step4, step0, step0_end
+local step4, step0, step0_end, step2b, step2b_end
 local last_step_line = 0
 do
   local l = 0
@@ -111,13 +113,16 @@ do
     l = l + 1
     if line:match("^%-%- ── Step ") then
       if step0 and not step0_end then step0_end = l end
+      if step2b and not step2b_end then step2b_end = l end
       last_step_line = l
       if line:match("^%-%- ── Step 4: Allow") then step4 = l end
       if line:match("^%-%- ── Step 0: Static IP/CIDR bypass") then step0 = l end
+      if line:match("^%-%- ── Step 2b: Honour clearance allow") then step2b = l end
     end
   end
 end
 check(step0 ~= nil and step0_end ~= nil, "cfm.lua has no '-- ── Step 0: Static IP/CIDR bypass' block")
+check(step2b ~= nil and step2b_end ~= nil, "cfm.lua has no '-- ── Step 2b: Honour clearance allow' block")
 -- the source text of one line range (raw, or stripped of comments/strings)
 local function span(text, a, b)
   local out, l = {}, 0
@@ -136,13 +141,28 @@ check(step4 == last_step_line, "a step header follows Step 4 (line " .. tostring
 local def = lines_of(code, "local%s+function%s+micro_cache_target%s*%(")
 local uses = lines_of(code, "%f[%w_]micro_cache_target%f[^%w_]")
 check(#def == 1, #def .. " definitions of micro_cache_target (want 1)")
-check(#uses == 3, (#uses - #def) .. " other uses of micro_cache_target (want exactly 2: the Step 0 crawler call and the Step 4 call)")
-local call, crawler_call
+check(#uses == 4, (#uses - #def) .. " other uses of micro_cache_target (want exactly 3: the Step 0 crawler, Step 2b clearance and Step 4 calls)")
+local call, crawler_call, clearance_call
 for _, l in ipairs(uses) do
   if l ~= def[1] then
     if step4 and l > step4 then call = l
-    elseif step0 and l > step0 and l < step0_end then crawler_call = l end
+    elseif step0 and l > step0 and l < step0_end then crawler_call = l
+    elseif step2b and l > step2b and l < step2b_end then clearance_call = l end
   end
+end
+check(clearance_call ~= nil, "the third micro_cache_target call is not inside the Step 2b clearance block (lines " ..
+      tostring(step2b) .. "-" .. tostring(step2b_end) .. ")")
+
+-- The Step 2b entry: inside `if clearance_allow then`, after the cookie refresh
+-- (its line must be recorded before the exec), gated on a conf that declares
+-- $cfm_edge_sc, and handed straight to ngx.exec.
+do
+  local code2b = step2b and span(code, step2b, step2b_end) or ""
+  local open = code2b:find("if%s+clearance_allow%s+then")
+  local refresh = code2b:find("refresh_clearance_cookie%s*%(")
+  local gate = code2b:find("if%s+ngx%s*%.%s*var%s*%.%s*cfm_edge_sc%s*~=%s*nil%s+then%s+local%s+([%a_][%w_]*)%s*=%s*micro_cache_target%s*%(%s*%)%s*if%s+%1%s+then%s+return%s+ngx%s*%.%s*exec%s*%(%s*%1%s*%)%s*end")
+  check(open ~= nil and refresh ~= nil and gate ~= nil and open < refresh and refresh < gate,
+        "at Step 2b the entry must be `if ngx.var.cfm_edge_sc ~= nil then local t = micro_cache_target() if t then return ngx.exec(t) end`, inside `if clearance_allow then`, after refresh_clearance_cookie")
 end
 check(call ~= nil, "micro_cache_target is not called after the Step 4 header (line " .. tostring(step4) .. ")")
 check(crawler_call ~= nil, "the second micro_cache_target call is not inside the Step 0 static-bypass block (lines " ..
@@ -200,8 +220,8 @@ while true do
   if ts and es > ts and es < te then exec_in_tail = true end
   einit = ee + 1
 end
-check(nexec == 2 and exec_in_tail,
-      nexec .. " mention(s) of ngx.exec in cfm.lua (want exactly two, the Step 0 crawler and the Step 4 micro calls; an alias counts) — if a new one can reach an @cfm_micro_<n>s location it must sit at Step 4; update this test")
+check(nexec == 3 and exec_in_tail,
+      nexec .. " mention(s) of ngx.exec in cfm.lua (want exactly three, the Step 0 crawler, Step 2b clearance and Step 4 micro calls; an alias counts) — if a new one can reach an @cfm_micro_<n>s location it must sit at Step 4; update this test")
 -- cfm.lua itself never names a micro location (cfm_cache.lua builds it).
 check(not strip(src, true):find("@cfm_micro_", 1, true), "cfm.lua names an @cfm_micro_ location in its code — only cfm_cache.lua builds the target")
 
@@ -225,5 +245,5 @@ end
 all:close()
 
 if fails > 0 then io.stderr:write(fails .. " failure(s)\n"); os.exit(1) end
-print("OK cfm_micro_entry_structure_test (micro entries at cfm.lua:" .. tostring(crawler_call) .. " (Step 0 crawler) and :" ..
-      tostring(call) .. " (Step 4 at :" .. tostring(step4) .. "))")
+print("OK cfm_micro_entry_structure_test (micro entries at cfm.lua:" .. tostring(crawler_call) .. " (Step 0 crawler), :" ..
+      tostring(clearance_call) .. " (Step 2b clearance) and :" .. tostring(call) .. " (Step 4 at :" .. tostring(step4) .. "))")
