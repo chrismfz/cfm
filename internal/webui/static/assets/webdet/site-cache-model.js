@@ -502,5 +502,5 @@ export function debugCurl(host, path = "/", taken = []) {
   let p = String(path || "/").trim() || "/";
   if (!p.startsWith("/")) p = `/${p}`;
   p = p.replace(/'/g, "%27").replace(/\s/g, (c) => encodeURIComponent(c));
-  return `curl -gsk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' --resolve ${h}:9043:VHOST_IP 'https://${h}:9043${p}'`;
+  return `curl -gsk -o /dev/null -D - -H 'X-CFM-Cache-Debug: 1' -H 'Accept-Encoding: gzip, br' --resolve ${h}:9043:VHOST_IP 'https://${h}:9043${p}'`;
 }

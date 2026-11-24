@@ -1141,6 +1141,10 @@ end
 -- a skipped micro, never a stored response. (A response carrying
 -- X-Accel-Redirect is served by an internal redirect and never reaches
 -- micro_note with a fetch status — it is neither stored nor remembered.)
+-- NOT mirrored on purpose: $cfm_cache_no_ae (a request accepting neither br
+-- nor gzip is never stored). It is about the request, not the page: marking
+-- the key would let any client without Accept-Encoding switch micro off for
+-- that URL for everyone, so such a fetch reads storable and is not marked.
 local function micro_storable(status, sc_unsafe, cc_nostore, xae_nocache, vary, x_accel_buffering, session_hdr)
     if status ~= "200" then return false end
     -- "" only: nil (the filter never ran) or anything else counts as unsafe,

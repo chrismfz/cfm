@@ -72,6 +72,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   another version or a corrupt one starts the page empty, as before.
 
 ### Fixed
+- **Site Cache no longer serves CSS/JS uncompressed to every visitor.** The
+  cache key leaves out `Accept-Encoding` and relies on the origin's `Vary`,
+  but LiteSpeed answers a request that accepts no compression (a bot, `curl`)
+  with the full uncompressed body and no `Vary`. When such a request filled a
+  key first, that copy was stored and served to everyone, for as long as the
+  asset's `max-age` (often a year). On orion, 53% of the bytes of the heaviest
+  compressible URLs went out that way, for example a 485 KB css that the
+  origin sends as 42 KB of Brotli. Both tiers now store nothing fetched for a
+  request that does not accept `br` or `gzip`. The request is still served.
+  **After upgrading, where Site Cache is armed:** the package writes the new
+  edge config but does not reload the edge, so first reload it (`systemctl
+  reload cfm-edge`, or the engine the upgrade output names), then purge once
+  (`cfm webtop site-cache purge --all`). Copies stored before the fix stay
+  until they expire, and a purge done before the reload is refilled by the
+  old config.
 - **Vhost controls: a tenant's challenge exclude no longer reads as
   covering its other hosts.** The Challenge column matched an exclude by its
   value alone, so an exclude a cPanel user added for `example.com` showed
