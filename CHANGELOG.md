@@ -21,6 +21,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **The edge access log carries the connection** (`conn=` and `creq=`, at
+  the end of each `log_format cfm` line): `$connection` and
+  `$connection_requests`. `sslr=` repeats on every request of a connection,
+  so on HTTP/2 a per-line resumption ratio overstated resumption; counting
+  only `creq=1` lines (HTTP/1.x and HTTP/2; an HTTP/3 stream is a
+  connection of its own to nginx) gives one line per handshake, the base for
+  measuring full vs resumed TLS handshakes. About 20 bytes more per line; every reader
+  reads fields by name, so older lines (without them) and newer ones parse
+  alike.
 - **cfm-admin: one page per vhost.** The Vhost page (it was "Vhost live";
   same URL, every link to it still works) now opens with the host's
   settings at a glance: challenge, WAF, HTTP/3, Site Cache, traffic rules

@@ -39,7 +39,17 @@ rt=0.081 urt="0.041" uct="0.012" uht="0.040" sslr="." luams=1.4
   misses.
 * `sslr` (`$ssl_session_reused`) — `r` when the *client* handshake was
   resumed from the session cache; `.` on a full handshake. Watch the ratio
-  climb after `ssl_session_cache` deploys.
+  climb after `ssl_session_cache` deploys. It repeats on every request of a
+  connection, so a per-line ratio overstates resumption (an HTTP/2 page load
+  is one handshake and dozens of lines): count handshakes on the lines with
+  `creq=1`, over HTTP/1.x and HTTP/2 only. nginx gives each HTTP/3 stream a
+  connection of its own, so leave `proto="HTTP/3.0"` lines out of the count
+  (HTTP/3 is off by default).
+* `conn` (`$connection`) / `creq` (`$connection_requests`) — the connection's
+  serial number and the request's place on it. `creq=1` is the request that
+  opened the connection; `conn` groups the rest of its requests. `conn` is a
+  counter that starts again at 1 when the edge restarts, so group by it only
+  within one run. Added 2026-11; older lines lack both.
 * `rt - uht` ≈ response transfer to the client (network-bound).
 
 So: `rt ≈ luams + uct + (uht - uct) + transfer`. Whatever bucket dominates
