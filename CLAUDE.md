@@ -818,8 +818,9 @@ cPanel — every rule here exists because of that. Design + as-built:
   number of counters.
 - **The never-cache rules differ by tier. Don't document them as one list.**
   Both tiers: Authorization, `Set-Cookie`/private/no-store, non-200,
-  panel/webmail hosts, GET/HEAD only, script paths; session cookies,
-  credential headers and admin paths are Tier B only. ONE Tier B exception: a
+  panel/webmail hosts, GET/HEAD only, script paths, a declared size cap
+  (Tier A 10 MB `$cfm_cache_too_big`, Tier B 5 MB `$cfm_micro_too_big`);
+  session cookies, credential headers and admin paths are Tier B only. ONE Tier B exception: a
   response whose Set-Cookie headers are ALL tracking cookies is stored, and the
   tracking lines are stripped from every micro response by
   `cfm_cache.micro_setcookie_filter` (`$cfm_sc_unsafe`, fail-closed "1"). That

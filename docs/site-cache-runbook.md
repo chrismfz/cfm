@@ -373,6 +373,11 @@ wildcard too (§6).
   - Tier A never stores a response that declares a `Content-Length` of 10 MB
     or more. A response without one (an origin compressing on the fly, e.g.
     cPanel "Optimize Website", sends it chunked) is not capped.
+  - Tier B never stores one of **5 MB** or more (`$cfm_micro_too_big`): a
+    dynamic download that reaches `location /` (a PHP-served zip, PDF or
+    export) is served, not stored, and its key is remembered as uncacheable,
+    so the next requests go to the origin direct. A chunked one (no
+    `Content-Length`) is not capped; the zone's `max_size` bounds it.
 - **Retired cache dirs.** Nothing creates these any more, and the current
   confs name none of them, so they are safe to delete:
   - `/var/cache/nginx/cfm_micro`, from before the per-bucket zones;

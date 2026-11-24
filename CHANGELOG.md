@@ -21,6 +21,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **Big responses are never micro-cached.** A response of 5 MB or more
+  (by its `Content-Length`) is served but not stored in the micro-cache. A
+  dynamic download that reaches the micro tier (a PHP-served zip, PDF or
+  export with no static file extension) used to be stored whole, which could
+  evict a zone's pages and be rewritten on every expiry. Its URL is now
+  remembered as uncacheable, so the next requests go to the origin direct.
+  A response sent without a length (chunked) is not capped.
 - **Web Traffic: rank the clients by any column.** Click Requests, Rate,
   Traffic, Origin time or IPs: the node picks the top clients by that column
   (the traffic mix API's new `sort=origin|requests|bytes|ips`, also on the MCP
