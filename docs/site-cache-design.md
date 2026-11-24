@@ -376,7 +376,9 @@ public entry points are `static_gate`, `micro_gate`, `observe`,
 Micro-cache (Tier B) is decided at the **allow-return**, after all
 enforcement: **Step 4** (Step 2b waits on §5.5.1), plus the **Step 0
 static bypass for a crawler** of the bypass list (kind `1`: Google, Bing,
-Apple, DuckDuckGo, Skroutz, …; a CDN `2` is never cached there).
+Apple, DuckDuckGo, Skroutz, …; a CDN `2` and a user fetcher `3`, Google's
+user-triggered fetchers that show the page to a person, are never cached
+there, and a held `3` is never micro-cached at all).
 `cfm_micro_entry_structure_test.lua` pins both. The crawler entry is safe
 before the WAF because nothing below Step 0 applies to a bypassed client
 anyway, and because a crawler gets its **own keyspace**: `micro_gate("crawler")`
@@ -462,7 +464,8 @@ the bucket model is the answer.
    uncacheable on the same variable. Harness evidence only (nginx 1.24 +
    lua-nginx-module 0.10.26): a header set with `ngx.header` before the
    `ngx.exec` (`X-CFM-Action`) is present on the micro response, HIT
-   included. Until then micro serves Step 4 only.
+   included. Until then a clearance holder is not micro-cached (micro serves
+   Step 4, and the Step 0 crawler entry, §5.3).
 2. **Origin keepalive — OPEN.** Caching sits in front of the origin whatever
    the `ORIGIN_KEEPALIVE` pools; 443 `proxy_ssl_session_reuse off` is
    unaffected. HIT/MISS accounting with keepalive armed is not yet checked on

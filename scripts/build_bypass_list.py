@@ -135,6 +135,20 @@ CDN_SOURCES = {
     "txt:https://www.quic.cloud/ips?ln",
 }
 
+# USER_FETCHER_FEEDS: the sources (by result name) whose clients fetch a page
+# FOR A PERSON and show it to them (Google's user-triggered fetchers and
+# agents: Read Aloud, Feedfetcher, Site Verification, the agentic fetchers).
+# Their prefixes are written as `<cidr> 3;`: they bypass like a crawler (a
+# vhost lockdown withdraws it too), but cfm.lua Step 0 never serves them from
+# the crawler micro-cache keyspace, which may hold a page an origin cloaked for
+# Googlebot (a hacked site's spam). A prefix in a CDN source too is written 2;
+# one in a crawler feed too is written 3.
+USER_FETCHER_FEEDS = {
+    "google-user-triggered-fetchers",
+    "google-user-triggered-fetchers-google",
+    "google-user-triggered-agents",
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 
 GOOGLE_FEEDS = {
@@ -158,6 +172,7 @@ class SourceResult:
     prefixes: set[str] = field(default_factory=set)
     meta: dict[str, Any] = field(default_factory=dict)
     cdn: bool = False  # from a CDN_SOURCES entry: written as `<cidr> 2;`
+    fetcher: bool = False  # a USER_FETCHER_FEEDS result: written as `<cidr> 3;`
 
 
 def eprint(*args: Any) -> None:
@@ -384,13 +399,13 @@ def address_space(prefixes: Iterable[str], drop_largest: bool = False) -> tuple[
 
 
 def existing_prefixes(path: str) -> list[str]:
-    """The ``<cidr>`` of each ``<cidr> 1;`` / ``<cidr> 2;`` data line in an
+    """The ``<cidr>`` of each ``<cidr> 1;`` / ``2;`` / ``3;`` data line in an
     existing output file."""
     try:
         with open(path, encoding="utf-8") as fh:
             return [s[:-2].strip() for line in fh
                     if (s := line.strip()) and not s.startswith("#")
-                    and (s.endswith(" 1;") or s.endswith(" 2;"))]
+                    and (s.endswith(" 1;") or s.endswith(" 2;") or s.endswith(" 3;"))]
     except OSError:
         return []
 
@@ -464,6 +479,7 @@ def render_output(results: list[SourceResult], output: str, union: set[str]) -> 
         f"# Generated at: {datetime.now(timezone.utc).isoformat()}",
         "# Format: <cidr> 1;  crawler (a vhost lockdown withdraws its bypass)",
         "#         <cidr> 2;  CDN fetching for visitors (bypasses even a lockdown)",
+        "#         <cidr> 3;  fetcher for a person (as 1, never micro-cached as a crawler)",
         "#",
         "#   geo $cfm_bypass_ip {",
         "#       default 0;",
@@ -478,14 +494,19 @@ def render_output(results: list[SourceResult], output: str, union: set[str]) -> 
             lines.append(f"#   {oneline(k)}: {oneline(v)}")
         if res.cdn:
             lines.append("#   class: cdn (written as 2: bypasses even a vhost lockdown)")
+        elif res.fetcher:
+            lines.append("#   class: user fetcher (written as 3: a crawler's bypass, never its micro-cache)")
     lines.append("")
 
     cdn: set[str] = set()
+    fetcher: set[str] = set()
     for res in results:
         if res.cdn:
             cdn.update(res.prefixes)
+        elif res.fetcher:
+            fetcher.update(res.prefixes)
     for prefix in sorted(union, key=sort_key):
-        lines.append(f"{prefix} {2 if prefix in cdn else 1};")
+        lines.append(f"{prefix} {2 if prefix in cdn else 3 if prefix in fetcher else 1};")
 
     data = "\n".join(lines).rstrip() + "\n"
 
@@ -533,6 +554,7 @@ def main() -> int:
         try:
             for res in load_source(spec):
                 res.cdn = spec in CDN_SOURCES
+                res.fetcher = res.name in USER_FETCHER_FEEDS
                 if len(res.prefixes) > MAX_PREFIXES_PER_SOURCE:
                     # A source suddenly emitting a huge set is a red flag (feed
                     # compromise / format change). Refuse the whole run rather

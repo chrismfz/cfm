@@ -46,7 +46,7 @@ type manualChalEntry struct {
 	Rung string
 	// LockdownUntil, while in the future, withdraws every client exemption from
 	// this vhost challenge: the crawler bypass list (cfm.lua Step 0, the "1"
-	// prefixes of challenge_waf_bypass.conf; CDN "2" prefixes keep it), the
+	// and "3" prefixes of challenge_waf_bypass.conf; CDN "2" prefixes keep it), the
 	// FCrDNS good-bot downgrade, Challenge Access-Control and the exclude file
 	// (handleDecision), the challenge page's exemptions and the v2 good-bot
 	// waiver. Never past ExpiresAt. Zero = no lockdown. See vhost_lockdown.go.

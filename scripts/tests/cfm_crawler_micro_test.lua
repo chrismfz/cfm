@@ -58,6 +58,24 @@ do
   check(g.skips[1] == "cdn", "a CDN client is logged mwhy=cdn: " .. tostring(g.skips[1]))
 end
 
+-- a fetcher for a person ("3"): the plain bypass, never the crawler keyspace
+do
+  local g = gate("@cfm_micro_30s")
+  local r = H.run{ host = "shop.gr", vars = { cfm_bypass_ip = "3" }, verdict = CHAL, micro = g.micro }
+  check(r.ok and r.execd == nil and r.upstream == "cfm_apache" and r.rpcs == "", "a fetcher keeps its plain bypass: " .. desc(r))
+  check(#g.calls == 0, "the gate is not asked for a fetcher")
+  check(g.skips[1] == "fetcher", "a fetcher is logged mwhy=fetcher: " .. tostring(g.skips[1]))
+end
+
+-- a fetcher a lockdown holds: through the steps (WAF skipped), never micro-cached
+do
+  local g = gate("@cfm_micro_30s")
+  local r = H.run{ host = "shop.gr", vars = { cfm_bypass_ip = "3" }, lockdown = { ["shop.gr"] = true },
+                   verdict = ALLOW, micro = g.micro }
+  check(r.ok and r.execd == nil and r.rpcs ~= "", "a held fetcher goes through the decision, no micro: " .. desc(r))
+  check(#g.calls == 0, "the gate is not asked for a held fetcher")
+end
+
 -- a visitor (not on the list): Step 4, visitor keyspace
 do
   local g = gate("@cfm_micro_30s")

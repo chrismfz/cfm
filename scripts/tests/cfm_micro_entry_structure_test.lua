@@ -162,10 +162,17 @@ do
         "the crawler class is set only for a bypass kind \"1\" client")
   check(code0:find("local%s+([%a_][%w_]*)%s*=%s*micro_cache_target%s*%(%s*%)%s*if%s+%1%s+then%s+return%s+ngx%s*%.%s*exec%s*%(%s*%1%s*%)%s*end") ~= nil,
         "at Step 0 the crawler entry must be `local t = micro_cache_target()` + `if t then return ngx.exec(t) end`")
-  -- the CDN kind returns before it: a CDN fetches for a site's visitors
-  local cdn = code0:find('if%s+bp%s*==%s*""%s+then%s+micro_skip%s*%(%s*""%s*%)%s+return%s+end')
-  local entry = code0:find("micro_cache_target%s*%(")
+  -- the CDN kind returns before it: a CDN fetches for a site's visitors (read
+  -- on the raw text, strings kept: the stripped code cannot tell "1" from "2")
+  local cdn = raw0:find('if%s+bp%s*==%s*"2"%s+then%s+micro_skip%s*%(%s*"cdn"%s*%)%s+return%s+end')
+  local entry = raw0:find("micro_cache_target%s*%(")
   check(cdn ~= nil and entry ~= nil and cdn < entry, "at Step 0 a CDN (\"2\") client must return before the crawler micro entry")
+  -- and so does a fetcher for a person ("3"), which a cloaked crawler page
+  -- must never reach
+  local fetcher = raw0:find('if%s+bp%s*==%s*"3"%s+then%s+micro_skip%s*%(%s*"fetcher"%s*%)%s+return%s+end')
+  check(fetcher ~= nil and entry ~= nil and fetcher < entry, "at Step 0 a fetcher (\"3\") client must return before the crawler micro entry")
+  check(raw0:find('if%s+held%s+and%s+bp%s*==%s*"3"%s+then%s+ngx%.ctx%.cfm_no_micro%s*=%s*true%s+end') ~= nil,
+        "a held fetcher (\"3\") is never micro-cached (it skips the WAF and has no keyspace)")
 end
 
 -- The call hands its target straight to ngx.exec, and that is the last

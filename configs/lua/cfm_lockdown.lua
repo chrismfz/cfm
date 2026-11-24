@@ -6,7 +6,8 @@
 -- the origin, before any other step: no challenge, no WAF, no rule reaches it.
 -- A vhost in LOCKDOWN (a manual vhost challenge armed with lockdown, see
 -- internal/webdetector/vhost_lockdown.go) withdraws that bypass for the
--- crawler ("1") prefixes, so they meet the vhost challenge like anyone else.
+-- crawler ("1") and fetcher ("3") prefixes, so they meet the vhost challenge
+-- like anyone else.
 -- CDN prefixes ("2", QUIC.cloud) keep their bypass: they fetch for a site's
 -- visitors. This module answers "is <host> locked down now?" for Step 0.
 --
@@ -17,7 +18,7 @@
 -- time even while the bridge is unreachable; on a failed refresh the worker
 -- keeps the last list it had.
 --
--- Cost: called only for a bypass-listed request (the "1" prefixes): one table
+-- Cost: called only for a bypass-listed request (the "1" / "3" prefixes): one table
 -- lookup, plus a staleness check that may schedule a refresh. The refresh is
 -- lazy: a worker that served no bypass request for a while serves its first
 -- one after a new lockdown with the old table, then refreshes (one request

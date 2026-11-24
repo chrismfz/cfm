@@ -57,8 +57,9 @@ type LogRec struct {
 	UpstreamName string
 	// Bypass is the edge's $cfm_bypass_ip (log-cfm.lua column 13): the client
 	// is on challenge_waf_bypass.conf, which cfm.lua Step 0 passes before any
-	// challenge ("1" a crawler, "2" a CDN; a vhost lockdown withdraws only the
-	// "1" kind's, at the edge). False when the line had no such column (an
+	// challenge ("1" a crawler, "2" a CDN, "3" a fetcher for a person; a vhost
+	// lockdown withdraws the "1" and "3" kinds', at the edge). False when the
+	// line had no such column (an
 	// older module, a file tailer).
 	Bypass bool
 	// Auth is the edge's login-facts field (log-cfm.lua column 14, sent on a
@@ -97,7 +98,7 @@ func parseTSVCols(line string, upstreamCol bool) (LogRec, bool) {
 	if len(f) >= 13 {
 		upName = f[12]
 	}
-	bypass := len(f) >= 14 && (f[13] == "1" || f[13] == "2")
+	bypass := len(f) >= 14 && (f[13] == "1" || f[13] == "2" || f[13] == "3")
 	auth := ""
 	if len(f) == 15 {
 		auth = f[14]

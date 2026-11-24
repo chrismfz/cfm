@@ -30,7 +30,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   site's spam shown to Googlebot only), nor a visitor's page to a crawler.
   Every micro rail still applies (cookies, method, admin paths, uncacheable
   pages); a purge drops both. A CDN of the list (QUIC.cloud) is not cached
-  and now logs `mwhy="cdn"`. Crawlers off the list (Meta, Amazon, the AI
+  and now logs `mwhy="cdn"`; neither are Google's user-triggered fetchers,
+  which fetch a page for a person: the bypass list writes them as a third
+  kind, `3` (same bypass and lockdown as a crawler), and they log
+  `mwhy="fetcher"`. Crawlers off the list (Meta, Amazon, the AI
   crawlers) were already micro-cached like visitors on an armed vhost.
 - **Traffic rules: an expiry and a total throttle, for incidents.** A rule can
   carry `match.until` (RFC3339): past it the rule matches nothing, and it is

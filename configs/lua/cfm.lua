@@ -296,7 +296,8 @@ local cache_ok, cfm_cache = pcall(require, "cfm_cache")
 -- went to the origin uncached before they went on to Step 4, and the cache
 -- must not keep a response to a payload the WAF flagged or never saw.
 -- micro_skip: record why a micro-armed request will not be micro-cached when
--- it is allowed before Step 4, the only micro entry (mwhy= in the access log;
+-- it is allowed before Step 4, the micro entry for every client but a
+-- bypass-list crawler, which Step 0 enters itself (mwhy= in the access log;
 -- cfm_cache.note_skip writes only on a micro-armed vhost and a conf that
 -- declares the variable). Under a pcall: logging never breaks an allow path.
 local function micro_skip(why)
@@ -1373,7 +1374,10 @@ pcall(strip_cdn_bust_arg)
 
 -- ── Step 0: Static IP/CIDR bypass ───────────────────────────────────────────
 -- challenge_waf_bypass.conf: "1" = a crawler, "2" = a CDN fetching for a
--- site's visitors (QUIC.cloud). A vhost in LOCKDOWN (a manual vhost challenge
+-- site's visitors (QUIC.cloud), "3" = a fetcher for a person (Google's
+-- user-triggered fetchers: a crawler's bypass and lockdown, but never the
+-- crawler micro-cache keyspace, which may hold a page cloaked for Googlebot).
+-- A vhost in LOCKDOWN (a manual vhost challenge
 -- armed with lockdown; internal/webdetector/vhost_lockdown.go) withdraws the
 -- crawler bypass, so a "1" client there goes on through the steps below and
 -- meets the vhost challenge; a "2" client keeps its bypass. A held client
@@ -1388,23 +1392,25 @@ pcall(strip_cdn_bust_arg)
 -- a bypassed client: the bypass already sends it to the origin unchecked, and
 -- the entries it reads were stored by crawler requests only. A held crawler
 -- keeps the crawler keyspace when it reaches Step 4. A CDN ("2") fetches for
--- a site's visitors and is never micro-cached here.
+-- a site's visitors, and a fetcher ("3") for a person: neither is
+-- micro-cached here, and a held fetcher is never micro-cached at all (it
+-- skips the WAF like a held crawler, and has no keyspace of its own).
 local lockdown_held = false
 do
   local bp = ngx.var.cfm_bypass_ip
-  if bp == "1" or bp == "2" then
+  if bp == "1" or bp == "2" or bp == "3" then
     local held = false
-    if bp == "1" then
-      ngx.ctx.cfm_micro_class = "crawler"
-      if lockdown_ok and lockdown then
-        local ok, act = pcall(lockdown.active, host)
-        held = ok and act == true
-      end
+    if bp == "1" then ngx.ctx.cfm_micro_class = "crawler" end
+    if (bp == "1" or bp == "3") and lockdown_ok and lockdown then
+      local ok, act = pcall(lockdown.active, host)
+      held = ok and act == true
     end
     lockdown_held = held
+    if held and bp == "3" then ngx.ctx.cfm_no_micro = true end
     if not held then
       ngx.var.cfm_upstream = "cfm_apache"; ngx.var.cfm_pass = origin_pass_for(scheme)
       if bp == "2" then micro_skip("cdn") return end
+      if bp == "3" then micro_skip("fetcher") return end
       local crawler_target = micro_cache_target()
       if crawler_target then return ngx.exec(crawler_target) end
       return

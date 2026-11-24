@@ -24,7 +24,7 @@ import (
 // A lockdown is an attribute of a MANUAL vhost challenge, with its own expiry
 // (default 30 min, at most 6 h, never past the arm's). While it holds, the
 // vhost's challenge has no client exemption:
-//   - cfm.lua Step 0 withdraws the bypass of the crawler ("1") prefixes for a
+//   - cfm.lua Step 0 withdraws the bypass of the crawler ("1") and fetcher ("3") prefixes for a
 //     locked host (cfm_lockdown.lua, fed from /nginx/lockdown). CDN prefixes
 //     ("2", QUIC.cloud) keep it: their requests are a site's visitors;
 //   - handleDecision skips the good-bot downgrade, Access-Control and the

@@ -502,8 +502,9 @@ doesn't trip legitimate panel/app traffic, and promote `logonly` →
   (`vhostChallengeExemptClient`, `uniqip_exempt.go`).
 - **A vhost in LOCKDOWN withdraws every client exemption**
   (`vhost_lockdown.go`, `docs/vhost-lockdown.md`): Step 0 stops bypassing
-  crawler (`1`) prefixes for that host (CDN `2` prefixes keep it; a held
-  crawler also skips the inline WAF, or bait would get Googlebot nft-banned),
+  crawler (`1`) and user-fetcher (`3`) prefixes for that host (CDN `2`
+  prefixes keep it; a held crawler also skips the inline WAF, or bait would
+  get Googlebot nft-banned),
   and the decision and challenge-page mirrors stand down. A new client
   exemption must check `vhostLockedDown` too. The uniqIP count is deliberately
   NOT locked down (it would arm an automatic v2 that outlives the lockdown).
@@ -925,9 +926,11 @@ make sync       # rsyncs today's .deb/.rpm (+ checksums) to the remote repo
   `scripts/build_bypass_list.py` and the Makefile). The offline validator
   failing, or no Python >= 3.9, stops the release; `BYPASS_REFRESH=0` skips
   both for an offline build.
-- Bypass prefixes are `<cidr> 1;` (crawler) or `<cidr> 2;` (a `CDN_SOURCES`
-  entry, QUIC.cloud); a vhost lockdown withdraws only the `1` kind, and the
-  validator fails a list that lost its `2` lines. **Never add a source whose
+- Bypass prefixes are `<cidr> 1;` (crawler), `<cidr> 2;` (a `CDN_SOURCES`
+  entry, QUIC.cloud) or `<cidr> 3;` (a `USER_FETCHER_FEEDS` feed: Google's
+  user-triggered fetchers, which show the page to a person, so they never get
+  the crawler micro-cache keyspace); a vhost lockdown withdraws the `1` and
+  `3` kinds, and the validator fails a list that lost its `2` or `3` lines. **Never add a source whose
   target URL anyone can choose** (ChatGPT-User, Stripe webhooks, uptime
   monitors): a bypass skips the WAF too (`cfm.lua` Step 0), so it becomes a
   free WAF-bypass proxy; such callers need a path-scoped exclude.

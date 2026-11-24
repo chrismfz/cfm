@@ -27,6 +27,14 @@ func TestParseSocketTSVAuthColumn(t *testing.T) {
 	if rec, _ = parseSocketTSV(authBase + "\t2"); !rec.Bypass || rec.Auth != "" {
 		t.Fatalf("14 columns: %+v", rec)
 	}
+	// A fetcher for a person (kind "3", Google's user-triggered fetchers) is on
+	// the bypass list too; "0" is not.
+	if rec, _ = parseSocketTSV(authBase + "\t3"); !rec.Bypass {
+		t.Fatalf("kind 3 must read as bypass: %+v", rec)
+	}
+	if rec, _ = parseSocketTSV(authBase + "\t0"); rec.Bypass {
+		t.Fatalf("kind 0 must not read as bypass: %+v", rec)
+	}
 	// File tailers never read past column 11.
 	if rec, _ = parseTSV(authBase + "\t0\tWP_LOGIN;li=1;l=;c="); rec.Auth != "" {
 		t.Fatalf("file TSV read an auth column: %+v", rec)
