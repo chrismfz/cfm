@@ -25,6 +25,15 @@ export function hostSet(rows) {
 
 // Each chip: { key, text, tone, weight }. weight orders the list: a host with
 // any weighted chip sorts above the quiet ones, the heaviest first.
+// CHIP_KEYS lists every key; a page that shows some of them as its own
+// columns (Vhost controls) leaves those out with without().
+export const CHIP_KEYS = Object.freeze(["attack", "lockdown", "challenged", "suspicious", "waf-off", "challenge-excluded", "cache", "rules", "h3", "clam"]);
+
+export function without(chipList, keys) {
+  const drop = new Set(keys);
+  return chipList.filter((c) => !drop.has(c.key));
+}
+
 export function chips(row, ctx = {}) {
   if (!row) return [];
   const host = str(row.host);

@@ -273,6 +273,16 @@ button:focus-visible, a:focus-visible, .input:focus-visible {
   color: var(--fg);
 }
 .btn-quiet:hover { background: var(--accent-soft); border-color: var(--accent); filter: none; }
+/* An OFF / not-applicable state (Vhost controls' HTTP/3 and ClamAV toggles):
+   quieter than .btn-quiet. Without it the bare button fell back to the
+   accent-blue primary look, the loudest style on the page for the least
+   important state. */
+.btn-muted {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+}
+.btn-muted:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--fg); filter: none; }
 .btn-nav-active {
   border-color: var(--accent);
   color: var(--accent-strong);

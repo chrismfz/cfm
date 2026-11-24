@@ -21,6 +21,13 @@ import {
   lockdownLabel,
   lockdownRequest,
 } from "./challenge-lockdown.js";
+import { hostSet, chips, without, weight } from "./vhost-picker-model.js";
+
+// The chips the table already shows as its own columns (Challenge, Under
+// Attack + lockdown, WAF, HTTP/3, Clam mode): the host cell carries the rest.
+const COLUMN_CHIPS = Object.freeze(["attack", "lockdown", "waf-off", "challenge-excluded", "h3", "clam"]);
+// The challenged / suspicious lists change slowly; the table polls faster.
+const ATTENTION_STALE_MS = 60_000;
 
 export const controlsMixin = {
   data() {
@@ -30,6 +37,13 @@ export const controlsMixin = {
       controlsSortKey: "host",
       controlsSortDir: "asc",
       vhostControlsLimit: 50,
+      // Host-cell chips (vhost-picker-model.js, shared with the Vhost page's
+      // picker): the hosts challenged right now (admin only: the list
+      // endpoint is admin-only, and this page never fans out per row) and
+      // the hosts the long window scores suspicious (scope-filtered).
+      controlsChallenged: [],
+      controlsSuspicious: [],
+      controlsAttentionAt: 0,
       // Quick filter chips: "" (all) | challenge_off | waf_off | http3_on —
       // the deviations-from-default an operator actually scans 690 vhosts for.
       controlsQuickFilter: "",
@@ -60,7 +74,23 @@ export const controlsMixin = {
   },
 
   computed: {
+    controlsChipCtx() {
+      return { challenged: hostSet(this.controlsChallenged), suspicious: hostSet(this.controlsSuspicious) };
+    },
+    // Each host's chips and weight, built once per data change (the counts,
+    // the filter, the sort comparator and the template all read them; a
+    // 700-host table recomputed them per comparison).
+    controlsChipInfo() {
+      const out = new Map();
+      for (const row of this.vhostControls) {
+        const all = chips(row, this.controlsChipCtx);
+        out.set(row?.host, { shown: without(all, COLUMN_CHIPS), weight: weight(all) });
+      }
+      return out;
+    },
     controlsCounts() {
+      let attention = 0;
+      for (const row of this.vhostControls) if (this.controlsWeight(row) > 0) attention++;
       let challengeOff = 0;
       let wafOff = 0;
       let http3On = 0;
@@ -73,7 +103,7 @@ export const controlsMixin = {
         if (!row?.clam_enabled) clamOff++;
         if (row?.clam_mode_inline) clamInline++;
       }
-      return { challengeOff, wafOff, http3On, clamOff, clamInline };
+      return { attention, challengeOff, wafOff, http3On, clamOff, clamInline };
     },
     vhostControlsFiltered() {
       const q = String(this.controlsSearch || "").trim().toLowerCase();
@@ -86,6 +116,7 @@ export const controlsMixin = {
       else if (quick === "http3_on") filtered = filtered.filter((row) => row?.http3_enabled);
       else if (quick === "clam_off") filtered = filtered.filter((row) => !row?.clam_enabled);
       else if (quick === "clam_inline") filtered = filtered.filter((row) => row?.clam_mode_inline);
+      else if (quick === "attention") filtered = filtered.filter((row) => this.controlsWeight(row) > 0);
       const key = String(this.controlsSortKey || "host");
       const dir = this.controlsSortDir === "desc" ? -1 : 1;
       const boolOrder = (v) => (v ? 1 : 0);
@@ -105,6 +136,11 @@ export const controlsMixin = {
         } else if (key === "clammode") {
           const cmp = boolOrder(Boolean(a?.clam_mode_inline)) - boolOrder(Boolean(b?.clam_mode_inline));
           if (cmp !== 0) return cmp * dir;
+        } else if (key === "attention") {
+          // The first click (asc) puts the most urgent first; the second
+          // reverses it.
+          const cmp = this.controlsWeight(b) - this.controlsWeight(a);
+          if (cmp !== 0) return cmp * dir;
         } else if (key === "underattack") {
           const cmp = boolOrder(Boolean(a?.under_attack)) - boolOrder(Boolean(b?.under_attack));
           if (cmp !== 0) return cmp * dir;
@@ -120,6 +156,24 @@ export const controlsMixin = {
   },
 
   methods: {
+    // ── Host-cell chips ────────────────────────────────────────────────
+    controlsChips(row) { return this.controlsChipInfo.get(row?.host)?.shown || []; },
+    // weight counts every chip, the column ones too: "needs attention" is the
+    // same verdict as on the Vhost page's picker.
+    controlsWeight(row) { return this.controlsChipInfo.get(row?.host)?.weight || 0; },
+    async refreshControlsAttention() {
+      if (Date.now() - this.controlsAttentionAt < ATTENTION_STALE_MS) return;
+      this.controlsAttentionAt = Date.now();
+      const [challenged, suspicious] = await Promise.all([
+        this.isScoped
+          ? Promise.resolve([])
+          : this.fetchJSONSafe("v1/challenge/vhosts?status=active&mode=all&limit=500", []),
+        this.fetchJSONSafe("v1/webdet/suspicious?limit=500", []),
+      ]);
+      this.controlsChallenged = this.extractRows(challenged, "rows");
+      this.controlsSuspicious = this.extractRows(suspicious, "rows");
+    },
+
     // ── Per-vhost protection toggles ───────────────────────────────────
     vhostControlEnabled(row, kind) {
       let key;
@@ -222,7 +276,10 @@ export const controlsMixin = {
       const url = new URL(window.location.href);
       const scoped = (url.searchParams.get("vhost") || url.searchParams.get("vhosts") || "").trim();
       const qs = scoped ? `?vhost=${encodeURIComponent(scoped)}` : "";
-      const payload = await this.fetchJSONSafe(`v1/webdet/vhosts${qs}`, { rows: [] });
+      const [payload] = await Promise.all([
+        this.fetchJSONSafe(`v1/webdet/vhosts${qs}`, { rows: [] }),
+        this.refreshControlsAttention(),
+      ]);
       this.vhostControls = this.extractRows(payload, "rows");
       // A single-vhost scope (the typical cPanel customer) preselects the
       // panic target and loads its status, so the card is one click away.
