@@ -26,6 +26,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (the traffic mix API's new `sort=origin|requests|bytes|ips`, also on the MCP
   `traffic_mix` tool), so "by requests" shows the busiest clients, not the
   costliest ones reordered. The choice is remembered per browser.
+- **Traffic mix: a window that ends in the past.** `until=<unix>` (a 5-minute
+  boundary within the last 24 h; also on the MCP `traffic_mix` tool) ends the
+  window there instead of now, so a finished hour (`window=1h&until=<10:00>`)
+  reads exactly 09:00-09:59 every time. cfm-web's hourly traffic history uses
+  it.
 
 ## 2026.11.24
 

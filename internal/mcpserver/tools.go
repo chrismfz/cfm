@@ -981,6 +981,7 @@ type trafficMixInput struct {
 	Hosts    int    `json:"hosts,omitempty" jsonschema:"how many top vhosts (by origin time) to list; default 20, max 500"`
 	Clients  int    `json:"clients,omitempty" jsonschema:"how many top clients to list; default 20, max 500"`
 	Sort     string `json:"sort,omitempty" jsonschema:"which clients make the list and in what order: origin (default: origin time), requests, bytes, or ips (distinct IPs in the last hour, automation and bot clients only)"`
+	Until    int64  `json:"until,omitempty" jsonschema:"end the window at this unix time instead of now: a 5-minute boundary (multiple of 300) within the last 24 h, e.g. the hour 09:00-10:00 is window=1h until=<10:00>; omit for a window ending now"`
 }
 
 func registerTrafficMix(srv *mcp.Server, d Deps) {
@@ -1003,6 +1004,9 @@ func registerTrafficMix(srv *mcp.Server, d Deps) {
 		setInt(q, "clients", in.Clients)
 		if in.Sort != "" {
 			q.Set("sort", in.Sort)
+		}
+		if in.Until > 0 {
+			q.Set("until", strconv.FormatInt(in.Until, 10))
 		}
 		return dispatchJSON(ctx, d, "/api/v1/webdet/traffic-mix", q)
 	})
