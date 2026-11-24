@@ -376,3 +376,38 @@ func TestUnsolvedHold_IPv6CountsPer64(t *testing.T) {
 		t.Fatalf("the crossing address is not held: %v", time.Until(e.Expires))
 	}
 }
+
+// Restore never shortens a longer challenge the fresh bridge already has.
+func TestUnsolvedHold_RestoreDoesNotShorten(t *testing.T) {
+	resetUnsolvedHold(t, "enforce")
+	old := newUnsolvedHoldBridge(t)
+	const ip = "203.0.113.63"
+	old.ChallengeIPWithReason(ip, 20*time.Minute, "x")
+	if r := views(old, ip, time.Now(), 20); !r.Held {
+		t.Fatalf("not held: %+v", r)
+	}
+	fresh := newUnsolvedHoldBridge(t)
+	long := time.Now().Add(3 * time.Hour)
+	fresh.mu.Lock()
+	fresh.ipState[ip] = bridgeIPEntry{Action: "challenge", Expires: long, Reason: "manual"}
+	fresh.mu.Unlock()
+	fresh.RestoreUnsolvedHolds()
+	if e, _ := ipEntry(fresh, ip); e.Expires.Before(long) {
+		t.Fatalf("restore shortened a 3h challenge to %v", time.Until(e.Expires))
+	}
+}
+
+// log mode shows the MAX cap too, so the burn-in can judge it.
+func TestUnsolvedHold_LogModeShowsTheCap(t *testing.T) {
+	resetUnsolvedHold(t, "log")
+	ConfigureChallengeUnsolvedHold("log", 20, 10*time.Minute, time.Hour, time.Hour)
+	b := newUnsolvedHoldBridge(t)
+	const ip = "203.0.113.64"
+	b.ChallengeIPWithReason(ip, 20*time.Minute, "x")
+	t0 := time.Now()
+	first := views(b, ip, t0, 20)
+	second := views(b, ip, t0.Add(5*time.Minute), 20)
+	if !first.Hold || first.Capped || !second.Hold || !second.Capped {
+		t.Fatalf("log-mode cap: first %+v second %+v, want the second capped", first, second)
+	}
+}

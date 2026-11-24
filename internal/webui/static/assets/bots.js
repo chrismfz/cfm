@@ -50,7 +50,8 @@
     drillUA: null,      // normalized UA whose drilldown panel is open
   };
 
-  // Mirrors IsGoogleVerifiedBot in internal/webdetector/ua_top.go. Used only
+  // Mirrors googleVerifiedBots in internal/webdetector/ua_top.go (pinned by
+  // TestGoogleVerifiedBotsUIParity: one quoted name per line). Used only
   // to surface a warning before the operator clicks — the server enforces
   // the actual block via the 409 conflict response.
   const GOOGLE_VERIFIED = new Set([

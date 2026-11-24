@@ -1,6 +1,10 @@
 package webdetector
 
 import (
+	"os"
+	"regexp"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -274,5 +278,29 @@ func TestIsGoogleVerifiedBot(t *testing.T) {
 		if got := IsGoogleVerifiedBot(in); got != want {
 			t.Errorf("IsGoogleVerifiedBot(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// The cfm-admin bots page keeps its own copy of the Google list for its
+// pre-click warning; it must match the server's (a name added on one side
+// only made the UI skip the warning).
+func TestGoogleVerifiedBotsUIParity(t *testing.T) {
+	src, err := os.ReadFile("../webui/static/assets/bots.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?s)const GOOGLE_VERIFIED = new Set\(\[(.*?)\]\)`).FindSubmatch(src)
+	if m == nil {
+		t.Fatal("GOOGLE_VERIFIED not found in bots.js")
+	}
+	var ui []string
+	for _, q := range regexp.MustCompile(`'([^']+)'`).FindAllSubmatch(m[1], -1) {
+		ui = append(ui, string(q[1]))
+	}
+	want := append([]string(nil), googleVerifiedBots...)
+	sort.Strings(ui)
+	sort.Strings(want)
+	if strings.Join(ui, ",") != strings.Join(want, ",") {
+		t.Fatalf("bots.js GOOGLE_VERIFIED = %v, ua_top.go googleVerifiedBots = %v", ui, want)
 	}
 }

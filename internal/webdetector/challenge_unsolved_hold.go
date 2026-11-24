@@ -142,8 +142,12 @@ type unsolvedViewState struct {
 }
 
 // unsolvedViews counts per firewall.CountKey (an IPv6 client is its /64, so
-// rotating the address does not reset the count; CLAUDE.md §5); the hold
-// itself extends the ipState entry of the address that crossed.
+// rotating the address does not reset the count; CLAUDE.md §5). The hold
+// itself extends ONLY the ipState entry of the address that crossed: a
+// sibling address of the /64 with its own live per-IP challenge keeps that
+// challenge's TTL (it is held when it crosses in turn; the per-IP challenges
+// are per address to begin with). A solve or clear on any address of the /64
+// starts its count over.
 var unsolvedViews = struct {
 	mu        sync.Mutex
 	m         map[string]*unsolvedViewState
@@ -239,6 +243,9 @@ func (b *NginxBridge) NoteUnsolvedChallengeView(ip, host string, now time.Time) 
 	if capAt := st.holdStart.Add(cfg.Max); until.After(capAt) {
 		until = capAt
 	}
+	// Nothing left to extend: MAX clamped this renewal to an end the episode
+	// already had. Known here in log mode too, so the burn-in shows the cap.
+	capped := !until.After(st.holdUntil)
 	if until.After(st.holdUntil) {
 		st.holdUntil = until
 	}
@@ -254,10 +261,14 @@ func (b *NginxBridge) NoteUnsolvedChallengeView(ip, host string, now time.Time) 
 		var extended bool
 		out.Held, extended = b.holdUnsolvedIPChallenge(ip, until, now)
 		out.Capped = out.Held && !extended
+	} else {
+		out.Capped = capped
 	}
 	if logIt {
 		verdict := "would_hold"
-		if out.Capped {
+		if out.Capped && cfg.Mode != unsolvedHoldEnforce {
+			verdict = "would_hold_capped"
+		} else if out.Capped {
 			verdict = "hold_capped" // MAX reached: the hold ends at until
 		} else if out.Held {
 			verdict = "hold"
@@ -350,8 +361,15 @@ func (b *NginxBridge) RestoreUnsolvedHolds() int {
 			continue
 		}
 		e := bridgeIPEntry{Action: "challenge", Expires: until, Reason: saved.Reason, WAFRuleID: saved.WAFRuleID, HoldUntil: until}
-		if ok && cur.Action == "challenge" && cur.Expires.After(now) && (cur.Reason != "" || cur.WAFRuleID != 0) {
-			e.Reason, e.WAFRuleID = cur.Reason, cur.WAFRuleID
+		if ok && cur.Action == "challenge" && cur.Expires.After(now) {
+			if cur.Reason != "" || cur.WAFRuleID != 0 {
+				e.Reason, e.WAFRuleID = cur.Reason, cur.WAFRuleID
+			}
+			// Never shorten a live challenge the fresh bridge already has (a
+			// malpath hold restored just before, or a longer challenge).
+			if cur.Expires.After(e.Expires) {
+				e.Expires = cur.Expires
+			}
 		}
 		b.ipState[ip] = b.withMalpathHoldLocked(ip, e, now)
 		b.mu.Unlock()
