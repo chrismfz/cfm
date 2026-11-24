@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.24
+
 ### Added
 - **The edge access log carries the connection** (`conn=` and `creq=`, at
   the end of each `log_format cfm` line): `$connection` and
@@ -162,8 +166,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   applies everywhere.** `--scope 'shop[a'` (an unterminated class, a trailing
   `\`) compiled to an empty matcher that read as "no scope" (every vhost); it
   now takes no host in the daemon, and the edge reads it the same way.
-
-## 2026.11.24
 
 ### Security
 - **Google's user-triggered fetchers no longer skip the WAF and the
