@@ -212,6 +212,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   a burn-in; review by 2026-12-08 (`docs/abuse-defense-master-plan.md` §5).
 
 ### Fixed
+- **`make rpm` after `make deb` failed on an unpackaged file**
+  (`/usr/share/cfm/etc-cfm-files.list`). The .deb's `/etc/cfm` seed list
+  (2026.11.23) was written into the staging tree both packages share, and the
+  rpm copies that tree's `/usr` as a whole. The rpm staging now drops it, as
+  it already drops the .deb's license copy; `check_deb_config_seed.sh` pins
+  it.
 - **`cfm bots block meta-externalagent` / `meta-webindexer` now match Meta's
   current crawler UA.** Since Meta moved to `Mozilla/5.0 (Windows …) …
   Chrome/145 … (compatible; meta-externalagent/1.1 (+https://…))`, the UA

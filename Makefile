@@ -281,6 +281,10 @@ stage-pkgroot: build cfm-edge-conf
 	@echo "→ Staging into $(PKGROOT)"
 	# the .deb's license copy; the rpm ships its own under /usr/share/licenses
 	@rm -rf $(PKGROOT)/usr/share/doc/cfm
+	# the .deb's /etc/cfm seed list (its postinst reads it); the rpm seeds with
+	# %config(noreplace) and owns no such file, so a `make deb` before `make rpm`
+	# (one PKGROOT) failed the rpm on an unpackaged file
+	@rm -f $(PKGROOT)/usr/share/cfm/etc-cfm-files.list
 	# binary
 	@mkdir -p $(PKGROOT)/usr/bin
 	@cp -f $(BINARY) $(PKGROOT)/usr/bin/cfm
