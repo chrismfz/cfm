@@ -82,4 +82,11 @@ grep -qF 'install -m0644 packaging/etc-cfm-files.list "$(PKGROOT)/usr/share/cfm/
 grep -qE '^CFM_ETC_LIST=/usr/share/cfm/etc-cfm-files\.list$' "$POSTINST" \
   || fail "$POSTINST does not read the list from /usr/share/cfm/etc-cfm-files.list"
 
+# 5. the rpm never packages the deb's list: deb and rpm share one PKGROOT, and
+# the spec copies its /usr wholesale, so a `make deb` before `make rpm` left it
+# there and rpmbuild failed on an installed-but-unpackaged file.
+awk '/^stage-pkgroot:/{f=1;next} f&&/^[^\t]/{f=0} f' Makefile \
+  | grep -qF 'rm -f $(PKGROOT)/usr/share/cfm/etc-cfm-files.list' \
+  || fail "stage-pkgroot does not drop the deb-only usr/share/cfm/etc-cfm-files.list (rpm: unpackaged file)"
+
 echo "OK: the .deb seeds $(wc -l <"$tmp/deb") /etc/cfm files (no conffile), the same set as the rpm's %config(noreplace)"
