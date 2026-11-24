@@ -200,9 +200,58 @@ do
 end
 set_only({ rule_wc_cart_get_crawl = "logonly" })
 
+-- ── The CRAWLER redirect (cfm.lua, 2026-11-24) ────────────────────────────
+do
+  set_only({ rule_wc_cart_get_crawl = "logonly" })
+  local _, _, _, _, hits = waf.check(req({ uri = "/shop/", args = "add-to-cart=3801", ua = META }))
+  META_HITS = hits
+  check(waf.cart_crawl_redirect(hits) == true, "redirect: meta-externalagent CRAWLER")
+  _, _, _, _, hits = waf.check(req({ uri = "/shop/", args = "add-to-cart=3801", ua = CHROME }))
+  check(waf.cart_crawl_redirect(hits) == false, "no redirect: NO_REFERER (a browser UA)")
+  _, _, _, _, hits = waf.check(req({ uri = "/shop/", args = "add-to-cart=3801", ua = CHROME, referer = "https://lm.facebook.com/" }))
+  check(waf.cart_crawl_redirect(hits) == false, "no redirect: XSITE")
+  check(waf.cart_crawl_redirect(nil) == false and waf.cart_crawl_redirect({}) == false, "no hits: no redirect")
+  -- The switch, and the rule disabled.
+  local q = waf.query_without_field
+  check(q("add-to-cart=3801", "add-to-cart") == "", "only field: empty query")
+  check(q("orderby=price&add-to-cart=3801&paged=2", "add-to-cart") == "orderby=price&paged=2", "kept in order, as sent")
+  check(q("add%2Dto%2Dcart=1&x=%41", "add-to-cart") == "x=%41", "encoded name dropped, kept value as sent")
+  check(q("add-to-cart[]=1&add-to-cart=2&quantity=1", "add-to-cart") == "quantity=1", "array form and duplicates dropped")
+  check(q("add_to_cart=1", "add-to-cart") == "add_to_cart=1", "a different field kept")
+  local _, n = q("a=1&add-to-cart=2&add-to-cart=3", "add-to-cart")
+  check(n == 2, "dropped count")
+  -- cfm.lua: the step is on a logonly verdict, skips proxied requests,
+  -- collapses leading slashes in the Location and marks no-store.
+  local src = io.open("configs/lua/cfm.lua"):read("*a")
+  local at = src:find("waf.cart_crawl_redirect(waf_hits)", 1, true)
+  check(at ~= nil, "cfm.lua calls cart_crawl_redirect")
+  local blk = at and src:sub(at - 200, at + 2200) or ""
+  check(blk:find('waf_action == "logonly"', 1, true) ~= nil, "only on a logonly verdict")
+  check(blk:find("realip_remote_addr", 1, true) ~= nil and blk:find("if not proxied then", 1, true) ~= nil, "skips proxied requests")
+  check(blk:find('gsub("^[/\\\\]+", "/")', 1, true) ~= nil, "Location: leading slashes collapsed")
+  check(blk:find('"Cache-Control"] = "no-store"', 1, true) ~= nil, "no-store on the 301")
+  check(blk:find('path:sub(1, 1) ~= "/"', 1, true) ~= nil, "Location: a non-path target becomes a local path")
+  check(blk:find("301)", 1, true) ~= nil, "status 301")
+  local allow_at = src:find('waf_allow_action = converted_from_challenge and "logonly_pc" or "logonly"', 1, true)
+  check(allow_at and at < allow_at, "before the logonly fall-through to Steps 2b-4")
+end
+
 -- ── Disabled ───────────────────────────────────────────────────────────────
 set_only({ rule_wc_cart_get_crawl = "disabled" })
 clean(req({ uri = "/", args = "add-to-cart=3801", ua = META }), "rule disabled")
+
+-- The operator's switch, as cfm_waf_config.lua sets it: a fresh load, last
+-- (re-loading cfm_waf re-initialises the shared detectors module).
+do
+  package.loaded["cfm_waf"] = nil
+  package.loaded["cfm_waf_config"] = { wc_cart_crawl_redirect = false }
+  local w2 = require("cfm_waf")
+  check(w2.cart_crawl_redirect(META_HITS) == false, "wc_cart_crawl_redirect = false: off")
+  package.loaded["cfm_waf"] = nil
+  package.loaded["cfm_waf_config"] = { wc_cart_crawl_redirect = true }
+  local w3 = require("cfm_waf")
+  check(w3.cart_crawl_redirect(META_HITS) == true, "control: the same hits redirect with the switch on")
+end
 
 if fails > 0 then
   io.stderr:write(fails .. " failure(s)\n")

@@ -33,6 +33,24 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   hit, and with it the ban. Rule 303 stays held: its sweep sends one request
   per Google Cloud IP, so a ban would add thousands of addresses that never
   return.
+- **WooCommerce add-to-cart from a declared crawler now gets a 301, and
+  meta-externalagent has a node-wide cap.** On 2026-11-24 Meta's AI /
+  indexing crawler (meta-externalagent) sent titan ~530 pages a minute for
+  three hours at ~1.5 s of PHP each, ~27 000 of them `?add-to-cart=` cart
+  writes; titan and orion hit 100% CPU. Two changes:
+  - Rule 530's `CRAWLER` tag (a declared crawler UA) is answered with a 301
+    to the same URL without `add-to-cart`, so the shop writes no cart. Not
+    behind Cloudflare (a CDN could cache the 301 for shoppers), and only
+    when nothing stronger matched. `NO_REFERER` / `XSITE` stay logonly.
+    `wc_cart_crawl_redirect = false` in `cfm_waf_config.lua` turns it off.
+  - The edge gives meta-externalagent one budget for the whole node: 2
+    pages/s (burst 10) and 6 connections, then 429. The per-vhost Meta
+    budgets never bound it, since it spreads over every shop. Link previews
+    (facebookexternalhit), ads (meta-externalads), the in-app browsers and
+    its images are not affected.
+  See `docs/waf.md`, "Rule 530".
+
+### Changed
 - **WAF rules 415 and 417 block (bans held).** Rule 417 (PHP source in the
   whole POST body, past rule 404's 2 KB) and rule 415 (PHP in an uploaded
   file, past rule 402's head) move from logonly to block after a 7-day
