@@ -60,6 +60,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   cfm` no longer empties it. A crash loses at most 5 minutes; a file from
   another version or a corrupt one starts the page empty, as before.
 
+### Fixed
+- **Vhost controls: a tenant's challenge exclude no longer reads as
+  covering its other hosts.** The Challenge column matched an exclude by its
+  value alone, so an exclude a cPanel user added for `example.com` showed
+  `www.example.com` as not challenged, although the challenge decision (which
+  honours the entry's scope) still challenged it. The column now uses the
+  decision's own matcher.
+
 ## 2026.11.24
 
 ### Security

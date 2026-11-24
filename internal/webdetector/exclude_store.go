@@ -592,6 +592,25 @@ func (s *excludeStore) ChallengeEntriesForHost(host string) []excludeEntry {
 	return out
 }
 
+// FirstChallengeHostMatch is the host entry MatchChallenge excludes host by
+// (the first in List order when several do); ok=false when none does.
+func (s *excludeStore) FirstChallengeHostMatch(host string) (excludeEntry, bool) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if s == nil || host == "" {
+		return excludeEntry{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best excludeEntry
+	found := false
+	for _, e := range s.challengeEntries {
+		if e.challengeHostCovers(host) && (!found || excludeEntryLess(e.Entry, best)) {
+			best, found = e.Entry, true
+		}
+	}
+	return best, found
+}
+
 // matchExact reports host among the literal (non-glob) scope hosts.
 func (m compiledScopeMatcher) matchExact(host string) bool {
 	_, ok := m.exact[host]

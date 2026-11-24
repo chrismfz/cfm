@@ -2,6 +2,7 @@ package webdetector
 
 import (
 	"net/http"
+	"net/netip"
 	"sort"
 	"strings"
 	"time"
@@ -61,10 +62,12 @@ type VhostProfile struct {
 	Schema      string    `json:"schema"`
 	Host        string    `json:"host"`
 	GeneratedAt time.Time `json:"generated_at"`
-	// Site is the registrable domain (example.co.uk for www.example.co.uk);
-	// RelatedHosts are the known hosts of that site, this one included
-	// (cPanel userdata, recent traffic, challenge rows), sorted.
-	Site         string   `json:"site"`
+	// Site is the registrable domain (example.co.uk for www.example.co.uk),
+	// empty for an IP literal or a public suffix; RelatedHosts are the known
+	// hosts of that site, this one included (cPanel userdata, recent
+	// traffic, challenge rows), the site first, then sorted: just this host
+	// when Site is empty.
+	Site         string   `json:"site,omitempty"`
 	RelatedHosts []string `json:"related_hosts"`
 	// RelatedTruncated: more than vhostProfileMaxRelated related hosts.
 	RelatedTruncated bool `json:"related_truncated,omitempty"`
@@ -170,18 +173,26 @@ func vhostProfileRuleState(r TrafficRule, now time.Time) string {
 	return "enabled"
 }
 
-// vhostProfileSite is host's registrable domain (one owner's www., shop. and
-// bare names are one site); host itself when it has none (an IP, a bare TLD).
+// vhostProfileSite is host's registrable domain (siteKey), or "" when it
+// has none to group by: an IP literal (publicsuffix would answer "3.4" for
+// 1.2.3.4) or a public suffix itself (co.uk), whose "related hosts" would
+// be every tenant under it.
 func vhostProfileSite(host string) string {
-	if d, err := publicsuffix.EffectiveTLDPlusOne(host); err == nil {
-		return d
+	if _, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		return ""
 	}
-	return host
+	if _, err := publicsuffix.EffectiveTLDPlusOne(host); err != nil {
+		return ""
+	}
+	return siteKey(host)
 }
 
 // vhostProfileRelated lists the known hosts of site, host included.
 func (e *Engine) vhostProfileRelated(host, site string) ([]string, bool) {
 	set := map[string]struct{}{host: {}}
+	if site == "" {
+		return []string{host}, false
+	}
 	for h := range e.collectKnownVhosts() {
 		h = normalizeControlHost(h)
 		if h == site || strings.HasSuffix(h, "."+site) {

@@ -153,7 +153,16 @@ func (e *Engine) vhostControlInputs() vhostControlInputs {
 // vhostControlRow is one host's row of the controls table (and the controls
 // block of the vhost profile).
 func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhostControlRow {
-	challengeMatched, challengeValue, challengeExact := matchHostExclude(in.challengeEntries, host)
+	// The challenge column follows MatchChallenge (the decision's own test,
+	// scope_hosts included): matchHostExclude ignores an entry's scope, so a
+	// tenant's exclude on example.com read as covering www.example.com,
+	// which is still challenged.
+	chEntry, challengeMatched := e.challengeExcludes.FirstChallengeHostMatch(normalizeControlHost(host))
+	challengeValue, challengeExact := "", false
+	if challengeMatched {
+		challengeValue = chEntry.Value
+		challengeExact = chEntry.Value == normalizeControlHost(host)
+	}
 	wafMatched, wafValue, wafExact := matchHostExclude(in.wafEntries, host)
 	// HTTP/3 does NOT use matchHostExclude: its suffix expansion (treat
 	// "cdn.example.com" as matching every "*.cdn.example.com") would lie

@@ -242,3 +242,40 @@ func TestVhostProfile_ParityWithExistingSurfaces(t *testing.T) {
 		}
 	}
 }
+
+// The challenge column follows MatchChallenge, scope_hosts included: a
+// tenant's exclude on example.com (scope [example.com]) does not cover
+// www.example.com, which the decision still challenges.
+func TestVhostProfile_ChallengeColumnFollowsScope(t *testing.T) {
+	e, mux := newVhostProfileEngine(t)
+	if !e.ChallengeExcludeAdd("host", "example.com", map[string]struct{}{"example.com": {}}) {
+		t.Fatal("scoped challenge exclude")
+	}
+	for host, wantExcluded := range map[string]bool{"example.com": true, "www.example.com": false} {
+		p := profileFor(t, mux, host)
+		if got := !p.Controls.ChallengeEnabled; got != wantExcluded {
+			t.Fatalf("%s: challenge excluded=%v, want %v", host, got, wantExcluded)
+		}
+		if got := e.challengeExcludes.MatchChallenge(host); got != wantExcluded {
+			t.Fatalf("%s: MatchChallenge=%v disagrees with the column", host, got)
+		}
+		if got := len(p.ChallengeExcludes) > 0; got != wantExcluded {
+			t.Fatalf("%s: challenge_excludes=%+v", host, p.ChallengeExcludes)
+		}
+	}
+}
+
+// An IP literal or a public suffix has no site to group by: related hosts is
+// the host alone (publicsuffix would group 1.2.3.4 under "3.4").
+func TestVhostProfile_NoSiteForIPOrSuffix(t *testing.T) {
+	e, _ := newVhostProfileEngine(t)
+	for _, host := range []string{"203.0.113.4", "2001:db8::1", "co.uk"} {
+		p := e.VhostProfile(host, time.Now())
+		if p.Site != "" || len(p.RelatedHosts) != 1 || p.RelatedHosts[0] != host {
+			t.Fatalf("%s: site=%q related=%v", host, p.Site, p.RelatedHosts)
+		}
+	}
+	if p := e.VhostProfile("www.example.co.uk", time.Now()); p.Site != "example.co.uk" {
+		t.Fatalf("www.example.co.uk: site=%q", p.Site)
+	}
+}
