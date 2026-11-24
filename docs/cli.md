@@ -73,6 +73,14 @@ vhosts** — useful when one bot family (Facebook OG fetcher, SemrushBot,
 AhrefsBot, …) hammers many vhosts at once and per-vhost throttles don't
 catch the aggregate.
 
+The key is the UA's first token (`curl`, `facebookexternalhit`), or, for a
+`Mozilla/5.0 …` UA, the first token carrying a bot marker in any of its
+`(...)` groups (`meta-externalagent` from Meta's Chrome-UA crawler,
+`googlebot` from Googlebot desktop AND smartphone); a browser is `mozilla`.
+So a rule on `googlebot` or `bingbot` also covers that engine's mobile
+crawler. The daemon (`NormalizeUA`) and the edge (`cfm_ua_emergency.lua`)
+compute it the same way (`scripts/tests/fixtures/ua_norm.txt`).
+
 ```bash
 cfm bots                          # live two-pane TUI (top + active rules)
 cfm bots top [N]                  # static top-N snapshot

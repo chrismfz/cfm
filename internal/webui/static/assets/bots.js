@@ -64,6 +64,7 @@
     'storebot-google',
     'feedfetcher-google',
     'googleother',
+    'google-inspectiontool',
   ]);
 
   function escapeHTML(s) {

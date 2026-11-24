@@ -72,6 +72,7 @@ local _refresh_in_progress = false  -- dedupes the async refresh timer (F48)
 local _BOT_MARKERS = {
   "bot", "spider", "crawl", "agent", "fetch", "externalhit",
   "scrap", "preview", "embed", "monitor", "checker", "indexer",
+  "googleother", "google-inspectiontool",
 }
 
 local function has_bot_marker(tok)
@@ -95,11 +96,25 @@ local function first_token(s)
   return m or ""
 end
 
--- normalize_ua mirrors NormalizeUA in ua_norm.go exactly.
+-- trim strips the bytes %s matches (space, \t-\r) from both ends in linear
+-- time. Not gsub("%s+$"): that retries the run at every position, so one
+-- UA with 8 KB of inner spaces cost ~200 ms of worker CPU per request.
+local function trim(s)
+  local a = string.find(s, "%S")
+  if not a then return "" end
+  local b = #s
+  while true do
+    local c = string.byte(s, b)
+    if c == 32 or (c >= 9 and c <= 13) then b = b - 1 else break end
+  end
+  return string.sub(s, a, b)
+end
+
+-- normalize_ua mirrors NormalizeUA in ua_norm.go exactly (bytes, ASCII-only:
+-- %s and string.lower know only ASCII, so Go trims and lowercases ASCII only).
 function _M.normalize_ua(ua)
   if not ua then return "-" end
-  ua = string.gsub(ua, "^%s+", "")
-  ua = string.gsub(ua, "%s+$", "")
+  ua = trim(ua)
   if ua == "" or ua == "-" then return "-" end
   ua = string.lower(ua)
 
@@ -107,26 +122,41 @@ function _M.normalize_ua(ua)
   if head == "" then return "-" end
   if head ~= "mozilla" then return head end
 
-  -- Mozilla envelope: scan every "(...)" group in order, not only the
-  -- first (Meta's Chrome-145 crawler UA and Googlebot smartphone declare
-  -- themselves in a trailing "(compatible; ...)" group). Same walk as Go.
+  -- Mozilla envelope: scan every top-level "(...)" group in order, not
+  -- only the first (Meta's Chrome-145 crawler UA and Googlebot smartphone
+  -- declare themselves in a trailing "(compatible; ...)" group). A group
+  -- ends at its MATCHING ")" (nested "(+https://...)" stays inside it); a
+  -- group never closed runs to the end. Parts split on ; , ( ). Same walk
+  -- as Go; both run scripts/tests/fixtures/ua_norm.txt.
+  local n = #ua
   local pos = 1
-  while true do
+  while pos <= n do
     local lp = string.find(ua, "(", pos, true)
-    if not lp then return "mozilla" end
-    local rp = string.find(ua, ")", lp, true)
-    if not rp then return "mozilla" end
-    local inner = string.sub(ua, lp + 1, rp - 1)
-    for part in string.gmatch(inner, "[^;,]+") do
-      part = string.gsub(part, "^%s+", "")
-      part = string.gsub(part, "%s+$", "")
-      local tok = first_token(part)
+    if not lp then break end
+    local close = n + 1 -- unclosed: the rest of the UA
+    local depth = 0
+    local j = lp
+    while true do
+      j = string.find(ua, "[()]", j)
+      if not j then break end
+      if string.byte(ua, j) == 40 then -- "("
+        depth = depth + 1
+      else
+        depth = depth - 1
+        if depth == 0 then close = j; break end
+      end
+      j = j + 1
+    end
+    local inner = string.sub(ua, lp + 1, close - 1)
+    for part in string.gmatch(inner, "[^;,()]+") do
+      local tok = first_token(trim(part))
       if tok ~= "" and has_bot_marker(tok) then
         return tok
       end
     end
-    pos = rp + 1
+    pos = close + 1
   end
+  return "mozilla"
 end
 
 -- Read + parse the rule file, updating _rules / _last_content. No timing logic:

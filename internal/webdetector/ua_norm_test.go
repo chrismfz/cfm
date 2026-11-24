@@ -1,61 +1,93 @@
 package webdetector
 
-import "testing"
+import (
+	"bufio"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+)
 
+// scripts/tests/fixtures/ua_norm.txt is shared with
+// scripts/tests/cfm_ua_emergency_test.lua: the daemon (`cfm bots top`, the
+// rule key) and the edge (the rule match) must key every UA the same way.
 func TestNormalizeUA(t *testing.T) {
-	cases := []struct {
-		in   string
-		want string
-	}{
-		{"", "-"},
-		{"-", "-"},
-		{"   ", "-"},
-
-		// Direct bot UAs (no Mozilla envelope).
-		{"facebookexternalhit/1.1", "facebookexternalhit"},
-		{"facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)", "facebookexternalhit"},
-		{"curl/7.88.1", "curl"},
-		{"python-requests/2.31.0", "python-requests"},
-		{"AhrefsBot/7.0", "ahrefsbot"},
-		{"Wget/1.21.3", "wget"},
-
-		// Mozilla envelope cases.
-		{"Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "googlebot"},
-		{"Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)", "bingbot"},
-		{"Mozilla/5.0 (compatible; SemrushBot/7~bl; +http://www.semrush.com/bot.html)", "semrushbot"},
-		{"Mozilla/5.0 (compatible; AhrefsBot/7.0; +http://ahrefs.com/robot/)", "ahrefsbot"},
-		{"Mozilla/5.0 (compatible; MJ12bot/v1.4.8; http://mj12bot.com/)", "mj12bot"},
-		{"Mozilla/5.0 (compatible; DotBot/1.2; +https://opensiteexplorer.org/dotbot)", "dotbot"},
-		{"Mozilla/5.0 (compatible; Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot)", "amazonbot"},
-		{"Mozilla/5.0 (compatible; meta-externalagent/1.1; +https://developers.facebook.com)", "meta-externalagent"},
-
-		// Bot declared in a LATER "(...)" group (Meta Chrome-145 crawler,
-		// Googlebot smartphone); an unclosed group stays "mozilla".
-		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))", "meta-externalagent"},
-		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 (compatible; meta-webindexer/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler))", "meta-webindexer"},
-		{"Mozilla/5.0 (Linux; Android 6.0.1; Nexus 5X Build/MMB29P) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "googlebot"},
-		{"Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (compatible; FooBot/1.0", "mozilla"},
-
-		// Real browsers — keep generic "mozilla" identifier.
-		{"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36", "mozilla"},
-		{"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605", "mozilla"},
-
-		// FB in-app browser — should not collapse to facebookexternalhit.
-		{"Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Mobile Safari/537.36 [FB_IAB/FB4A;FBAV/444]", "mozilla"},
-
-		// Whitespace parity with Lua: firstUAToken must NOT treat \n \r
-		// \v \f as token separators (Lua's %s would; Go's must not).
-		// These cases lock the parity in.
-		{"FooBot\nextra/1.0", "foobot\nextra"},
-		{"SemBot\v/1.0", "sembot\v"},
-		{"DotBot\f/2.0", "dotbot\f"},
-		{"GooBot\r/3.0", "goobot\r"},
+	f, err := os.Open("../../scripts/tests/fixtures/ua_norm.txt")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	for _, c := range cases {
-		got := NormalizeUA(c.in)
-		if got != c.want {
-			t.Errorf("NormalizeUA(%q) = %q, want %q", c.in, got, c.want)
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	n := 0
+	for sc.Scan() {
+		line := sc.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
+		in, want, ok := strings.Cut(line, "\t")
+		if !ok {
+			t.Fatalf("fixture line without a tab: %q", line)
+		}
+		in, want = unescapeUAFixture(t, in), unescapeUAFixture(t, want)
+		if got := NormalizeUA(in); got != want {
+			t.Errorf("NormalizeUA(%q) = %q, want %q", in, got, want)
+		}
+		n++
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if n < 30 {
+		t.Fatalf("fixture read only %d cases", n)
+	}
+}
+
+// unescapeUAFixture decodes \n \r \t \v \f \\ and \xHH, like the Lua test.
+func unescapeUAFixture(t *testing.T, s string) string {
+	t.Helper()
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		i++
+		switch s[i] {
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte('\v')
+		case 'f':
+			b.WriteByte('\f')
+		case '\\':
+			b.WriteByte('\\')
+		case 'x':
+			if i+2 >= len(s) {
+				t.Fatalf("short \\x escape in %q", s)
+			}
+			v, err := strconv.ParseUint(s[i+1:i+3], 16, 8)
+			if err != nil {
+				t.Fatalf("bad \\x escape in %q", s)
+			}
+			b.WriteByte(byte(v))
+			i += 2
+		default:
+			t.Fatalf("unknown escape \\%c in %q", s[i], s)
+		}
+	}
+	return b.String()
+}
+
+// BenchmarkNormalizeUABrowser is the common case on every ingest event: a
+// browser UA with two groups and no marker.
+func BenchmarkNormalizeUABrowser(b *testing.B) {
+	ua := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = NormalizeUA(ua)
 	}
 }

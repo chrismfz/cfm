@@ -328,7 +328,8 @@ func IsGoogleVerifiedBot(ua string) bool {
 		"mediapartners-google",
 		"storebot-google",
 		"feedfetcher-google",
-		"googleother":
+		"googleother",
+		"google-inspectiontool":
 		return true
 	}
 	return false

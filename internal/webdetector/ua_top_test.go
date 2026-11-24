@@ -264,6 +264,8 @@ func TestIsGoogleVerifiedBot(t *testing.T) {
 		"GoogleBot":             true,
 		"adsbot-google":         true,
 		"mediapartners-google":  true,
+		"googleother":           true,
+		"google-inspectiontool": true,
 		"facebookexternalhit":   false,
 		"semrushbot":            false,
 		"":                      false,

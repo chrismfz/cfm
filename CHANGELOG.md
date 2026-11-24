@@ -27,9 +27,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   normalizer (Go `NormalizeUA` and its edge twin `cfm_ua_emergency.lua`)
   looked only at the first `(...)` group and keyed the crawler as `mozilla`,
   so the rule never hit (titan, 2026-11-24: 0 hits a minute). Every group is
-  scanned now, which also names Googlebot smartphone (`googlebot`) in
-  `cfm bots top`, and `indexer` joins the bot markers (`meta-webindexer`
-  had none). Browser UAs still read `mozilla`.
+  scanned now (a group ends at its matching `)`, an unclosed one runs to the
+  end), and `indexer`, `googleother` and `google-inspectiontool` join the bot
+  markers (none of those names matched one). Browser UAs still read
+  `mozilla`. **Review your active rules before upgrading (`cfm bots list`):**
+  Googlebot smartphone now keys as `googlebot` and Bingbot mobile as
+  `bingbot`, so an existing `googlebot` / `bingbot` rule starts covering the
+  mobile crawler too. `google-inspectiontool` (Search Console) joins the
+  Google crawlers that need `--confirm`. The two normalizers are now
+  ASCII-only on both sides (they keyed a UA with NBSP or non-ASCII letters
+  differently) and run one shared fixture. The edge's UA trim is linear
+  now: while any `cfm bots` rule was active, one request with a long run of
+  spaces inside its User-Agent cost ~200 ms of worker CPU (8 KB header).
 - **A Debian/Ubuntu upgrade no longer stops to ask about `/etc/cfm` files.**
   Every `/etc/cfm` file was a dpkg conffile, and CFM edits several of them
   itself (`cfm allow` / `cfm block`, the WebUI's notify and detectors editors,
