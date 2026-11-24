@@ -24,12 +24,12 @@
 
 ## 2. Current picture (update on every read)
 
-*As of 2026-11-17 (read 7).*
+*As of 2026-11-24 (read 8).*
 
-- **Fleet version:** the 8 web nodes run `2026.11.16` (qualityweb, Angie,
-  joined on 2026-10-27). The 5 nodes without an edge serve no challenge:
-  mymail, 3deers and saf run `2026.10.21`, avglb `2026.11.03`, watchdog
-  `2026.11.16`.
+- **Fleet version:** the 8 web nodes run `2026.11.23`, all of them on the
+  cfm-edge engine (nginx 1.31.9). The 5 nodes without an edge serve no
+  challenge: saf runs `2026.10.21`, watchdog `2026.11.16`, avglb
+  `2026.11.17`, 3deers `2026.11.18`, mymail `2026.11.22`.
 - **Live since release 2026.09.29** (deployed 2026-09-29/30):
 
   | PR | What |
@@ -81,6 +81,16 @@
   +20 and the log-only `rf` reading, live from 11-11 ~01:00), a manual
   vhost challenge armed at v2 unless told v1, and WAF rule 102 at
   `challenge_v2` (2026.11.14).
+
+  Releases 2026.11.17 to 2026.11.23 added, in this area:
+  - the under-attack confirm step (#1667, under a manual `attack on` only);
+  - `attack on` arming its own challenge for a TTL (#1668, #1669);
+  - the `unsolicited` grain: a solve no challenge asked for is scored at v2
+    and earns no cookie (2026.11.18);
+  - an automatic v2 challenge that no longer falls to v1 while it is served,
+    and the `vhost_config` list read by the tier resolver itself
+    (2026.11.18);
+  - IPv6 clients counted by their /64 (2026.11.20).
 - **What bites today:** operator-armed fingerprint / country-ASN policies
   from cfm-web (still no `v2=geo` line in read 3's week), the WAF challenge
   tier at `challenge_v2`, manual vhost v2 tiers, the automatic vhost
@@ -104,6 +114,11 @@
   79 121 Mac passes on `c28caa00` after 11-11. Each tell buys about a day.
   Read 7's sizing points at WHO an automatic arm covers instead (proposal
   (b) in read 7: a per-vhost audience floor).
+  **Read 8: 74 % fleet-wide** on the same fingerprints. The farm also sent
+  its Linux SwiftShader profile under two new fingerprints on 11-19/20
+  (`9e4a75d5`, `7b6c7d83`, both convicted by cfm-web): 73 % and 87 %
+  rejected. `c28caa00` still passes as Windows / Mac at hs 0 (43 447 passes,
+  read 7: 138 916).
   The farms' rejects are now device-claim lies (`mobile_hw_lie`,
   `mac_hw_lie`), no longer `outer_zero`. Their passes stay under the fail
   score by design (D5b); stopping the rest is the operator fingerprint
@@ -163,18 +178,10 @@
      2026-10-22**, shipped with it); the orphan `HUMANITY_*` keys (decided:
      operator cleanup); the shipped `solver_farm` defaults (**decided
      2026-10-27: 180s / 30 / 15**; the fleet moves from 15 to 30).
-- **Next read:** 2026-11-24 (read 8), after the operator's decisions on
-  read 7's proposals. It watches the farm's hs-0 Windows / Mac profile, the
-  catch rate per node, human rejects under every v2 source, the
-  `solver_farm` humanity lines, and, for the audience floor, each vhost's
-  GR/CY share of its real-input solves and how stable it is week to week
-  (`docs/targeted-challenge-design.md` §8 has the method and the first
-  measurement: the edge's access log cannot give an audience, the real-input
-  solves read 95–100 % GR/CY on the busy Greek shops). It also counts
-  the vhosts whose `solver_farm` findings would have entered UNDER_ATTACK
-  (≥ 80 % of the passed solves outside the audience), none of which may be
-  a Greek audience. The `hid:1`
-  watch on `95070673` closed in read 7.
+- **Next read:** 2026-12-01 (read 9). It watches the same items as read 8,
+  plus the audience estimate's coverage (how many vhosts have one at all)
+  and, if the operator tries it, the confirm step under `attack on`
+  (`v2_confirm` lines vs `v2_confirm=clicked` solves).
 - **Kill switches, if a read shows harm:** `CHALLENGE_V2_INPUT_RESCUE = 0`
   (rescue off) · `CHALLENGE_V2_AUTO_VHOST = off` (auto-v2 off) · per vhost
   `cfm webtop challenge tier <vhost> v1` · `CHALLENGE_V2_HW_TELLS = 0` ·
@@ -273,6 +280,207 @@ week missed is a week lost on virgo and speedhost.
   `hc` before calling a reject human.
 
 ## 6. Entries
+
+### 2026-11-24 — read 8 (window: 2026-11-17 09:05 to 2026-11-24 09:05 Athens, 7 days)
+
+The read for the audience floor (`docs/targeted-challenge-design.md` §8).
+Same method as read 7: every web node's `cfm.challenges.log*` and
+`cfm.abuse_shadow.log*` parsed over SSH (read-only, python on stdin, `nice`),
+and the `solver_farm` findings from each node's history database (read-only
+SQLite). The window is the whole week on every node. Read 7's scripts were
+gone with the scratchpad, so they were rebuilt from its method.
+
+- **Fleet:**
+  - The 8 web nodes run `2026.11.23`, and all 8 now run the cfm-edge engine
+    (nginx 1.31.9).
+  - In this area since read 7:
+    - the confirm step (#1667) and `attack on` arming its own challenge
+      (#1668, #1669);
+    - the `unsolicited` grain (2026.11.18);
+    - the automatic v2 tier that no longer falls to v1 while served, and
+      `vhost_config` read by the resolver (2026.11.18);
+    - IPv6 /64 counting (2026.11.20).
+  - **No operator policy bites:** no `v2=fp` and no `v2=geo` line.
+  - **No `attack on` this week:** no `v2_confirm` line on any node, so the
+    confirm step (S4) has no measurement yet.
+  - cfm-web: farm verdicts `c28caa00`, `95070673`, `9e4a75d5`, `7b6c7d83`,
+    `2879571a`. `d9d37bc0` is still a `suspect`.
+- **Health:**
+  - 501 solves with no payload (`hs=-`), 487 of them farm-fp solves under an
+    arm (read 7: 1 052 / 508).
+  - No `v2_rescued` line (fifth week running).
+  - `would_v2` in the shadow log: 2 418 on farm fps, 326 on others.
+- **Watch item 1, the `c28caa00` pass profile: unchanged, smaller.**
+
+  | UA | Passed at hs 0 | Passed at hs 1–99 | Rejected |
+  |---|---|---|---|
+  | X11 Linux | 1 062 | 7 900 | **124 517** |
+  | Windows | **24 879** | 2 406 | 346 |
+  | Mac | **18 568** | 633 | 4 048 |
+  | Android | 6 030 | 64 | 22 371 |
+  | iOS | 242 | 1 673 | 22 107 |
+
+  - The passes are still Windows and Mac at hs 0, no software renderer, no
+    input: 43 447 (read 7: 138 916).
+  - `linux_sw` still rejects the Linux profile the farm keeps sending
+    (124 517).
+  - New: Android and iOS UAs on a software renderer, rejected by
+    `mobile_hw_lie` (44 478; read 7: 8 298 on Android).
+- **The farm changed TLS fingerprint for two days.**
+  - **`9e4a75d5`**, 11-19 and 11-20 only:
+    - 81 454 rejected, 30 120 passed;
+    - qualityweb ventus.com.gr 47 410, rigel e-vafeiadis.gr 19 723, titan
+      gastronom.hk 8 813;
+    - the Linux SwiftShader profile (`sw_renderer,linux_sw,no_input`),
+      US ×58 690, then DE, FR, GB.
+  - **`7b6c7d83`** (orion, the same two days): 26 809 rejected, 3 872
+    passed, on mathematica.gr and vitolighting.com; Android / iOS / Linux on
+    SwiftShader.
+  - cfm-web convicted both within the days (verdict `farm`). The detector's
+    fingerprint grain kept up; no policy is armed on any of them.
+  - A third shape, with no TLS fingerprint at all (`tls_fp=-`): 8 968
+    rejects on orion eranistis.net from 11-20, the same Linux SwiftShader
+    profile (US, NO). Its `solver_farm` findings are `subnet_spread` only.
+- **Catch rate** (read 7's farm fps, under an arm, rejected / all):
+
+  | Node | Rejected / passed | Caught (read 7) |
+  |---|---|---|
+  | mars | 1 832 / 279 | **87 %** (26 %) |
+  | orion | 57 027 / 11 480 | **83 %** (25 %) |
+  | titan | 44 784 / 15 208 | 75 % (79 %) |
+  | rigel | 40 724 / 16 001 | 72 % (62 %) |
+  | qualityweb | 43 243 / 21 688 | 67 % (53 %) |
+  | virgo | 414 / 351 | 54 % (80 %) |
+  | earth | 1 635 / 1 797 | 48 % (75 %) |
+  | server.speedhost.gr | 56 / 89 | 39 % (26 %) |
+
+  - Fleet-wide: **74 %** (189 715 rejected, 66 893 passed; read 7: 52 %).
+    With the two new fingerprints: 75 %.
+  - The passes still include the bucket's humans: earth's are mostly
+    365home.gr and motopegasus.com.
+- **Human-labelled rejects (GR/CY address, no bot UA): none human.**
+  - Under every v2 source, 26 rejects from a GR/CY non-datacenter address,
+    of 302 151:
+    - rigel: `62.103.124.3` (OTEnet), 9 on e-vafeiadis.gr, `HeadlessChrome`
+      (the same address as in read 7);
+    - titan: `194.154.40.212` (the DEI corporate network), 3 on tophair.gr,
+      `HeadlessChrome`, `webdriver`;
+    - farm fps on Cyta (`62.228.4.115`, `62.228.183.16`) with the farm's
+      Linux SwiftShader profile;
+    - `186.247.x` addresses labelled GR (Datacamp, PacketHub): webdriver
+      Firefox from a datacenter.
+  - **`vhost_config`: 4 509 rejects** (read 7: 496), none from a GR/CY
+    address and none on a panel port. 1 536 GR/CY solves passed on the
+    always-on hosts. The rise is 2026.11.18: the resolver now reads the
+    list itself, so a quiet `cpanel.` / `webmail.` host is at v2 from its
+    first solve (orion 2 515, earth 790).
+  - **`unsolicited`:** 11 921 withheld solves rejected (qualityweb 6 373,
+    orion 2 511, titan 2 209) and 2 980 passed. Nothing asked for them; a
+    rejected one gets no cookie and goes on to its page.
+- **Watch item 4, the audience estimate** (real-input solves: `ptr` ≥ 5 and
+  `mv` ≥ 100, not on a convicted farm fp, `www.` stripped):
+
+  | vhost (node) | Read 7 | Read 8 |
+  |---|---|---|
+  | mathematica.gr (orion) | 405 / 96 % | **386 / 97 %** |
+  | e-vafeiadis.gr (rigel) | 186 / 99 % | **195 / 99 %** |
+  | somabed.gr (qualityweb) | 156 / 99 % | 49 / 96 % |
+  | ventus.com.gr (qualityweb) | 85 / 99 % | 31 / 90 % |
+  | ekalogeropoulos.gr (qualityweb) | 97 / 98 % | 26 / 88 % |
+  | techking.gr (titan) | 34 / 97 % | 22 / 95 % |
+  | lpr.gr (qualityweb) | 273 / 100 % | 13 (< 20) |
+  | gokids.gr (rigel) | 56 / 100 % | absent |
+
+  New with n ≥ 20: pireasplus.gr (speedhost) 27 / 100 %, trimel.gr
+  (qualityweb) 24 / 96 %, karagilanis.gr (rigel) 20 / 100 %,
+  webmail.financial.gr (qualityweb) 20 / 100 %.
+
+  - **Stable where it is measured.** The two vhosts with a busy week both
+    times read the same share (96 → 97 %, 99 → 99 %).
+  - **But it exists only while the vhost is challenged.** A real-input
+    solve happens only on a challenge, so the counts follow the challenge,
+    not the audience: lpr.gr fell from 273 to 13, gokids.gr to none. Only
+    12 vhosts reach n ≥ 20 this week. The estimate needs memory: a rolling
+    window kept per vhost, not one week's solves.
+  - **Under 70 %:** vitolighting.com (orion), 27 / 7 % (RS, SI, HU, KZ),
+    as in read 7. gastronom.hk is below the n floor (9, HK / US).
+  - The few foreign real-input solves on the Greek shops (3 on ventus: CN,
+    SV, PL; 3 on ekalogeropoulos: BR, LT, NL) are what pulled them to
+    88–90 %. Under the floor they would be challenged as today.
+- **Watch item 5, would-enter UNDER_ATTACK** (a `solver_farm` finding whose
+  humanity line has n ≥ 10 and ≥ 80 % of its solves outside GR/CY):
+
+  | Node | Findings | Would enter | vhosts |
+  |---|---|---|---|
+  | qualityweb | 1 272 | 295 | 5 |
+  | titan | 1 489 | 271 | 12 |
+  | orion | 1 072 | 212 | 8 |
+  | rigel | 716 | 158 | 4 |
+  | earth | 96 | 16 | 4 |
+  | mars | 4 | 2 | 2 |
+  | virgo, server.speedhost.gr | 0 | — | — |
+
+  - 954 of 4 649 findings, on 35 vhosts.
+  - The busiest: gastronom.hk 210, vitolighting.com 131, e-vafeiadis.gr 128,
+    ventus.com.gr 117, mathematica.gr 64, somabed.gr 67, ekalogeropoulos.gr
+    63, achro.gr 43, elitefirstclassmykonos.com 35, vagoneto.gr 28.
+  - **No would-enter finding is a Greek-audience finding.** The test reads
+    the finding's own solves, so it fires on the farm's windows on a Greek
+    shop and not on its Greek ones: mathematica.gr entered on 64 of its 209
+    findings (its findings average 70 % outside), trimel.gr on 5 of 183,
+    naturehealth.gr on none of 200 (23 % outside).
+  - So automatic entry would put most of the farm's Greek targets under
+    UNDER_ATTACK most of the week. Inside it, the confirm is shown only
+    outside the audience, so their GR/CY visitors would see nothing new.
+- **Watch item 6, sizing the audience floor** (every solve and reject under
+  an AUTOMATIC vhost challenge, `src=vhost:*`, manual excluded):
+
+  | Who | Solves | Rejects |
+  |---|---|---|
+  | Not GR/CY | 72 575 | 205 920 |
+  | Not GR/CY, datacenter ASN | 17 189 | 96 190 |
+  | GR/CY, datacenter ASN | 638 | 15 |
+  | **GR/CY, other networks** | **20 671** | **26** |
+
+  - **Spared:** 20 671 solves (19 %), 9 165 of them on a farm fingerprint
+    (its bucket's Greek visitors).
+  - **Let through:** of the 26 GR/CY rejects, the ones a floor that still
+    challenges a convicted fp on a software renderer would skip are 16,
+    all `HeadlessChrome` (the OTEnet and DEI addresses above, and 5 on
+    `c28caa00` with no software renderer).
+  - The floor would still challenge 81 % of the solves and every farm
+    reject from abroad.
+- **Since last read:** the catch rate rose from 52 % to 74 %, mostly
+  2026.11.18's fixes (the tier no longer falls to v1, the always-on panel
+  hosts at v2, no cookie for an unsolicited solve). The farm's passes are
+  still Windows / Mac at hs 0, a third of last week's. The farm rotated TLS
+  fingerprints for two days and cfm-web convicted the new ones.
+
+#### Proposals (for the operator; nothing is implemented without a go)
+
+**(a) Build the audience floor's shadow first (S1), with a persisted
+estimate.** The share is stable where it is measured, but this week only 12
+vhosts have one: the estimate must be a rolling window kept per vhost (for
+example 28 days, saved with the vhost's state), with the GR/CY default and
+an operator pin for the rest. S1 logs `aud=in|out|dc` on the
+automatic-challenge lines and the vhost's estimate, and changes nothing.
+A second read of those lines decides S2.
+
+**(b) Log would-enter (S3) next to it.** 954 findings a week, never on a
+Greek finding. Automatic entry (S5) would then cover most of the farm's
+Greek targets all week, which makes S5 the audience floor plus the confirm
+on those vhosts. Decide S2 vs S5 after one read of both shadow lines.
+
+**(c) Try the confirm step on one vhost.** S4 has no measurement: no `attack
+on` ran this week. An operator `cfm webtop attack on www.ventus.com.gr
+--ttl 6h` (or e-vafeiadis.gr) during a farm window would give the first
+`v2_confirm` / `clicked` corpus.
+
+**(d) No new score tell.** The new fingerprints carried known profiles and
+were rejected. Keep the rotation as evidence that the fingerprint grain
+keeps up (D3a), with no policy armed.
+
+- **Actions:** none.
 
 ### 2026-11-17 — read 7 (window: 2026-11-10 09:05 to 2026-11-17 09:05 Athens, 7 days)
 
