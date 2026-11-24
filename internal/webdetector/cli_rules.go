@@ -312,7 +312,7 @@ func runRulesSimulate(baseURL string, in TrafficRuleEvalInput) error {
 	case out.VerifiedBotInconclusive == "not_checked":
 		// no verified_bot rule exists → nothing was resolved; say nothing definitive
 	case out.VerifiedBotExcluded != "":
-		fmt.Printf("Verified crawler: reverse DNS forward-confirmed as %q, which is deliberately NOT a crawler for rules (Google user-driven fetchers: Translate/AMP proxies); verified_bot rules do not match.\n", out.VerifiedBotExcluded)
+		fmt.Printf("Verified crawler: reverse DNS forward-confirmed as %q, which is deliberately NOT a crawler for rules (the generic google verdict: Google's special-case crawlers such as AdsBot); verified_bot rules do not match.\n", out.VerifiedBotExcluded)
 	case out.VerifiedBotInconclusive != "":
 		fmt.Printf("Verified crawler: could not tell (%s) — the IP's reverse DNS was not checked to completion, so this is NOT a negative; verified_bot rules were evaluated as unverified. Pass --verified-bot to test the crawler path.\n", out.VerifiedBotInconclusive)
 	case strings.TrimSpace(in.IP) != "":

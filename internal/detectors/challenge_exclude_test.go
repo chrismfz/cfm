@@ -1,6 +1,9 @@
 package detectors
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Real UAs contain '/', so '*' in a pattern must NOT treat '/' as a separator.
 // This was previously broken because globMatch used filepath.Match.
@@ -312,7 +315,9 @@ func TestShippedExcludeFile_PreviewFetchers(t *testing.T) {
 		{"twitterbot from X", twitterbot, "AS13414", true},
 		{"twitterbot from Google Cloud", twitterbot, "AS396982", false},
 		{"twitterbot from Hetzner", twitterbot, "AS24940", false},
-		{"read-aloud from Google", readAloud, "AS15169", true},
+		// Read-Aloud is a user-triggered fetcher: its rule was removed on
+		// 2026-11-24 (anyone can send the UA through Google's proxies).
+		{"read-aloud from Google", readAloud, "AS15169", false},
 		{"read-aloud from Google Cloud", readAloud, "AS396982", false},
 		{"read-aloud spoof from Hetzner", readAloud, "AS24940", false},
 		{"read-aloud, ASN unknown", readAloud, "", false},
@@ -328,6 +333,55 @@ func TestShippedExcludeFile_PreviewFetchers(t *testing.T) {
 		_, _, ok := ce.MatchNoDNS("shop.gr", c.ua, str(c.asn), nil, "CHALLENGE_VHOST")
 		if ok != c.want {
 			t.Errorf("%s: exempt=%v, want %v", c.name, ok, c.want)
+		}
+	}
+}
+
+// Google's user-triggered fetchers (google-proxy-*) earn no exemption from an
+// exclude rule that names a client, the shipped file's or an edited copy's:
+// they carry the user's own UA from Google's own ASN, and their PTR
+// forward-confirms. A host-only rule (a per-vhost free pass) still applies.
+func TestExcludeRefusesGoogleUserTriggeredFetchers(t *testing.T) {
+	const proxyPTR = "google-proxy-66-249-82-238.google.com"
+	str := func(v string) func() string { return func() string { return v } }
+	old := &ChallengeExclude{rules: []challengeExcludeRule{
+		{ptr: "*.google.com", verifyFcrdns: true, action: "skip"},
+		{asn: "as15169", ua: "*google-read-aloud*", action: "skip"},
+		{asn: "as15169", ua: "*google-xrawler*", action: "skip"},
+	}}
+	readAloud := "Mozilla/5.0 (Linux; Android 10; K) (compatible; Google-Read-Aloud)"
+	for _, ua := range []string{readAloud, "google-xrawler"} {
+		if _, _, ok := old.MatchNoDNS("shop.gr", ua, str("AS15169"), str(proxyPTR), "CHALLENGE_VHOST"); ok {
+			t.Errorf("serve path: %q through a google-proxy PTR must not be exempt", ua)
+		}
+		if _, _, ok := old.Match("66.249.82.238", "shop.gr", ua, "AS15169", proxyPTR, "CHALLENGE_IP"); ok {
+			t.Errorf("log path: %q through a google-proxy PTR must not be exempt", ua)
+		}
+	}
+	// The feed fetcher itself has no PTR: still exempt.
+	if _, _, ok := old.MatchNoDNS("shop.gr", "google-xrawler", str("AS15169"), str(""), "CHALLENGE_VHOST"); !ok {
+		t.Error("google-xrawler with no PTR must stay exempt")
+	}
+	// The ptr rule never even reaches a forward-confirm for such a PTR.
+	if n, ok := old.VerifiedGoodBotName("66.249.82.238", proxyPTR, nil); ok {
+		t.Errorf("VerifiedGoodBotName(google-proxy) = %q, want none", n)
+	}
+	// A host-only rule is about the site, not the client.
+	hostOnly := &ChallengeExclude{rules: []challengeExcludeRule{{host: "status.example.com", action: "skip"}}}
+	if _, _, ok := hostOnly.MatchNoDNS("status.example.com", readAloud, str("AS15169"), str(proxyPTR), "CHALLENGE_VHOST"); !ok {
+		t.Error("a host-only rule must still apply")
+	}
+	// The SHIPPED file carries no rule that could cover them by PTR glob.
+	ce, err := LoadChallengeExclude("../../configs/webdetector_challenge_exclude.txt")
+	if err != nil || ce == nil {
+		t.Fatalf("load shipped file: %v", err)
+	}
+	for _, r := range ce.rules {
+		if r.ptr != "" && globMatch(r.ptr, proxyPTR) {
+			t.Errorf("shipped rule %q covers %s", r.raw, proxyPTR)
+		}
+		if strings.Contains(r.ua, "read-aloud") {
+			t.Errorf("shipped rule %q exempts Read-Aloud by UA", r.raw)
 		}
 	}
 }

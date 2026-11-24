@@ -910,7 +910,8 @@ at 80 and puts the farm profile 10 points over the bar.
   above 80): at 61-80, a Linux software-renderer visitor with some input
   but fewer than 5 pointer events scores 80 and is rejected.
 - **Good-bot waiver:** unchanged. Google-Read-Aloud claims Android (no
-  `linux_sw`, still 140); Googlebot/Bingbot rendering UAs carry no Linux
+  `linux_sw`, still 140; since 2026-11-24 its `google-proxy-*` PTR is not a
+  good bot at all, so it is no longer waived); Googlebot/Bingbot rendering UAs carry no Linux
   token. A verified crawler that did would reach the waiver at 110 under a
   geo/vhost arm, exactly as any failing crawler does.
 - **Malpath ban:** a malpath-marked IP's failed visits escalate to a ban
@@ -1421,8 +1422,9 @@ burn-in and FP triage with no new plumbing and no logrotate change:
   question "is my newly-armed tier actually covering traffic?"; `grep
   v2_reject` is "did it bite"; `grep v2_waived=` is "which failing solves did
   it let through as an FCrDNS-verified good bot" (`CHALLENGE_GOODBOT_EXEMPT`;
-  e.g. Google-Read-Aloud, hs=140 from rotating first-seen Google IPs — the
-  gate forward-confirms a crawler-looking PTR inline, bounded, on the reject
+  e.g. a Google special-case crawler; Google-Read-Aloud, hs=140 from rotating
+  first-seen `google-proxy-*` IPs, was waived until 2026-11-24, when that PTR
+  stopped being a good bot — the gate forward-confirms a crawler-looking PTR inline, bounded, on the reject
   path only). Only under a geo or vhost arm, the grains the decision-time
   exemption already softens; a fingerprint policy or a traffic-rule/WAF mark
   stays strict. The history row carries it as `v2_waived`. The mirror image

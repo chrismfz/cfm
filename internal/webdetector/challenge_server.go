@@ -1130,10 +1130,9 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				// for it (geo, vhost — challengeV2WaiverBar): the SAME FCrDNS
 				// verdict and CHALLENGE_GOODBOT_EXEMPT knob. It typically got
 				// here because no verdict existed when the challenge was served
-				// (e.g. Google-Read-Aloud's rotating, first-seen fetcher IPs,
-				// which score sw_renderer,touch_lie,no_input = 140 — on a 16+
-				// thread fetcher mobile_hw_lie is listed too, same score: the
-				// device-claim group counts once), so this
+				// (a crawler on rotating, first-seen IPs; Google-Read-Aloud,
+				// which scores 140, was the case until 2026-11-24, when its
+				// google-proxy-* PTR stopped verifying), so this
 				// may forward-confirm inline — bounded, and only on this
 				// about-to-reject path. The solve then takes the normal
 				// solved path, marked v2_waived=<name>.

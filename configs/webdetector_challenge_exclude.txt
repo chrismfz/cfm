@@ -122,21 +122,25 @@
 #    Fake "Googlebot" UAs from random IPs do NOT pass.
 # -----------------------------------------------------------------------------
 ptr=*.googlebot.com; verify_fcrdns=1; action=skip
-ptr=*.google.com;    verify_fcrdns=1; action=skip
-#    Google-Read-Aloud: the Google Assistant / "Listen to this page" fetcher a
-#    USER triggers. Its PTRs (google-proxy-*.google.com) do forward-confirm, but
-#    it spreads requests over many IPs, so the cache-only FCrDNS exemption above
-#    rarely has a verdict in time on the decision hot path. The ASN pins it to
-#    Google's own network (AS15169 — NOT Google Cloud, AS396982): on titan
-#    2026-10-02, 98% of its requests were AS15169; the rest (Hetzner, Vultr,
-#    Online SAS) were spoofs and stay challenged.
-asn=as15169; ua=*google-read-aloud*; action=skip
+#    Google's special-case crawlers (AdsBot, APIs-Google).
+ptr=rate-limited-proxy-*.google.com; verify_fcrdns=1; action=skip
+#    NOT Google's user-triggered fetchers (google-proxy-*.google.com: Read
+#    Aloud, Translate, link previews). They fetch whatever URL a user hands
+#    Google, with the user's own UA, from Google's own network, so a
+#    `ptr=*.google.com` or an `asn=as15169; ua=*google-read-aloud*` rule (both
+#    here until 2026-11-24) let anyone through them: ~440 of them walked a
+#    forum on orion for days. CFM refuses any ua / asn / ptr rule match for
+#    such a PTR in code (goodbot.NotGoodBotPTR) once the PTR is cached, so an
+#    edited copy of this file with the old lines grants them nothing past an
+#    IP's first request or two.
 #    google-xrawler: the fetcher Google Merchant Center / Google Ads use for a
 #    shop's product feed (csv_feed*.php and similar). Its addresses (173.194.x,
 #    74.125.x) have NO PTR at all, so the FCrDNS rules above can never match
 #    it; under a vhost challenge it got the challenge page instead of the feed
-#    (somabed.gr, qualityweb, 2026-11-09: 11 of 11 fetches challenged). Same
-#    ASN pin as Read-Aloud: the UA from any other network stays challenged.
+#    (somabed.gr, qualityweb, 2026-11-09: 11 of 11 fetches challenged). Pinned
+#    to Google's own ASN: the UA from any other network stays challenged, and
+#    from a google-proxy-* PTR (the UA sent through a user-triggered fetcher)
+#    too, once that PTR is known.
 asn=as15169; ua=*google-xrawler*;    action=skip
 
 # -----------------------------------------------------------------------------

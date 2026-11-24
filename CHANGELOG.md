@@ -20,6 +20,42 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Security
+- **Google's user-triggered fetchers no longer skip the WAF and the
+  challenge.** These are the `google-proxy-*.google.com` IPs behind Read
+  Aloud, Translate and link previews. They fetch whatever URL a user hands
+  Google, so anyone can aim them at a site. They were exempt twice over:
+  - **The bypass list.** It took all five of Google's IP feeds (`google-all`),
+    including the three user-triggered ones. It now takes the common crawlers
+    (Googlebot) and the special-case crawlers (AdsBot) only, 1620 fewer
+    prefixes.
+  - **The good-bot check.** A `google-proxy-*` PTR verified as the good bot
+    "google". Under `google.com` only Google's special-case crawlers
+    (`rate-limited-proxy-*`) verify now, everywhere that check is read
+    (challenge exemption, v2 waiver, bans, uniqIP, shadow, L4 autoblock).
+  - **The challenge-exclude file.** It shipped `ptr=*.google.com;
+    verify_fcrdns=1` and `asn=as15169; ua=*google-read-aloud*`, and the
+    proxies pass the user's own UA through. The reference file is narrowed to
+    `ptr=rate-limited-proxy-*.google.com`, and the Read-Aloud rule is gone. A
+    node whose `/etc/cfm/webdetector_challenge_exclude.txt` was edited keeps
+    its copy (the new default lands as `.dpkg-dist` / `.rpmnew`). CFM refuses,
+    in code, any `ua=` / `asn=` / `ptr=` rule match for a `google-proxy-*`
+    client once its PTR is cached, so the old lines grant nothing past an IP's
+    first request or two. Remove them by hand. A Challenge Access-Control
+    entry is not covered: an operator's `asn_in: [15169]` entry (the
+    product-feed recipe) still lets them reach the paths it names.
+
+  Why: from 2026-11-21, ~440 of them walked `www.mathematica.gr`'s phpBB
+  forum on orion. They sent ~2M requests (671k on the 11-24 morning) with no
+  static asset, and at the 08–09 peak took about 40 % of orion's origin time.
+  Elsewhere on the fleet the same proxies sent 0–31 requests per node that
+  day.
+
+  Cost: on a vhost that is challenging, Read Aloud and Translate now see the
+  challenge, and a v2 arm rejects them. The Merchant Center feed fetcher
+  (`google-xrawler`, no PTR) stays exempt by its UA rule. The bypass list changes with the
+  package (`make release` regenerates it from the same, narrower sources).
+
 ### Added
 - **Bypass-list crawlers are micro-cached.** Googlebot, Bingbot, Applebot,
   DuckDuckBot, Skroutz and the other crawlers of the bypass list used to go

@@ -38,7 +38,7 @@ export const CA_RECIPES = Object.freeze([
     vars: [
       { key: "vhosts", label: "Vhosts", type: "vhosts", required: true, default: "*", placeholder: "* (all vhosts)" },
     ],
-    warnings: ["Covers only FCrDNS-verifiable crawlers. It also keeps Google's Translate/AMP proxies out of the challenge (they cannot solve one)."],
+    warnings: ["Covers only FCrDNS-verifiable crawlers. It also keeps Google's special-case crawlers (AdsBot) out of the challenge. Google's user-triggered fetchers (Translate, Read Aloud) are not verified crawlers and stay challenged."],
     build: (v) => [{
       enabled: true,
       scope: { vhosts: vhosts(v.vhosts) },
