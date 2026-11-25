@@ -20,7 +20,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **The web detector no longer times out on a node with busy vhost
+  challenges.** For every vhost under a vhost-wide challenge (automatic,
+  manual or listed), each tick looked up every visitor of the last window
+  one by one, with a reverse-DNS query of up to 1 s each, for a per-IP bypass
+  that had stopped doing anything since 2026-11-05. A farm on fresh IPs with
+  no PTR pushed the tick past its 30 s watchdog: on qualityweb about 360
+  `webdetector run timeout` lines a day, each one a tick whose challenges,
+  blocks and the rest came late. The walk is gone. IGNORE_IPS and the
+  challenge-exclude file still apply to a vhost challenge exactly as before:
+  per request, at the edge decision.
 
 ## 2026.11.25
 
