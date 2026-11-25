@@ -1076,8 +1076,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			})
 		}
 
-		// D5 gate — teeth ONLY under an arm (v2Grain: an operator-armed
-		// fingerprint or country/ASN policy, a v2 vhost tier, or a rung mark):
+		// D5 gate — teeth under an arm (v2Grain: an operator-armed
+		// fingerprint or country/ASN policy, a v2 vhost tier, a rung mark, the
+		// unsolicited pre-solve, or — CHALLENGE_V2_ALL, default on since
+		// 2026-11-25 — the all grain, which leaves no scored solve unarmed):
 		// a failing score there means the PoW solve earns NO clearance —
 		// unless the rescue or the good-bot waiver lets it through, each
 		// marked on the solve line. The 403

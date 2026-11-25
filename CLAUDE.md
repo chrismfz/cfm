@@ -745,12 +745,16 @@ Knobs `[webdetector] FP_POLICY` (`0` kills all kinds) / `FP_POLICY_ALLOW_FPS`.
   decision. An unblock clears every rung mark (`clearChallengeV2Marks`).
 - **Exemptions at verify are grain-scoped.** The FCrDNS good-bot waiver
   (`CHALLENGE_GOODBOT_EXEMPT`, `v2_waived=`) applies only under a geo / vhost
-  arm (the grains the decision exemption softens) and never in lockdown; fp
-  policy and rule/WAF marks stay strict. The real-input rescue
+  arm (the grains the decision exemption softens), the unsolicited and the
+  `all` grains, and never in lockdown; fp policy and rule/WAF marks stay
+  strict. Only `internal/goodbot`'s crawlers verify (no Baidu, no
+  `google-proxy-*` fetchers), so those are rejected under `all` too. The real-input rescue
   (`v2_rescued=input`) applies under every grain but never above its fixed cap
   (`rescueMaxScore`) and never with a certain tell (webdriver / headless UA).
   Making webdriver / headless UA reject at every tier was measured and
-  rejected (unarmed, they are mostly site owners' own tools).
+  rejected (unarmed, they are mostly site owners' own tools); the `all` grain
+  (2026-11-25) rejects a failing solve at every challenge anyway, but only
+  one that was challenged, and the input rescue still clears.
 - **ONE resolver for "is this vhost v2": `challengeV2VhostTier`**, serving
   the gate and every surface — never read the manual rung alone. A manual v1
   arm never downgrades an automatic v2 (that was a scoped bypass of an

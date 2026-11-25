@@ -10,7 +10,12 @@ package webdetector
 // for a real user — no puzzle, no extra click, nothing visible.
 //
 // D5 is the contract this file exists to honour:
-//   (a) SCOPE      — the score has TEETH only for a solve covered by an
+//   (a) SCOPE      — since 2026-11-25 every scored solve has TEETH: the
+//                    named grains below, then the unsolicited and the all
+//                    grains (challengeV2UnsolicitedArms, challengeV2AllArms;
+//                    CHALLENGE_V2_ALL=0 restores this arm-only scope, D5
+//                    amendment). Arm-only, the score has TEETH only for a
+//                    solve covered by an
 //                    operator-armed `challenge_v2` on SOME grain: the client's
 //                    fingerprint (FingerprintPolicyForID), a fleet-armed
 //                    country/ASN policy (GeoPolicyActionForIP), a v2-tier
