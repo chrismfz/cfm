@@ -118,6 +118,7 @@ func SetTrustedProxies(nets []*net.IPNet) {
 	// Nor does nft ban a proxy's whole /64 (a detector that saw the proxy's
 	// own address): firewall/client_block.go bans the address instead.
 	firewall.SetClientNetExempt("trusted_proxies", func(p netip.Prefix) bool { return proxies.Load().overlaps(p) })
+	markAll()
 	version.Add(1)
 }
 
@@ -190,6 +191,7 @@ func (s *Store) registerAllowExempt(on bool) {
 // false for every address (the store keeps its entries).
 func SetEnabled(on bool) {
 	if enabled.Swap(on) != on {
+		markAll()
 		version.Add(1)
 	}
 }
@@ -228,6 +230,7 @@ func Enabled() bool { return enabled.Load() }
 // SetDefault installs the daemon's store; nil uninstalls it.
 func SetDefault(s *Store) {
 	def.Store(s)
+	markAll()
 	version.Add(1)
 }
 
@@ -309,6 +312,7 @@ func (s *Store) add(k string, ttl *time.Duration, source string, exact bool) {
 	}
 	s.m[k] = e
 	s.mu.Unlock()
+	markKeys(k)
 	s.save()
 }
 
@@ -334,19 +338,20 @@ func (s *Store) Remove(ip string) {
 	if addr := net.ParseIP(strings.TrimSpace(ip)); addr != nil {
 		keys = append(keys, clientKey(addr))
 	}
-	had := false
+	var gone []string
 	s.mu.Lock()
 	for _, k := range keys {
 		if k == "" {
 			continue
 		}
 		if _, ok := s.m[k]; ok {
-			had = true
+			gone = append(gone, k)
 			delete(s.m, k)
 		}
 	}
 	s.mu.Unlock()
-	if had {
+	if len(gone) > 0 {
+		markKeys(gone...)
 		s.save()
 	}
 }
@@ -500,7 +505,7 @@ func (s *Store) Reconcile(snap Snapshot) {
 	allow := parseAllowSet(snap.Allows)
 	old := s.allow.Swap(allow)
 	s.registerAllowExempt(true)
-	changed := false
+	var changed []string
 	s.mu.Lock()
 	for k, e := range s.m {
 		exp, blocked := inNft[k]
@@ -508,28 +513,35 @@ func (s *Store) Reconcile(snap Snapshot) {
 		switch {
 		case !e.Expires.IsZero() && !e.Expires.After(now):
 			delete(s.m, k)
-			changed = true
+			changed = append(changed, k)
 		case allow.coversKey(k):
 			delete(s.m, k)
-			changed = true
+			changed = append(changed, k)
 		case !blocked && !fresh:
 			delete(s.m, k)
-			changed = true
+			changed = append(changed, k)
 		case blocked && !exp.IsZero() && (e.Expires.IsZero() || e.Expires.Sub(exp) > time.Second):
 			// nft ends earlier (more than a second: its own clock): clamp.
 			e.Expires = exp
 			s.m[k] = e
-			changed = true
+			changed = append(changed, k)
 		}
 	}
 	s.mu.Unlock()
 	wasReady, wasCleared := s.ready.Swap(true), s.cleared.Swap(false)
-	if changed {
+	// The answers can move without an entry changing: readiness, or the
+	// allow sets. Those move every answer at once (a new generation of the
+	// change log); a reconcile that changed nothing leaves the version
+	// alone, or every 2 minute reconcile rebuilt the edge's list.
+	moved := !wasReady || wasCleared || !allow.equal(old)
+	if moved {
+		markAll()
+	} else {
+		markKeys(changed...)
+	}
+	if len(changed) > 0 {
 		s.save() // bumps the version
-	} else if !wasReady || wasCleared || !allow.equal(old) {
-		// The answers moved without an entry changing: readiness, or the
-		// allow sets. A reconcile that changed nothing leaves the version
-		// alone, or every 2 minute reconcile rebuilt the edge's list.
+	} else if moved {
 		version.Add(1)
 	}
 }
@@ -550,6 +562,7 @@ func (s *Store) Clear() {
 	s.cleared.Store(true)
 	s.allow.Store(nil)
 	s.registerAllowExempt(false)
+	markAll()
 	version.Add(1)
 }
 
@@ -787,6 +800,7 @@ func (s *Store) Load() {
 		}
 	}
 	s.mu.Unlock()
+	markAll()
 	version.Add(1)
 }
 

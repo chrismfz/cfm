@@ -30,13 +30,17 @@
 -- address left over from an older list carries an older id and never
 -- matches. Changes are written into the live slot directly. Each entry lives
 -- as long as its ban (a permanent one has no TTL), as in nft: with the daemon
--- down the edge keeps enforcing what nft enforces. The dict is sized for two
--- copies of the daemon's cap (16m for 20k; measured on nginx 1.24): a write
--- into a full dict does not fail, it evicts the least recently used keys,
--- and those are the leftovers of older lists, so the live list stays whole.
--- Past that size the evictions would reach live entries silently (they come
--- back with the next whole list); a lost eb:cur makes the next poll ask for
--- one. A write the dict does refuse leaves the position where it was (the
+-- down the edge keeps enforcing what nft enforces. Two copies of the list
+-- must fit the dict (ENTRY_BYTES each, measured on nginx 1.24: 16m held two
+-- copies of 20 000): a write into a full dict does not fail, it evicts the
+-- least recently used keys, and those are the leftovers of older lists, so
+-- the live list stays whole. Past that size the evictions would reach live
+-- entries silently (they come back with the next whole list); a lost eb:cur
+-- makes the next poll ask for one. So every poll tells the daemon how many
+-- entries fit (cap=, from the dict's capacity), and the daemon caps the
+-- list there (the longest bans kept); a larger dict in the conf is all a
+-- node with more bans needs. Without the report (the cfm_decisions fallback
+-- below, or no capacity()) the daemon assumes the 16m dict's 20 000. A write the dict does refuse leaves the position where it was (the
 -- same changes or list come again). A daemon whose store was cleared (nft unreadable, the table
 -- gone after `cfm disable`) sends an empty list: the copy is emptied.
 --
@@ -85,6 +89,9 @@ local FULL_KEY   = "eb:full"
 local LOCK_KEY   = "eb:lock"
 local WOULD_KEY  = "eb:n:would"
 local BLOCK_KEY  = "eb:n:block"
+-- What one entry costs in the dict, headroom included (16m held two copies
+-- of 20 000 on nginx 1.24).
+local ENTRY_BYTES = 400
 
 local function dict()
   local sh = ngx.shared
@@ -253,9 +260,24 @@ function M.apply(d, r, now)
   return true
 end
 
+-- cap is how many entries the list may have: two copies of it fit the
+-- dedicated dict. nil when that cannot be told (the cfm_decisions fallback
+-- is shared with other data; a module without capacity()).
+local function cap(d)
+  if d ~= ngx.shared.cfm_edgeban or type(d.capacity) ~= "function" then return nil end
+  local ok, bytes = pcall(d.capacity, d)
+  if not ok or type(bytes) ~= "number" or bytes <= 0 then return nil end
+  local n = math.floor(bytes / (2 * ENTRY_BYTES))
+  if n < 1 then return nil end
+  return n
+end
+M._cap = cap
+
 local function poll(d, dec, decode, full)
   local would, blocked = d:get(WOULD_KEY) or 0, d:get(BLOCK_KEY) or 0
   local path = "/nginx/edgeban?would=" .. would .. "&blocked=" .. blocked
+  local c = cap(d)
+  if c then path = path .. "&cap=" .. string.format("%d", c) end
   local have = d:get(POS_KEY)
   local epoch, seq
   if type(have) == "string" then epoch, seq = have:match("^(.+):(%d+)$") end

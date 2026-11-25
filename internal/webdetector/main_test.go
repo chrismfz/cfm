@@ -20,6 +20,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	defaultStateDir, defaultLogDir = dir, dir
+	// A poll's rebuild of the edge ban list runs in the poll in the tests
+	// (TestEdgeBanRebuildBesideThePoll covers the production path).
+	edgeBanRebuildAsync = false
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

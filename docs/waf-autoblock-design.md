@@ -473,11 +473,26 @@ belongs to: a whole list is written into the other slot and `eb:cur` flips
 to it in one set, so a lookup never sees half a list and a leftover never
 matches; changes are written into the live slot. Each entry lives as long
 as its ban (a permanent one has no TTL), as in nft, so a daemon outage does
-not lift bans at the edge. The dict is sized for two copies of the 20 000
-cap (16m, measured on nginx 1.24): a write into a full dict evicts the least
-recently used keys, the leftovers of older lists; past that size evictions
-would reach live entries silently (back with the next whole list), and a
-lost `eb:cur` makes the next poll ask for one. An IPv4-mapped peer is looked
+not lift bans at the edge. Two copies of the list must fit the dict (400
+bytes an entry, measured on nginx 1.24): a write into a full dict evicts the
+least recently used keys, the leftovers of older lists; past that size
+evictions would reach live entries silently (back with the next whole list),
+and a lost `eb:cur` makes the next poll ask for one. So every poll reports
+what fits (`cap=`, from the dict's capacity) and the daemon caps the list
+there, keeping the longest bans (permanent first); an edge that reports
+nothing (older Lua, the `cfm_decisions` fallback) gets the 16m dict's
+20 000. The reference confs carry 64m (~83 k): with 7-day WAF bans a busy
+node held 58 k (earth, 2026-11-25), and under the old fixed 20 000 cap two
+thirds of them never reached its edge. `cfm debug` / the bridge status show
+`cap` and `left_out`.
+
+The daemon keeps the published list current from the store's change log
+(`edgeban.ChangesSince`): a ban, an unban or a reconcile's drop is applied
+by looking up those keys only. The whole list is rebuilt on the first poll,
+on a change that moves every answer (the allow sets, `EDGE_BAN`, the
+trusted proxies, readiness), on a cap change, on a new ban while bans are
+left out, and every 5 minutes; before, every ban rebuilt it (453 times in 3
+hours on earth, ~150 ms each). An IPv4-mapped peer is looked
 up as IPv4.
 
 `cfm.lua` checks it in **Step 0e**, right after the static IP/CIDR bypass

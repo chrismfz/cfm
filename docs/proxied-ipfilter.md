@@ -16,9 +16,9 @@ allows. On earth (2026-11-17) addresses other nodes had fleet-banned for WAF
 hits reached the origin through Cloudflare with 200 / 301 / 404.
 
 The edge ban store (`internal/edgeban`) covers only the node's web-related
-bans and on purpose holds no fleet feed: the edge keeps a Lua copy of it, sized
-for 20 k entries (`lua_shared_dict cfm_edgeban 16m`), and 268 k there is the
-regression ruled out. So these lists live in the daemon, never in Lua.
+bans and on purpose holds no fleet feed: the edge keeps a Lua copy of it,
+capped by its dict (`lua_shared_dict cfm_edgeban 64m`: ~83 k entries, which
+the edge reports to the daemon), and 268 k there is the regression ruled out. So these lists live in the daemon, never in Lua.
 
 ## How
 

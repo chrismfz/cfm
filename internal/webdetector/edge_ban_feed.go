@@ -27,10 +27,19 @@ import (
 // edge is further behind than the journal reaches, and when the edge asks
 // for it (every ~10 minutes, a consistency check).
 
-// edgeBanFeedMax bounds the list. The store holds the web-related and manual
-// bans only (not fleet feeds or cfm.deny), a few thousand at most on a busy
-// node; the edge dict (cfm_edgeban, 16m) holds two copies of this many.
-const edgeBanFeedMax = 20000
+// The list the edge gets is capped by what its dict holds: the edge reports
+// it on every poll (cap=, from the dict's capacity: two copies of the list
+// fit, cfm_edgeban.lua), and an edge that does not (Lua older than the
+// report, or the upgrade-lag dict cfm_decisions) gets edgeBanLegacyCap, what
+// the 16m dict was sized for. edgeBanFeedMax bounds any report. The store
+// holds the web-related and manual bans only (not fleet feeds or cfm.deny),
+// but with 7-day WAF bans that is 36 000–58 000 on the busiest nodes
+// (2026-11-25), and with the old fixed 20 000 cap two thirds of earth's bans
+// never reached its edge.
+const (
+	edgeBanLegacyCap = 20000
+	edgeBanFeedMax   = 200000
+)
 
 // edgeBanJournalMax is how many changes the journal keeps. An edge further
 // behind gets the whole list.
@@ -65,8 +74,21 @@ type edgeBanJournal struct {
 	published map[string]int64
 	log       []edgeBanChange
 	version   uint64    // edgeban.Version() at the last sync
-	recheck   time.Time // edgeBanSyncMax after the sync
+	recheck   time.Time // edgeBanSyncMax after the last whole rebuild
 	logged    time.Time // last truncation warning
+
+	// Where the last rebuild left the store's change log (edgeban.ChangePos):
+	// a sync applies the keys changed since instead of rebuilding.
+	gen, cseq uint64
+	// The cap the published list was built for, and whether bans were left
+	// out of it then: over the cap, every new ban rebuilds (the longest
+	// bans win), as before.
+	builtCap  int
+	truncated bool
+	edgeCap   int       // what the edge last reported its dict holds (0: no report)
+	edgeCapAt time.Time // when it last reported one
+	// rebuilding: a rebuild runs beside the polls (edgeBanRebuildBeside).
+	rebuilding bool
 
 	// What the edge reported on its polls, for the status view.
 	lastPoll   time.Time
@@ -92,6 +114,11 @@ type EdgeBanStatus struct {
 	WouldBlock int64     `json:"would_block"`
 	Blocked    int64     `json:"blocked"`
 	SyncMS     float64   `json:"last_sync_ms"`
+	// Cap is how many bans the edge's list takes (its dict, or the legacy
+	// 20 000 when the edge does not say); LeftOut, whether the last rebuild
+	// had to leave bans out (the soonest to expire).
+	Cap     int  `json:"cap"`
+	LeftOut bool `json:"left_out"`
 	// The rest of nft's IP filter for a proxied client (internal/proxyipfilter):
 	// its modes, would-block / blocked / allowed counts and each source's size.
 	ProxiedIPFilter map[string]any `json:"proxied_ipfilter"`
@@ -107,10 +134,11 @@ func newEdgeBanEpoch() string {
 
 // current is the list the edge must hold now: every address the store
 // answers banned, less IGNORE_IPS (the decision path skips those too), with
-// its expiry in unix seconds (0 = permanent); capped at edgeBanFeedMax.
-func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) map[string]int64 {
+// its expiry in unix seconds (0 = permanent); capped at capN (the longest
+// bans kept), with how many were left out.
+func (b *NginxBridge) edgeBanCurrent(capN int) (map[string]int64, int) {
 	items := edgeban.List()
-	if len(items) > edgeBanFeedMax {
+	if len(items) > capN {
 		// Over the cap, keep the longest bans: permanent first, then the
 		// latest expiry (address order would drop a whole storm of new bans).
 		// Many manual permanent bans can thus crowd out fresh autoblocks.
@@ -125,75 +153,230 @@ func (b *NginxBridge) edgeBanCurrent(j *edgeBanJournal, now time.Time) map[strin
 			return ea.After(ec)
 		})
 	}
-	cur := make(map[string]int64, len(items))
+	cur := make(map[string]int64, min(len(items), capN))
 	truncated := 0
 	for _, it := range items {
-		if b.bypassFunc != nil && b.bypassFunc(it.IP) {
+		if b.edgeBanSkipped(it.IP) {
 			continue
 		}
-		// An IPv6 client /64 ban: IGNORE_IPS / IGNORE_NETS and the trusted
-		// proxies touching any of it (the address check above cannot read a
-		// prefix).
-		if p, err := netip.ParsePrefix(it.IP); err == nil && firewall.ClientNetExempted(p) != "" {
-			continue
-		}
-		if len(cur) >= edgeBanFeedMax {
+		if len(cur) >= capN {
 			truncated++
 			continue
 		}
-		var exp int64
-		if !it.Expires.IsZero() {
-			exp = it.Expires.Unix()
-		}
-		cur[it.IP] = exp
+		cur[it.IP] = edgeBanExp(it)
 	}
-	if truncated > 0 && now.Sub(j.logged) > 10*time.Minute {
-		j.logged = now
-		logging.Logf("[edgeban] %d bans, the edge copy takes %d: %d left out (the soonest to expire)", len(cur)+truncated, edgeBanFeedMax, truncated)
-	}
-	return cur
+	return cur, truncated
 }
 
+// edgeBanSkipped reports whether the list leaves k out although the store
+// bans it: IGNORE_IPS (the decision path skips those too), and for an IPv6
+// client /64 ban, IGNORE_IPS / IGNORE_NETS and the trusted proxies touching
+// any of it (the address check cannot read a prefix).
+func (b *NginxBridge) edgeBanSkipped(k string) bool {
+	if b.bypassFunc != nil && b.bypassFunc(k) {
+		return true
+	}
+	if p, err := netip.ParsePrefix(k); err == nil && firewall.ClientNetExempted(p) != "" {
+		return true
+	}
+	return false
+}
+
+// edgeBanExp is an item's expiry on the wire: unix seconds, 0 permanent.
+func edgeBanExp(it edgeban.Item) int64 {
+	if it.Expires.IsZero() {
+		return 0
+	}
+	return it.Expires.Unix()
+}
+
+// edgeBanCapGrace is how long an edge's cap report stands for polls that
+// carry none: during an edge reload, old-generation workers (older Lua) and
+// new ones take turns polling, and a cap flipping between their answers
+// rebuilt the list, and journalled tens of thousands of changes, each time.
+const edgeBanCapGrace = 10 * time.Minute
+
+// noteEdgeCap records a poll's cap report (0: none).
+func (j *edgeBanJournal) noteEdgeCap(c int, now time.Time) {
+	if c > 0 {
+		j.edgeCap, j.edgeCapAt = c, now
+		return
+	}
+	if now.Sub(j.edgeCapAt) > edgeBanCapGrace {
+		j.edgeCap = 0
+	}
+}
+
+// edgeBanCap is the cap for the edge's list now (see edgeBanLegacyCap).
+func (j *edgeBanJournal) edgeBanCap() int {
+	if j.edgeCap <= 0 {
+		return edgeBanLegacyCap
+	}
+	return min(j.edgeCap, edgeBanFeedMax)
+}
+
+// edgeBanRebuildAsync runs the rebuilds a poll asks for beside the poll
+// (edgeBanRebuildBeside), the first one excepted. A rebuild of the whole list
+// took 150–220 ms with 58 000 bans on an EL8 node, and the edge's read gives
+// up after decision_timeout_ms (300 ms): inside the poll, a larger list would
+// lose the poll. The tests turn it off, to see a rebuild in the poll that
+// asked for it.
+var edgeBanRebuildAsync = true
+
 // sync brings the published list to the store's, journalling the
-// difference. Cheap when nothing changed (a version compare).
+// difference. Cheap when nothing changed (a version compare); a change the
+// store's change log names is applied key by key (edgeBanApplyChanges); the
+// whole list is rebuilt on the first sync (in the poll) and, beside the
+// polls, on a change that moves every answer (a new change-log generation),
+// a changed cap, a ban added or lifted while bans are left out, and every
+// edgeBanSyncMax. Until that rebuild lands the edge gets the changes applied
+// so far.
 func (b *NginxBridge) edgeBanSync(j *edgeBanJournal, now time.Time) {
 	ver := edgeban.Version()
-	if j.published != nil && j.version == ver && now.Before(j.recheck) {
+	capN := j.edgeBanCap()
+	rebuild := j.published == nil || !now.Before(j.recheck) || capN != j.builtCap
+	if !rebuild && j.version == ver {
 		return
 	}
 	t0 := time.Now()
-	cur := b.edgeBanCurrent(j, now)
-	recheck := now.Add(edgeBanSyncMax)
+	if j.published != nil && capN == j.builtCap {
+		if b.edgeBanApplyChanges(j) {
+			j.version = ver
+		} else {
+			rebuild = true
+		}
+	}
+	if !rebuild {
+		j.syncDur = time.Since(t0)
+		return
+	}
+	if j.published == nil || !edgeBanRebuildAsync {
+		gen, cseq := edgeban.ChangePos() // before List: later changes are applied next time
+		cur, truncated := b.edgeBanCurrent(capN)
+		b.edgeBanPublish(j, cur, truncated, gen, cseq, ver, capN, now, t0)
+		return
+	}
+	if !j.rebuilding {
+		j.rebuilding = true
+		go b.edgeBanRebuildBeside(capN)
+	}
+}
+
+// edgeBanRebuildBeside rebuilds the list off the poll path: the store read
+// and the list outside the journal's lock, the publish under it.
+func (b *NginxBridge) edgeBanRebuildBeside(capN int) {
+	t0 := time.Now()
+	ver := edgeban.Version()
+	gen, cseq := edgeban.ChangePos() // before List: later changes are applied next time
+	cur, truncated := b.edgeBanCurrent(capN)
+	j := &b.edgeBanJournal
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.rebuilding = false
+	b.edgeBanPublish(j, cur, truncated, gen, cseq, ver, capN, time.Now(), t0)
+}
+
+// edgeBanPublish makes cur the published list (j.mu held), journalling the
+// difference: cur was built from the store at change-log position
+// (gen, cseq) and version ver, for capN.
+func (b *NginxBridge) edgeBanPublish(j *edgeBanJournal, cur map[string]int64, truncated int, gen, cseq, ver uint64, capN int, now, t0 time.Time) {
 	if j.published == nil {
 		j.epoch = newEdgeBanEpoch()
 		j.published = map[string]int64{}
 	}
 	for ip, exp := range cur {
 		if old, ok := j.published[ip]; !ok || old != exp {
-			j.seq++
-			j.log = append(j.log, edgeBanChange{Seq: j.seq, IP: ip, Exp: exp})
+			j.journal(edgeBanChange{IP: ip, Exp: exp})
 		}
 	}
 	for ip := range j.published {
 		if _, ok := cur[ip]; !ok {
-			j.seq++
-			j.log = append(j.log, edgeBanChange{Seq: j.seq, IP: ip, Del: true})
+			j.journal(edgeBanChange{IP: ip, Del: true})
 		}
 	}
+	j.trimJournal()
+	j.published, j.version, j.recheck = cur, ver, now.Add(edgeBanSyncMax)
+	j.gen, j.cseq, j.builtCap, j.truncated = gen, cseq, capN, truncated > 0
+	j.syncDur = time.Since(t0)
+	if truncated > 0 && now.Sub(j.logged) > 10*time.Minute {
+		j.logged = now
+		logging.Logf("[edgeban] %d bans, the edge copy takes %d: %d left out (the soonest to expire); a larger cfm_edgeban dict takes more", len(cur)+truncated, capN, truncated)
+	}
+}
+
+// edgeBanResync makes the next poll rebuild the list (the bypass lists
+// changed: IGNORE_IPS / IGNORE_NETS on a config reload).
+func (b *NginxBridge) edgeBanResync() {
+	j := &b.edgeBanJournal
+	j.mu.Lock()
+	j.recheck = time.Time{}
+	j.mu.Unlock()
+}
+
+// edgeBanApplyChanges applies the keys the store changed since the last sync
+// to the published list: each key looked up again, then set, updated or
+// deleted. False when the list must be rebuilt instead (the change log says
+// so, or a new ban needs room the cap does not leave: which bans go is the
+// rebuild's choice).
+func (b *NginxBridge) edgeBanApplyChanges(j *edgeBanJournal) bool {
+	keys, gen, cseq, ok := edgeban.ChangesSince(j.gen, j.cseq)
+	if !ok {
+		return false
+	}
+	for _, k := range keys {
+		it, want := edgeban.Lookup(k)
+		if want && b.edgeBanSkipped(k) {
+			want = false
+		}
+		old, have := j.published[k]
+		switch {
+		case want && !have:
+			if j.truncated || len(j.published) >= j.builtCap {
+				return false
+			}
+			exp := edgeBanExp(it)
+			j.published[k] = exp
+			j.journal(edgeBanChange{IP: k, Exp: exp})
+		case want && have:
+			if exp := edgeBanExp(it); exp != old {
+				j.published[k] = exp
+				j.journal(edgeBanChange{IP: k, Exp: exp})
+			}
+		case !want && have:
+			delete(j.published, k)
+			j.journal(edgeBanChange{IP: k, Del: true})
+			if j.truncated {
+				return false // a slot freed: the longest left-out ban takes it
+			}
+		}
+	}
+	j.trimJournal()
+	j.gen, j.cseq = gen, cseq
+	return true
+}
+
+// journal appends one change with the next sequence number.
+func (j *edgeBanJournal) journal(c edgeBanChange) {
+	j.seq++
+	c.Seq = j.seq
+	j.log = append(j.log, c)
+}
+
+// trimJournal keeps the last edgeBanJournalMax changes.
+func (j *edgeBanJournal) trimJournal() {
 	if n := len(j.log) - edgeBanJournalMax; n > 0 {
 		j.log = append([]edgeBanChange(nil), j.log[n:]...)
 	}
-	j.published, j.version, j.recheck = cur, ver, recheck
-	j.syncDur = time.Since(t0)
 }
 
 // edgeBanReply builds the reply for an edge at (epoch, seq): the changes
 // since, or the whole list.
-func (b *NginxBridge) edgeBanReply(epoch string, seq uint64, haveSeq, wantFull bool) map[string]any {
+func (b *NginxBridge) edgeBanReply(epoch string, seq uint64, haveSeq, wantFull bool, edgeCap int) map[string]any {
 	j := &b.edgeBanJournal
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	now := time.Now()
+	j.noteEdgeCap(edgeCap, now)
 	b.edgeBanSync(j, now)
 	j.lastPoll = now
 	out := map[string]any{"epoch": j.epoch, "seq": j.seq, "mode": edgeban.EdgeMode()}
@@ -243,6 +426,8 @@ func (b *NginxBridge) edgeBanReply(epoch string, seq uint64, haveSeq, wantFull b
 //	?epoch=E&seq=N   the edge's position; absent or not in reach: the whole list
 //	&full=1          the whole list anyway (the edge's periodic check)
 //	&would=W&blocked=B  the edge's counters since its last poll (status only)
+//	&cap=C           how many entries the edge's dict holds a list of (two
+//	                 copies fit); absent: edgeBanLegacyCap
 //
 // Replies (all carry "epoch", "seq" and "mode", log|enforce):
 //
@@ -276,7 +461,8 @@ func (b *NginxBridge) handleEdgeBan(w http.ResponseWriter, r *http.Request) {
 	seqStr := strings.TrimSpace(q.Get("seq"))
 	seq, err := strconv.ParseUint(seqStr, 10, 64)
 	haveSeq := seqStr != "" && err == nil
-	writeEdgeBanJSON(w, b.edgeBanReply(strings.TrimSpace(q.Get("epoch")), seq, haveSeq, q.Get("full") == "1"))
+	edgeCap, _ := strconv.Atoi(strings.TrimSpace(q.Get("cap")))
+	writeEdgeBanJSON(w, b.edgeBanReply(strings.TrimSpace(q.Get("epoch")), seq, haveSeq, q.Get("full") == "1", max(edgeCap, 0)))
 }
 
 // edgeBanCount adds the edge's reported counters (bounded: a counter is a
@@ -317,6 +503,7 @@ func (b *NginxBridge) EdgeBanStatus() EdgeBanStatus {
 	st.LastPoll, st.LastFull = j.lastPoll, j.lastFull
 	st.WouldBlock, st.Blocked = j.wouldBlock, j.blocked
 	st.SyncMS = float64(j.syncDur.Microseconds()) / 1000
+	st.Cap, st.LeftOut = j.edgeBanCap(), j.truncated
 	return st
 }
 
