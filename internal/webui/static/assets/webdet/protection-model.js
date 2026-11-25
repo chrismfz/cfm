@@ -41,11 +41,16 @@ export function windowOf(hours) {
 }
 
 // How the WAF log is grouped: which of the summary's top lists carries the
-// groups, and which filter of the same endpoint lists one group's requests.
+// groups, which filter of the same endpoint lists one group's requests, and
+// how many groups are asked for (`enrich`: the address list shows who each
+// one is, which costs a reverse lookup per address, so it is the short one).
+// The rule groups are rule FAMILIES (the reason up to its first colon); the
+// endpoint's rule= filter matches a substring, so a family whose name is
+// inside another's (WAF_BOT in WAF_BOT_UA) lists both when opened.
 export const GROUPINGS = Object.freeze({
-  rule: Object.freeze({ label: "rule", top: "top_rule_bases", param: "rule", head: "Rule" }),
-  ip: Object.freeze({ label: "address", top: "top_ips", param: "ip", head: "Address" }),
-  host: Object.freeze({ label: "vhost", top: "top_hosts", param: "host", head: "Vhost" }),
+  rule: Object.freeze({ label: "rule", top: "top_rule_bases", param: "rule", head: "Rule family", n: 50, enrich: false }),
+  ip: Object.freeze({ label: "address", top: "top_ips", param: "ip", head: "Address", n: 20, enrich: true }),
+  host: Object.freeze({ label: "vhost", top: "top_hosts", param: "host", head: "Vhost", n: 50, enrich: false }),
 });
 export const DEFAULT_GROUPING = "rule";
 export function grouping(key) {
@@ -69,12 +74,15 @@ export function tierTone(t) {
 }
 
 // wafQuery builds the summary request. filters: { host, rule, ip, country }.
-export function wafQuery({ hours, limit, top, filters } = {}) {
+// enrich asks for country / ASN on the rows and a PTR for every top address:
+// a blocking reverse lookup each (up to a second, one after another), so it
+// is asked only where the answer is shown and with a small `top`.
+export function wafQuery({ hours, limit, top, filters, enrich } = {}) {
   const q = new URLSearchParams();
   q.set("hours", String(windowOf(hours).hours));
   q.set("limit", String(Math.max(1, Math.min(2000, Number(limit) || 200))));
   q.set("top", String(Math.max(1, Math.min(100, Number(top) || 50))));
-  q.set("enrich", "1");
+  if (enrich) q.set("enrich", "1");
   const f = filters || {};
   for (const k of ["host", "rule", "ip", "country"]) {
     const v = str(f[k]).trim();
@@ -98,10 +106,10 @@ export function groupRows(summary, by) {
     const k = keyOf(r);
     if (!k) continue;
     let s = seen.get(k);
-    if (!s) { s = { tiers: new Set(), last: 0, ruleID: 0 }; seen.set(k, s); }
+    if (!s) { s = { tiers: new Set(), last: 0, ruleIDs: new Set() }; seen.set(k, s); }
     s.tiers.add(tier(r));
     if (num(r.ts_unix) > s.last) s.last = num(r.ts_unix);
-    if (!s.ruleID && num(r.waf_rule_id) > 0) s.ruleID = num(r.waf_rule_id);
+    if (num(r.waf_rule_id) > 0) s.ruleIDs.add(num(r.waf_rule_id));
   }
   const max = list.reduce((m, x) => Math.max(m, num(x && x.count)), 0);
   return list.filter((x) => x && str(x.key)).map((x) => {
@@ -114,7 +122,9 @@ export function groupRows(summary, by) {
       width: max > 0 ? num(x.count) / max : 0,
       tiers: s ? [...s.tiers].sort() : [],
       last: s ? s.last : 0,
-      ruleID: s ? s.ruleID : 0,
+      // Every rule id seen under this group among the recent requests (a
+      // family holds several rules).
+      ruleIDs: s ? [...s.ruleIDs].sort((a, b) => a - b) : [],
       // top_ips entries carry who the address is.
       who: g.param === "ip" ? whoLine(x) : "",
     };
@@ -220,12 +230,14 @@ export function eventsQuery({ host, ip, type, cursor } = {}) {
   return `v1/webdet/history/events?${q.toString()}`;
 }
 
-// nextCursor is the cursor for the page after rows, or null when rows is the
-// last page (shorter than a page) or carries no id (an older daemon).
-export function nextCursor(rows) {
-  if (!Array.isArray(rows) || rows.length < EVENT_PAGE) return null;
-  const last = rows[rows.length - 1] || {};
-  return num(last.id) > 0 ? { ts: num(last.ts_unix), id: num(last.id) } : null;
+// nextCursor is the cursor for the page after this answer, or null on the
+// last page. The node says so itself (`next`): a scoped caller's page can
+// come back short of a full one with older events still to read, because the
+// node's own fault rows are dropped from it after the query.
+export function nextCursor(res) {
+  const n = res && res.next;
+  if (!n || num(n.before_id) <= 0) return null;
+  return { ts: num(n.before_ts), id: num(n.before_id) };
 }
 
 // eventDetail is the one-line "what happened" of an event row.
@@ -287,6 +299,7 @@ export function histBars(summary) {
     count: num(b.count),
     blocked: num(b.blocked),
     height: max > 0 ? num(b.count) / max : 0,
-    blockedHeight: max > 0 ? Math.min(num(b.blocked), num(b.count)) / max : 0,
+    // The blocked part of its own bar, never more than all of it.
+    blockedShare: num(b.count) > 0 ? Math.min(1, num(b.blocked) / num(b.count)) : 0,
   }));
 }

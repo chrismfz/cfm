@@ -274,11 +274,19 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Whether an older page exists is read BEFORE a scoped caller's rows are
+	// dropped: a page that comes back short because of that is not the last.
+	// The cursor is a position only (a time and a row id the caller could not
+	// read anything from), never a dropped row's content.
+	var next map[string]int64
+	if n := len(rows); n > 0 && n >= clampHistoryQueryLimit(limit) {
+		next = map[string]int64{"before_ts": rows[n-1].TsUnix, "before_id": rows[n-1].ID}
+	}
 	rows = dropServerOnlyRows(r, rows)
 	redactScopedHistoryRows(r, rows)
 	enrichEnabled := strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "1") || strings.EqualFold(strings.TrimSpace(q.Get("enrich")), "true")
 	if !enrichEnabled || e.enr == nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"rows": rows})
+		writeJSON(w, http.StatusOK, historyEventsPage(rows, next))
 		return
 	}
 	type geo struct {
@@ -304,7 +312,17 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, v)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"rows": out})
+	writeJSON(w, http.StatusOK, historyEventsPage(out, next))
+}
+
+// historyEventsPage is the events answer: the rows and, when an older page
+// exists, `next` = the before_ts / before_id that asks for it.
+func historyEventsPage(rows interface{}, next map[string]int64) map[string]interface{} {
+	res := map[string]interface{}{"rows": rows}
+	if next != nil {
+		res["next"] = next
+	}
+	return res
 }
 
 func (e *Engine) handleHistorySummary(w http.ResponseWriter, r *http.Request) {

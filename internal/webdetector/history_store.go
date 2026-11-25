@@ -385,7 +385,9 @@ func (s *HistoryStore) QueryEventsBefore(host, ip, typ string, limit int, before
 	clauses := make([]string, 0, 4)
 	args := make([]interface{}, 0, 7)
 	if beforeID > 0 {
-		clauses = append(clauses, "(ts_unix < ? OR (ts_unix = ? AND id < ?))")
+		// ts_unix <= ? first: a bound the ts indexes can seek to (the OR
+		// alone made every older page walk the index from the newest row).
+		clauses = append(clauses, "ts_unix <= ? AND (ts_unix < ? OR id < ?)")
 		args = append(args, beforeTS, beforeTS, beforeID)
 	}
 	if host != "" {

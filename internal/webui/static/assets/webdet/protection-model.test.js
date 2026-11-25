@@ -30,8 +30,11 @@ test("tabs, windows and groupings fall back to their defaults", () => {
 
 test("wafQuery clamps and carries only the filters set", () => {
   assert.equal(M.wafQuery({ hours: 6, limit: 9999, top: 500, filters: { host: " shop.gr ", rule: "", ip: "198.51.100.7" } }),
-    "v1/waf/engine/summary?hours=6&limit=2000&top=100&enrich=1&host=shop.gr&ip=198.51.100.7");
-  assert.equal(M.wafQuery(), "v1/waf/engine/summary?hours=24&limit=200&top=50&enrich=1");
+    "v1/waf/engine/summary?hours=6&limit=2000&top=100&host=shop.gr&ip=198.51.100.7");
+  assert.equal(M.wafQuery(), "v1/waf/engine/summary?hours=24&limit=200&top=50");
+  assert.equal(M.wafQuery({ enrich: true, top: 5 }), "v1/waf/engine/summary?hours=24&limit=200&top=5&enrich=1");
+  // A PTR lookup per top address: only the address grouping asks, for few.
+  assert.deepEqual(Object.entries(M.GROUPINGS).filter(([, g]) => g.enrich).map(([k, g]) => [k, g.n]), [["ip", 20]]);
 });
 
 test("groupRows: exact counts from the node's top list, tier and last hit from the recent requests", () => {
@@ -43,7 +46,8 @@ test("groupRows: exact counts from the node's top list, tier and last hit from t
   assert.equal(g[0].last, 0);
   assert.deepEqual(g[1].tiers, ["block", "challenge"]);
   assert.equal(g[1].last, NOW - 30);
-  assert.equal(g[1].ruleID, 402);
+  assert.deepEqual(g[1].ruleIDs, [402]);
+  assert.deepEqual(M.groupRows({ ...SUMMARY, rows: [row({ waf_rule_id: 415 }), row({})] }, "rule")[1].ruleIDs, [402, 415], "a family holds several rules");
   assert.deepEqual(g[2].tiers, ["challenge v2"]);
 
   const ips = M.groupRows(SUMMARY, "ip");
@@ -90,10 +94,11 @@ test("events: the query, the cursor and the labels", () => {
   assert.equal(M.eventsQuery({ host: "shop.gr", type: "waf_trigger" }), "v1/webdet/history/events?limit=50&enrich=1&host=shop.gr&type=waf_trigger");
   assert.equal(M.eventsQuery({ type: "made_up", cursor: { ts: 100, id: 7 } }), "v1/webdet/history/events?limit=50&enrich=1&before_ts=100&before_id=7");
   assert.equal(M.eventsQuery({ cursor: { ts: 100, id: 0 } }), "v1/webdet/history/events?limit=50&enrich=1", "no id: the first page");
-  const page = Array.from({ length: M.EVENT_PAGE }, (_, i) => ({ id: 500 - i, ts_unix: NOW - i }));
-  assert.deepEqual(M.nextCursor(page), { ts: NOW - 49, id: 451 });
-  assert.equal(M.nextCursor(page.slice(0, 10)), null, "a short page is the last");
-  assert.equal(M.nextCursor(page.map((r) => ({ ts_unix: r.ts_unix }))), null, "no ids: no paging");
+  // The node says whether an older page exists: a scoped caller's page can be short and not the last.
+  assert.deepEqual(M.nextCursor({ rows: [{ id: 9 }], next: { before_ts: NOW - 49, before_id: 451 } }), { ts: NOW - 49, id: 451 });
+  assert.equal(M.nextCursor({ rows: Array.from({ length: M.EVENT_PAGE }, (_, i) => ({ id: i + 1 })) }), null, "no next: the last page, however full");
+  assert.equal(M.nextCursor({ rows: [], next: { before_ts: 5, before_id: 0 } }), null);
+  assert.equal(M.nextCursor([]), null, "an older daemon's bare list");
   assert.equal(M.eventLabel("challenge_v2_reject"), "v2 reject");
   assert.equal(M.eventLabel("challenge_vhost_manual_on"), "challenge vhost manual on");
   assert.equal(M.eventTone("block_trigger"), "danger");
@@ -129,7 +134,8 @@ test("age, whoLine, tiles, histogram, filters", () => {
   const h = M.histBars(SUMMARY);
   assert.equal(h[1].height, 1);
   assert.equal(h[0].height, 0.25);
-  assert.equal(h[1].blockedHeight, 1, "blocked never taller than its bar");
+  assert.equal(h[1].blockedShare, 1, "blocked never taller than its bar");
+  assert.equal(h[0].blockedShare, 0.4);
   assert.deepEqual(M.histBars({}), []);
   assert.deepEqual(M.activeFilters({ host: "a.gr", rule: "", ip: " 198.51.100.7 " }), [{ key: "host", label: "vhost", value: "a.gr" }, { key: "ip", label: "address", value: "198.51.100.7" }]);
 });

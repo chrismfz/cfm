@@ -51,7 +51,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
           <tr :class="{ 'pinned-row': ptOpenKey === g.key }">
             <td>
               <button type="button" class="pt-link" :aria-expanded="ptOpenKey === g.key ? 'true' : 'false'" @click="ptToggleGroup(g.key)"><span aria-hidden="true">{{ ptOpenKey === g.key ? '▾' : '▸' }}</span> <span class="mono">{{ g.key }}</span></button>
-              <span v-if="ptGroupBy === 'rule' && g.ruleID" class="muted"> · rule {{ g.ruleID }}</span>
+              <span v-if="ptGroupBy === 'rule' && g.ruleIDs.length" class="muted"> · rule{{ g.ruleIDs.length === 1 ? '' : 's' }} {{ g.ruleIDs.join(', ') }}</span>
               <button v-if="ptGroupBy === 'ip'" type="button" class="btn-quiet btn-sm" @click="ptOpenIP(g.key, $event.currentTarget)">Who is it</button>
               <div class="muted pt-sub" v-if="g.who">{{ g.who }}</div>
             </td>
@@ -65,7 +65,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
               <p class="muted" v-if="!ptOpen">Loading its requests…</p>
               <p class="danger-text" v-else-if="ptOpen.error">Its requests could not be read: {{ ptOpen.error }}</p>
               <template v-else>
-                <p class="muted">{{ ptCount(ptOpen.summary.total_events) }} hits from {{ ptCount(ptOpen.summary.unique_ips) }} addresses on {{ ptCount(ptOpen.summary.unique_hosts) }} vhost{{ ptOpen.summary.unique_hosts === 1 ? '' : 's' }}, {{ ptCount(ptOpen.summary.blocked_events) }} blocked. The {{ ptOpen.summary.rows.length }} most recent:</p>
+                <p class="muted"><span v-if="ptGroupBy === 'rule' && ptOpen.summary.total_events !== g.count">Other families whose name holds this one are listed too. </span>{{ ptCount(ptOpen.summary.total_events) }} hits from {{ ptCount(ptOpen.summary.unique_ips) }} addresses on {{ ptCount(ptOpen.summary.unique_hosts) }} vhost{{ ptOpen.summary.unique_hosts === 1 ? '' : 's' }}, {{ ptCount(ptOpen.summary.blocked_events) }} blocked. The {{ ptOpen.summary.rows.length }} most recent:</p>
                 <div class="table-wrap">
                   <table class="compact-table">
                     <thead><tr><th>Time</th><th>Address</th><th>Network</th><th>Vhost</th><th>Request</th><th>Rule</th><th>Tier</th><th></th></tr></thead>
@@ -144,7 +144,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
     <h3 class="pt-h3">Hits per hour</h3>
     <div class="pt-hist" role="img" :aria-label="'WAF hits per hour over the window, ' + ptHist.length + ' hours'">
       <div v-for="b in ptHist" :key="b.ts" class="pt-hist-col" :title="ptTime(b.ts) + ': ' + b.count + ' hits, ' + b.blocked + ' blocked'">
-        <div class="pt-hist-bar" :style="{ height: (b.height * 100) + '%' }"><div class="pt-hist-blocked" :style="{ height: (b.count ? (b.blocked / b.count) * 100 : 0) + '%' }"></div></div>
+        <div class="pt-hist-bar" :style="{ height: (b.height * 100) + '%' }"><div class="pt-hist-blocked" :style="{ height: (b.blockedShare * 100) + '%' }"></div></div>
       </div>
     </div>
     <div class="vp-legend"><span><i class="pt-sw pt-sw-hit"></i>hits</span><span><i class="pt-sw pt-sw-blocked"></i>of them blocked</span></div>
@@ -166,7 +166,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
 
 <!-- The address panel -->
 <div class="pt-panel-backdrop" v-if="ptPanelIP" @click.self="ptCloseIP">
-  <aside class="pt-panel" role="dialog" aria-modal="true" aria-labelledby="pt-panel-title">
+  <aside ref="ptPanelEl" class="pt-panel" role="dialog" aria-modal="true" aria-labelledby="pt-panel-title">
     <div class="pt-head">
       <div>
         <div class="muted pt-sub">Address</div>

@@ -23,9 +23,10 @@ export const protectionMixin = {
     let t = M.DEFAULT_TAB, host = "", ip = "";
     try {
       const u = new URL(window.location.href);
-      t = M.tab(u.searchParams.get("tab") || "");
       host = String(u.searchParams.get("host") || "").trim().toLowerCase();
       ip = String(u.searchParams.get("ip") || "").trim();
+      // A link to one address opens where that address filters: its events.
+      t = M.tab(u.searchParams.get("tab") || (ip ? "events" : ""));
     } catch { /* no URL */ }
     return {
       ptTab: t,
@@ -52,7 +53,6 @@ export const protectionMixin = {
       ptPanel: null,
       ptPanelSeq: 0,
       ptNow: Date.now(),
-      ptTopN: 50,
     };
   },
 
@@ -73,6 +73,7 @@ export const protectionMixin = {
       return this.allowedVhosts.find((v) => v && !/[*?]/.test(v)) || "";
     },
     ptGroups() { return M.groupRows(this.ptSummary, this.ptGroupBy); },
+    ptTopN() { return M.GROUPINGS[M.grouping(this.ptGroupBy)].n; },
     ptGroupsNote() { return M.groupsNote(this.ptSummary, this.ptGroupBy, this.ptTopN); },
     ptTiles() { return M.wafTiles(this.ptSummary); },
     ptHist() { return M.histBars(this.ptSummary); },
@@ -122,7 +123,7 @@ export const protectionMixin = {
 
     async ptLoadSummary() {
       const seq = ++this.ptSeq;
-      const url = M.wafQuery({ hours: this.ptHours, limit: 500, top: this.ptTopN, filters: this.ptAllFilters });
+      const url = M.wafQuery({ hours: this.ptHours, limit: 500, top: this.ptTopN, filters: this.ptAllFilters, enrich: M.GROUPINGS[M.grouping(this.ptGroupBy)].enrich });
       try {
         const res = await this.fetchJSON(url);
         if (seq !== this.ptSeq) return; // a newer request is on its way
@@ -142,7 +143,7 @@ export const protectionMixin = {
       const g = M.GROUPINGS[M.grouping(this.ptGroupBy)];
       const filters = { ...this.ptAllFilters, [g.param]: key };
       try {
-        const res = await this.fetchJSON(M.wafQuery({ hours: this.ptHours, limit: 50, top: 5, filters }));
+        const res = await this.fetchJSON(M.wafQuery({ hours: this.ptHours, limit: 50, top: 5, filters, enrich: true }));
         if (seq !== this.ptOpenSeq || this.ptOpenKey !== key) return;
         this.ptOpen = { key, summary: res, error: "" };
       } catch (err) {
@@ -176,7 +177,7 @@ export const protectionMixin = {
         const res = await this.fetchJSON(url);
         if (seq !== this.ptEventSeq) return;
         this.ptEvents = this.extractRows(res);
-        this.ptEventNext = M.nextCursor(this.ptEvents);
+        this.ptEventNext = M.nextCursor(res);
         this.ptEventsError = "";
       } catch (err) {
         if (seq !== this.ptEventSeq) return;
@@ -241,7 +242,7 @@ export const protectionMixin = {
       this.ptPanelIP = addr;
       this.ptPanel = null;
       const host = this.ptEffectiveHost;
-      const waf = this.fetchJSONSafe(M.wafQuery({ hours: this.ptHours, limit: 20, top: 5, filters: { host: this.ptHost, ip: addr } }), null);
+      const waf = this.fetchJSONSafe(M.wafQuery({ hours: this.ptHours, limit: 20, top: 5, filters: { host: this.ptHost, ip: addr }, enrich: true }), null);
       // A scoped caller's events need a vhost; an admin's list every vhost.
       const events = (this.isScoped && !host)
         ? Promise.resolve(null)
@@ -281,7 +282,20 @@ export const protectionMixin = {
   },
 
   mounted() {
-    this._ptKey = (ev) => { if (ev.key === "Escape" && this.ptPanelIP) this.ptCloseIP(); };
+    // While the address panel is open: Escape closes it, Tab stays inside it.
+    this._ptKey = (ev) => {
+      if (!this.ptPanelIP) return;
+      if (ev.key === "Escape") { ev.preventDefault(); this.ptCloseIP(); return; }
+      if (ev.key !== "Tab") return;
+      const panel = this.$refs.ptPanelEl;
+      if (!panel) return;
+      const f = [...panel.querySelectorAll("button, a[href], input, select")].filter((x) => !x.disabled && x.offsetParent !== null);
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (!panel.contains(document.activeElement)) { ev.preventDefault(); first.focus(); }
+      else if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+    };
     document.addEventListener("keydown", this._ptKey);
   },
   beforeUnmount() {
