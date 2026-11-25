@@ -20,7 +20,29 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The cfm-admin menu is grouped by what you are doing.** Five groups instead
+  of "Web protection / Rules & engine / Services / System":
+  - **Overview**: Dashboard, Health, Alerts.
+  - **Web** (what is happening on the sites): Traffic, Protection, Vhosts,
+    WebDetector.
+  - **Policy** (what the node is told to do): Vhost controls, Traffic rules,
+    Exceptions, Site cache, Firewall, ClamAV.
+  - **Mail**.
+  - **System**: Detectors, Notifier, MySQL governor, API tokens, Settings,
+    Debug.
+
+  "Web Traffic" is now "Traffic" and "Vhost" is "Vhosts" in the menu; no
+  address changed. The quick search (Ctrl K) follows the same groups.
+
+### Fixed
+- **A cPanel user's menu shows only the pages they can open.** The scoped view
+  was meant to hide the admin-only pages (Dashboard, Health, Alerts, Traffic,
+  Firewall, Detectors, Notifier, API tokens, Settings, Debug), but it looked
+  for a menu element that an earlier redesign had removed, so every link was
+  shown and each one bounced back to Vhost controls. They are hidden again,
+  a group left with no page loses its heading, and the quick search no longer
+  offers them.
 
 ## 2026.11.25
 

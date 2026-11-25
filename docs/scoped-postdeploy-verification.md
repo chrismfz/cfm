@@ -36,6 +36,11 @@ In **Tab B**, open each page and confirm it renders and shows scoped mode badge:
 Expected:
 - Page loads without redirect loops or blank state.
 - Scoped badge remains visible on each page.
+- The menu lists only what a scoped user can open: Protection, Vhosts,
+  WebDetector, Vhost controls, Traffic rules, Exceptions, Site cache, ClamAV,
+  Mail, MySQL governor. No Dashboard / Health / Alerts / Traffic / Firewall /
+  Detectors / Notifier / API tokens / Settings / Debug, and no "Overview"
+  heading (`ADMIN_ONLY_NAV_PATHS`; the quick search offers the same pages).
 
 Then, still in **Tab B**, open an admin-only page by URL: `/cfm-admin/`,
 `/cfm-admin/alerts/`, `/cfm-admin/webdetector/bots/`. Expected: each one

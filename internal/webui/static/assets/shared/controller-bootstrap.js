@@ -77,7 +77,7 @@
       }),
       applyScopedChrome: ({
         scoped = false,
-        navSelector = '.top-nav',
+        navSelector = '.sidebar-nav',
         adminOnlyMatcher = defaultAdminOnlyMatcher,
         badgeSelector = '.topbar .meta',
         scopedLabel,

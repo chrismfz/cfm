@@ -92,7 +92,7 @@ To see the current values, use:
 ## 3. Arming a vhost
 
 Three ways to manage policies:
-- the cfm-admin **Site cache** page (Rules & engine), which also has recipes,
+- the cfm-admin **Site cache** page (Policy), which also has recipes,
   the debug-stamp command for one URL, and the hit counts;
 - the admin CLI `cfm webtop site-cache …` (alias `cache`), which can also set
   a custom micro TTL (it snaps to a bucket) and the static TTL label;
