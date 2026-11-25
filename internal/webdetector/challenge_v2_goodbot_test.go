@@ -39,6 +39,7 @@ func setV2HostArmed(t *testing.T, fn func(host string) bool) {
 // on any armed shop. Everyone else, and every explicit rule/WAF arm, stays
 // strict; and the waiver is never even consulted for a solve that would pass.
 func TestVerify_V2GateWaivesAVerifiedGoodBot(t *testing.T) {
+	withoutV2All(t) // this test is about a named grain's own scope
 	base, capt := startVerifyServer(t)
 	const (
 		armedHost   = "shop.example.com"

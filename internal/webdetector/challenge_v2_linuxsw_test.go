@@ -213,6 +213,7 @@ func TestLinuxSW_Rescue(t *testing.T) {
 // and on Linux (120) alike. Unarmed, the farm profile passes and is scored at
 // the same 110 (what the would_v2 shadow line reports).
 func TestVerify_LinuxSWAtTheGate(t *testing.T) {
+	withoutV2All(t) // this test is about a named grain's own scope
 	base, capt := startVerifyServer(t)
 	const armedHost = "shop.example.gr"
 	setV2HostArmed(t, func(host string) bool { return host == armedHost })

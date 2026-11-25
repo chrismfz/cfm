@@ -1044,6 +1044,7 @@ func init() {
 		webdet.ConfigureChallengeV2Paths(kvBool(kv, "CHALLENGE_V2_PATHS", true))
 		// A web solve no challenge covered (src=-) is scored at v2; default on.
 		webdet.ConfigureChallengeV2Unsolicited(kvBool(kv, "CHALLENGE_V2_UNSOLICITED", true))
+		webdet.ConfigureChallengeV2All(kvBool(kv, "CHALLENGE_V2_ALL", true))
 		// The tier of a manual vhost arm that names none; default v2.
 		webdet.ConfigureChallengeV2Manual(kvBool(kv, "CHALLENGE_V2_MANUAL", true))
 		// The malpath challenge also revokes the IP's clearance cookie; default on.

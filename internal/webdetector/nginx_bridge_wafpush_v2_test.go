@@ -235,6 +235,7 @@ func TestChallengeV2IPMark_GrainAndWaiverAreWebScopeOnly(t *testing.T) {
 // failing B solve passed at v1, got a clearance, and released the IP's WAF
 // decision on every host; a panel-scope solve released it too.
 func TestVerify_WAFV2PushArmsSiblingVhostButNotPanel(t *testing.T) {
+	withoutV2All(t) // this test is about a named grain's own scope
 	b := NewNginxBridge("/tmp/cfm-test-wafv2e2e.sock", "tok", time.Minute, time.Minute)
 	base, capt := startVerifyServerWithBridge(t, b)
 	const (

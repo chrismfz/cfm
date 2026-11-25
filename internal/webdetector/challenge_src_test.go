@@ -473,6 +473,7 @@ func TestHistoryEventsRedactsV2GrainForScopedCallers(t *testing.T) {
 // taken BEFORE the solve releases the per-IP entry it reads (releaseSolvedIP →
 // ClearIP), or every per-IP source would read as src=-.
 func TestVerify_SolveCarriesProvenanceBeforeRelease(t *testing.T) {
+	withoutV2All(t) // this test is about a named grain's own scope
 	resetFPPolicies(t)
 	resetChallengeRuleNotes(t)
 	const (

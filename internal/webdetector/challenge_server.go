@@ -1048,6 +1048,13 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			v2Grain = v2GrainUnsolicited
 			solve.V2Grain = v2Grain
 		}
+		// "v2 everywhere" (challengeV2AllArms): whatever challenge the solve
+		// answers, a failing score earns no clearance. Checked last, so a
+		// named grain keeps its name on the line.
+		if v2On && v2Grain == "" && challengeV2AllArms() {
+			v2Grain = v2GrainAll
+			solve.V2Grain = v2Grain
+		}
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
 		// the 8-character id instead of the full tuple. The UA rides along
@@ -1069,8 +1076,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			})
 		}
 
-		// D5 gate — teeth ONLY under an arm (v2Grain: an operator-armed
-		// fingerprint or country/ASN policy, a v2 vhost tier, or a rung mark):
+		// D5 gate — teeth under an arm (v2Grain: an operator-armed
+		// fingerprint or country/ASN policy, a v2 vhost tier, a rung mark, the
+		// unsolicited pre-solve, or — CHALLENGE_V2_ALL, default on since
+		// 2026-11-25 — the all grain, which leaves no scored solve unarmed):
 		// a failing score there means the PoW solve earns NO clearance —
 		// unless the rescue or the good-bot waiver lets it through, each
 		// marked on the solve line. The 403

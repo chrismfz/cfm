@@ -77,6 +77,7 @@ func TestVerify_UnsolicitedCleanSolvePasses(t *testing.T) {
 // challenge is not in the snapshot, so every panel solve reads src=-), and
 // any solve with the knob off. Each gets its cookie as before.
 func TestVerify_UnsolicitedGrainScope(t *testing.T) {
+	withoutV2All(t) // this test is about a named grain's own scope
 	t.Run("covered by a vhost challenge", func(t *testing.T) {
 		b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 		b.ChallengeVhostWithReason("covered.example", time.Hour, "manual")
