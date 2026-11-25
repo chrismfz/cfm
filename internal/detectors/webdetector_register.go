@@ -1037,6 +1037,10 @@ func init() {
 			kvStrClean(kv, "CHALLENGE_V2_CONFIRM", "manual"),
 			kvStrClean(kv, "CHALLENGE_V2_CONFIRM_AUDIENCE", "GR,CY"),
 		)
+		// The confirm fallback for a Rung-1 reject with no certain tell:
+		// off | audience (default: CHALLENGE_V2_CONFIRM_AUDIENCE, never a
+		// datacenter ASN) | all.
+		webdet.ConfigureChallengeV2Fallback(kvStrClean(kv, "CHALLENGE_V2_FALLBACK", "audience"))
 		// Shadow login signals (login_spray / login_spray_net /
 		// login_dirty_success history rows); default on, nothing enforced.
 		webdet.ConfigureLoginSignals(kvBool(kv, "LOGIN_SIGNALS", true))

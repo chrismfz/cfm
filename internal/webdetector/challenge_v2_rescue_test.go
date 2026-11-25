@@ -71,6 +71,7 @@ func TestChallengeV2InputRescue(t *testing.T) {
 // the good-bot waiver is never consulted for it. The same machine WITHOUT
 // input, and any certain tell, is still rejected.
 func TestVerify_V2GateRescuesRealInput(t *testing.T) {
+	withFallback(t, fallbackOff) // this test is about the reject itself
 	withoutV2All(t) // this test is about a named grain's own scope
 	base, capt := startVerifyServer(t)
 	const (
@@ -224,6 +225,7 @@ func TestV2Rescued_Surfaces(t *testing.T) {
 // with real input is rejected exactly as before the rescue existed, and no
 // surface carries v2_rescued — the would_v2 marker included.
 func TestVerify_InputRescueKillSwitch(t *testing.T) {
+	withFallback(t, fallbackOff) // this test is about the reject itself
 	withoutV2All(t) // this test is about a named grain's own scope
 	base, capt := startVerifyServer(t)
 	const (
@@ -258,6 +260,7 @@ func TestVerify_InputRescueKillSwitch(t *testing.T) {
 // fail score: raised to 110, the same solve is still not rescued (it is
 // rejected), and lowered to 90 the 100 class is still rescued.
 func TestVerify_V2RescueCapIsFixed(t *testing.T) {
+	withFallback(t, fallbackOff) // this test is about the reject itself
 	base, capt := startVerifyServer(t)
 	const (
 		armedHost = "shop.example.gr"

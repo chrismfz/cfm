@@ -20,7 +20,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **ChallengeV2: a "Continue" button instead of a dead end.** A solve the
+  humanity check is about to refuse, with no certain sign of automation
+  (webdriver, headless UA), now gets the same one-click "Continue" step the
+  under-attack confirm shows, and the click lets it through
+  (`v2_rescued=confirm`). This is for a person whose machine scores like a
+  farm (a software renderer, no window size: a VDI desk, an old PC) and who
+  did not move the mouse: a retry never changed their score, one click
+  does. By default only for visitors from `CHALLENGE_V2_CONFIRM_AUDIENCE`
+  (GR, CY) on a non-datacenter network; `CHALLENGE_V2_FALLBACK = all`
+  offers it to everyone, `off` refuses as before. Fingerprint policies and
+  the rule / WAF / malpath challenges stay strict.
 
 ## 2026.11.25
 

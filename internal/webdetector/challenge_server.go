@@ -645,6 +645,10 @@ type ChallengeSolve struct {
 	// withheld from scoped callers by prefix.
 	V2Confirm   string
 	V2ConfirmMS int64
+	// ConfirmFallback marks a confirm asked by the Rung-1 reject fallback
+	// (challenge_v2_fallback.go) rather than the under-attack step: rendered
+	// confirm=fallback on the result=v2_confirm line.
+	ConfirmFallback bool
 	// Country / CountryISO / ASN / ASNName / PTR are the solving client's
 	// network identity, resolved ONCE at verify (resolveGeo, challenge_geo.go)
 	// so every line and history row about this solve carries the same answer.
@@ -1149,11 +1153,36 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				if miss == "" {
 					bot, miss = challengeV2GoodBot(r.Context(), solve.IP, solve.PTR)
 				}
-				if bot != "" {
+				fallback := bot == "" && challengeV2FallbackOffered(solve, v2Grain, scope)
+				switch {
+				case bot != "":
 					solve.V2Waived = bot
 					// ms= must include the waiver's inline forward-confirm.
 					solve.VerifyMS = time.Since(verifyStart).Milliseconds()
-				} else {
+				case fallback && confirmOK && confirmInput(hsSig, r.Header.Get(clickHeader) == "1"):
+					// The confirm fallback's click (challenge_v2_fallback.go):
+					// the solve takes the normal solved path, marked.
+					solve.V2Rescued = v2RescuedConfirm
+					solve.V2Confirm = confirmClicked
+					if ms := verifyAt.Sub(confirmAt).Milliseconds(); ms > 0 {
+						solve.V2ConfirmMS = ms
+					}
+				case fallback:
+					// Not refused yet: ask for one click. A re-post that
+					// carries the token but no input is asked again with the
+					// SAME token, never a new one (one PoW must not stay alive
+					// for as long as a client keeps re-posting).
+					solve.ConfirmFallback = true
+					tok := r.Header.Get(confirmHeader)
+					if !confirmOK {
+						logging.LogfCHALLENGES("%s", solve.ConfirmLine())
+						tok = issueConfirmToken(ipStr, host, powTok, verifyAt)
+					}
+					setNoStore(w.Header())
+					w.Header().Set(confirmHeader, tok)
+					http.Error(w, "confirm", http.StatusForbidden)
+					return
+				default:
 					// RejectLine carries sig= and the geo fields (see there);
 					// the hook writes the durable challenge_v2_reject history
 					// row, which is what makes the rung's false-positive rate

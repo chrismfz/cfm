@@ -778,7 +778,11 @@ Knobs `[webdetector] FP_POLICY` (`0` kills all kinds) / `FP_POLICY_ALLOW_FPS`.
   by nothing until the corpus says so; a new tell is written from the corpus,
   never from memory, and a single spoofed device claim never rejects alone.
   The real-input rescue only ever clears. `src=` and `scope=` are log-only,
-  never an arm. Kill switches: `CHALLENGE_V2_HW_TELLS`,
+  never an arm. The confirm fallback (`challenge_v2_fallback.go`) turns a
+  would-be reject with no certain tell, from the audience (GR/CY, not a
+  datacenter ASN), under a geo / vhost / all grain, into the confirm step's
+  Continue button; its click passes (`v2_rescued=confirm`), corpus-only.
+  Kill switches: `CHALLENGE_V2_HW_TELLS`, `CHALLENGE_V2_FALLBACK`,
   `CHALLENGE_V2_INPUT_RESCUE`, `CHALLENGE_V2_UNSOLICITED`,
   `CHALLENGE_V2_PATHS`, `CHALLENGE_PATHS_REVOKE`,
   `CHALLENGE_V2_PATHS_REJECT_BAN`. The client-authored humanity report stays

@@ -191,9 +191,14 @@ D3/D4 are the process fix.
   reported no input at all. (b), (c) and (d) stand: the input rescue and
   the good-bot waiver (which covers `all` like geo and vhost) still clear,
   a reject is still retry-able, and every line still names its grain. The
-  confirm fallback (c) for a failing solve with no certain tell, on any
-  vhost, is the next step; the grain / mark / note / tier-pin machinery
-  that decided coverage goes after it.
+  confirm fallback (c) is built (same day, PR B, `challenge_v2_fallback.go`,
+  `CHALLENGE_V2_FALLBACK`, default `audience`): a solve about to be rejected,
+  with no certain tell, from the node's audience (GR/CY, never a datacenter
+  ASN), under a geo / vhost / all grain and no mark, gets the confirm step's
+  Continue button instead, and its click passes (`v2_rescued=confirm`). Its
+  click's approach is corpus first, scored by nothing (D3); `all` offers it
+  to everyone once that corpus says a farm does not script it. The grain /
+  mark / note / tier-pin machinery that decided coverage goes after it.
 
 ## 5. Enforcement roadmap — the only live checklist
 
