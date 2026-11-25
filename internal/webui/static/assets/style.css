@@ -1079,3 +1079,23 @@ td, th { font-variant-numeric: tabular-nums; }
 .pt-panel { width: min(760px, 100%); height: 100%; overflow-y: auto; background: var(--card); border-left: 1px solid var(--border); box-shadow: var(--shadow); padding: 1.2rem; }
 .pt-pre { max-height: 28rem; overflow: auto; background: var(--bg-inset); border: 1px solid var(--border-soft); border-radius: 8px; padding: .6rem; font-size: .78rem; }
 .ex-add { margin: .4rem 0 .8rem; }
+
+/* ── Mail page (assets/mail.js) ───────────────────────────────────────── */
+.ml-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: .6rem; margin-bottom: .8rem; }
+.ml-tile { border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg-inset); color: var(--fg); padding: .6rem .7rem; display: flex; flex-direction: column; gap: .2rem; min-width: 0; text-align: left; font: inherit; cursor: pointer; }
+.ml-tile:hover { border-color: var(--accent); filter: none; }
+.ml-head { margin: 0 0 .5rem; }
+.ml-note { margin: 0 0 .6rem; }
+.ml-note.bad { color: var(--danger); }
+.ml-age { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; margin-bottom: .8rem; }
+.ml-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: .7rem; align-items: start; }
+.ml-grid .mini-card { min-width: 0; }
+.ml-grid .mini-card td { overflow-wrap: anywhere; }
+/* A table of many columns scrolls sideways on a phone instead of breaking its ids and addresses letter by letter. */
+.ml-grid .ml-wide td, .ml-grid .ml-mid td { overflow-wrap: normal; }
+.ml-grid .pill { white-space: nowrap; }
+.ml-grid .mini-card th.pt-r, .ml-grid .mini-card td.pt-r { width: 1%; white-space: nowrap; overflow-wrap: normal; }
+.ml-grid .mini-card h3 .top-hint { display: block; margin-top: .15rem; }
+.ml-age[hidden] { display: none; }
+.ml-wide { grid-column: 1 / -1; }
+@media (min-width: 900px) { .ml-mid { grid-column: span 2; } }

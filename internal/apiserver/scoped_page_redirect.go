@@ -27,7 +27,6 @@ var scopedAdminOnlyPages = map[string]struct{}{
 	"/":                    {},
 	"/health":              {},
 	"/alerts":              {},
-	"/mail":                {},
 	"/firewall":            {},
 	"/webdetector/bots":    {},
 	"/webdetector/traffic": {},

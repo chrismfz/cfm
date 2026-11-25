@@ -54,6 +54,20 @@ _Nothing yet._
   per request, at the edge decision.
 
 ### Changed
+- **Mail is one page.** "Mail queue" and "Mail Monitor" were two menu items
+  with fifteen cards between them; they are now one page, Mail, with the
+  numbers on top (in queue now, sent, received, sent by scripts, rejected,
+  rate-limited, over quota, failed logins) and three tabs: Queue, Outbound,
+  Inbound & logins. The "Suspected compromise" list stays above the tabs
+  whenever it has a row. Tables show their top 8 with a "Show all"; the tab
+  and the window are in the address, so a link opens the same view.
+  - A cPanel user gets the same page for its own domains, without the Queue
+    tab or the server-wide tables (as before: the daemon refuses those).
+  - The two reports are held apart: the queue detector being off no longer
+    blanks anything else, and a refresh that fails keeps the last read on
+    screen, marked with when it was taken, instead of a message that fades.
+    A number the page does not have shows as a dash, never as 0.
+  - `/cfm-admin/mailmon/` forwards to the new page.
 - **cfm-admin: three pages became two.** The WAF engine, Forensics and
   Challenge access pages are gone from the menu; their old links still work
   (each forwards to its new place, with its `?host=` / `?ip=`).
