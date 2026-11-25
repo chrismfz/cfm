@@ -23,7 +23,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ### Added
 - **The solved-ok grace is measured (`okstate` lines).** After a solve,
   `OPENRESTY_OK_IP_TTL` lets everyone behind the same IP pass the host's
-  vhost and per-IP challenge without a cookie of their own, and every cleared
+  vhost and per-IP challenge (and a per-IP edge block) without a cookie of
+  their own, and every cleared
   browser there keeps extending it (an operator's `attack on` on virgo showed
   no challenge to a private window from the IP that had solved earlier).
   `cfm.challenges.log` now writes `okstate mode=allow` when it lets a client

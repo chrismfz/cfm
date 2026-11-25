@@ -73,6 +73,25 @@ func TestOKStateProbe_Would(t *testing.T) {
 	}
 }
 
+// okState clears a per-IP block too, not only a challenge: the probe must
+// show that one (ipa=block), it is the worse case.
+func TestOKStateProbe_AllowOverABlock(t *testing.T) {
+	got := captureOKProbe(t)
+	b := NewNginxBridge("/tmp/cfm-test-okprobeb.sock", "tok", time.Minute, 45*time.Minute)
+	const ip, host = "203.0.113.73", "shop.example.gr"
+	b.ClearIPScoped(ip, host, "web")
+	b.mu.Lock()
+	b.ipState[ip] = bridgeIPEntry{Action: "block", Expires: time.Now().Add(time.Hour)}
+	b.mu.Unlock()
+	if a := decisionIPAction(t, b, ip, host); a != "allow" {
+		t.Fatalf("ip_action=%q: okState no longer clears a block (update this test)", a)
+	}
+	lines := got()
+	if len(lines) != 1 || !strings.Contains(lines[0], "okstate mode=allow ip="+ip) || !strings.Contains(lines[0], " ipa=block ") {
+		t.Fatalf("lines=%q, want one mode=allow line with ipa=block", lines)
+	}
+}
+
 func decisionVhostAction(t *testing.T, b *NginxBridge, ip, host string) string {
 	t.Helper()
 	rr := httptestDecision(t, b, ip, host)

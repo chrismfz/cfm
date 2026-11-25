@@ -25,7 +25,8 @@ import (
 // request WITHOUT its own cookie. One line per (ip, host, scope) per
 // okProbeLogEvery:
 //
-//	[challenge] okstate mode=allow …  okState let a would-be challenge through
+//	[challenge] okstate mode=allow …  okState let a would-be challenge — or a
+//	                                  per-IP block, ipa=block — through
 //	                                  (OPENRESTY_OK_IP_TTL > 0);
 //	[challenge] okstate mode=would …  a challenge answered to a pair that
 //	                                  solved within okProbeWindow, i.e. one
@@ -83,7 +84,9 @@ func noteOKProbeSolved(ip, host, scope string, now time.Time) {
 func okStateProbe(ip, host, scope, ua, origVh, origIP, finalVh, finalIP string, overridden bool, now time.Time) {
 	mode := ""
 	switch {
-	case overridden && (origVh == "challenge" || origIP == "challenge"):
+	case overridden:
+		// Whatever okState cleared: a challenge, or a per-IP block (it
+		// clears that too; ipa=block on the line).
 		mode = "allow"
 	case !overridden && finalIP != "block" && (finalVh == "challenge" || finalIP == "challenge"):
 		mode = "would"
