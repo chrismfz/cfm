@@ -85,10 +85,13 @@ type NginxBridge struct {
 	// config list relabels), so the auto-v2 resolver (challenge_v2_auto.go)
 	// sees the real automatic sources. Cleared with the entry; guarded by mu
 	// like vhState.
-	vhAuto         map[string]map[string]time.Time
-	okState        map[okStateKey]time.Time // (ip,host,scope) → solved-ok expiry (bypasses matching vhost challenge)
-	bypassFunc     func(string) bool        // set once at startup; no lock needed (written before serving starts)
-	hostBypassFunc func(string) bool        // host-level permanent allow (CHALLENGE_HOST_BYPASS); same write-once guarantee
+	vhAuto  map[string]map[string]time.Time
+	okState map[okStateKey]time.Time // (ip,host,scope) → solved-ok expiry (bypasses matching vhost challenge)
+	// bypassFn is IGNORE_IPS / IGNORE_NETS (SetBypassFunc; read through
+	// bypassed). Atomic: a detectors.conf reload sets it again while the
+	// handlers and the edge ban rebuild beside the polls read it.
+	bypassFn       atomic.Pointer[func(string) bool]
+	hostBypassFunc func(string) bool // host-level permanent allow (CHALLENGE_HOST_BYPASS); set once at startup, before serving starts
 	stats          bridgeStatsState
 
 	// clrRevoked: ip → until, the IPs whose clearance a malpath challenge
@@ -662,10 +665,20 @@ func (b *NginxBridge) SetBypassFunc(fn func(string) bool) {
 	if b == nil {
 		return
 	}
-	b.bypassFunc = fn
+	if fn == nil {
+		b.bypassFn.Store(nil)
+	} else {
+		b.bypassFn.Store(&fn)
+	}
 	// The edge ban list leaves IGNORE_IPS out: a new list (a config reload)
 	// rebuilds it on the next poll.
 	b.edgeBanResync()
+}
+
+// bypassed reports whether ip is on IGNORE_IPS / IGNORE_NETS.
+func (b *NginxBridge) bypassed(ip string) bool {
+	fn := b.bypassFn.Load()
+	return fn != nil && (*fn)(ip)
 }
 
 // SetHostBypassFunc wires a host predicate that permanently allows any host
@@ -1126,7 +1139,7 @@ func (b *NginxBridge) ChallengeIPWithReason(ip string, ttl time.Duration, reason
 		return
 	}
 	// ── NEW: honour static bypass (IGNORE_IPS / IGNORE_NETS) ──────────────────
-	if b.bypassFunc != nil && b.bypassFunc(ip) {
+	if b.bypassed(ip) {
 		return
 	}
 	// ──────────────────────────────────────────────────────────────────────────
@@ -1215,7 +1228,7 @@ func (b *NginxBridge) HoldChallengeIP(ip string, ttl time.Duration) bool {
 	if b == nil || !b.cfg.Enabled || ip == "" || ttl <= 0 {
 		return false
 	}
-	if b.bypassFunc != nil && b.bypassFunc(ip) {
+	if b.bypassed(ip) {
 		return false
 	}
 	now := time.Now()
@@ -1306,7 +1319,7 @@ func (b *NginxBridge) BlockIP(ip string, ttl time.Duration) {
 		return
 	}
 
-	if b.bypassFunc != nil && b.bypassFunc(ip) {
+	if b.bypassed(ip) {
 		return
 	}
 
@@ -2133,7 +2146,7 @@ func (b *NginxBridge) writeEdgeBan(w http.ResponseWriter, r *http.Request) (hand
 		return false, false
 	}
 	ip := strings.TrimSpace(q.Get("ip"))
-	if b.bypassFunc != nil && b.bypassFunc(ip) {
+	if b.bypassed(ip) {
 		return false, false
 	}
 	if ok, _ := edgeban.IsBanned(ip); !ok {
@@ -2273,7 +2286,7 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 
 	// ── NEW: static bypass — always allow, ignores ipState/vhState entirely ──
-	if b.bypassFunc != nil && b.bypassFunc(ip) {
+	if b.bypassed(ip) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"ip_action":    "allow",

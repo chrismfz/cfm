@@ -355,7 +355,7 @@ func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time) {
         )
     }
     // IGNORE_IPS and the challenge-exclude file are applied per request in
-    // handleDecision (bypassFunc, ChalExcludeHot): nothing per IP here.
+    // handleDecision (bypassed, ChalExcludeHot): nothing per IP here.
     e.nginxBridge.ChallengeVhostWithReason(host, rem, "manual")
 }
 
@@ -1829,7 +1829,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
 
 if doChallenge {
     // IGNORE_IPS and the challenge-exclude file are applied per request in
-    // handleDecision (bypassFunc, ChalExcludeHot): nothing per IP here.
+    // handleDecision (bypassed, ChalExcludeHot): nothing per IP here.
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
                     // The auto-v2 resolver's view of this source: re-noted every
                     // cycle it is active, riding the challenge entry just
@@ -2249,7 +2249,7 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                 }
 
                 // No per-IP walk: IGNORE_IPS and the challenge-exclude file are
-                // applied per request in handleDecision (bypassFunc,
+                // applied per request in handleDecision (bypassed,
                 // ChalExcludeHot). The walk this replaced looked every IP of the
                 // window up (an inline PTR, 1 s each) on every tick, for a
                 // BypassIPTemp that had stopped writing anything (host ""): it

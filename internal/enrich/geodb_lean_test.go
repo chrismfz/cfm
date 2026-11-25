@@ -39,13 +39,20 @@ func fullCityRecord(iso, country, city string) mmdbMap {
 func TestLeanReadMatchesGeoip2(t *testing.T) {
 	dir := t.TempDir()
 	ip := net.ParseIP("94.68.42.127")
-	for name, rec := range map[string]mmdbMap{
-		"full":       fullCityRecord("GR", "Greece", "Athens"),
-		"no city":    mmdbMap{{"country", mmdbMap{{"iso_code", "CY"}, {"names", names("Cyprus")}}}},
-		"no en name": mmdbMap{{"country", mmdbMap{{"iso_code", "DE"}, {"names", mmdbMap{{"de", "Deutschland"}}}}}},
+	type tc struct {
+		dbType string
+		rec    mmdbMap
+	}
+	for name, c := range map[string]tc{
+		"full":         {"GeoLite2-City", fullCityRecord("GR", "Greece", "Athens")},
+		"no city":      {"GeoLite2-City", mmdbMap{{"country", mmdbMap{{"iso_code", "CY"}, {"names", names("Cyprus")}}}}},
+		"no en name":   {"GeoLite2-City", mmdbMap{{"country", mmdbMap{{"iso_code", "DE"}, {"names", mmdbMap{{"de", "Deutschland"}}}}}}},
+		"city only":    {"GeoLite2-City", mmdbMap{{"city", mmdbMap{{"names", names("Nicosia")}}}}},
+		"dbip city":    {"DBIP-City-Lite", fullCityRecord("GR", "Greece", "Patras")},
+		"country file": {"GeoLite2-Country", mmdbMap{{"country", mmdbMap{{"iso_code", "GR"}, {"names", names("Greece")}}}}},
 	} {
 		path := filepath.Join(dir, name+".mmdb")
-		writeMMDB(t, dir, name+".mmdb", buildMMDB("GeoLite2-City", rec), time.Now())
+		writeMMDB(t, dir, name+".mmdb", buildMMDB(c.dbType, c.rec), time.Now())
 		ref, err := geoip2.Open(path)
 		if err != nil {
 			t.Fatal(err)

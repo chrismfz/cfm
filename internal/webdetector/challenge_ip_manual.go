@@ -134,7 +134,7 @@ func (e *Engine) handleChallengeIPAdd(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	out := manualIPChallengeResult{Action: "challenge", Done: []string{}, Skipped: skipped, TTLSeconds: int(ttl / time.Second)}
 	for _, ip := range ips {
-		if b.bypassFunc != nil && b.bypassFunc(ip) {
+		if b.bypassed(ip) {
 			out.Skipped = append(out.Skipped, manualIPChallengeSkip{IP: ip, Why: "never challenged on this node (IGNORE_IPS / IGNORE_NETS)"})
 			continue
 		}

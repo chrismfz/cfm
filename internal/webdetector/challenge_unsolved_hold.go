@@ -195,7 +195,7 @@ func (b *NginxBridge) NoteUnsolvedChallengeView(ip, host string, now time.Time) 
 	if b == nil || !b.cfg.Enabled || cfg == nil || cfg.Mode == unsolvedHoldOff || ip == "" {
 		return UnsolvedHold{}
 	}
-	if b.bypassFunc != nil && b.bypassFunc(ip) {
+	if b.bypassed(ip) {
 		return UnsolvedHold{}
 	}
 	b.mu.RLock()
@@ -349,7 +349,7 @@ func (b *NginxBridge) RestoreUnsolvedHolds() int {
 	}
 	n := 0
 	for ip, until := range live {
-		if b.bypassFunc != nil && b.bypassFunc(ip) {
+		if b.bypassed(ip) {
 			endUnsolvedHold(ip)
 			continue
 		}

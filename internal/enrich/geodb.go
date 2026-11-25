@@ -68,7 +68,8 @@ func openGeoDBQuiet(path string) (geoDB, error) {
 	r, err := geoip2.Open(path)
 	if err == nil {
 		// geoip2 only vouches for the type: the reads go through maxminddb
-		// into lean structs (maxmindDB).
+		// into lean structs (maxmindDB). The second open is once per file
+		// load; deciding the type ourselves would copy geoip2's type list.
 		_ = r.Close()
 		raw, err := maxminddb.Open(path)
 		if err != nil {
@@ -140,12 +141,17 @@ func (d maxmindDB) asn(ip net.IP) (uint, string, bool) {
 
 func (d maxmindDB) country(ip net.IP) (string, string, string, bool) {
 	var rec maxmindCountryFields
-	if err := d.r.Lookup(ip, &rec); err != nil || rec.Country.IsoCode == "" {
+	if err := d.r.Lookup(ip, &rec); err != nil {
 		return "", "", "", false
 	}
 	name := rec.Country.IsoCode
 	if rec.Country.Names.EN != "" {
 		name = rec.Country.Names.EN
+	}
+	// As geoip2's City() read: a record with a city but no country still
+	// answers its city.
+	if rec.Country.IsoCode == "" && name == "" && rec.City.Names.EN == "" {
+		return "", "", "", false
 	}
 	return rec.Country.IsoCode, name, rec.City.Names.EN, true
 }

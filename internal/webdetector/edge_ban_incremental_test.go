@@ -14,11 +14,21 @@ import (
 	"cfm/internal/firewall"
 )
 
-// scanCounter counts the keys a sync looks at (bypassFunc is asked once per
+// setBypass sets the bridge's IGNORE_IPS predicate as SetBypassFunc does,
+// without asking the edge ban list for a rebuild (the tests count rebuilds).
+func setBypass(b *NginxBridge, fn func(string) bool) {
+	if fn == nil {
+		b.bypassFn.Store(nil)
+		return
+	}
+	b.bypassFn.Store(&fn)
+}
+
+// scanCounter counts the keys a sync looks at (the bypass check is asked once per
 // key): a rebuild asks it for every ban, a change for the changed keys only.
 func scanCounter(b *NginxBridge) *int {
 	n := new(int)
-	b.bypassFunc = func(string) bool { *n++; return false }
+	setBypass(b, func(string) bool { *n++; return false })
 	return n
 }
 
@@ -139,7 +149,7 @@ func TestEdgeBanCapFollowsTheEdge(t *testing.T) {
 func TestEdgeBanChangesMatchARebuild(t *testing.T) {
 	s := installEdgeBans(t)
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
-	b.bypassFunc = func(ip string) bool { return ip == "10.0.0.7" } // IGNORE_IPS
+	setBypass(b, func(ip string) bool { return ip == "10.0.0.7" }) // IGNORE_IPS
 	r := rand.New(rand.NewSource(3))
 	edge := map[string]int64{}
 	q := url.Values{"cap": {"100000"}}
@@ -327,5 +337,56 @@ func TestEdgeBanBypassChangeRebuilds(t *testing.T) {
 	b.SetBypassFunc(func(ip string) bool { return ip == "192.0.2.2" })
 	if _, r, raw := pollEdgeBan(t, b, at(first), "tok"); len(r.Del) != 1 || r.Del[0] != "192.0.2.2" {
 		t.Fatalf("after a new IGNORE_IPS: %s, want 192.0.2.2 deleted", raw)
+	}
+}
+
+// A rebuild beside the polls brings its list up to the changes the polls
+// applied while it was built: before, its publish journalled a ban made
+// meanwhile as deleted and an unban as set again (each back ~5 s later).
+func TestEdgeBanRebuildBesideKeepsTheChangesMeanwhile(t *testing.T) {
+	edgeBanRebuildAsync = true
+	t.Cleanup(func() { edgeBanRebuildAsync = false })
+	s := installEdgeBans(t, "192.0.2.1", "192.0.2.2")
+	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
+	_, first, _ := pollEdgeBan(t, b, url.Values{}, "tok")
+	if len(first.IPs) != 2 {
+		t.Fatalf("first poll: %+v", first)
+	}
+	// While the rebuild reads its list: a ban and an unban, which a poll
+	// applies to the published list.
+	var mid edgeBanReply
+	once := true
+	setBypass(b, func(string) bool {
+		if once {
+			once = false
+			ttl := time.Hour
+			s.Add(net.ParseIP("198.51.100.7"), &ttl, "waf_security", false)
+			s.Remove("192.0.2.2")
+			_, mid, _ = pollEdgeBan(t, b, at(first), "tok")
+		}
+		return false
+	})
+	b.edgeBanJournal.mu.Lock()
+	b.edgeBanJournal.rebuilding = true
+	capN := b.edgeBanJournal.edgeBanCap()
+	b.edgeBanJournal.mu.Unlock()
+	b.edgeBanRebuildBeside(capN)
+	if mid.Set["198.51.100.7"] == 0 || len(mid.Del) != 1 {
+		t.Fatalf("the poll meanwhile: %+v, want the ban set and 192.0.2.2 deleted", mid)
+	}
+	_, next, raw := pollEdgeBan(t, b, at(mid), "tok")
+	if next.Full || len(next.Set) != 0 || len(next.Del) != 0 {
+		t.Fatalf("the poll after the rebuild: %s, want no change (the rebuild reverted the poll's)", raw)
+	}
+	b.edgeBanJournal.mu.Lock()
+	defer b.edgeBanJournal.mu.Unlock()
+	if b.edgeBanJournal.rebuilding {
+		t.Fatal("rebuilding still set after the publish")
+	}
+	if _, ok := b.edgeBanJournal.published["198.51.100.7"]; !ok {
+		t.Fatal("the ban made meanwhile is not in the published list")
+	}
+	if _, ok := b.edgeBanJournal.published["192.0.2.2"]; ok {
+		t.Fatal("the unban made meanwhile is back in the published list")
 	}
 }
