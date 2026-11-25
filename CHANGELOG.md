@@ -21,6 +21,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **The solved-ok grace is measured (`okstate` lines).** After a solve,
+  `OPENRESTY_OK_IP_TTL` lets everyone behind the same IP pass the host's
+  vhost and per-IP challenge without a cookie of their own, and every cleared
+  browser there keeps extending it (an operator's `attack on` on virgo showed
+  no challenge to a private window from the IP that had solved earlier).
+  `cfm.challenges.log` now writes `okstate mode=allow` when it lets a client
+  with no cookie through, and `okstate mode=would` when a challenge goes to a
+  client that solved in the last 45 minutes, which is what
+  `OPENRESTY_OK_IP_TTL = 0` costs. One line per IP and host every 10
+  minutes; it decides nothing.
 - **ChallengeV2: a "Continue" button instead of a dead end.** A solve the
   humanity check is about to refuse, with no certain sign of automation
   (webdriver, headless UA), now gets the same one-click "Continue" step the
