@@ -519,6 +519,9 @@ func plainExcludablePath(p string) bool {
 }
 
 func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
+	e.excludePTRBudget.Store(excludePTRBudgetPerTick)
+	e.excludeDeferred.Store(0)
+	defer e.logExcludeDeferred(now)
 	if out == nil {
 		return
 	}
@@ -2641,4 +2644,23 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// excludePTRBudgetPerTick bounds the inline reverse lookups isExcluded does in
+// one tick (each up to 1 s): the rest wait one tick for the background lookup.
+const excludePTRBudgetPerTick = 8
+
+// logExcludeDeferred reports, at most once a minute, the IPs isExcluded held
+// back this tick for want of a PTR (they are judged next tick, from cache).
+func (e *Engine) logExcludeDeferred(now time.Time) {
+	n := e.excludeDeferred.Load()
+	if n <= 0 {
+		return
+	}
+	last := e.excludeDeferredLogAt.Load()
+	if last != 0 && now.Unix()-last < 60 {
+		return
+	}
+	e.excludeDeferredLogAt.Store(now.Unix())
+	logging.LogfCHALLENGES("[challenge] exclude_ptr_deferred n=%d budget=%d note=judged_next_tick_from_cache", n, excludePTRBudgetPerTick)
 }

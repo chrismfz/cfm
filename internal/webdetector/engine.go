@@ -589,6 +589,13 @@ type Engine struct {
 	longwin *LongWindow
 	scorer  Scorer
 	enr     *enrich.Enricher
+	// excludePTRBudget: inline reverse lookups isExcluded may still do this
+	// tick (reset by emitIPChallenges; see isExcluded).
+	excludePTRBudget atomic.Int64
+	// excludeDeferred: IPs isExcluded held back this tick for want of a PTR.
+	excludeDeferred atomic.Int64
+	// excludeDeferredLogAt: unix seconds of the last exclude_ptr_deferred line.
+	excludeDeferredLogAt atomic.Int64
 	// simulatePTRFn overrides the reverse-DNS resolver used by
 	// TrafficRuleSimulateForAPI (tests only; nil = direct LookupAddr). ok=false
 	// means the lookup did not complete (resolver failure).
@@ -4442,17 +4449,65 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 		//logging.Logf("[challenge][debug] exclude_no_func ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
 		return false
 	}
-	asn, ptr := "", ""
-	if e.enr != nil {
-		r := e.enr.Lookup(ip)
-		if r.ASN > 0 {
-			asn = fmt.Sprintf("AS%d", r.ASN)
-		}
-		ptr = r.PTR
+	enr := e.excludeEnricher()
+	if enr == nil {
+		_, matched := e.chalExcludeFunc(ip, host, ua, "", "", rule)
+		return matched
 	}
-	_, matched := e.chalExcludeFunc(ip, host, ua, asn, ptr, rule)
-	//logging.Logf("[challenge][debug] isExcluded ip=%s host=%s ua=%q rule=%s asn=%q ptr=%q matched=%v", ip, host, ua, rule, asn, ptr, matched)
-	return matched
+	asnOf := func(r enrich.Result) string {
+		if r.ASN > 0 {
+			return fmt.Sprintf("AS%d", r.ASN)
+		}
+		return ""
+	}
+	// The PTR the rules need: from the enrich cache (no DNS), else inline —
+	// but at most excludePTRBudget inline reverse lookups a tick. One costs
+	// up to dnsTimeout (1 s), and a farm on fresh PTR-less IPs once made
+	// them hundreds a tick: the tick ran past its 30 s watchdog (qualityweb,
+	// 2026-11-25). Past the budget the lookup goes to the background and
+	// the IP is held back this tick (reported excluded), unless a rule that
+	// needs no PTR already exempts it; next tick its PTR is cached. Holding
+	// it back, not judging it without a PTR, keeps a verify_fcrdns crawler
+	// the goodbot registry does not know (ahrefs, semrush) from a per-IP
+	// challenge on its first tick: the edge lifts only vhost-wide
+	// challenges for the exclude file, never a per-IP one.
+	if r, ok := enr.LookupCached(ip); ok {
+		_, matched := e.chalExcludeFunc(ip, host, ua, asnOf(r), r.PTR, rule)
+		return matched
+	}
+	if !enr.PTREnabled() || e.excludePTRBudget.Add(-1) >= 0 {
+		// No PTR switch: Lookup is mmdb only, no DNS, no budget.
+		r := enr.Lookup(ip)
+		_, matched := e.chalExcludeFunc(ip, host, ua, asnOf(r), r.PTR, rule)
+		return matched
+	}
+	r := enr.LookupCachedOrAsync(ip) // geo now, the PTR in the background
+	if _, matched := e.chalExcludeFunc(ip, host, ua, asnOf(r), "", rule); matched {
+		return true
+	}
+	e.excludeDeferred.Add(1)
+	return true
+}
+
+// excludeEnr is what isExcluded needs of the enricher (a test fakes it).
+type excludeEnr interface {
+	LookupCached(ip string) (enrich.Result, bool)
+	Lookup(ip string) enrich.Result
+	LookupCachedOrAsync(ip string) enrich.Result
+	PTREnabled() bool
+}
+
+// excludeEnricherForTest, when set, replaces e.enr in isExcluded.
+var excludeEnricherForTest excludeEnr
+
+func (e *Engine) excludeEnricher() excludeEnr {
+	if excludeEnricherForTest != nil {
+		return excludeEnricherForTest
+	}
+	if e.enr == nil {
+		return nil
+	}
+	return e.enr
 }
 
 // logExcludeChange records every challenge/WAF exclude add/remove to cfm.log

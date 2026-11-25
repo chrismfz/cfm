@@ -20,7 +20,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **A wave of fresh IPs can no longer stall the web detector through the
+  challenge excludes.** Before a per-IP challenge (malicious paths, unique
+  user agents, malformed requests, the rules), the exclude file is checked,
+  and a `ptr=` rule needs the client's reverse DNS: up to 1 s per IP, done
+  inline. A farm on many fresh IPs with no PTR could again run the tick past
+  its 30 s watchdog. Now a tick does at most 8 such lookups inline; the rest
+  are looked up in the background and judged on the next tick (about 10 s
+  later), from the cache. Until then such an IP gets no per-IP challenge,
+  so a crawler exempted by PTR (ahrefs, semrush) is never challenged on the
+  way; a farm IP gets its challenge one tick later. `cfm.challenges.log`
+  writes `exclude_ptr_deferred n=…`, at most once a minute, when IPs wait.
 
 ## 2026.11.25
 

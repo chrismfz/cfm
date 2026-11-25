@@ -390,6 +390,25 @@ func (e *Enricher) LookupCachedOrAsync(ipStr string) Result {
 	return partial
 }
 
+// LookupCached returns the cached Result for ipStr and whether there was one,
+// never resolving anything inline. A hit whose PTR failed earlier and is due
+// for a retry also starts the background full Lookup (as LookupCachedOrAsync
+// does). A miss starts nothing: the caller chooses between an inline Lookup
+// and LookupCachedOrAsync.
+func (e *Enricher) LookupCached(ipStr string) (Result, bool) {
+	if e == nil || ipStr == "" {
+		return Result{}, false
+	}
+	r, ok := e.cache.Get(ipStr)
+	if !ok {
+		return Result{}, false
+	}
+	if e.ptrRetryDue(r, ipStr, time.Now()) {
+		e.dispatchAsyncLookup(ipStr)
+	}
+	return r, true
+}
+
 // LookupCachedOrGeo returns the cached Result for ipStr, or on a miss the
 // mmdb-only one (country + ASN, no PTR). Unlike LookupCachedOrAsync it never
 // starts a background reverse lookup: for callers that only need geo data
