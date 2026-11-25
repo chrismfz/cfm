@@ -591,8 +591,14 @@ func (e *Engine) scopedWAFExcludeAdd(w http.ResponseWriter, r *http.Request, typ
 		scope = pathScope
 	}
 	opt.ExpiresUnix = expiryFromTTL(ttl)
-	if e == nil {
+	if e == nil || e.wafExcludes == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine not ready"})
+		return
+	}
+	if old, ok := e.wafExcludes.Get(typ, value, scope, ruleIDs); ok && old.By == excludeByScoped && old.ExpiresUnix > 0 &&
+		opt.ExpiresUnix > 0 && opt.ExpiresUnix-old.ExpiresUnix < int64(scopedWAFRenewMinGain/time.Second) {
+		// The same exclude again, with (nearly) the expiry it already has.
+		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "unchanged": true, "expires_unix": old.ExpiresUnix})
 		return
 	}
 	if len(ruleIDs) > 0 && !scopedWAFRuleExcludeRoom(e.WAFExcludeList(), ctxScope, typ, value, ruleIDs) {

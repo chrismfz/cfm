@@ -363,6 +363,23 @@ func (s *excludeStore) RemoveTenantPathHosts(v string, strip map[string]struct{}
 	return touched
 }
 
+// Get returns the live (not expired) entry on exactly (type, value, scope,
+// rule ids), as Add keys it.
+func (s *excludeStore) Get(t, v string, scope map[string]struct{}, ruleIDs []int) (excludeEntry, bool) {
+	t, v, ok := s.normalize(t, v)
+	if !ok {
+		return excludeEntry{}, false
+	}
+	k := s.key(t, v, scopeMapToHosts(scope), normalizeRuleIDs(ruleIDs))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	e, found := s.entries[k]
+	if !found || e.expired(time.Now().Unix()) {
+		return excludeEntry{}, false
+	}
+	return e, true
+}
+
 func (s *excludeStore) List() []excludeEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

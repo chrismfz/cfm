@@ -227,8 +227,23 @@ func TestScopedWAFExcludeAPI(t *testing.T) {
 	if _, ids, _ := e.wafExcludes.MatchWAFDecision("victim.gr", "/wp-admin/admin-ajax.php"); len(ids) != 0 {
 		t.Fatalf("a tenant's path rule reached another site: %v", ids)
 	}
-	// Renewing an expiring entry works; the same add twice is not an error.
-	want(sAdd("type=path&value=/wp-admin/admin-ajax.php&rule_ids=402&ttl=24h&scope_hosts=t1.gr", "t1.gr", "t2.gr"), 200, "renew")
+	// The same add again changes nothing: no write, no history row, no notification.
+	n := len(events)
+	rr = sAdd("type=path&value=/wp-admin/admin-ajax.php&rule_ids=402&ttl=7d&scope_hosts=t1.gr", "t1.gr", "t2.gr")
+	want(rr, 200, "repeat")
+	if !strings.Contains(rr.Body.String(), `"unchanged":true`) || len(events) != n {
+		t.Fatalf("a repeated add was recorded again: %s, %d new events", rr.Body.String(), len(events)-n)
+	}
+	// A shorter ttl never shortens it either.
+	want(sAdd("type=path&value=/wp-admin/admin-ajax.php&rule_ids=402&ttl=24h&scope_hosts=t1.gr", "t1.gr", "t2.gr"), 200, "repeat, shorter")
+	if got, _ := e.wafExcludes.Get("path", "/wp-admin/admin-ajax.php", scopeSet("t1.gr"), []int{402}); time.Until(time.Unix(got.ExpiresUnix, 0)) < 6*24*time.Hour || len(events) != n {
+		t.Fatalf("a shorter repeat changed the entry: %+v", got)
+	}
+	// A real renewal (the expiry moves by an hour or more) is one.
+	want(sAdd("type=host&value=t2.gr&rule_ids=402&ttl=7d", "t1.gr", "t2.gr"), 200, "renew")
+	if len(events) != n+1 {
+		t.Fatalf("a renewal was not published")
+	}
 
 	// ── Lists ─────────────────────────────────────────────────────────────
 	// The operator narrows an exclude to the tenant's site: not the tenant's to see or remove.
@@ -281,7 +296,7 @@ func TestScopedWAFExcludeAPI(t *testing.T) {
 		"add host t1.gr t1.gr -",
 		"add host t2.gr t2.gr 402",
 		"add path /wp-admin/admin-ajax.php t1.gr 402",
-		"add path /wp-admin/admin-ajax.php t1.gr 402",
+		"add host t2.gr t2.gr 402",
 		"remove path /wp-admin/admin-ajax.php t1.gr 402",
 		"remove host t1.gr t1.gr -",
 	}
@@ -455,6 +470,9 @@ func TestScopedWAFRuleExcludeCap(t *testing.T) {
 	}
 	if code := add("type=path&value=/p3/&rule_ids=402&ttl=7d", "t1.gr", "t2.gr"); code != 200 {
 		t.Fatalf("renewing at the cap: %d", code)
+	}
+	if got, _ := e.wafExcludes.Get("path", "/p3/", scopeSet("t1.gr", "t2.gr"), []int{402}); time.Until(time.Unix(got.ExpiresUnix, 0)) < 6*24*time.Hour {
+		t.Fatalf("the renewal at the cap did not extend: %+v", got)
 	}
 	if code := add("type=host&value=t1.gr", "t1.gr", "t2.gr"); code != 200 {
 		t.Fatalf("the switch at the cap: %d", code)

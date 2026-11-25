@@ -64,6 +64,12 @@ const (
 	// one account can create is bounded; renewing an existing one stays
 	// allowed at the cap.
 	scopedWAFRuleExcludeMax = 40
+	// scopedWAFRenewMinGain: a repeated add of a live rule exclude is a
+	// renewal only when it moves the expiry at least this far; otherwise it
+	// changes nothing and is answered without a write, a history row or a
+	// notification (a client repeating the same request must not be able to
+	// fill the history or the operator's inbox).
+	scopedWAFRenewMinGain = time.Hour
 	// scopedWAFPathMaxLen bounds a site owner's path value.
 	scopedWAFPathMaxLen = 255
 )
