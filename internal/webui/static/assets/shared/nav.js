@@ -6,6 +6,7 @@
 // delegation so Vue re-renders can't detach the handlers.
 
 import { chips, weight } from "../webdet/vhost-picker-model.js";
+import { MENU_GROUPS } from "./nav-menu.js";
 
 const ICONS = {
   gauge: '<path d="M12 15l3.5-5.5"/><path d="M20.5 14a8.5 8.5 0 1 0-17 0"/><path d="M2 14h2m16 0h2"/>',
@@ -31,39 +32,6 @@ const ICONS = {
   pass: '<path d="M13 5l7 7-7 7"/><path d="M4 12h15"/><path d="M4 5v14"/>',
   bolt: '<path d="M13 3L5 13h6l-1 8 8-10h-6l1-8z"/>',
 };
-
-const MENU_GROUPS = [
-  { title: "Overview", items: [
-    { label: "Dashboard", href: "/cfm-admin/", icon: "gauge" },
-    { label: "Health", href: "/cfm-admin/health/", icon: "pulse" },
-    { label: "Alerts", href: "/cfm-admin/alerts/", icon: "bell" },
-  ]},
-  { title: "Web protection", items: [
-    { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },
-    { label: "Vhost", href: "/cfm-admin/webdetector/vhost/", icon: "globe" },
-    { label: "Protection", href: "/cfm-admin/webdetector/protection/", icon: "shield" },
-    { label: "Web Traffic", href: "/cfm-admin/webdetector/traffic/", icon: "bot" },
-  ]},
-  { title: "Rules & engine", items: [
-    { label: "Firewall", href: "/cfm-admin/firewall/", icon: "ban" },
-    { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
-    { label: "Traffic rules", href: "/cfm-admin/webdetector/rules/", icon: "funnel" },
-    { label: "Exceptions", href: "/cfm-admin/webdetector/exceptions/", icon: "pass" },
-    { label: "Site cache", href: "/cfm-admin/webdetector/site-cache/", icon: "bolt" },
-    { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "virus" },
-  ]},
-  { title: "Services", items: [
-    { label: "MySQL governor", href: "/cfm-admin/governor/", icon: "db" },
-    { label: "Mail", href: "/cfm-admin/mail/", icon: "mail" },
-    { label: "API tokens", href: "/cfm-admin/webdetector/tokens/", icon: "key" },
-    { label: "Notifier", href: "/cfm-admin/notifier/", icon: "bell" },
-    { label: "Detectors", href: "/cfm-admin/detectors/", icon: "layers" },
-  ]},
-  { title: "System", items: [
-    { label: "Settings", href: "/cfm-admin/settings/", icon: "gear" },
-    { label: "Debug", href: "/cfm-admin/debug/", icon: "bug" },
-  ]},
-];
 
 const THEME_KEY = "cfm-theme";
 
@@ -269,6 +237,15 @@ function hostActions(host) {
   ];
 }
 
+// A page the sidebar hides from this viewer (an admin-only page, for a scoped
+// user: ui-scope.js) is not offered by the quick search either.
+function hiddenInSidebar(href) {
+  for (const a of document.querySelectorAll(".sidebar-nav a[href]")) {
+    if (a.getAttribute("href") === href) return a.style.display === "none";
+  }
+  return false;
+}
+
 function paletteActions(query) {
   const q = query.trim();
   const ql = q.toLowerCase();
@@ -305,7 +282,11 @@ function paletteActions(query) {
   }
   for (const group of MENU_GROUPS) {
     for (const item of group.items) {
-      if (!q || item.label.toLowerCase().includes(ql) || group.title.toLowerCase().includes(ql)) {
+      if (hiddenInSidebar(item.href)) continue;
+      // The group counts as part of the name ("web traffic" finds Traffic
+      // under Web), and a page keeps answering to the name it used to have.
+      const names = [item.label, group.title, group.title + " " + item.label, ...(item.aka || [])];
+      if (!q || names.some((n) => n.toLowerCase().includes(ql))) {
         out.push({ label: item.label, hint: group.title, href: item.href, icon: item.icon });
       }
     }

@@ -45,6 +45,15 @@
       const adminOnly = matcher(href, anchor);
       anchor.style.display = scoped && adminOnly ? 'none' : '';
     });
+    // A group whose every page is hidden loses its heading too (a scoped user
+    // has nothing under "Overview").
+    nav.querySelectorAll('.nav-group-title').forEach((title) => {
+      let any = false;
+      for (let n = title.nextElementSibling; n && !n.classList.contains('nav-group-title'); n = n.nextElementSibling) {
+        if (n.matches('a[href]') && n.style.display !== 'none') { any = true; break; }
+      }
+      title.style.display = any ? '' : 'none';
+    });
     return nav;
   }
 

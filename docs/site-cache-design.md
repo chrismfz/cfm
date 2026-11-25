@@ -763,7 +763,7 @@ cfm webtop site-cache stats [host]        # hit-ratio + HIT/MISS/BYPASS breakdow
 
 ### 7.3 cfm-admin page "Site cache"
 
-`/cfm-admin/webdetector/site-cache/`, under "Rules & engine" ("Site cache for
+`/cfm-admin/webdetector/site-cache/`, under "Policy" ("Site cache for
 <host>" in the Ctrl-K palette; `?vhost=` filters the list). A
 directory-routed page modelled on Challenge-Access; files in §15. It has:
 
