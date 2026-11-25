@@ -2,7 +2,8 @@
   // Nav items a scoped (per-vhost cPanel/DA) user must NOT see: they are
   // server-wide/admin-only (global dashboard, global UA-emergency "Web Bots",
   // notifier/detectors config, settings, debug). Everything else (WebDetector,
-  // Vhost live, Protection, Exceptions, Vhost controls, MySQL governor) is
+  // Vhost live, Protection, Exceptions, Vhost controls, MySQL governor, Mail:
+  // a scoped user gets its own domains' counters there, never the queue) is
   // scope-filtered server-side and stays visible. Backends already fail-closed
   // (403) on these paths; this just hides the dead links from scoped users.
   // The daemon also redirects a scoped user who opens one of these pages to
@@ -13,7 +14,6 @@
     '/cfm-admin',                    // Dashboard (global stats + global block/unblock)
     '/cfm-admin/health',             // Health history — box-wide metrics (admin-only endpoints)
     '/cfm-admin/alerts',             // Alert log — every detector event, all tenants (admin-only endpoints)
-    '/cfm-admin/mail',               // Mail queue — box-wide queue report (admin-only endpoint)
     '/cfm-admin/firewall',           // Firewall topology + global block state
     '/cfm-admin/webdetector/bots',   // Web Bots — global UA emergency controls
     '/cfm-admin/webdetector/traffic', // Web Traffic — box-wide traffic mix + per-IP / UA actions

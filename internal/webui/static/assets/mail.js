@@ -1,43 +1,68 @@
 // /cfm-admin/assets/mail.js
 //
-// Mail queue page — the MTA-agnostic mail-queue breakdown (exim/postfix).
-// Admin-only (the nav link hides for scoped viewers; the backend 403s). Reads
-// the report the active queue detector publishes each poll — the SAME data as
-// `cfm mailtop` and the mail_queue_summary MCP tool, with no per-request MTA
-// probe:
+// The Mail page: the live queue and the mail counters in one place, in tabs.
+// It replaced two pages (Mail queue, Mail Monitor). Two read-only reports,
+// neither a per-request MTA probe:
 //
-//   GET /api/v1/system/mail-queue
+//   GET /api/v1/system/mail-queue           what the queue detector last
+//                                           published (as `cfm mailtop`).
+//                                           Admin only.
+//   GET /api/v1/mail/traffic?hours=&limit=  per-hour counters from the mail
+//                                           logs. Scope-aware: a cPanel user
+//                                           gets its own domains.
 //
-// `available:false` when no queue detector is enabled yet (or first poll
-// pending) — surfaced as a note, not an error.
+// A scoped viewer gets the counters only: the queue is never asked for, and
+// the server-wide tables are not drawn (mail-model.js; the daemon is what
+// refuses). Each report is held on its own, so one failing or being off
+// (`available:false`) never blanks the other, and a failed refresh keeps the
+// last read on screen, marked as old.
+
+import {
+  WINDOWS, SHOWN, tabsFor, pickTab, pickHours, ageBuckets, tablesFor, tableHint, tableView,
+  anomalies, tiles, sourceNote, hasData, queueHeadline, trafficHeadline,
+} from "./mail-model.js";
 
 (() => {
-  const controller = window.CFMControllerBootstrap.initSharedController({});
-  const api = controller.createApiClient({
-    basePath: '/cfm-admin/api',
-    isScoped: () => false,
+  const controller = window.CFMControllerBootstrap.initSharedController({
+    onDeferredScopedToken: () => { boot().catch(() => {}); },
   });
 
-  const el = {
-    meta:          document.getElementById('mailMeta'),
-    headline:      document.getElementById('mailHeadline'),
-    unavailable:   document.getElementById('mailUnavailable'),
-    ageBuckets:    document.getElementById('ageBuckets'),
-    senderBody:    document.getElementById('senderBody'),
-    queueSenderBody: document.getElementById('queueSenderBody'),
-    recipientBody: document.getElementById('recipientBody'),
-    reasonsBody:   document.getElementById('reasonsBody'),
-    oldestBody:    document.getElementById('oldestBody'),
-    autoState:     document.getElementById('autoState'),
-    refreshBtn:    document.getElementById('refreshBtn'),
-    toggleAutoBtn: document.getElementById('toggleAutoBtn'),
-    actionMsg:     document.getElementById('actionMsg'),
+  function waitForScopedTokenOrTimeout(timeoutMs) {
+    if (controller.getToken()) return Promise.resolve('present');
+    return controller.waitForToken(timeoutMs).then((tok) => {
+      controller.refreshToken();
+      return tok ? 'postmessage' : 'timeout';
+    });
+  }
+
+  const REFRESH_MS = 30000;
+  const query = new URLSearchParams(window.location.search);
+
+  const st = {
+    auto: true, timer: null, booted: false, modeKnown: false,
+    isScopedMode: false,
+    tab: query.get('tab') || '',
+    hours: pickHours(query.get('hours')),
+    expanded: new Set(),
+    queue: { state: 'loading' },
+    traffic: { state: 'loading' },
+    seq: 0,
   };
 
-  const AGE_ORDER = ['<10m', '10m-1h', '1h-6h', '6h-1d', '>1d'];
-  const REFRESH_MS = 30000;
+  const api = controller.createApiClient({
+    basePath: '/cfm-admin/api',
+    isScoped: () => st.isScopedMode,
+  });
 
-  const st = { auto: true, timer: null };
+  const $ = (id) => document.getElementById(id);
+  const el = {
+    tiles: $('tiles'), tabs: $('tabs'), actionMsg: $('actionMsg'),
+    anomalyCard: $('anomalyCard'), anomalyBody: $('anomalyBody'),
+    panel: $('tabPanel'), panelHead: $('panelHead'), panelNote: $('panelNote'),
+    ageBar: $('ageBar'), tables: $('tables'),
+    hoursSel: $('hoursSel'), autoState: $('autoState'),
+    refreshBtn: $('refreshBtn'), toggleAutoBtn: $('toggleAutoBtn'),
+  };
 
   function escapeHTML(s) {
     if (s == null) return '';
@@ -46,106 +71,198 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  function flashMsg(text, kind) {
+  function flashMsg(text) {
     if (!el.actionMsg) return;
     el.actionMsg.textContent = text || '';
     el.actionMsg.style.display = text ? '' : 'none';
-    el.actionMsg.className = 'pill' + (kind ? ' ' + kind : '');
-    if (text) {
-      window.clearTimeout(flashMsg._t);
-      flashMsg._t = window.setTimeout(() => { el.actionMsg.style.display = 'none'; }, 6000);
-    }
+    window.clearTimeout(flashMsg._t);
+    if (text) flashMsg._t = window.setTimeout(() => { el.actionMsg.style.display = 'none'; }, 6000);
   }
 
-  function formatAge(secs) {
-    const n = Number(secs) || 0;
-    if (n <= 0) return '0s';
-    if (n < 60) return `${n}s`;
-    if (n < 3600) return `${Math.round(n / 60)}m`;
-    if (n < 86400) return `${(n / 3600).toFixed(1)}h`;
-    return `${(n / 86400).toFixed(1)}d`;
+  // The tab and the window live in the address, so a reload or a shared link
+  // opens the same view.
+  function syncURL() {
+    const q = new URLSearchParams(window.location.search);
+    q.set('tab', st.tab);
+    q.set('hours', String(st.hours));
+    try { window.history.replaceState(null, '', window.location.pathname + '?' + q.toString()); } catch (_) {}
   }
 
-  function formatSize(b) {
-    const n = Number(b) || 0;
-    if (n >= 1048576) return `${(n / 1048576).toFixed(1)}M`;
-    if (n >= 1024) return `${(n / 1024).toFixed(1)}K`;
-    return `${n}B`;
+  function renderTiles() {
+    el.tiles.innerHTML = tiles(st.queue, st.traffic, st.isScopedMode).map((t) =>
+      `<button type="button" class="ml-tile" data-tab="${escapeHTML(t.tab)}" title="Open ${escapeHTML(t.tab)}">` +
+      `<span class="vp-k">${escapeHTML(t.label)}</span>` +
+      `<span class="vp-big">${escapeHTML(t.value)}</span>` +
+      `<span class="muted pt-sub">${escapeHTML(t.sub) || '&nbsp;'}</span></button>`).join('');
   }
 
-  function rows(tbody, items, render) {
-    if (!tbody) return;
-    if (!Array.isArray(items) || items.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="9" class="muted">(none)</td></tr>';
+  function renderTabs() {
+    el.tabs.innerHTML = tabsFor(st.isScopedMode).map((t) =>
+      `<button type="button" role="tab" class="vp-tab${t.key === st.tab ? ' on' : ''}" ` +
+      `aria-selected="${t.key === st.tab ? 'true' : 'false'}" data-tab="${escapeHTML(t.key)}">${escapeHTML(t.label)}</button>`).join('');
+  }
+
+  function renderAnomalies() {
+    const rows = hasData(st.traffic) ? anomalies(st.traffic.data.anomalies) : [];
+    el.anomalyCard.hidden = rows.length === 0;
+    el.anomalyBody.innerHTML = rows.map((a) =>
+      `<tr><td>${escapeHTML(a.addr)}</td><td><span class="pill warn">${escapeHTML(a.signal)}</span></td>` +
+      `<td class="pt-r">${escapeHTML(a.recent)}</td><td class="pt-r">${escapeHTML(a.baseline)}</td><td class="pt-r">${escapeHTML(a.ratio)}</td></tr>`).join('');
+  }
+
+  function tableHTML(def, report) {
+    const view = tableView(def, report, st.expanded.has(def.key));
+    const hint = tableHint(def, st.isScopedMode);
+    const head = def.cols.map((c) => `<th${c.t && c.t !== 'flag' ? ' class="pt-r"' : ''}>${escapeHTML(c.h)}</th>`).join('');
+    const body = view.rows.length
+      ? view.rows.map((r) => '<tr>' + r.map((c) =>
+          `<td${c.num ? ' class="pt-r"' : ''}>${c.flag ? `<span class="pill info">${escapeHTML(c.text)}</span>` : escapeHTML(c.text)}</td>`).join('') + '</tr>').join('')
+      : `<tr><td colspan="${def.cols.length}" class="muted">(none)</td></tr>`;
+    let more = '';
+    if (view.hidden > 0) more = `<button type="button" class="pt-link" data-expand="${escapeHTML(def.key)}">Show all ${view.total}</button>`;
+    else if (view.total > SHOWN) more = `<button type="button" class="pt-link" data-expand="${escapeHTML(def.key)}">Show the top ${SHOWN}</button>`;
+    return `<div class="mini-card${def.wide ? ' ml-wide' : def.mid ? ' ml-mid' : ''}">` +
+      `<h3>${escapeHTML(def.title)}${hint ? ` <span class="top-hint">${escapeHTML(hint)}</span>` : ''}</h3>` +
+      `<div class="table-wrap"><table class="mini-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>${more}</div>`;
+  }
+
+  function renderPanel() {
+    const kind = st.tab === 'queue' ? 'queue' : 'traffic';
+    const src = st[kind];
+    const data = hasData(src) ? src.data : null;
+
+    el.panelHead.textContent = !data ? '' : (kind === 'queue' ? queueHeadline(data) : trafficHeadline(data, st.isScopedMode));
+    const note = sourceNote(kind, src);
+    el.panelNote.hidden = !note.text;
+    el.panelNote.textContent = note.text;
+    el.panelNote.className = 'ml-note' + (note.bad ? ' bad' : ' muted');
+
+    const showAge = kind === 'queue' && !!data;
+    el.ageBar.hidden = !showAge;
+    el.ageBar.innerHTML = showAge
+      ? '<span class="vp-k">Age of the queued messages</span>' + ageBuckets(data.age_buckets).map((b) =>
+          `<span class="pill">${escapeHTML(b.label)}: <strong>${b.count.toLocaleString('en-US')}</strong> <span class="muted">${b.pct}%</span></span>`).join('')
+      : '';
+
+    // No report, no tables: an empty table would read as "nothing happened".
+    el.tables.innerHTML = data ? tablesFor(st.tab, st.isScopedMode).map((d) => tableHTML(d, data)).join('') : '';
+  }
+
+  function render() {
+    // Until the viewer is known (admin or scoped) nothing is drawn: an admin's
+    // tabs must not flash in front of a cPanel user.
+    if (!st.modeKnown) {
+      el.panelNote.hidden = false;
+      el.panelNote.className = 'ml-note muted';
+      el.panelNote.textContent = 'Loading…';
       return;
     }
-    tbody.innerHTML = items.map(render).join('');
+    st.tab = pickTab(st.tab, st.isScopedMode);
+    renderTiles();
+    renderTabs();
+    renderAnomalies();
+    renderPanel();
   }
 
-  function renderReport(rep) {
-    el.unavailable.style.display = 'none';
-    const measured = rep.measured_at ? new Date(rep.measured_at).toLocaleTimeString() : '';
-    el.meta.textContent = measured ? `measured ${measured}` : '';
-
-    let head = `mta=${escapeHTML(rep.mta || '?')}  ·  total=${rep.total || 0}  ·  frozen=${rep.frozen || 0}  ·  deferred=${rep.deferred || 0}`;
-    if (rep.truncated) head += `  ·  (parsed ${rep.parsed} — listing truncated)`;
-    el.headline.textContent = head;
-
-    const buckets = rep.age_buckets || {};
-    el.ageBuckets.innerHTML = AGE_ORDER
-      .map((k) => `<span class="pill" style="margin-right:.4rem">${k}: <strong>${Number(buckets[k]) || 0}</strong></span>`)
-      .join('');
-
-    rows(el.senderBody, rep.top_sender_domains, (d) =>
-      `<tr><td>${escapeHTML(d.domain)}</td><td>${Number(d.count) || 0}</td></tr>`);
-    rows(el.queueSenderBody, rep.top_senders, (s) =>
-      `<tr><td>${escapeHTML(s.sender)}</td><td>${Number(s.total) || 0}</td>` +
-      `<td>${Number(s.frozen) || 0}</td><td>${Number(s.deferred) || 0}</td></tr>`);
-    rows(el.recipientBody, rep.top_recipient_domains, (d) =>
-      `<tr><td>${escapeHTML(d.domain)}</td><td>${Number(d.count) || 0}</td></tr>`);
-    rows(el.reasonsBody, rep.defer_reasons, (d) =>
-      `<tr><td>${Number(d.count) || 0}</td><td>${escapeHTML(d.category)}</td><td>${escapeHTML(d.reason)}</td></tr>`);
-    rows(el.oldestBody, rep.oldest, (m) =>
-      `<tr><td>${formatAge(m.age_sec)}</td><td>${formatSize(m.size_bytes)}</td>` +
-      `<td>${m.frozen ? '<span class="pill info">frozen</span>' : ''}</td><td>${escapeHTML(m.sender || '<>')}</td>` +
-      `<td>${Number(m.recipients) || 0}</td><td>${escapeHTML(m.id)}</td></tr>`);
+  function setTab(key) {
+    st.tab = pickTab(key, st.isScopedMode);
+    syncURL();
+    render();
   }
 
-  function renderUnavailable(note) {
-    el.headline.textContent = '';
-    el.meta.textContent = '';
-    el.ageBuckets.innerHTML = '';
-    [el.senderBody, el.queueSenderBody, el.recipientBody, el.reasonsBody, el.oldestBody].forEach((b) => { if (b) b.innerHTML = ''; });
-    el.unavailable.style.display = '';
-    el.unavailable.textContent = note || 'No mail-queue report yet (exim_queues/postfix_queues detector not enabled, or first poll pending).';
+  // load one report into its source. A reply from before the mode or the
+  // window changed (seq) is dropped.
+  async function load(kind, path, pick) {
+    const seq = st.seq;
+    let next;
+    try {
+      const reply = await api(path);
+      const data = reply && reply.available ? pick(reply) : null;
+      next = data && typeof data === 'object'
+        ? { state: 'ok', data, at: Date.now() }
+        : { state: 'unavailable', note: reply && typeof reply.note === 'string' ? reply.note : '' };
+    } catch (err) {
+      const prev = st[kind];
+      next = { state: 'error', error: err && err.message ? err.message : 'request failed', data: hasData(prev) ? prev.data : null, at: prev.at };
+    }
+    if (seq !== st.seq) return;
+    if (kind === 'queue' && st.isScopedMode) return;
+    st[kind] = next;
+    // The daemon has the last word on who the viewer is: counters it scoped
+    // mean a scoped viewer, even when the identity lookup could not say so.
+    if (kind === 'traffic' && next.state === 'ok' && next.data.scope === 'scoped' && !st.isScopedMode) {
+      st.isScopedMode = true;
+      st.queue = { state: 'loading' };
+      controller.applyScopedChrome({ scoped: true, scopedLabel: 'Scoped mail view' });
+    }
+    render();
   }
 
   async function refresh() {
-    try {
-      // basePath is '/cfm-admin/api', so the call path omits the leading /api
-      // (→ /cfm-admin/api/v1/system/mail-queue → strips to /api/v1/system/mail-queue).
-      const data = await api('/v1/system/mail-queue');
-      if (data && data.available && data.report) {
-        renderReport(data.report);
-      } else {
-        renderUnavailable(data && data.note);
-      }
-    } catch (err) {
-      flashMsg(err && err.message ? err.message : 'request failed', 'bad');
-    }
+    if (!st.modeKnown) return;
+    const jobs = [load('traffic', `/v1/mail/traffic?hours=${st.hours}&limit=25`, (r) => r.traffic)];
+    // basePath '/cfm-admin/api' → the call path omits the leading /api.
+    if (!st.isScopedMode) jobs.push(load('queue', '/v1/system/mail-queue', (r) => r.report));
+    await Promise.all(jobs);
   }
 
   function setAuto(on) {
     st.auto = on;
-    if (el.autoState) el.autoState.textContent = on ? 'ON' : 'OFF';
-    if (el.toggleAutoBtn) el.toggleAutoBtn.textContent = on ? 'Stop' : 'Start';
+    el.autoState.textContent = on ? 'ON' : 'OFF';
+    el.toggleAutoBtn.textContent = on ? 'Stop' : 'Start';
     window.clearInterval(st.timer);
     if (on) st.timer = window.setInterval(refresh, REFRESH_MS);
   }
 
-  if (el.refreshBtn) el.refreshBtn.addEventListener('click', refresh);
-  if (el.toggleAutoBtn) el.toggleAutoBtn.addEventListener('click', () => setAuto(!st.auto));
+  // Resolve admin vs scoped (by identity), apply the scoped chrome, then load.
+  // The queue is asked for only once the viewer is known to be an admin.
+  async function boot() {
+    if (!controller.getToken()) await waitForScopedTokenOrTimeout(350);
+    let me = null;
+    try { me = await controller.loadMe({ preferScopedToken: true }); controller.refreshToken(); } catch (_) {}
+    const token = controller.refreshToken();
+    const mode = window.CFMAuthMode?.computeInitialScopeMode?.({ identity: me, token }) || 'global';
+    const scoped = mode === 'scoped' || Boolean(me && (me.isScopedMode ?? me.is_scoped_mode ?? me.scoped));
+    if (scoped !== st.isScopedMode || !st.modeKnown) {
+      // What was read under the other identity is not this viewer's.
+      st.seq++;
+      st.queue = { state: 'loading' };
+      st.traffic = { state: 'loading' };
+    }
+    st.isScopedMode = scoped;
+    st.modeKnown = true;
+    controller.applyScopedChrome({ scoped, scopedLabel: 'Scoped mail view' });
+    render();
+    syncURL();
+    await refresh();
+    if (!st.booted) { setAuto(true); st.booted = true; }
+  }
 
-  refresh();
-  setAuto(true);
+  el.hoursSel.innerHTML = WINDOWS.map((w) => `<option value="${w.hours}"${w.hours === st.hours ? ' selected' : ''}>${escapeHTML(w.label)}</option>`).join('');
+  el.hoursSel.addEventListener('change', () => {
+    st.hours = pickHours(el.hoursSel.value);
+    st.seq++;
+    syncURL();
+    refresh();
+  });
+  el.refreshBtn.addEventListener('click', refresh);
+  el.toggleAutoBtn.addEventListener('click', () => setAuto(!st.auto));
+  el.tabs.addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-tab]');
+    if (b) setTab(b.dataset.tab);
+  });
+  el.tiles.addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-tab]');
+    if (b) setTab(b.dataset.tab);
+  });
+  el.tables.addEventListener('click', (ev) => {
+    const b = ev.target.closest('[data-expand]');
+    if (!b) return;
+    const k = b.dataset.expand;
+    if (st.expanded.has(k)) st.expanded.delete(k); else st.expanded.add(k);
+    renderPanel();
+  });
+
+  render();
+  boot().catch((err) => { flashMsg(err && err.message ? err.message : 'init failed'); });
 })();

@@ -54,8 +54,7 @@ const MENU_GROUPS = [
   ]},
   { title: "Services", items: [
     { label: "MySQL governor", href: "/cfm-admin/governor/", icon: "db" },
-    { label: "Mail queue", href: "/cfm-admin/mail/", icon: "mail" },
-    { label: "Mail Monitor", href: "/cfm-admin/mailmon/", icon: "pulse" },
+    { label: "Mail", href: "/cfm-admin/mail/", icon: "mail" },
     { label: "API tokens", href: "/cfm-admin/webdetector/tokens/", icon: "key" },
     { label: "Notifier", href: "/cfm-admin/notifier/", icon: "bell" },
     { label: "Detectors", href: "/cfm-admin/detectors/", icon: "layers" },

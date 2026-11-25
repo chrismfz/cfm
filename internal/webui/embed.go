@@ -16,7 +16,7 @@
 //   /webdetector/site-cache/ → static/webdetector/site-cache/index.html
 //   /governor/               → static/governor/index.html
 //   /mail/                   → static/mail/index.html
-//   /mailmon/                → static/mailmon/index.html
+//   /mailmon/                → a page that moved: a stub that forwards to /mail/
 //   /settings/               → static/settings/index.html
 //   /alerts/                 → static/alerts/index.html
 //   /assets/                → static/assets/  (JS, CSS)
