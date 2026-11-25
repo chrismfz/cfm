@@ -152,14 +152,17 @@ func TestScopedWAFExcludeAPI(t *testing.T) {
 		"type=host&value=t1.gr&rule_ids=" + webshellRuleID(t) + "&ttl=24h": 403,
 		"type=path&value=/api/&rule_ids=" + webshellRuleID(t) + "&ttl=24h": 403,
 		// a path exclude: one rule, a literal path below the root
-		"type=path&value=/api/":                           403,
-		"type=path&value=/api/&ttl=24h":                   403,
-		"type=path&value=/api/&rule_ids=402":              400,
-		"type=path&value=/&rule_ids=402&ttl=24h":          400,
-		"type=path&value=/*&rule_ids=402&ttl=24h":         400,
-		"type=path&value=/api/*&rule_ids=402&ttl=24h":     400,
-		"type=path&value=/api/[a-z]&rule_ids=402&ttl=24h": 400,
-		"type=path&value=/api/../x&rule_ids=402&ttl=24h":  400,
+		"type=path&value=/api/":                                                  403,
+		"type=path&value=/api/&ttl=24h":                                          403,
+		"type=path&value=/api/&rule_ids=402":                                     400,
+		"type=path&value=/&rule_ids=402&ttl=24h":                                 400,
+		"type=path&value=/*&rule_ids=402&ttl=24h":                                400,
+		"type=path&value=/api/*&rule_ids=402&ttl=24h":                            400,
+		"type=path&value=/api/[a-z]&rule_ids=402&ttl=24h":                        400,
+		"type=path&value=/api/../x&rule_ids=402&ttl=24h":                         400,
+		"type=path&value=/a%0Ab&rule_ids=402&ttl=24h":                            400,
+		"type=path&value=/a%00b&rule_ids=402&ttl=24h":                            400,
+		"type=path&value=/" + strings.Repeat("a", 300) + "&rule_ids=402&ttl=24h": 400,
 		// the switch: a ttl out of range
 		"type=host&value=t1.gr&ttl=30d": 400,
 	} {
@@ -281,6 +284,9 @@ func TestScopedWAFExcludeAPI(t *testing.T) {
 		"add path /wp-admin/admin-ajax.php t1.gr 402",
 		"remove path /wp-admin/admin-ajax.php t1.gr 402",
 		"remove host t1.gr t1.gr -",
+	}
+	if s := events[len(events)-1].Summary(); strings.Contains(s, "stay on") || !strings.Contains(s, "switched back on the WAF on t1.gr") {
+		t.Fatalf("switch-back summary: %s", s)
 	}
 	if strings.Join(got2, " | ") != strings.Join(wantEvents, " | ") {
 		t.Fatalf("events:\n got  %v\n want %v", got2, wantEvents)
@@ -423,5 +429,43 @@ func TestNginxBridgeWAFExcludesTenantFields(t *testing.T) {
 	}
 	if strings.Count(s, "keep_critical") != 1 || strings.Count(s, "expires_unix") != 1 {
 		t.Fatalf("zero values must be omitted: %s", s)
+	}
+}
+
+// One account's sites hold a bounded number of rule excludes; renewing one of
+// them stays possible at the cap, and another account is not affected.
+func TestScopedWAFRuleExcludeCap(t *testing.T) {
+	e := newTenantWAFEngine(t)
+	SetTenantPolicySink(nil)
+	add := func(q string, hosts ...string) int {
+		rr := httptest.NewRecorder()
+		e.handleWAFExcludeAdd(rr, scopedReq("POST", "/api/v1/waf/exclude/add?"+q, hosts...))
+		return rr.Code
+	}
+	for i := 0; i < scopedWAFRuleExcludeMax; i++ {
+		if code := add("type=path&value=/p"+itoa(i)+"/&rule_ids=402&ttl=24h", "t1.gr", "t2.gr"); code != 200 {
+			t.Fatalf("add %d: %d", i, code)
+		}
+	}
+	if code := add("type=path&value=/one-more/&rule_ids=402&ttl=24h", "t1.gr", "t2.gr"); code != http.StatusTooManyRequests {
+		t.Fatalf("over the cap: %d", code)
+	}
+	if code := add("type=host&value=t2.gr&rule_ids=301&ttl=24h", "t1.gr", "t2.gr"); code != http.StatusTooManyRequests {
+		t.Fatalf("a host rule exclude over the cap: %d", code)
+	}
+	if code := add("type=path&value=/p3/&rule_ids=402&ttl=7d", "t1.gr", "t2.gr"); code != 200 {
+		t.Fatalf("renewing at the cap: %d", code)
+	}
+	if code := add("type=host&value=t1.gr", "t1.gr", "t2.gr"); code != 200 {
+		t.Fatalf("the switch at the cap: %d", code)
+	}
+	if code := add("type=path&value=/mine/&rule_ids=402&ttl=24h", "other.gr"); code != 200 {
+		t.Fatalf("another account at t1's cap: %d", code)
+	}
+	// The operator is not capped.
+	rr := httptest.NewRecorder()
+	e.handleWAFExcludeAdd(rr, adminReq("POST", "/api/v1/waf/exclude/add?type=path&value=/op/&rule_ids=402&scope_hosts=t1.gr"))
+	if rr.Code != 200 {
+		t.Fatalf("operator at t1's cap: %d", rr.Code)
 	}
 }

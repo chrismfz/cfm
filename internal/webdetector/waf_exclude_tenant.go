@@ -58,7 +58,64 @@ const (
 	// adminWAFExcludeMaxTTL bounds an operator's optional ttl= (a typo guard).
 	adminWAFExcludeMaxTTL = 366 * 24 * time.Hour
 	excludeByScoped       = "scoped"
+	// scopedWAFRuleExcludeMax caps the live rule excludes the sites of one
+	// scoped token may hold. The edge walks every exclude row for each
+	// inspected request, and each write notifies the operator, so the number
+	// one account can create is bounded; renewing an existing one stays
+	// allowed at the cap.
+	scopedWAFRuleExcludeMax = 40
+	// scopedWAFPathMaxLen bounds a site owner's path value.
+	scopedWAFPathMaxLen = 255
 )
+
+// plainExcludeValue: a tenant's WAF path exclude is a literal path (a file,
+// or a folder and what is under it), never a glob: what it lets through must
+// be readable from the entry itself. No control byte either (the value goes
+// into log lines, the history and the notifier), and a bounded length.
+func plainExcludeValue(value string) bool {
+	if len(value) > scopedWAFPathMaxLen || strings.ContainsAny(value, "*?[]\\") || strings.Contains(value, "..") {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// scopedWAFRuleExcludeRoom reports whether a scoped caller with scope may add
+// the rule exclude (typ, value, ruleIDs): its sites hold fewer than
+// scopedWAFRuleExcludeMax live scoped-written rule excludes, or this very
+// entry is among them (a renewal).
+func scopedWAFRuleExcludeRoom(entries []excludeEntry, scope map[string]struct{}, typ, value string, ruleIDs []int) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if typ == "path" && !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	want := ruleIDsKey(normalizeRuleIDs(ruleIDs))
+	n := 0
+	for _, e := range entries {
+		if e.By != excludeByScoped || len(e.RuleIDs) == 0 {
+			continue
+		}
+		mine := false
+		for _, h := range e.ScopeHosts {
+			if _, ok := scope[h]; ok {
+				mine = true
+				break
+			}
+		}
+		if !mine {
+			continue
+		}
+		if e.Type == typ && e.Value == value && ruleIDsKey(e.RuleIDs) == want {
+			return true
+		}
+		n++
+	}
+	return n < scopedWAFRuleExcludeMax
+}
 
 // parseExcludeTTL reads a ttl= value: a Go duration ("24h", "90m") or whole
 // days ("7d"). Empty is (0, nil): no expiry asked.
@@ -120,7 +177,10 @@ type TenantPolicyEvent struct {
 // Summary is the one-line description used by the log, the history row and
 // the notifier.
 func (ev TenantPolicyEvent) Summary() string {
-	what := "the WAF (CVE and webshell rules stay on)"
+	what := "the WAF"
+	if len(ev.RuleIDs) == 0 && ev.Action == "add" {
+		what += " (CVE and webshell rules stay on)"
+	}
 	if len(ev.RuleIDs) > 0 {
 		ids := make([]string, len(ev.RuleIDs))
 		for i, id := range ev.RuleIDs {

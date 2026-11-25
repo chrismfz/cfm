@@ -595,6 +595,10 @@ func (e *Engine) scopedWAFExcludeAdd(w http.ResponseWriter, r *http.Request, typ
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine not ready"})
 		return
 	}
+	if len(ruleIDs) > 0 && !scopedWAFRuleExcludeRoom(e.WAFExcludeList(), ctxScope, typ, value, ruleIDs) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many WAF rule excludes on your sites; remove one first, or ask the administrator"})
+		return
+	}
 	if ok := e.WAFExcludeAddEntry(typ, value, scope, ruleIDs, opt); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
 		return
@@ -616,13 +620,6 @@ func (e *Engine) scopedWAFExcludeAdd(w http.ResponseWriter, r *http.Request, typ
 		resp["keep_critical"] = true
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// plainExcludeValue: a tenant's WAF path exclude is a literal path (a file,
-// or a folder and what is under it), never a glob: what it lets through must
-// be readable from the entry itself.
-func plainExcludeValue(value string) bool {
-	return !strings.ContainsAny(value, "*?[]\\") && !strings.Contains(value, "..")
 }
 
 // POST /api/v1/waf/exclude/remove?type=host&value=example.com[&rule_ids=320][&scope_hosts=a.gr]

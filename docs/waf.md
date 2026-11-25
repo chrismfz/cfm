@@ -1604,7 +1604,10 @@ the operator hears of each one.
 | One rule on a path of its site | `type=path&value=/path&rule_ids=<id>&ttl=[&scope_hosts=]` | The same, and: a literal path below the site root (no `* ? [ ]`, no `..`); pinned to the token's LITERAL vhosts, `scope_hosts` may only narrow them. |
 
 A path exclude without a rule, a rule exclude without an expiry, and anything
-on another account's vhost are refused. A scoped list shows the host entries
+on another account's vhost are refused. One account's sites hold at most 40
+live rule excludes (`scopedWAFRuleExcludeMax`, `429` beyond; renewing one of
+them is always allowed), and a path value is at most 255 bytes with no
+control character. A scoped list shows the host entries
 on its vhosts and the path entries a scoped token wrote (`by: "scoped"`); an
 exclude the operator narrowed to the tenant's site stays the operator's to
 see and remove. A scoped remove of a path entry takes the caller's hosts out
