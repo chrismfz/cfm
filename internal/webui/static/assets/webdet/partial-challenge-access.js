@@ -4,9 +4,9 @@
 // no backtick, dollar-brace or backslash inside.
 
 export const CHALLENGE_ACCESS_PARTIAL = `      <section class="card wide">
-        <h2>Challenge Access</h2>
+        <h2>Trusted clients</h2>
         <p class="muted">
-          A per-vhost / global allow-list that lets specific requests through the
+          Challenge access: a per-vhost / global allow-list that lets specific requests through the
           interactive challenge — by <strong>country</strong>, <strong>URL path</strong>,
           <strong>user-agent</strong>, <strong>IP / range</strong>, <strong>ASN</strong>
           or <strong>verified crawler</strong>. The surgical companion to the coarse

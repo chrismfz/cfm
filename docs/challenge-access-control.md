@@ -2,7 +2,7 @@
 
 Status: **Phase 0 (backend + edge enforcement), Phase 1 (cfm-admin UI) and
 Phase 2 (Challenge-Recipes) LANDED.** As-built notes are inline in §3/§6; the UI
-lives on the Exceptions page, tab **Trusted clients**
+lives on the Exceptions page, tab **Trusted clients** (the card is headed the same)
 (`/cfm-admin/webdetector/exceptions/?tab=trusted` since 2026-11-25; the old
 `/webdetector/challenge-access/` redirects there. Markup
 `assets/webdet/partial-challenge-access.js`,

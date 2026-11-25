@@ -31,8 +31,10 @@ export const protectionMixin = {
       ip = String(u.searchParams.get("ip") || "").trim();
       // A link to one address opens where that address filters: its events.
       t = M.tab(u.searchParams.get("tab") || (ip ? "events" : ""));
-      linked = ip;
-      // The events filter takes it only when the link opens the events.
+      // The address goes where the link points: the Tools tab runs its
+      // analysis for it (once), the Events tab filters by it. Never both: a
+      // link to its events must not start a log analysis on a later click.
+      if (t === "tools") linked = ip;
       if (t !== "events") ip = "";
     } catch { /* no URL */ }
     return {
@@ -205,9 +207,12 @@ export const protectionMixin = {
         return;
       }
       const url = M.eventsQuery({ host: this.ptEffectiveHost, ip: this.ptEventIP, type: this.ptEventType, cursor: this.ptEventCursor });
-      // The window's totals for the same vhost and address (not per page).
-      this.fetchJSONSafe(M.eventsSummaryQuery({ hours: this.ptHours, host: this.ptEffectiveHost, ip: this.ptEventIP }), null)
-        .then((s) => { if (seq === this.ptEventSeq) this.ptEventsSummary = s; });
+      // The window's totals for the same vhost and address: they do not
+      // depend on the page, so they are asked with the first one only.
+      if (!this.ptEventCursor) {
+        this.fetchJSONSafe(M.eventsSummaryQuery({ hours: this.ptHours, host: this.ptEffectiveHost, ip: this.ptEventIP }), null)
+          .then((s) => { if (seq === this.ptEventSeq) this.ptEventsSummary = s; });
+      }
       try {
         const res = await this.fetchJSON(url);
         if (seq !== this.ptEventSeq) return;
