@@ -31,6 +31,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   "the scraper pool was challenged 4,410 times and never answered" or "we
   stopped 61 requests of likely humans" reads at a glance. The MCP
   `traffic_mix` tool carries them too. A reading only: nothing acts on it.
+- **The one-click "Continue" fallback also works on the cPanel / WHM /
+  webmail login ports.** A person on a machine that scores like a farm (a
+  VDI desk, an old PC) who did not move the mouse was still refused at a
+  panel login's challenge, with no way past it; they now get the same
+  Continue button as on the web, and the click lets them in
+  (`v2_rescued=confirm`, `scope=panel:<port>`). The button's token is bound
+  to the surface it was shown on, so a click on the website never passes a
+  panel login, nor one panel port another. Same audience and
+  `CHALLENGE_V2_FALLBACK` knob as the web. A button shown just before the
+  upgrade asks once more after it.
 - **The solved-ok grace is measured (`okstate` lines).** After a solve,
   `OPENRESTY_OK_IP_TTL` lets everyone behind the same IP pass the host's
   vhost and per-IP challenge (and a per-IP edge block) without a cookie of

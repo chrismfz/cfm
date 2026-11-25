@@ -225,15 +225,17 @@ func intVal(p *int) int {
 	return *p
 }
 
-// confirmMAC signs (issued, ip, host, powTok) under the PoW key, domain
-// separated, so a confirm token is valid only for the solve it was issued to.
-func confirmMAC(issued int64, ip, host, powTok string) []byte {
+// confirmMAC signs (issued, ip, host, scope, powTok) under the PoW key,
+// domain separated, so a confirm token is valid only for the solve it was
+// issued to, on the surface it was issued on (a web token never passes a
+// panel verify, nor one panel port's another's).
+func confirmMAC(issued int64, ip, host, scope, powTok string) []byte {
 	mac := hmac.New(sha256.New, powSecretKey())
 	var ts [8]byte
 	binary.BigEndian.PutUint64(ts[:], uint64(issued))
 	mac.Write([]byte("cfm-confirm\x00"))
 	mac.Write(ts[:])
-	for _, part := range []string{ip, normalizeHost(host), powTok} {
+	for _, part := range []string{ip, normalizeHost(host), scope, powTok} {
 		mac.Write([]byte{0})
 		mac.Write([]byte(part))
 	}
@@ -241,23 +243,23 @@ func confirmMAC(issued int64, ip, host, powTok string) []byte {
 }
 
 // issueConfirmToken: base64url( issued_unix_ms(8) || mac(32) ).
-func issueConfirmToken(ip, host, powTok string, now time.Time) string {
+func issueConfirmToken(ip, host, scope, powTok string, now time.Time) string {
 	issued := now.UnixMilli()
 	buf := make([]byte, 8, 40)
 	binary.BigEndian.PutUint64(buf, uint64(issued))
-	buf = append(buf, confirmMAC(issued, ip, host, powTok)...)
+	buf = append(buf, confirmMAC(issued, ip, host, scope, powTok)...)
 	return base64.RawURLEncoding.EncodeToString(buf)
 }
 
 // verifyConfirmToken returns when the token was issued, if it is genuine for
-// (ip, host, powTok), not from the future and younger than confirmTokenTTL.
-func verifyConfirmToken(tok, ip, host, powTok string, now time.Time) (time.Time, bool) {
+// (ip, host, scope, powTok), not from the future and younger than confirmTokenTTL.
+func verifyConfirmToken(tok, ip, host, scope, powTok string, now time.Time) (time.Time, bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(tok))
 	if err != nil || len(raw) != 40 {
 		return time.Time{}, false
 	}
 	issuedMS := int64(binary.BigEndian.Uint64(raw[:8]))
-	if !hmac.Equal(raw[8:], confirmMAC(issuedMS, ip, host, powTok)) {
+	if !hmac.Equal(raw[8:], confirmMAC(issuedMS, ip, host, scope, powTok)) {
 		return time.Time{}, false
 	}
 	issued := time.UnixMilli(issuedMS).UTC()

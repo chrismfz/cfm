@@ -1147,12 +1147,14 @@ it newly covers; FCrDNS-verified ones are waived.
 **The confirm fallback (`v2_rescued=confirm`, 2026-11-25).** A solve the
 gate is about to reject, with no certain tell, from the node's audience
 (`CHALLENGE_V2_CONFIRM_AUDIENCE`, GR/CY, never a datacenter ASN), under a geo
-/ vhost / all grain and no mark, web scope, gets the confirm step's 403 +
+/ vhost / all grain and no mark, on the web or a panel port, gets the confirm step's 403 +
 `X-CFM-Confirm` token and the page's Continue button instead
 (`challenge_v2_fallback.go`). The click re-posts the same solve (the PoW
 checked as of the token) and passes, marked `v2_rescued=confirm` and
 `v2_confirm=clicked` with `v2_confirm_ms`; a re-post with the token and no
-input is asked again with the same token. A shown button is a
+input is asked again with the same token. The token binds the scope it was
+issued on (web, `panel:<port>`): a click on one surface never passes another.
+A shown button is a
 `result=v2_confirm … confirm=fallback` line, not a `challenge_v2_reject` row.
 It is for the person who scores like a farm and cannot retry their way out
 (a VDI desk, an old PC, keyboard or touch only). The click is client-authored:

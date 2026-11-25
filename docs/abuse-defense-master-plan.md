@@ -194,8 +194,9 @@ D3/D4 are the process fix.
   confirm fallback (c) is built (same day, PR B, `challenge_v2_fallback.go`,
   `CHALLENGE_V2_FALLBACK`, default `audience`): a solve about to be rejected,
   with no certain tell, from the node's audience (GR/CY, never a datacenter
-  ASN), under a geo / vhost / all grain and no mark, gets the confirm step's
-  Continue button instead, and its click passes (`v2_rescued=confirm`). Its
+  ASN), under a geo / vhost / all grain and no mark, on the web or a panel
+  port (the token binds its scope; panel since 2026-11-25), gets the confirm
+  step's Continue button instead, and its click passes (`v2_rescued=confirm`). Its
   click's approach is corpus first, scored by nothing (D3); `all` offers it
   to everyone once that corpus says a farm does not script it. The grain /
   mark / note / tier-pin machinery that decided coverage goes after it.
