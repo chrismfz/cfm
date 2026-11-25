@@ -20,7 +20,26 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Every edge ban reaches the edge again, not just 20 000 of them.** The
+  edge's copy of the edge ban store (bans of clients behind Cloudflare) was
+  capped at a fixed 20 000. With 7-day WAF bans the busiest nodes hold
+  36 000–58 000, so two thirds of earth's bans were never enforced for
+  proxied visitors (`[edgeban] … left out` in `cfm.log`). The edge now tells
+  the daemon how many entries its `cfm_edgeban` dict holds, and the daemon
+  caps the list there (the longest bans kept, as before). The reference
+  confs raise the dict from 16m to 64m (~83 000 bans); a node that needs more
+  only raises the dict. An edge on older Lua, or an older conf, keeps the
+  20 000. The resized dict starts empty on the reload and the next poll
+  (5 s) refills it. The bridge status shows `cap` and `left_out`.
+- **A ban no longer rebuilds the edge's whole ban list.** Every ban, unban
+  or reconcile made the next edge poll rebuild the list from all of the
+  node's bans (453 times in 3 hours on earth, ~150 ms each, logged as
+  `slow handler GET /nginx/edgeban`). The edge ban store now logs which
+  bans changed, and the poll applies just those. The whole list is still
+  rebuilt on a change that moves every answer (allow sets, `EDGE_BAN`,
+  trusted proxies), on a new ban while bans are left out, and every 5
+  minutes.
 
 ## 2026.11.25
 

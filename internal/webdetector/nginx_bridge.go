@@ -663,6 +663,9 @@ func (b *NginxBridge) SetBypassFunc(fn func(string) bool) {
 		return
 	}
 	b.bypassFunc = fn
+	// The edge ban list leaves IGNORE_IPS out: a new list (a config reload)
+	// rebuilds it on the next poll.
+	b.edgeBanResync()
 }
 
 // SetHostBypassFunc wires a host predicate that permanently allows any host

@@ -253,6 +253,30 @@ reset()
 eb.apply(d, full("e1", 1, { ["203.0.113.5"] = 0 }), clock)
 eb.apply(d, delta("e1", 2, { ["203.0.113.5"] = "x" }), clock)
 check(as("203.0.113.5") == "block", "a non-numeric expiry in the changes is skipped, not a delete")
+-- The poll tells the daemon how many entries its dict holds a list of:
+-- two copies of the list must fit (ENTRY_BYTES each).
+reset()
+d.capacity = function() return 64 * 1024 * 1024 end
+check(eb._cap(d) == 83886, "64m holds two lists of 83886: " .. tostring(eb._cap(d)))
+d.capacity = function() return 16 * 1024 * 1024 end
+check(eb._cap(d) >= 20000, "the old 16m still takes the old 20000: " .. tostring(eb._cap(d)))
+calls, replies = {}, { full("e1", 1, {}) }
+eb.tick(dec, decode)
+timers[#timers].cb(false, unpack(timers[#timers].args))
+check(calls[#calls]:find("&cap=20971", 1, true), "the poll reports the cap: " .. calls[#calls])
+d.capacity = function() error("no capacity") end
+check(eb._cap(d) == nil, "a failing capacity(): no report")
+d.capacity = nil
+check(eb._cap(d) == nil, "no capacity(): no report")
+-- The upgrade-lag fallback dict is shared with other data: no report.
+reset()
+ngx.shared = { cfm_decisions = d }
+d.capacity = function() return 64 * 1024 * 1024 end
+check(eb._cap(d) == nil, "the cfm_decisions fallback reports no cap")
+calls, replies = {}, { full("e1", 1, {}) }
+eb.tick(dec, decode)
+timers[#timers].cb(false, unpack(timers[#timers].args))
+check(not calls[#calls]:find("cap=", 1, true), "the fallback's poll carries no cap: " .. calls[#calls])
 -- No dict at all.
 ngx.shared = {}
 eb.tick(dec, decode)
