@@ -118,6 +118,46 @@ export function summary(mix) {
   };
 }
 
+// What the edge did with requests (traffic_mix.go tmOutcome), in a fixed
+// order. "origin" is what reached the site; the rest the edge answered itself.
+// Colors are the page's CSS tokens (both themes). "stopped" are the outcomes
+// that refused the request outright or made it prove itself: a cache hit or a
+// redirect is not a stop.
+export const OUTCOMES = Object.freeze([
+  Object.freeze({ key: "origin", label: "Reached the origin", color: "var(--border)", stop: false }),
+  Object.freeze({ key: "cached", label: "Cached at the edge", color: "var(--accent-2)", stop: false }),
+  Object.freeze({ key: "challenged", label: "Challenged", color: "var(--v2)", stop: true }),
+  Object.freeze({ key: "blocked", label: "Blocked (WAF, ban, policy)", color: "var(--danger)", stop: true }),
+  Object.freeze({ key: "rule_blocked", label: "Blocked by a traffic rule", color: "var(--c-automation)", stop: true }),
+  Object.freeze({ key: "rate_limited", label: "Rate-limited (429)", color: "var(--warn)", stop: true }),
+  Object.freeze({ key: "redirect", label: "Redirected", color: "var(--accent)", stop: false }),
+  Object.freeze({ key: "other_edge", label: "Other edge answer", color: "var(--muted)", stop: false }),
+]);
+
+// outcomeSummary reads one `outcomes` object (a class, a vhost, a client):
+// the stacked-bar segments, how many were stopped, and the challenge's
+// answers. null when the node sent none (a build before outcomes): absent,
+// never a fabricated zero.
+export function outcomeSummary(outcomes) {
+  if (!outcomes || typeof outcomes !== "object") return null;
+  const total = OUTCOMES.reduce((t, o) => t + num(outcomes[o.key]), 0);
+  const stopped = OUTCOMES.filter((o) => o.stop).reduce((t, o) => t + num(outcomes[o.key]), 0);
+  const passed = num(outcomes.verify_passed);
+  const failed = num(outcomes.verify_failed);
+  return {
+    total,
+    stopped,
+    stoppedShare: share(stopped, total),
+    segments: OUTCOMES.map((o) => ({ key: o.key, label: o.label, color: o.color, value: num(outcomes[o.key]), fraction: share(outcomes[o.key], total) })),
+    challenged: num(outcomes.challenged),
+    passed,
+    failed,
+    // Of the verifies answered, how many passed: a challenge page nobody
+    // answers (a scraper that does not run it) is neither.
+    passRate: passed + failed > 0 ? passed / (passed + failed) : null,
+  };
+}
+
 // segments turns per-class values into the stacked-bar segments (fractions),
 // in CLASS_ORDER; a zero total gives zero widths.
 export function segments(values, field) {

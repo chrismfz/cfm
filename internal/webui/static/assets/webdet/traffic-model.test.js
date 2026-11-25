@@ -165,6 +165,20 @@ test("distributedSummary: the pool behind the sample, where it lands, whether pe
   assert.equal(plain.coverage, 0.75);
 });
 
+test("outcomeSummary: what the edge did, what counts as stopped, the challenge's answers", async () => {
+  const { outcomeSummary, OUTCOMES } = await import("./traffic-model.js");
+  const o = outcomeSummary({ origin: 1, cached: 1, challenged: 5, blocked: 1, rule_blocked: 0, rate_limited: 1, redirect: 1, other_edge: 0, verify_passed: 1, verify_failed: 3 });
+  assert.equal(o.total, 10);
+  assert.equal(o.stopped, 7, "challenged + blocked + rule + 429; cache and redirect are not stops");
+  assert.equal(o.stoppedShare, 0.7);
+  assert.equal(o.passRate, 0.25);
+  assert.deepEqual(o.segments.map((x) => x.key), OUTCOMES.map((x) => x.key));
+  assert.equal(o.segments.find((x) => x.key === "challenged").fraction, 0.5);
+  assert.equal(outcomeSummary(undefined), null, "an older node: absent, not zero");
+  assert.equal(outcomeSummary({ origin: 3 }).passRate, null, "no verify answered: no rate");
+  for (const x of OUTCOMES) assert.match(x.color, /^var\(--[a-z0-9-]+\)$/, `${x.key} uses a page token`);
+});
+
 // The class colours live in two places on purpose: here for the canvas charts
 // (ECharts needs values) and as --c-* tokens in style.css for the pages' CSS.
 // They must be the same colours in each theme.

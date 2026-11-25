@@ -240,9 +240,7 @@ func mergeFileBucket(b *tmBucket, fb tmFileBucket) {
 			b.hosts[hk] = h
 		}
 		for c := 0; c < tmClasses; c++ {
-			h[c].Req += v[c].Req
-			h[c].OriginMs += v[c].OriginMs
-			h[c].Bytes += v[c].Bytes
+			h[c].addSmall(v[c])
 		}
 	}
 	clientCap := tmMaxClients
@@ -265,9 +263,7 @@ func mergeFileBucket(b *tmBucket, fb tmFileBucket) {
 				cl = &tmClient{}
 				cm[ck] = cl
 			}
-			cl.Req += fc.Req
-			cl.OriginMs += fc.OriginMs
-			cl.Bytes += fc.Bytes
+			cl.addSmall(fc.tmSmall)
 			cl.ev += fc.Ev
 			if len(fc.IPs) > 0 && !b.compact && (c == tmAutomation || c == tmBot || c == tmHuman) {
 				if cl.ips == nil {
