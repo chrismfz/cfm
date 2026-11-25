@@ -62,7 +62,7 @@ the session, so in the iframe the scoped cookie is the identity.
 one of `scopedAdminOnlyPages` (`internal/apiserver/scoped_page_redirect.go:26`,
 mirroring the nav's `ADMIN_ONLY_NAV_PATHS`), or for an unknown page path
 (served as the dashboard), gets a `303` to `/cfm-admin/webdetector/controls/`
-(`scopedAdminPageRedirect`, `:44`). Assets, files and `/api/` paths are never
+(`scopedAdminPageRedirect`, `:45`). Assets, files and `/api/` paths are never
 redirected, and admin requests never are.
 
 ## Request pipeline (auth-relevant behaviour)

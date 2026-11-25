@@ -142,4 +142,8 @@ test("headlines", () => {
   assert.equal(trafficHeadline({ window: "6h", scope: "admin" }, false), "last 6h · whole server");
   assert.equal(trafficHeadline({ window: "6h", scope: "scoped" }, false), "last 6h · your domains");
   assert.equal(trafficHeadline({}, true), "your domains");
+  const dl = { window: "24h", deliverability: { delivered: 14000, deferred: 900, bounced: 330 } };
+  assert.equal(trafficHeadline(dl, false, "outbound"), "last 24h · whole server · delivered 14,000 · deferred 900 · bounced 330");
+  assert.equal(trafficHeadline(dl, false, "inbound"), "last 24h · whole server");
+  assert.equal(trafficHeadline({ window: "24h" }, true, "outbound"), "last 24h · your domains");
 });

@@ -131,7 +131,7 @@ import {
     const src = st[kind];
     const data = hasData(src) ? src.data : null;
 
-    el.panelHead.textContent = !data ? '' : (kind === 'queue' ? queueHeadline(data) : trafficHeadline(data, st.isScopedMode));
+    el.panelHead.textContent = !data ? '' : (kind === 'queue' ? queueHeadline(data) : trafficHeadline(data, st.isScopedMode, st.tab));
     const note = sourceNote(kind, src);
     el.panelNote.hidden = !note.text;
     el.panelNote.textContent = note.text;
@@ -145,7 +145,10 @@ import {
       : '';
 
     // No report, no tables: an empty table would read as "nothing happened".
-    el.tables.innerHTML = data ? tablesFor(st.tab, st.isScopedMode).map((d) => tableHTML(d, data)).join('') : '';
+    // The tables are rebuilt only when they changed, so a refresh that brings
+    // the same rows keeps a sideways scroll and the keyboard focus.
+    const html = data ? tablesFor(st.tab, st.isScopedMode).map((d) => tableHTML(d, data)).join('') : '';
+    if (html !== st.tablesHTML) { el.tables.innerHTML = html; st.tablesHTML = html; }
   }
 
   function render() {
@@ -194,6 +197,9 @@ import {
       st.isScopedMode = true;
       st.queue = { state: 'loading' };
       controller.applyScopedChrome({ scoped: true, scopedLabel: 'Scoped mail view' });
+      render();
+      syncURL();
+      return;
     }
     render();
   }

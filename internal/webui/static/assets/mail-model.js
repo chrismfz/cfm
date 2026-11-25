@@ -278,9 +278,15 @@ export function queueHeadline(rep) {
   return s;
 }
 
-// trafficHeadline: window and whose mail the counters cover.
-export function trafficHeadline(data, scoped) {
+// trafficHeadline: window and whose mail the counters cover; on the outbound
+// tab also how the server's mail fared (the daemon gives that to admins only).
+export function trafficHeadline(data, scoped, tab) {
   if (!data) return "";
   const who = scoped || data.scope === "scoped" ? "your domains" : "whole server";
-  return (data.window ? "last " + data.window + " · " : "") + who;
+  let s = (data.window ? "last " + data.window + " · " : "") + who;
+  const dl = data.deliverability;
+  if (tab === "outbound" && dl && typeof dl === "object") {
+    s += " · delivered " + fmtNum(dl.delivered) + " · deferred " + fmtNum(dl.deferred) + " · bounced " + fmtNum(dl.bounced);
+  }
+  return s;
 }
