@@ -116,6 +116,11 @@ test("events: the query, the cursor and the labels", () => {
   assert.equal(M.impossibleUA({ payload: { ua_impossible: "Windows + iPhone" } }), "Windows + iPhone");
   assert.equal(M.impossibleUA({ payload: null }), "");
   assert.equal(M.eventUA({ payload: { ua: " Mozilla/5.0 " } }), "Mozilla/5.0");
+  assert.equal(M.eventsSummaryQuery({ hours: 6, host: "shop.gr", ip: "" }), "v1/webdet/history/summary?hours=6&host=shop.gr");
+  assert.deepEqual(M.eventsSummary({ challenge_issued: 10327, challenge_solved: 3332 }).slice(0, 2), [{ label: "Challenges served", value: "10,327" }, { label: "Solved", value: "3,332" }]);
+  assert.deepEqual(M.eventsSummary(null), [], "a failed read shows nothing, never zeros");
+  assert.equal(M.exceptionsURL("Shop.GR"), "/cfm-admin/webdetector/exceptions/?host=shop.gr");
+  assert.equal(M.exceptionsURL(""), "/cfm-admin/webdetector/exceptions/");
 });
 
 // The filter chips name history types: each must be one the daemon writes.

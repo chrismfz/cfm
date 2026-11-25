@@ -267,6 +267,34 @@ export function eventDetail(ev) {
   return parts.join(" · ");
 }
 
+// eventsSummaryQuery asks the window's totals for the same vhost and address.
+export function eventsSummaryQuery({ hours, host, ip } = {}) {
+  const q = new URLSearchParams();
+  q.set("hours", String(windowOf(hours).hours));
+  for (const [k, v] of [["host", host], ["ip", ip]]) {
+    const s = str(v).trim();
+    if (s) q.set(k, s);
+  }
+  return `v1/webdet/history/summary?${q.toString()}`;
+}
+
+// eventsSummary is the window's totals as labelled counts, or [] when the
+// node sent none (a failed read shows nothing, never zeros).
+export function eventsSummary(s) {
+  if (!s || typeof s !== "object") return [];
+  return [
+    ["Challenges served", s.challenge_issued], ["Solved", s.challenge_solved],
+    ["Expired unsolved", s.challenge_expired_unsolved], ["Escalated to a block", s.challenge_escalated_block],
+    ["Block triggers", s.block_triggers], ["WAF hits", s.waf_observed],
+  ].map(([label, v]) => ({ label, value: fmtCount(v) }));
+}
+
+// exceptionsURL is the Exceptions page narrowed to one vhost.
+export function exceptionsURL(host) {
+  const h = str(host).trim().toLowerCase();
+  return `/cfm-admin/webdetector/exceptions/${h ? `?host=${encodeURIComponent(h)}` : ""}`;
+}
+
 // impossibleUA is the reason a solve's User-Agent contradicts itself, or "".
 export function impossibleUA(ev) {
   const p = (ev && ev.payload && typeof ev.payload === "object") ? ev.payload : {};

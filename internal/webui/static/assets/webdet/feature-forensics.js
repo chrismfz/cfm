@@ -1,5 +1,6 @@
-// The analyze-ip / analyze-host tools (offline TSV). The history views that
-// lived here (the Forensics page) are the Protection page's Events tab now.
+// The analyze-ip / analyze-host tools (offline TSV), mounted by the
+// Protection page's Tools tab (feature-protection.js). The history views that
+// lived here (the Forensics page) are that page's Events tab now.
 
 // Analyze is its own small mixin: the forensics page renders its card, and
 // the overview's Global Top IPs "Analyze" button reuses the same actions.

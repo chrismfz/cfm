@@ -80,7 +80,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
                         <td class="mono pt-uri" :title="r.uri">{{ (r.method || '').toUpperCase() }} {{ r.uri }}</td>
                         <td class="mono">{{ r.rule }}<span v-if="r.waf_rule_id" class="muted"> ({{ r.waf_rule_id }})</span></td>
                         <td><span class="pill" :class="ptTierTone(ptTier(r))">{{ ptTier(r) }}</span></td>
-                        <td class="pt-nowrap"><button v-if="ptExcludeOffer(r)" type="button" class="btn-quiet btn-sm" :title="'Let ' + ptPath(r.uri) + ' through rule ' + r.waf_rule_id + ' on ' + r.host" @click="ptExclude(r)">Exclude this path</button></td>
+                        <td class="pt-nowrap"><button v-if="ptExcludeOffer(r)" type="button" class="btn-quiet btn-sm" :title="'Let ' + ptPath(r.uri) + ' through rule ' + r.waf_rule_id + ' on ' + r.host" @click="ptExclude(r)">Exclude this path</button><a v-else class="btn-quiet btn-sm pt-a" :href="ptExceptionsURL(r.host)" title="The WAF exceptions of this vhost">Exceptions</a></td>
                       </tr>
                     </tbody>
                   </table>
@@ -111,6 +111,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
     <label class="muted" title="Of the page shown, only the solves whose User-Agent contradicts itself"><input type="checkbox" v-model="ptOnlyImpossibleUA" /> impossible UA only</label>
   </div>
   <p class="danger-text" v-if="ptEventsError">{{ ptEventsError }}</p>
+  <p class="muted" v-if="ptEventTotals.length">In this window: <span v-for="(t, i) in ptEventTotals" :key="t.label">{{ i ? ' · ' : '' }}{{ t.label }} <strong>{{ t.value }}</strong></span></p>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Time</th><th>Event</th><th>Vhost</th><th>Address</th><th>Network</th><th>What</th><th>Solve</th><th>Browser</th></tr></thead>

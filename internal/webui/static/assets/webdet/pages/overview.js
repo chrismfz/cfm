@@ -10,10 +10,9 @@ import { createWebdetApp } from "../core.js";
 import { liveMixin } from "../feature-live.js";
 import { challengeMixin } from "../feature-challenge.js";
 import { firewallMixin } from "../feature-firewall.js";
-import { analyzeMixin } from "../feature-forensics.js";
 
 createWebdetApp({
   pageMode: "overview",
   sections: ["webtop", "suspicious", "longtop", "globalips", "vhost"],
-  mixins: [liveMixin, challengeMixin, firewallMixin, analyzeMixin],
+  mixins: [liveMixin, challengeMixin, firewallMixin],
 });

@@ -160,6 +160,12 @@ export function createWebdetApp(config) {
         if (newTab) window.open(url, "_blank", "noopener");
         else window.location.href = url;
       },
+      // The analyze tool lives on the Protection page's Tools tab, which
+      // runs it for the address a link names.
+      openAnalyze(ip) {
+        const i = String(ip || "").trim();
+        if (i) window.location.href = `/cfm-admin/webdetector/protection/?tab=tools&ip=${encodeURIComponent(i)}`;
+      },
       openHistoryPage(host = "", ip = "") {
         window.location.href = this.forensicsURL(host, ip);
       },

@@ -24,13 +24,16 @@ export const protectionMixin = {
   // the WebDetector page uses the same one.
   mixins: [analyzeMixin],
   data() {
-    let t = M.DEFAULT_TAB, host = "", ip = "";
+    let t = M.DEFAULT_TAB, host = "", ip = "", linked = "";
     try {
       const u = new URL(window.location.href);
       host = String(u.searchParams.get("host") || "").trim().toLowerCase();
       ip = String(u.searchParams.get("ip") || "").trim();
       // A link to one address opens where that address filters: its events.
       t = M.tab(u.searchParams.get("tab") || (ip ? "events" : ""));
+      linked = ip;
+      // The events filter takes it only when the link opens the events.
+      if (t !== "events") ip = "";
     } catch { /* no URL */ }
     return {
       ptTab: t,
@@ -51,7 +54,8 @@ export const protectionMixin = {
       ptOnlyImpossibleUA: false,
       ptStore: null,
       ptStoreBusy: false,
-      ptLinkedIP: ip,
+      ptLinkedIP: linked,
+      ptEventsSummary: null,
       ptEventCursors: [], // the cursors of the pages before this one (for "Newer")
       ptEventCursor: null,
       ptEventNext: null,
@@ -67,6 +71,7 @@ export const protectionMixin = {
   computed: {
     ptTabs() { return M.tabsFor({ scoped: this.isScoped }); },
     // "impossible UA only" narrows the page shown, as the Forensics page did.
+    ptEventTotals() { return M.eventsSummary(this.ptEventsSummary); },
     ptEventsShown() { return this.ptOnlyImpossibleUA ? this.ptEvents.filter((e) => M.impossibleUA(e)) : this.ptEvents; },
     ptWindows() { return M.WINDOWS; },
     ptGroupings() { return Object.entries(M.GROUPINGS).map(([key, g]) => ({ key, label: g.label })); },
@@ -122,6 +127,7 @@ export const protectionMixin = {
     ptEventTone: M.eventTone,
     ptEventDetail: M.eventDetail,
     ptWho: M.whoLine,
+    ptExceptionsURL: M.exceptionsURL,
     ptImpossibleUA: M.impossibleUA,
     ptSolveTime: M.solveTime,
     ptEventUA: M.eventUA,
@@ -199,6 +205,9 @@ export const protectionMixin = {
         return;
       }
       const url = M.eventsQuery({ host: this.ptEffectiveHost, ip: this.ptEventIP, type: this.ptEventType, cursor: this.ptEventCursor });
+      // The window's totals for the same vhost and address (not per page).
+      this.fetchJSONSafe(M.eventsSummaryQuery({ hours: this.ptHours, host: this.ptEffectiveHost, ip: this.ptEventIP }), null)
+        .then((s) => { if (seq === this.ptEventSeq) this.ptEventsSummary = s; });
       try {
         const res = await this.fetchJSON(url);
         if (seq !== this.ptEventSeq) return;
@@ -217,8 +226,13 @@ export const protectionMixin = {
     async ptLoadStore() {
       if (this.isScoped) return;
       this.ptStore = await this.fetchJSONSafe("v1/webdet/history/stats", null);
-      // A link that named an address (the palette's "Analyze IP") fills the tool.
-      if (this.ptLinkedIP && !this.analyzeTarget) this.analyzeTarget = this.ptLinkedIP;
+      // A link that named an address (the palette's "Analyze IP", the
+      // WebDetector page's Analyze button) runs the tool for it, once.
+      if (this.ptLinkedIP) {
+        const addr = this.ptLinkedIP;
+        this.ptLinkedIP = "";
+        await this.analyzeIP(addr);
+      }
     },
     async ptPruneHistory(days) {
       if (!window.confirm("Delete history events older than " + days + " days?")) return;

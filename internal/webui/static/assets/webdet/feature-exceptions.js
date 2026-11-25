@@ -34,6 +34,13 @@ export const exceptionsMixin = {
     // but not the excludes themselves (core.js shouldShow).
     exExcludesShown() { return this.shouldShow("excludes"); },
   },
+  watch: {
+    // A session that cannot manage excludes opens on the tab it can use.
+    exExcludesShown: {
+      immediate: true,
+      handler(shown) { if (!shown && this.exTab !== "trusted") this.exTab = "trusted"; },
+    },
+  },
   methods: {
     exSkips: wafExcludeSkips,
     exWhere: excludeWhere,
