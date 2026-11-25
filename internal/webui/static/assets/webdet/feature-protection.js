@@ -75,6 +75,11 @@ export const protectionMixin = {
     ptGroups() { return M.groupRows(this.ptSummary, this.ptGroupBy); },
     ptTopN() { return M.GROUPINGS[M.grouping(this.ptGroupBy)].n; },
     ptGroupsNote() { return M.groupsNote(this.ptSummary, this.ptGroupBy, this.ptTopN); },
+    // The endpoint sends rows: null when nothing matches (a group that aged
+    // out of the window between the two requests): always a list here.
+    ptOpenRows() { return (this.ptOpen && this.ptOpen.summary && Array.isArray(this.ptOpen.summary.rows)) ? this.ptOpen.summary.rows : []; },
+    ptPanelRows() { return (this.ptPanel && this.ptPanel.waf && Array.isArray(this.ptPanel.waf.rows)) ? this.ptPanel.waf.rows : []; },
+    ptPanelRules() { return (this.ptPanel && this.ptPanel.waf && Array.isArray(this.ptPanel.waf.top_rule_bases)) ? this.ptPanel.waf.top_rule_bases : []; },
     ptTiles() { return M.wafTiles(this.ptSummary); },
     ptHist() { return M.histBars(this.ptSummary); },
     ptEventTypes() { return M.EVENT_TYPES; },
@@ -260,6 +265,21 @@ export const protectionMixin = {
       const o = this._ptOpener;
       this._ptOpener = null;
       if (o && document.body.contains(o)) o.focus();
+    },
+    // The panel's "Filter the WAF log by it": the address is read before the
+    // panel is closed (closing empties it), and the WAF log is where it shows.
+    async ptFilterWAFBy(ip) {
+      const addr = String(ip || "").trim();
+      this.ptCloseIP();
+      if (!addr) return;
+      this.ptFilters.ip = addr;
+      this.ptTab = "waf";
+      try {
+        const u = new URL(window.location.href);
+        u.searchParams.set("tab", "waf");
+        window.history.replaceState(null, "", `${u.pathname}${u.search}`);
+      } catch { /* no history */ }
+      await this.ptReload(); // a new filter: any opened group is closed
     },
     async ptShowEventsOf(ip) {
       this.ptCloseIP();

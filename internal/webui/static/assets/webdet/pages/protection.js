@@ -17,4 +17,5 @@ createWebdetApp({
   // Each view is a history query: refreshed on demand and on a change, not
   // every few seconds.
   autoRefresh: false,
+  minRefreshSec: 60,
 });

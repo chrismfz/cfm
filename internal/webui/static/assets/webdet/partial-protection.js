@@ -65,12 +65,14 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
               <p class="muted" v-if="!ptOpen">Loading its requests…</p>
               <p class="danger-text" v-else-if="ptOpen.error">Its requests could not be read: {{ ptOpen.error }}</p>
               <template v-else>
-                <p class="muted"><span v-if="ptGroupBy === 'rule' && ptOpen.summary.total_events !== g.count">Other families whose name holds this one are listed too. </span>{{ ptCount(ptOpen.summary.total_events) }} hits from {{ ptCount(ptOpen.summary.unique_ips) }} addresses on {{ ptCount(ptOpen.summary.unique_hosts) }} vhost{{ ptOpen.summary.unique_hosts === 1 ? '' : 's' }}, {{ ptCount(ptOpen.summary.blocked_events) }} blocked. The {{ ptOpen.summary.rows.length }} most recent:</p>
+                <p class="muted" v-if="!ptOpenRows.length">No request of this group in the window any more: refresh the log.</p>
+                <template v-else>
+                <p class="muted"><span v-if="ptGroupBy === 'rule' && ptOpen.summary.total_events > g.count">Other families whose name holds this one are listed too. </span>{{ ptCount(ptOpen.summary.total_events) }} hits from {{ ptCount(ptOpen.summary.unique_ips) }} addresses on {{ ptCount(ptOpen.summary.unique_hosts) }} vhost{{ ptOpen.summary.unique_hosts === 1 ? '' : 's' }}, {{ ptCount(ptOpen.summary.blocked_events) }} blocked. The {{ ptOpenRows.length }} most recent:</p>
                 <div class="table-wrap">
                   <table class="compact-table">
                     <thead><tr><th>Time</th><th>Address</th><th>Network</th><th>Vhost</th><th>Request</th><th>Rule</th><th>Tier</th><th></th></tr></thead>
                     <tbody>
-                      <tr v-for="(r, i) in ptOpen.summary.rows" :key="i">
+                      <tr v-for="(r, i) in ptOpenRows" :key="i">
                         <td class="muted pt-nowrap" :title="ptTime(r.ts_unix)">{{ ptAge(r.ts_unix) }}</td>
                         <td><button type="button" class="pt-link mono" @click="ptOpenIP(r.ip, $event.currentTarget)">{{ r.ip }}</button></td>
                         <td class="muted pt-nowrap">{{ ptWho(r) }}</td>
@@ -83,6 +85,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
                     </tbody>
                   </table>
                 </div>
+                </template>
               </template>
             </td>
           </tr>
@@ -183,12 +186,12 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
         <p class="muted" v-if="!ptPanel.waf.total_events">No WAF hit from this address.</p>
         <template v-else>
           <p>{{ ptCount(ptPanel.waf.total_events) }} hits, {{ ptCount(ptPanel.waf.blocked_events) }} blocked, on {{ ptCount(ptPanel.waf.unique_hosts) }} vhost{{ ptPanel.waf.unique_hosts === 1 ? '' : 's' }}.</p>
-          <div class="chip-row"><span class="muted">Rules</span><span v-for="r in ptPanel.waf.top_rule_bases" :key="r.key" class="pill">{{ r.key }} {{ r.count }}</span></div>
+          <div class="chip-row"><span class="muted">Rules</span><span v-for="r in ptPanelRules" :key="r.key" class="pill">{{ r.key }} {{ r.count }}</span></div>
           <div class="table-wrap">
             <table class="compact-table">
               <thead><tr><th>Time</th><th>Vhost</th><th>Request</th><th>Tier</th><th></th></tr></thead>
               <tbody>
-                <tr v-for="(r, i) in ptPanel.waf.rows" :key="i">
+                <tr v-for="(r, i) in ptPanelRows" :key="i">
                   <td class="muted pt-nowrap" :title="ptTime(r.ts_unix)">{{ ptAge(r.ts_unix) }}</td>
                   <td>{{ r.host }}</td>
                   <td class="mono pt-uri pt-uri-narrow" :title="r.rule + ' · ' + r.uri">{{ (r.method || '').toUpperCase() }} {{ r.uri }}</td>
@@ -218,8 +221,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
       </div>
       <div class="toolbar wrap pt-pager">
         <button type="button" class="btn-quiet" @click="ptShowEventsOf(ptPanelIP)">All its events</button>
-        <button type="button" class="btn-quiet" @click="ptCloseIP(); ptSetFilter('ip', ptPanelIP)">Filter the WAF log by it</button>
-        <a v-if="!isScoped" class="btn-quiet pt-a" :href="'/cfm-admin/webdetector/forensics/?ip=' + encodeURIComponent(ptPanelIP)">Live drilldown</a>
+        <button type="button" class="btn-quiet" @click="ptFilterWAFBy(ptPanelIP)">Filter the WAF log by it</button>
       </div>
     </template>
   </aside>

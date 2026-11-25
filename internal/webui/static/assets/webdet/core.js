@@ -16,6 +16,10 @@ export function createWebdetApp(config) {
   const sections = new Set(config.sections || []);
   const mixins = config.mixins || [];
   const autoRefreshByDefault = config.autoRefresh !== false;
+  // The shortest auto-refresh a page allows: a page whose refresh runs heavy
+  // history queries sets a floor so "every 5 s" cannot hammer the store.
+  const minRefreshSec = Math.max(1, Number(config.minRefreshSec) || 1);
+  const clampRefresh = (v) => Math.max(minRefreshSec, Math.min(300, Number(v) || 5));
 
   const { createApp } = window.Vue;
   let _appVm = null;
@@ -47,7 +51,7 @@ export function createWebdetApp(config) {
       return {
         loading: false,
         autoRefresh: autoRefreshByDefault,
-        refreshIntervalSec: 5,
+        refreshIntervalSec: clampRefresh(5),
         timer: null,
         refreshInProgress: false,
         lastRefreshAt: null,
@@ -311,13 +315,13 @@ export function createWebdetApp(config) {
       // ── Refresh loop ──────────────────────────────────────────────────
       startAutoRefresh() {
         if (this.timer) clearInterval(this.timer);
-        const sec = Math.max(1, Math.min(300, Number(this.refreshIntervalSec) || 5));
+        const sec = clampRefresh(this.refreshIntervalSec);
         this.refreshIntervalSec = sec;
         this.autoRefresh = true;
         this.timer = setInterval(() => this.refreshAll(), sec * 1000);
       },
       applyRefreshInterval() {
-        const sec = Math.max(1, Math.min(300, Number(this.refreshIntervalSec) || 5));
+        const sec = clampRefresh(this.refreshIntervalSec);
         this.refreshIntervalSec = sec;
         if (this.autoRefresh) this.startAutoRefresh();
       },
