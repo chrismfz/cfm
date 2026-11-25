@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.25
+
 ### Added
 - **Web Traffic: what the edge did with each kind of traffic.** Every class,
   vhost and client now carries its edge outcomes: reached the origin, cached,
@@ -71,8 +75,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   site's origin answered: on titan ~15,000 in 45 minutes, which made a
   challenged scraper pool look like origin traffic. They now count as the
   edge's work.
-
-## 2026.11.25
 
 ### Added
 - **Web Traffic: a distributed population shows how big it really is and
