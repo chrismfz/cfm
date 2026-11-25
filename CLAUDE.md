@@ -734,7 +734,9 @@ Knobs `[webdetector] FP_POLICY` (`0` kills all kinds) / `FP_POLICY_ALLOW_FPS`.
   upgrade before setting the tier (`docs/waf.md`).
 - **Arm grains** (the list also lives in `challenge_v2.go`'s header):
   fingerprint policy, geo policy, a per-vhost v2 tier, `unsolicited` (a web
-  solve no challenge covered: withheld, never refused), and rung marks from
+  solve no challenge covered: withheld, never refused), `all` (checked last:
+  any other solve, every scope, `CHALLENGE_V2_ALL`, default on since
+  2026-11-25 — "v2 everywhere"), and rung marks from
   three writers — a traffic rule with action `challenge_v2` (per ip+host;
   `rules-model.js` and `traffic_rules.go` change together), a WAF rule at
   `"challenge_v2"` (per IP, recorded in `handleIPPush`), and the malpath

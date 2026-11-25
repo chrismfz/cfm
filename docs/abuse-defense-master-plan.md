@@ -77,7 +77,7 @@ reviewed PR.
 | 9 | `under_attack` I1 state machine + notify | `under_attack.go` | detect-only (DRYRUN) | alarm value real ("challenge defeated" as an alert) | **KEEP as the alarm.** I1b read-surfaces shipped (`state` field, cfm-admin badge, `cfm webtop attack on\|off`, `POST /api/v1/challenge/vhost/attack`). Since 2026-09-29 it also puts a vhost's automatic challenge at v2 (`CHALLENGE_V2_AUTO_VHOST`), but UNDER_ATTACK has never been entered fleet-wide (no `vhost_under_attack_on` row on any node; leg 3 needs ≥50% origin errors), so that link is dormant until an operator `attack on`. The RT-baseline clause of leg 3 (frozen, `docs/under-attack-mode.md`) would widen it to slow origins only. |
 | 10 | `under_attack` campaign fingerprinter I2 | `under_attack_fingerprint.go` | shadow | no consumer; I3–I5 never built | **FROZEN — operator-ratified 2026-09-22.** Code STAYS as-is (this is a freeze, not a retire: unlike `cfm_pcw` its mechanism is sound, it simply has no consumer). No new predicates, no weight tuning, no sub-signals, no I3–I5. E1–E3 superseded its enforcement path; revisit ONLY if the draft-rule idea (I3) is deliberately picked up, and then with a §4-D3 exit contract. |
 | 11 | `ua_family=` solve-log corpus | `challenge_server.go` | log-first | builds the fp↔UA corpus | **KEEP.** The JA4↔UA coherence tell it was kept for was measured 2026-09-23 and **NOT adopted**: 0 extra farm catch over `mobile_hw_lie`, and the broad forms hit humans (docs/traffic-classifier.md, "UA ↔ TLS coherence tell"). |
-| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG`/`_HW_TELLS` (a kill switch for the corpus-measured device-claim tells, 2026-09-23)/`_AUTO_VHOST` (the automatic vhost challenges that run at v2, 2026-09-29 — D5 amendment) — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
+| 12 | Humanity scorer / would_v2 Rung-1 | `challenge_v2.go` | **BUILT + ENFORCING** since 2026-09-19 (E3) | positive-only tells; `hs=`/`tells=`/`sig=`/`v2=` per solve | **KEEP.** Teeth only under an operator arm (D5a) until 2026-11-25; since then on every solve (`CHALLENGE_V2_ALL`, D5 amendment). The knobs are `CHALLENGE_V2_PASSIVE`/`_FAIL_SCORE`/`_DEBUG`/`_HW_TELLS` (a kill switch for the corpus-measured device-claim tells, 2026-09-23)/`_AUTO_VHOST` (the automatic vhost challenges that run at v2, 2026-09-29 — D5 amendment) — the old `HUMANITY_MIN_OBS`/`MINORITY_PCT` keys were never read by any code and are still orphans in live `/etc/cfm/detectors.conf`: **operator cleanup, still outstanding.** |
 
 Fleet-config cleanup that falls out of the table: remove the orphan
 `HUMANITY_*`/`MINORITY_PCT` keys (row 12); leave `UNDER_ATTACK*`,
@@ -142,7 +142,7 @@ D3/D4 are the process fix.
   scored solve logs `hs=` + `tells=` so the operator can see exactly why any
   client passed or failed, `sig=` with the readings exactly as the client
   reported them (corpus for future tells; absent key = not reported, never a
-  fabricated zero), and `v2=<fp|geo|vhost|mark|unsolicited>` naming the arm whenever one
+  fabricated zero), and `v2=<fp|geo|vhost|mark|unsolicited|all>` naming the arm whenever one
   covers the solve — an armed solve that PASSES must not read like a plain v1
   one, or a live tier looks like a forgotten one (added 2026-09-22 after
   exactly that confusion in the field). With a shadow burn-in + measured FP
@@ -180,6 +180,20 @@ D3/D4 are the process fix.
   until the confirm fallback. The trajectory readings that could tighten the
   rescue are measured first. *Capped 2026-10-20:* a failing score above 100
   is never rescued (§5, E4); since 2026-11-10 that is a score of at most 100, not counting linux_sw's share (so at most 120 for a desktop Linux solve).
+  *Amendment (operator, 2026-11-25): v2 everywhere — (a) is superseded.*
+  Every scored solve has teeth: a failing one no named grain covers is
+  armed by the `all` grain (`v2=all`, `CHALLENGE_V2_ALL`, default on; `0`
+  goes back to arm-only). The one-week read before it (8 edge nodes, 19-25
+  Nov): ~315 000 rejects under the named grains, ~307 failing solves still
+  unarmed (0.1%: per-IP detector challenges, a plain traffic-rule
+  challenge, v1-noted vhosts, the panel ports), and among the rejects
+  without a certain tell no likely human (GR/CY, non-farm); 99.7%+ of them
+  reported no input at all. (b), (c) and (d) stand: the input rescue and
+  the good-bot waiver (which covers `all` like geo and vhost) still clear,
+  a reject is still retry-able, and every line still names its grain. The
+  confirm fallback (c) for a failing solve with no certain tell, on any
+  vhost, is the next step; the grain / mark / note / tier-pin machinery
+  that decided coverage goes after it.
 
 ## 5. Enforcement roadmap — the only live checklist
 

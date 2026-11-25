@@ -1130,6 +1130,20 @@ would_v2 solves in one morning: 1 072 with `src=-`, 140 under
 `vhost:suspicious_vhost` (qualityweb), 102 under `vhost:uniqpaths_short`
 (orion, titan).
 
+**v2 everywhere (`v2=all`, 2026-11-25).** A failing solve that no named
+grain covers is armed by the `all` grain, checked last (a named grain keeps
+its name on the line), in every scope: the per-IP detector challenges
+(`CHALLENGE_SUBNET`, `UNIQHOSTS_IP`, `NO_UA`, …), a plain traffic-rule or WAF
+`challenge`, a vhost noted or pinned at v1, the panel ports' own challenge.
+It is rejected like any other (403 `X-CFM-V2: reject`, retry-able), the input
+rescue and the good-bot waiver apply, and `would_v2` shadow lines stop (no
+solve is unarmed). Knob `CHALLENGE_V2_ALL` (`0` = arm-only, as before). The
+one-week read before it (8 edge nodes, 19-25 Nov): ~315 000 rejects under the
+named grains against ~307 unarmed would-fail solves, and no likely human
+among the rejects without a certain tell. The Google fetchers on a webmail
+panel (`panel:2096`, AS15169, `touch_lie`) were the one non-farm population
+it newly covers; FCrDNS-verified ones are waived.
+
 **The pre-solve (`v2=unsolicited`).** The farms fetch
 `/__cfm_challenge?next=…` on each fresh IP while the vhost is NOT challenged
 (gastronom.hk on titan: auto_off at 13:07, 395 such solves after it). Unarmed,

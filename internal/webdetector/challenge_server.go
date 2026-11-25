@@ -1048,6 +1048,13 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 			v2Grain = v2GrainUnsolicited
 			solve.V2Grain = v2Grain
 		}
+		// "v2 everywhere" (challengeV2AllArms): whatever challenge the solve
+		// answers, a failing score earns no clearance. Checked last, so a
+		// named grain keeps its name on the line.
+		if v2On && v2Grain == "" && challengeV2AllArms() {
+			v2Grain = v2GrainAll
+			solve.V2Grain = v2Grain
+		}
 
 		// One dictionary line per distinct fingerprint, so every solve can carry
 		// the 8-character id instead of the full tuple. The UA rides along

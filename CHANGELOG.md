@@ -56,6 +56,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   only the rules they can see are counted).
 
 ### Changed
+- **ChallengeV2 everywhere (`CHALLENGE_V2_ALL`, default on).** A failing
+  Rung-1 solve now earns no clearance whatever challenge it answers: until
+  now one only did under a named arm (a v2 vhost, a fingerprint or geo
+  policy, a rung mark, the unsolicited pre-solve), and everything else (the
+  per-IP detector challenges such as `CHALLENGE_SUBNET` or `CHALLENGE_NO_UA`,
+  a plain traffic-rule or WAF `challenge`, a vhost noted or pinned at v1, the
+  panel ports' own challenge) still handed out a cookie scored at v1. Such a
+  solve is now rejected under `v2=all` (403, retry-able, a
+  `challenge_v2_reject` row). The real-input rescue and the good-bot waiver
+  apply as under the vhost grain. Measured first, over a week on 8 nodes:
+  ~307 such would-fail solves against ~315 000 rejects under the named arms,
+  and no likely human among the rejects without a certain tell. `0` goes
+  back to arm-only. The vhost tier the Vhost page, the CLI and the API show
+  is still the named one; with this on, every solve is v2.
 - **`/api/v1/webdet/suspicious` honours `?limit=`** (1–500, default 50; it
   always returned 50), so the Vhost page picker and Vhost controls mark every
   suspicious host on a busy node, not only the top 50.

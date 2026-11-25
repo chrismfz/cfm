@@ -71,6 +71,7 @@ func TestChallengeV2InputRescue(t *testing.T) {
 // the good-bot waiver is never consulted for it. The same machine WITHOUT
 // input, and any certain tell, is still rejected.
 func TestVerify_V2GateRescuesRealInput(t *testing.T) {
+	withoutV2All(t) // this test is about a named grain's own scope
 	base, capt := startVerifyServer(t)
 	const (
 		armedHost = "mathematica.example.gr"
@@ -223,6 +224,7 @@ func TestV2Rescued_Surfaces(t *testing.T) {
 // with real input is rejected exactly as before the rescue existed, and no
 // surface carries v2_rescued — the would_v2 marker included.
 func TestVerify_InputRescueKillSwitch(t *testing.T) {
+	withoutV2All(t) // this test is about a named grain's own scope
 	base, capt := startVerifyServer(t)
 	const (
 		armedHost = "mathematica.example.gr"

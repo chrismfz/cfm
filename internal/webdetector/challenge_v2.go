@@ -390,6 +390,9 @@ type challengeV2State struct {
 	// (src=-, the unsolicited grain): CHALLENGE_V2_UNSOLICITED, default on.
 	// Off, such a solve earns clearance unscored as before.
 	unsolicited bool
+	// all arms every scored solve no other grain covers (the all grain):
+	// CHALLENGE_V2_ALL, default on. "v2 everywhere" (2026-11-25).
+	all bool
 	// hostTier answers "is this host's vhost tier v2" plus what put it there
 	// (manual / pin / auto:<source>, rendered as v2_via=), from ONE
 	// resolution — NewEngine wires challengeV2GateTier (challenge_v2_auto.go:
@@ -411,7 +414,7 @@ type challengeV2State struct {
 	lockdown func(host string) bool
 }
 
-var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true, manualV2: true, unsolicited: true}
+var challengeV2 = challengeV2State{enabled: true, failScore: defaultV2FailScore, hwTells: true, inputRescue: true, pathsMark: true, manualV2: true, unsolicited: true, all: true}
 
 // ConfigureChallengeV2HWTells applies [webdetector] CHALLENGE_V2_HW_TELLS
 // (every reload; see challengeV2State.hwTells).
@@ -451,6 +454,32 @@ func ConfigureChallengeV2Unsolicited(on bool) {
 	challengeV2.mu.Lock()
 	challengeV2.unsolicited = on
 	challengeV2.mu.Unlock()
+}
+
+// ConfigureChallengeV2All applies [webdetector] CHALLENGE_V2_ALL (every
+// reload; see challengeV2State.all).
+func ConfigureChallengeV2All(on bool) {
+	challengeV2.mu.Lock()
+	challengeV2.all = on
+	challengeV2.mu.Unlock()
+}
+
+// challengeV2AllArms reports whether the all grain arms a solve no other
+// grain covers: every scope, every challenge the solve answers (a per-IP
+// detector rule, a plain traffic-rule or WAF challenge, a v1 vhost arm or
+// pin, the panel ports' human-entry challenge). It is checked LAST, so a
+// named grain keeps its name on the line.
+//
+// Why (2026-11-25 fleet read, 8 edge nodes, 19-25 Nov): ~315 000 rejects
+// under the named grains against ~307 failing solves still unarmed (0.1%),
+// and among the rejects without a certain tell no likely human (GR/CY,
+// non-farm): 99.7%+ reported no input at all. What stayed unarmed was the
+// same farms on the sources no grain names, plus Google fetchers on a
+// webmail panel, which the good-bot waiver covers under this grain.
+func challengeV2AllArms() bool {
+	challengeV2.mu.RLock()
+	defer challengeV2.mu.RUnlock()
+	return challengeV2.enabled && challengeV2.all
 }
 
 // challengeV2UnsolicitedArms reports whether a solve is armed by the
@@ -810,6 +839,9 @@ const (
 	// a failing one gets no cookie and is sent on to next, never refused
 	// (challengeV2UnsolicitedArms).
 	v2GrainUnsolicited = "unsolicited"
+	// v2GrainAll: a solve no other grain covers, armed by CHALLENGE_V2_ALL
+	// (challengeV2AllArms). Waivable like geo and vhost.
+	v2GrainAll = "all"
 )
 
 // challengeV2ArmGrainVia answers D5a's "is this solve covered by an
@@ -983,7 +1015,7 @@ func linuxSWShare(tells string) int {
 // skips the good-bot exemption there too.
 func challengeV2WaiverBar(grain, ip, host, scope string) string {
 	switch grain {
-	case v2GrainGeo, v2GrainVhost, v2GrainUnsolicited:
+	case v2GrainGeo, v2GrainVhost, v2GrainUnsolicited, v2GrainAll:
 		if challengeV2MarkCovers(ip, host, scope) {
 			return v2WaiverMark
 		}
