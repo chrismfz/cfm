@@ -62,6 +62,9 @@ type tmFileClient struct {
 	tmSmall
 	Ev  int64            `json:"ev,omitempty"` // a file from before the evidence count reads 0
 	IPs map[string]int64 `json:"ips,omitempty"`
+	// Hosts: a browser-UA client's requests per vhost (a file from before
+	// them reads none: the restored hour lists no vhosts for it).
+	Hosts map[string]int64 `json:"hosts,omitempty"`
 }
 
 type tmFileMinute struct {
@@ -96,6 +99,12 @@ func (s *trafficMixStore) snapshotFile(now time.Time) tmFile {
 					fc.IPs = make(map[string]int64, len(cl.ips))
 					for ip, n := range cl.ips {
 						fc.IPs[ip] = n
+					}
+				}
+				if len(cl.hosts) > 0 {
+					fc.Hosts = make(map[string]int64, len(cl.hosts))
+					for h, n := range cl.hosts {
+						fc.Hosts[h] = n
 					}
 				}
 				fb.Clients[c][k] = fc
@@ -268,6 +277,14 @@ func mergeFileBucket(b *tmBucket, fb tmFileBucket) {
 					if _, ok := cl.ips[ip]; ok || len(cl.ips) < tmClientIPCap(c) {
 						cl.ips[ip] += n
 					}
+				}
+			}
+			if len(fc.Hosts) > 0 && !b.compact && c == tmHuman {
+				if cl.hosts == nil {
+					cl.hosts = make(map[string]int64)
+				}
+				for h, n := range fc.Hosts {
+					tmCountHost(cl.hosts, h, n)
 				}
 			}
 		}

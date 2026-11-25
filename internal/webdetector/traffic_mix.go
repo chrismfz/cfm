@@ -48,7 +48,9 @@ package webdetector
 // and the per-IP behaviour state is capped and swept.
 
 import (
+	"math"
 	"net/http"
+	"net/netip"
 	"slices"
 	"sort"
 	"strconv"
@@ -89,12 +91,17 @@ const (
 	// bucket: enough to tell a population spread over hundreds of addresses
 	// (the distributed tell) from one visitor's, at an eighth of the memory.
 	tmMaxHumanClientIPs = 64
-	tmMaxIPState        = 100000
-	tmIPStateSweep      = 30 * time.Second
-	tmOtherKey          = "_other"
-	tmMaxClientLen      = 200
-	tmDefaultHosts      = 20
-	tmDefaultClient     = 20
+	// tmMaxHumanClientHosts bounds a browser-UA client's vhosts per bucket
+	// (the rest count under "_other"): where a distributed population lands
+	// is the grain an operator can act on, its addresses are not.
+	tmMaxHumanClientHosts = 16
+	tmDistTopHosts        = 5 // vhosts listed on a flagged client (then "_other")
+	tmMaxIPState          = 100000
+	tmIPStateSweep        = 30 * time.Second
+	tmOtherKey            = "_other"
+	tmMaxClientLen        = 200
+	tmDefaultHosts        = 20
+	tmDefaultClient       = 20
 
 	tmAutomationDynPerMin = 20
 	tmHumanEvidenceTTL    = 10 * time.Minute
@@ -124,6 +131,9 @@ type tmClient struct {
 	tmSmall
 	ev  int64            // requests a person's browser sends (static, POST, XHR: tmHumanEvidence)
 	ips map[string]int64 // last hour only; nil otherwise
+	// hosts: a browser-UA client's requests per vhost (tmMaxHumanClientHosts
+	// per bucket, the rest under "_other"), last hour only; nil otherwise.
+	hosts map[string]int64
 }
 
 type tmBucket struct {
@@ -346,6 +356,23 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 			cl.ips[rec.IP]++
 		}
 	}
+	if cls == tmHuman {
+		// Lazily: a client a restored file created (mergeFileBucket) has no
+		// map yet. The current bucket is never compact.
+		if cl.hosts == nil {
+			cl.hosts = make(map[string]int64)
+		}
+		tmCountHost(cl.hosts, host, 1)
+	}
+}
+
+// tmCountHost adds n requests on host to a client's per-vhost counts, within
+// tmMaxHumanClientHosts (a new vhost past the cap counts under "_other").
+func tmCountHost(m map[string]int64, host string, n int64) {
+	if _, ok := m[host]; !ok && len(m) >= tmMaxHumanClientHosts {
+		host = tmOtherKey
+	}
+	m[host] += n
 }
 
 // The distributed tell (a READING, never an enforcement decision): one exact
@@ -385,7 +412,70 @@ func distributedTell(ips int, sampled, hourReq, hourEv int64) *TrafficMixDistrib
 	if perIP >= tmDistMaxReqPerIP || ev >= tmDistMaxEvidence {
 		return nil
 	}
-	return &TrafficMixDistributed{IPs: ips, Requests: hourReq, ReqPerIP: perIP, EvidenceShare: ev}
+	// The population behind the sample: every request of the hour at the
+	// sample's requests per IP. Each bucket keeps only its first
+	// tmMaxHumanClientIPs addresses, so a pool that rotates through
+	// thousands reads ~768 kept (rigel, 2026-11-25: 767 kept, 18,078 in the
+	// edge log, an estimate of ~18,300). Like ReqPerIP it leans high: never
+	// fewer than the addresses kept.
+	est := int(math.Round(float64(hourReq) / perIP))
+	if est < ips {
+		est = ips
+	}
+	return &TrafficMixDistributed{IPs: ips, EstIPs: est, Requests: hourReq, ReqPerIP: perIP, EvidenceShare: ev}
+}
+
+// tmNetCount counts the distinct networks of a client's kept addresses: /16
+// for IPv4, /32 for IPv6. A handful means one operator's fleet (GeedoShop's
+// 114 addresses on virgo were one /16); hundreds, a residential proxy pool
+// (rigel's 18k addresses, 441 /16s). Context for the operator, never a
+// threshold.
+func tmNetCount(ips map[string]int64) int {
+	nets := make(map[netip.Prefix]struct{}, len(ips))
+	for ip := range ips {
+		a, err := netip.ParseAddr(ip)
+		if err != nil {
+			continue
+		}
+		bits := 32
+		if a = a.Unmap(); a.Is4() {
+			bits = 16
+		}
+		if p, err := a.Prefix(bits); err == nil {
+			nets[p] = struct{}{}
+		}
+	}
+	return len(nets)
+}
+
+// tmTopHosts lists a client's top n vhosts by requests, then the rest summed
+// under "_other" (trailing).
+func tmTopHosts(m map[string]int64, n int) []TrafficMixClientHost {
+	var out []TrafficMixClientHost
+	var other int64
+	for h, r := range m {
+		if h == tmOtherKey {
+			other += r
+			continue
+		}
+		out = append(out, TrafficMixClientHost{Host: h, Requests: r})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Requests != out[j].Requests {
+			return out[i].Requests > out[j].Requests
+		}
+		return out[i].Host < out[j].Host
+	})
+	if len(out) > n {
+		for _, h := range out[n:] {
+			other += h.Requests
+		}
+		out = out[:n]
+	}
+	if other > 0 {
+		out = append(out, TrafficMixClientHost{Host: tmOtherKey, Requests: other})
+	}
+	return out
 }
 
 // tmClientIPCap is how many IPs one client keeps per bucket.
@@ -501,6 +591,7 @@ func compactBucket(b *tmBucket) {
 	for c, cm := range b.clients {
 		for _, cl := range cm {
 			cl.ips = nil
+			cl.hosts = nil
 		}
 		if len(cm) <= tmOldMaxClients {
 			continue
@@ -599,10 +690,26 @@ type TrafficMixClient struct {
 
 // TrafficMixDistributed is the distributed-population tell's evidence.
 type TrafficMixDistributed struct {
+	// IPs are the addresses kept (each 5-minute bucket keeps its first
+	// tmMaxHumanClientIPs), EstIPs the population they sample
+	// (distributedTell): a rotating pool reads ~768 kept of thousands.
 	IPs           int     `json:"ips"`
+	EstIPs        int     `json:"est_ips"`
 	Requests      int64   `json:"requests"`
 	ReqPerIP      float64 `json:"req_per_ip"`
 	EvidenceShare float64 `json:"evidence_share"`
+	// Nets: distinct /16 (IPv4) and /32 (IPv6) networks of the kept
+	// addresses (tmNetCount).
+	Nets int `json:"nets"`
+	// Hosts: where the population lands over the hour, top vhosts by
+	// requests, "_other" last: the grain an operator can act on.
+	Hosts []TrafficMixClientHost `json:"hosts,omitempty"`
+}
+
+// TrafficMixClientHost is one vhost of a client's last hour.
+type TrafficMixClientHost struct {
+	Host     string `json:"host"`
+	Requests int64  `json:"requests"`
 }
 
 type TrafficMixPoint struct {
@@ -809,6 +916,14 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 						acc.ips[ip] += n
 					}
 				}
+				if cl.hosts != nil && id > lastB-tmIPBuckets {
+					if acc.hosts == nil {
+						acc.hosts = map[string]int64{}
+					}
+					for h, n := range cl.hosts {
+						acc.hosts[h] += n // the hour's sum is not capped: a vhost "_other" in one bucket is named in another
+					}
+				}
 			}
 		}
 		s.mu.Unlock()
@@ -898,6 +1013,10 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 				sampled += n
 			}
 			c.Distributed = distributedTell(len(cl.ips), sampled, hourReq, hourEv)
+			if d := c.Distributed; d != nil {
+				d.Nets = tmNetCount(cl.ips)
+				d.Hosts = tmTopHosts(cl.hosts, tmDistTopHosts)
+			}
 		}
 		// A browser-UA client's addresses are listed only when the tell
 		// fires (they are visitors' otherwise): its count is enough.

@@ -21,6 +21,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **Web Traffic: a distributed population shows how big it really is and
+  where it lands.** The traffic mix kept 64 addresses per 5 minutes, so a
+  pool rotating through 18,000 residential IPs read "767 IPs" (rigel). A
+  flagged client now also carries `est_ips` (the pool behind that sample),
+  `nets` (/16 networks of its addresses) and `hosts` (its top vhosts by
+  requests). The page shows "~18,300 IPs", the vhosts it lands on, and,
+  under 1.5 requests per address, that a per-IP challenge, throttle or deny
+  reaches little of it (each address comes about once). The challenge
+  dialog's coverage is now over the hour's requests, not over the addresses
+  listed (it read 100% for 3% of the pool). A reading only: nothing acts on
+  it.
 - **The Ctrl-K search shows what is going on at each host.** Host
   suggestions carry the same chips as the Vhost page's picker (under attack,
   lockdown, WAF off, cache, rules…), and opening it with nothing typed lists

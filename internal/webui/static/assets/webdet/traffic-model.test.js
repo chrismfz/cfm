@@ -121,6 +121,46 @@ test("a browser-UA client the distributed tell flagged gets IP actions; an unfla
   assert.deepEqual(clientActions({ class: "human", client: CHROME152, top_ips_last_hour: ips }), [], "unflagged visitors: nothing");
 });
 
+// rigel, 2026-11-25: Mac Chrome 142, 767 addresses kept of ~18,300 at 1.02/IP,
+// two shops carrying almost all of it.
+test("distributedSummary: the pool behind the sample, where it lands, whether per-IP actions reach it", async () => {
+  const { distributedSummary, topIPs } = await import("./traffic-model.js");
+  const ips = Array.from({ length: 500 }, (_, i) => ({ ip: `198.51.${i >> 8}.${i & 255}`, requests: 1 }));
+  const c = {
+    class: "human", client: CHROME152, ips_last_hour: 767, top_ips_last_hour: ips,
+    distributed: {
+      ips: 767, est_ips: 18300, requests: 18650, req_per_ip: 1.02, evidence_share: 0, nets: 441,
+      hosts: [{ host: "amabilecreations.com", requests: 12500 }, { host: "vagoneto.gr", requests: 5800 }, { host: OTHER_KEY, requests: 350 }],
+    },
+  };
+  const d = distributedSummary(c);
+  assert.equal(d.kept, 767);
+  assert.equal(d.est, 18300);
+  assert.equal(d.nets, 441);
+  assert.equal(d.listed, 500);
+  assert.ok(d.reach < 0.03, "500 listed of ~18,300");
+  assert.equal(d.onceEach, true);
+  assert.deepEqual(d.hosts.map((h) => [h.host, h.other]), [["amabilecreations.com", false], ["vagoneto.gr", false], [OTHER_KEY, true]]);
+  assert.ok(Math.abs(d.hosts[0].share - 12500 / 18650) < 1e-9);
+
+  // The dialog's preview reads the pool, not the sample.
+  const t = topIPs(c, 500);
+  assert.equal(t.total, 18300);
+  assert.ok(t.coverage < 0.03, `500 one-request addresses carry ${t.coverage} of the hour, not 100%`);
+
+  // A pool whose addresses come back is reachable; an old node (no est_ips, nets, hosts) still reads.
+  const back = distributedSummary({ class: "human", client: CHROME152, distributed: { ips: 300, requests: 700, req_per_ip: 2.3, evidence_share: 0.01 } });
+  assert.equal(back.est, 300);
+  assert.equal(back.onceEach, false);
+  assert.deepEqual(back.hosts, []);
+  assert.equal(distributedSummary({ class: "human", client: CHROME152 }), null);
+
+  // An unflagged client's preview is unchanged: over what is listed.
+  const plain = topIPs({ class: "automation", ips_last_hour: 2, top_ips_last_hour: [{ ip: "a", requests: 3 }, { ip: "b", requests: 1 }] }, 1);
+  assert.equal(plain.total, 2);
+  assert.equal(plain.coverage, 0.75);
+});
+
 // The class colours live in two places on purpose: here for the canvas charts
 // (ECharts needs values) and as --c-* tokens in style.css for the pages' CSS.
 // They must be the same colours in each theme.

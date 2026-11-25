@@ -3,6 +3,7 @@ package webdetector
 import (
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -150,5 +151,31 @@ func TestTrafficMixPersist_RemovesStaleTemps(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
 			t.Fatalf("%s was removed", keep)
 		}
+	}
+}
+
+// A flagged client's vhosts survive a restart, like its IPs.
+func TestTrafficMixPersist_KeepsADistributedClientsHosts(t *testing.T) {
+	end := time.Now().Truncate(5 * time.Minute)
+	start := end.Add(-time.Hour)
+	src := newTrafficMixStore()
+	for i := 0; i < 300; i++ {
+		tmFeed(src, tmOrigin(fmt.Sprintf("10.8.%d.%d", i/256, i%256), fmt.Sprintf("s%d.gr", i%3), "GET", "/p", tmMacChrome136, 200, 1), start.Add(time.Duration(i)*time.Hour/300))
+	}
+	path := filepath.Join(t.TempDir(), "m.json.gz")
+	if err := src.saveTo(path, end); err != nil {
+		t.Fatal(err)
+	}
+	dst := newTrafficMixStore()
+	if _, err := dst.loadFrom(path, end); err != nil {
+		t.Fatal(err)
+	}
+	want := tmFindClient(src.SnapshotSorted(end, time.Hour, "", false, 10, 10, ""), tmMacChrome136)
+	got := tmFindClient(dst.SnapshotSorted(end, time.Hour, "", false, 10, 10, ""), tmMacChrome136)
+	if want == nil || want.Distributed == nil || got == nil || got.Distributed == nil {
+		t.Fatalf("flagged before %+v / after %+v", want, got)
+	}
+	if !reflect.DeepEqual(want.Distributed, got.Distributed) || len(got.Distributed.Hosts) != 3 {
+		t.Fatalf("after a reload %+v, want %+v", *got.Distributed, *want.Distributed)
 	}
 }
