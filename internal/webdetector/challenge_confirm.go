@@ -293,7 +293,13 @@ func (s ChallengeSolve) ConfirmLine() string {
 	if tells == "" {
 		tells = "-"
 	}
-	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_confirm hs=%s tells=%s%s%s tls_fp=%s ua=%q%s%s%s%s",
+	// confirm=fallback: asked by the Rung-1 reject fallback
+	// (challenge_v2_fallback.go), not the under-attack step.
+	why := ""
+	if s.ConfirmFallback {
+		why = " confirm=fallback"
+	}
+	return fmt.Sprintf("[challenge] ip=%s host=%s uri=%s result=v2_confirm hs=%s tells=%s%s%s tls_fp=%s ua=%q%s%s%s%s%s",
 		s.IP, s.Host, s.URI, hs, tells, s.SignalSuffix(), grain, s.TLSFingerprintOrDash(), s.UA,
-		s.GeoSuffix(), s.SrcSuffix(), via, s.ScopeSuffix())
+		s.GeoSuffix(), s.SrcSuffix(), via, s.ScopeSuffix(), why)
 }

@@ -1144,6 +1144,25 @@ among the rejects without a certain tell. The Google fetchers on a webmail
 panel (`panel:2096`, AS15169, `touch_lie`) were the one non-farm population
 it newly covers; FCrDNS-verified ones are waived.
 
+**The confirm fallback (`v2_rescued=confirm`, 2026-11-25).** A solve the
+gate is about to reject, with no certain tell, from the node's audience
+(`CHALLENGE_V2_CONFIRM_AUDIENCE`, GR/CY, never a datacenter ASN), under a geo
+/ vhost / all grain and no mark, web scope, gets the confirm step's 403 +
+`X-CFM-Confirm` token and the page's Continue button instead
+(`challenge_v2_fallback.go`). The click re-posts the same solve (the PoW
+checked as of the token) and passes, marked `v2_rescued=confirm` and
+`v2_confirm=clicked` with `v2_confirm_ms`; a re-post with the token and no
+input is asked again with the same token. A shown button is a
+`result=v2_confirm … confirm=fallback` line, not a `challenge_v2_reject` row.
+It is for the person who scores like a farm and cannot retry their way out
+(a VDI desk, an old PC, keyboard or touch only). The click is client-authored:
+its approach (the clicked line's `sig=` trajectory readings and
+`v2_confirm_ms`) is corpus, scored by nothing until the numbers are in.
+`CHALLENGE_V2_FALLBACK` = `audience` (default) | `all` | `off`. The
+under-attack confirm step had never been shown on the fleet (0 asks on the
+4 busiest nodes, 12-25 Nov): there is no corpus yet of how a farm meets a
+button, which is why it starts with the audience only.
+
 **The pre-solve (`v2=unsolicited`).** The farms fetch
 `/__cfm_challenge?next=…` on each fresh IP while the vhost is NOT challenged
 (gastronom.hk on titan: auto_off at 13:07, 395 such solves after it). Unarmed,
