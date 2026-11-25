@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.25
+
 ### Security
 - **A site owner's WAF switch no longer switches off the CVE and webshell
   rules.** A cPanel user can turn the WAF off for its own site (Vhost
@@ -72,8 +76,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   shown and each one bounced back to Vhost controls. They are hidden again,
   a group left with no page loses its heading, and the quick search no longer
   offers them.
-
-## 2026.11.25
 
 ### Added
 - **A Protection page: what the edge stopped and why, in one place.** New
