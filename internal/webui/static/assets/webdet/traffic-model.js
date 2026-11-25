@@ -118,6 +118,75 @@ export function summary(mix) {
   };
 }
 
+// What the edge did with requests (traffic_mix.go tmOutcome), in a fixed
+// order. "origin" is what reached the site; the rest the edge answered itself.
+// Colors are the page's CSS tokens (both themes). "stopped" are the outcomes
+// that refused the request outright or made it prove itself: a cache hit or a
+// redirect is not a stop.
+export const OUTCOMES = Object.freeze([
+  Object.freeze({ key: "origin", label: "Reached the origin", color: "var(--border)", stop: false }),
+  Object.freeze({ key: "cached", label: "Cached at the edge", color: "var(--accent-2)", stop: false }),
+  Object.freeze({ key: "challenged", label: "Challenged", color: "var(--v2)", stop: true }),
+  Object.freeze({ key: "blocked", label: "Blocked (WAF, ban, policy)", color: "var(--danger)", stop: true }),
+  Object.freeze({ key: "rule_blocked", label: "Blocked by a traffic rule", color: "var(--c-automation)", stop: true }),
+  Object.freeze({ key: "rate_limited", label: "Rate-limited (429)", color: "var(--warn)", stop: true }),
+  Object.freeze({ key: "redirect", label: "Redirected", color: "var(--accent)", stop: false }),
+  Object.freeze({ key: "other_edge", label: "Other edge answer", color: "var(--muted)", stop: false }),
+]);
+
+// outcomeSummary reads one `outcomes` object (a class, a vhost, a client):
+// the stacked-bar segments, how many were stopped, and the challenge's
+// answers. null when the node sent none (a build before outcomes): absent,
+// never a fabricated zero.
+export function outcomeSummary(outcomes) {
+  if (!outcomes || typeof outcomes !== "object") return null;
+  const total = OUTCOMES.reduce((t, o) => t + num(outcomes[o.key]), 0);
+  const stopped = OUTCOMES.filter((o) => o.stop).reduce((t, o) => t + num(outcomes[o.key]), 0);
+  // The challenge's answers to a verify, by status (traffic_mix.go
+  // tmVerifyOutcome): 303 sent the client on (nearly always a solve), 403
+  // refused it or asked it to confirm (the v2 confirm step, which a person
+  // then clicks through). Answers, not exact verdicts.
+  const sentOn = num(outcomes.verify_sent_on);
+  const refused = num(outcomes.verify_refused);
+  return {
+    total,
+    stopped,
+    stoppedShare: share(stopped, total),
+    segments: OUTCOMES.map((o) => ({ key: o.key, label: o.label, color: o.color, value: num(outcomes[o.key]), fraction: share(outcomes[o.key], total) })),
+    challenged: num(outcomes.challenged),
+    sentOn,
+    refused,
+    // Of the verifies answered, the share sent on: a challenge page nobody
+    // answers (a scraper that does not run it) is neither.
+    sentOnRate: sentOn + refused > 0 ? sentOn / (sentOn + refused) : null,
+  };
+}
+
+const OUT_SHORT = Object.freeze({ challenged: "challenged", blocked: "blocked", rule_blocked: "rule-blocked", rate_limited: "429" });
+
+// outcomeLine is the one-line reading under an outcome bar:
+// "stopped 6,940 (14.4%) · verifies sent on 304 of 1,016".
+export function outcomeLine(o) {
+  if (!o) return "";
+  let t = `stopped ${fmtCount(o.stopped)} (${fmtPct(o.stoppedShare)})`;
+  if (o.challenged) {
+    t += o.sentOnRate === null
+      ? ` · ${fmtCount(o.challenged)} challenge requests, no verify answered`
+      : ` · verifies sent on ${fmtCount(o.sentOn)} of ${fmtCount(o.sentOn + o.refused)}`;
+  }
+  return t;
+}
+
+// outcomeCell is the short reading in a table cell, or "—" from a node that
+// sent no outcomes: "92% stopped: challenged 4,410 · sent on 0".
+export function outcomeCell(o) {
+  if (!o) return "—";
+  if (!o.stopped) return "nothing stopped";
+  const parts = o.segments.filter((x) => OUT_SHORT[x.key] && x.value).map((x) => `${OUT_SHORT[x.key]} ${fmtCount(x.value)}`);
+  if (o.challenged && o.sentOnRate !== null) parts.push(`sent on ${fmtCount(o.sentOn)}`);
+  return `${fmtPct(o.stoppedShare, 0)} stopped: ${parts.join(" · ")}`;
+}
+
 // segments turns per-class values into the stacked-bar segments (fractions),
 // in CLASS_ORDER; a zero total gives zero widths.
 export function segments(values, field) {

@@ -165,6 +165,30 @@ test("distributedSummary: the pool behind the sample, where it lands, whether pe
   assert.equal(plain.coverage, 0.75);
 });
 
+test("outcomeSummary: what the edge did, what counts as stopped, the challenge's answers", async () => {
+  const { outcomeSummary, OUTCOMES } = await import("./traffic-model.js");
+  const o = outcomeSummary({ origin: 1, cached: 1, challenged: 5, blocked: 1, rule_blocked: 0, rate_limited: 1, redirect: 1, other_edge: 0, verify_sent_on: 1, verify_refused: 3 });
+  assert.equal(o.total, 10);
+  assert.equal(o.stopped, 7, "challenged + blocked + rule + 429; cache and redirect are not stops");
+  assert.equal(o.stoppedShare, 0.7);
+  assert.equal(o.sentOnRate, 0.25);
+  assert.deepEqual(o.segments.map((x) => x.key), OUTCOMES.map((x) => x.key));
+  assert.equal(o.segments.find((x) => x.key === "challenged").fraction, 0.5);
+  assert.equal(outcomeSummary(undefined), null, "an older node: absent, not zero");
+  assert.equal(outcomeSummary({ origin: 3 }).sentOnRate, null, "no verify answered: no rate");
+  const { outcomeLine, outcomeCell } = await import("./traffic-model.js");
+  assert.equal(outcomeLine(o), "stopped 7 (70.0%) · verifies sent on 1 of 4");
+  assert.equal(outcomeCell(o), "70% stopped: challenged 5 · blocked 1 · 429 1 · sent on 1");
+  // A scraper pool that never answers the page: no rate, said so.
+  const pool = outcomeSummary({ origin: 0, challenged: 4410 });
+  assert.equal(outcomeLine(pool), "stopped 4,410 (100.0%) · 4,410 challenge requests, no verify answered");
+  assert.equal(outcomeCell(pool), "100% stopped: challenged 4,410");
+  assert.equal(outcomeCell(outcomeSummary({ origin: 5, cached: 2 })), "nothing stopped");
+  assert.equal(outcomeCell(null), "—", "an older node");
+  assert.equal(outcomeCell(outcomeSummary({ rule_blocked: 2 })), "100% stopped: rule-blocked 2");
+  for (const x of OUTCOMES) assert.match(x.color, /^var\(--[a-z0-9-]+\)$/, `${x.key} uses a page token`);
+});
+
 // The class colours live in two places on purpose: here for the canvas charts
 // (ECharts needs values) and as --c-* tokens in style.css for the pages' CSS.
 // They must be the same colours in each theme.

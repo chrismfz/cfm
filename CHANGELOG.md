@@ -21,6 +21,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **Web Traffic: what the edge did with each kind of traffic.** Every class,
+  vhost and client now carries its edge outcomes: reached the origin, cached,
+  challenged, blocked (WAF, bans, fingerprint/geo deny, a UA emergency
+  block), blocked by a traffic rule, rate-limited (429), redirected, and the
+  challenge's answers to its verifies (sent on, or refused / asked to
+  confirm). A new "What the edge did with it" card shows them per class, and
+  the clients and vhosts tables gain an "At the edge" / "Stopped" column, so
+  "the scraper pool was challenged 4,410 times and never answered" or "we
+  stopped 61 requests of likely humans" reads at a glance. The MCP
+  `traffic_mix` tool carries them too. A reading only: nothing acts on it.
 - **The one-click "Continue" fallback also works on the cPanel / WHM /
   webmail login ports.** A person on a machine that scores like a farm (a
   VDI desk, an old PC) who did not move the mouse was still refused at a
@@ -53,6 +63,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (GR, CY) on a non-datacenter network; `CHALLENGE_V2_FALLBACK = all`
   offers it to everyone, `off` refuses as before. Fingerprint policies and
   the rule / WAF / malpath challenges stay strict.
+
+### Fixed
+- **Web Traffic no longer counts the challenge as origin time.** CFM's own
+  `/__cfm_challenge` and `/__cfm_verify` locations log the server's default
+  upstream (`cfm_apache`), so every challenge page read as a request the
+  site's origin answered: on titan ~15,000 in 45 minutes, which made a
+  challenged scraper pool look like origin traffic. They now count as the
+  edge's work.
 
 ## 2026.11.25
 

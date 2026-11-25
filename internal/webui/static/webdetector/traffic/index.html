@@ -75,6 +75,14 @@
       </section>
 
       <section class="card wide">
+        <h2>What the edge did with it</h2>
+        <p class="muted">Per class: what reached the site's origin, what the edge answered from cache, and what it stopped (challenged, blocked, rate-limited). Challenge pages and verifies are the challenge server's work, never origin time. A reading of the edge's own log: nothing here acts by itself.</p>
+        <div class="tr-legend" id="outLegend"></div>
+        <div id="outBars"></div>
+        <p class="muted" id="outNote"></p>
+      </section>
+
+      <section class="card wide">
         <h2>Requests over time, by class</h2>
         <div id="seriesChart" class="echart-box" style="height: 260px;" role="img" aria-label="Requests per 5 minutes, stacked by class"></div>
       </section>
@@ -92,6 +100,7 @@
                 <th aria-sort="none"><button type="button" class="th-sort" data-sort="bytes">Traffic</button></th>
                 <th aria-sort="descending"><button type="button" class="th-sort" data-sort="origin">Origin time</button></th>
                 <th aria-sort="none"><button type="button" class="th-sort" data-sort="ips">IPs (1 h)</button></th>
+                <th>At the edge</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -112,6 +121,7 @@
                 <th>Origin time</th>
                 <th style="min-width: 220px;">Origin time by class</th>
                 <th>Bots</th>
+                <th>Stopped</th>
                 <th>Actions</th>
               </tr>
             </thead>

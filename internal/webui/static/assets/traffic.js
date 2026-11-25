@@ -27,6 +27,7 @@ import {
   CLASS_ORDER, CLASS_LABELS, CLASS_COLORS, OTHER_KEY,
   share, fmtPct, fmtCount, fmtBytes, fmtMbps, fmtRate, fmtSeconds,
   classMap, summary, segments, hostBotShare, topIPs, clientActions, challengeableIPs, distributedSummary,
+  OUTCOMES, outcomeSummary, outcomeLine, outcomeCell,
   CLIENT_SORTS, clientSort,
 } from "./webdet/traffic-model.js";
 import {
@@ -44,6 +45,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     windowSelect: $("windowSelect"), autoState: $("autoState"), refreshBtn: $("refreshBtn"),
     toggleAutoBtn: $("toggleAutoBtn"), actionMsg: $("actionMsg"), windowNote: $("windowNote"),
     tiles: $("tiles"), legend: $("legend"), mixBars: $("mixBars"), mixNote: $("mixNote"),
+    outLegend: $("outLegend"), outBars: $("outBars"), outNote: $("outNote"),
     seriesChart: $("seriesChart"), clientsBody: $("clientsBody"), hostsBody: $("hostsBody"),
     rulesBody: $("rulesBody"), ipDialog: $("ipDialog"), ipDialogClient: $("ipDialogClient"),
     ipCount: $("ipCount"), ipTTL: $("ipTTL"), ipReason: $("ipReason"),
@@ -139,6 +141,34 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     el.mixNote.textContent = (mix && mix.note) ? `Note: ${mix.note}.` : "";
   }
 
+  // One stacked bar of edge outcomes (OUTCOMES order), its colours the page's tokens.
+  function outBar(o, height, label) {
+    const parts = o.segments.filter((x) => x.fraction > 0).map((x) => {
+      const pct = (x.fraction * 100).toFixed(1);
+      return `<div title="${escapeHTML(`${x.label}: ${fmtCount(x.value)} (${pct}%)`)}" style="flex:${x.fraction} 1 0;min-width:2px;background:${x.color};border-radius:4px"></div>`;
+    }).join("");
+    const aria = o.segments.filter((x) => x.value > 0).map((x) => `${x.label} ${fmtCount(x.value)}`).join(", ");
+    return `<div role="img" aria-label="${escapeHTML(`${label}: ${aria || "no traffic"}`)}" style="display:flex;gap:2px;height:${height}px">${parts || '<div class="muted">no traffic</div>'}</div>`;
+  }
+
+  function renderOutcomes(mix) {
+    const rows = [["All traffic", mix && mix.total]].concat(CLASS_ORDER.map((k) => [CLASS_LABELS[k], classMap(mix)[k]]));
+    const read = rows.map(([label, c]) => [label, outcomeSummary(c && c.outcomes)]);
+    if (!read.some(([, o]) => o)) {
+      el.outLegend.innerHTML = "";
+      el.outBars.innerHTML = '<p class="muted">This node\u2019s daemon does not report edge outcomes yet (an older build).</p>';
+      el.outNote.textContent = "";
+      return;
+    }
+    el.outLegend.innerHTML = OUTCOMES.map((x) => `<span style="margin-right:1rem;white-space:nowrap"><span aria-hidden="true" style="display:inline-block;width:.7rem;height:.7rem;border-radius:3px;background:${x.color};margin-right:.35rem;vertical-align:-1px"></span>${escapeHTML(x.label)}</span>`).join("");
+    el.outBars.innerHTML = read.filter(([, o]) => o).map(([label, o]) =>
+      `<div style="display:grid;grid-template-columns:minmax(7rem,14rem) minmax(0,1fr);gap:.6rem;align-items:center;margin:.55rem 0"><div class="muted">${escapeHTML(label)}</div><div>${outBar(o, 22, label)}<div class="muted" style="font-size:.78rem;margin-top:.2rem">${escapeHTML(outcomeLine(o))}</div></div></div>`).join("");
+    const human = outcomeSummary((classMap(mix).human || {}).outcomes);
+    el.outNote.textContent = human && human.stopped
+      ? `Browser UAs labelled likely humans that the edge stopped: ${fmtCount(human.stopped)} requests (${fmtPct(human.stoppedShare)} of theirs)${human.sentOnRate === null ? "" : `; ${fmtPct(human.sentOnRate, 0)} of their verifies were sent on (a 403 includes the v2 confirm question)`}. A distributed scraper counts here too: check its row in the clients below.`
+      : "";
+  }
+
   function renderSeries(mix) {
     if (!window.CFMChartTheme || !window.echarts || !el.seriesChart) return;
     if (!st.chart) {
@@ -170,13 +200,20 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     if (note) note.textContent = `Top clients by ${CLIENT_SORTS[st.sort].label}.`;
   }
 
+  // A table cell: the outcome bar and how much was stopped; "—" from an older node.
+  function edgeCell(outcomes, label) {
+    const o = outcomeSummary(outcomes);
+    if (!o) return '<span class="muted">—</span>';
+    return `${outBar(o, 10, `${label} at the edge`)}<div class="muted" style="font-size:.75rem;margin-top:.2rem">${escapeHTML(outcomeCell(o))}</div>`;
+  }
+
   function renderClients(mix) {
     renderSortHeaders();
     const list = (mix && Array.isArray(mix.clients)) ? mix.clients : [];
     const secs = Number(mix && mix.window_sec) || 1;
     const totalOrigin = Number(mix && mix.total && mix.total.origin_sec) || 0;
     if (!list.length) {
-      el.clientsBody.innerHTML = '<tr><td colspan="7" class="muted">No traffic in this window yet.</td></tr>';
+      el.clientsBody.innerHTML = '<tr><td colspan="8" class="muted">No traffic in this window yet.</td></tr>';
       return;
     }
     el.clientsBody.innerHTML = list.map((c, i) => {
@@ -201,6 +238,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
         <td>${escapeHTML(fmtBytes(c.bytes))}<div class="muted" style="font-size:.78rem">${escapeHTML(fmtMbps(c.bytes, secs))}</div></td>
         <td><strong>${escapeHTML(fmtPct(share(c.origin_sec, totalOrigin)))}</strong><div class="muted" style="font-size:.78rem">${escapeHTML(fmtSeconds(c.origin_sec))}</div></td>
         <td>${ips}</td>
+        <td style="min-width:150px">${edgeCell(c.outcomes, name)}</td>
         <td class="actions-cell">${acts || '<span class="muted">—</span>'}</td>
       </tr>`;
     }).join("");
@@ -209,7 +247,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
   function renderHosts(mix) {
     const list = (mix && Array.isArray(mix.hosts)) ? mix.hosts : [];
     if (!list.length) {
-      el.hostsBody.innerHTML = '<tr><td colspan="6" class="muted">No vhost traffic in this window yet.</td></tr>';
+      el.hostsBody.innerHTML = '<tr><td colspan="7" class="muted">No vhost traffic in this window yet.</td></tr>';
       return;
     }
     el.hostsBody.innerHTML = list.map((h, i) => {
@@ -227,6 +265,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
         <td>${escapeHTML(fmtSeconds(h.total && h.total.origin_sec))}</td>
         <td>${bar(segs, 16, `${h.host} origin time`, false)}</td>
         <td><strong>${escapeHTML(fmtPct(hostBotShare(h)))}</strong></td>
+        <td style="min-width:130px">${edgeCell(h.total && h.total.outcomes, h.host)}</td>
         <td class="actions-cell">${acts}</td>
       </tr>`;
     }).join("");
@@ -280,6 +319,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     el.windowNote.textContent = secs ? ` Window shown: ${Math.round(secs / 60)} min, since ${new Date(mix.since * 1000).toLocaleTimeString()}.` : "";
     renderTiles(mix);
     renderMix(mix);
+    renderOutcomes(mix);
     renderSeries(mix);
     renderClients(mix);
     renderHosts(mix);

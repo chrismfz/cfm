@@ -86,7 +86,11 @@ func (s *trafficMixStore) snapshotFile(now time.Time) tmFile {
 		}
 		fb := tmFileBucket{ID: b.id, Compact: b.compact, C: b.c, Hosts: make(map[string][tmClasses]tmSmall, len(b.hosts))}
 		for k, v := range b.hosts {
-			fb.Hosts[k] = *v
+			var cp [tmClasses]tmSmall
+			for c := range v {
+				cp[c] = v[c].clone() // encoded after the lock is dropped
+			}
+			fb.Hosts[k] = cp
 		}
 		for c := 0; c < tmClasses; c++ {
 			if len(b.clients[c]) == 0 {
@@ -94,7 +98,7 @@ func (s *trafficMixStore) snapshotFile(now time.Time) tmFile {
 			}
 			fb.Clients[c] = make(map[string]tmFileClient, len(b.clients[c]))
 			for k, cl := range b.clients[c] {
-				fc := tmFileClient{tmSmall: cl.tmSmall, Ev: cl.ev}
+				fc := tmFileClient{tmSmall: cl.tmSmall.clone(), Ev: cl.ev}
 				if len(cl.ips) > 0 {
 					fc.IPs = make(map[string]int64, len(cl.ips))
 					for ip, n := range cl.ips {
@@ -240,9 +244,7 @@ func mergeFileBucket(b *tmBucket, fb tmFileBucket) {
 			b.hosts[hk] = h
 		}
 		for c := 0; c < tmClasses; c++ {
-			h[c].Req += v[c].Req
-			h[c].OriginMs += v[c].OriginMs
-			h[c].Bytes += v[c].Bytes
+			h[c].addSmall(v[c])
 		}
 	}
 	clientCap := tmMaxClients
@@ -265,9 +267,7 @@ func mergeFileBucket(b *tmBucket, fb tmFileBucket) {
 				cl = &tmClient{}
 				cm[ck] = cl
 			}
-			cl.Req += fc.Req
-			cl.OriginMs += fc.OriginMs
-			cl.Bytes += fc.Bytes
+			cl.addSmall(fc.tmSmall)
 			cl.ev += fc.Ev
 			if len(fc.IPs) > 0 && !b.compact && (c == tmAutomation || c == tmBot || c == tmHuman) {
 				if cl.ips == nil {
