@@ -21,6 +21,24 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **A geo lookup costs a quarter of what it did.** A country lookup from
+  the GeoLite2-City database decoded the whole record (every language's
+  country and city names, the continent, the registered country, location,
+  postal), where CFM reads three fields: 5.1 µs and 86 allocations each, now
+  1.2 µs and 4 (measured on a synthetic record shaped like GeoLite2-City's).
+  A record with a city and no country still answers its city. The challenge excludes' ASN check (asked per request) read
+  the City database too, for a country it never used; it now reads the ASN
+  database alone. Together they were the top of qualityweb's CPU profile
+  (2026-11-25). IPLocate databases are read as before.
+- **A ban or an unban made while the edge ban list was being rebuilt no
+  longer flaps.** The rebuild that runs beside the edge's polls published the
+  list as it read it, so a ban made meanwhile went out as deleted and an
+  unban as set again, each put right on the next poll (~5 s). The rebuild now
+  catches up with the changes made while it ran, and builds again when the
+  store changed as a whole meanwhile.
+- **A detectors.conf reload no longer races the edge ban list on the
+  IGNORE_IPS check** (the predicate was a plain field, read by the request
+  handlers and the rebuild while a reload set it).
 - **Every edge ban reaches the edge again, not just 20 000 of them.** The
   edge's copy of the edge ban store (bans of clients behind Cloudflare) was
   capped at a fixed 20 000. With 7-day WAF bans the busiest nodes hold

@@ -173,7 +173,7 @@ func (b *NginxBridge) edgeBanCurrent(capN int) (map[string]int64, int) {
 // client /64 ban, IGNORE_IPS / IGNORE_NETS and the trusted proxies touching
 // any of it (the address check cannot read a prefix).
 func (b *NginxBridge) edgeBanSkipped(k string) bool {
-	if b.bypassFunc != nil && b.bypassFunc(k) {
+	if b.bypassed(k) {
 		return true
 	}
 	if p, err := netip.ParsePrefix(k); err == nil && firewall.ClientNetExempted(p) != "" {
@@ -266,14 +266,55 @@ func (b *NginxBridge) edgeBanSync(j *edgeBanJournal, now time.Time) {
 // and the list outside the journal's lock, the publish under it.
 func (b *NginxBridge) edgeBanRebuildBeside(capN int) {
 	t0 := time.Now()
-	ver := edgeban.Version()
-	gen, cseq := edgeban.ChangePos() // before List: later changes are applied next time
+	gen, cseq := edgeban.ChangePos() // before List: the changes after it are caught up below
 	cur, truncated := b.edgeBanCurrent(capN)
 	j := &b.edgeBanJournal
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	// The polls kept applying changes while the list was built: bring it up
+	// to them before it replaces the published one, or the publish would
+	// journal a ban made meanwhile as deleted and an unban as set again
+	// (each back on the next poll, ~5 s later). A new generation meanwhile:
+	// the snapshot is stale as a whole, so build again.
+	// The version before the change log, as edgeBanSync reads them: the
+	// store logs a key before it moves the version, so a change the catch-up
+	// misses moves the version past ver and the next poll applies it.
+	ver := edgeban.Version()
+	ngen, ncseq, extra, ok := b.edgeBanCatchUp(cur, gen, cseq, capN)
+	if !ok {
+		go b.edgeBanRebuildBeside(j.edgeBanCap()) // j.rebuilding stays true
+		return
+	}
 	j.rebuilding = false
-	b.edgeBanPublish(j, cur, truncated, gen, cseq, ver, capN, time.Now(), t0)
+	b.edgeBanPublish(j, cur, truncated+extra, ngen, ncseq, ver, capN, time.Now(), t0)
+}
+
+// edgeBanCatchUp applies the store's changes since (gen, cseq) to cur, a list
+// built at that position: each changed key looked up again. It returns the
+// position after them, how many bans the cap left out of cur, and false when
+// the change log cannot say (a new generation, or trimmed): rebuild then.
+func (b *NginxBridge) edgeBanCatchUp(cur map[string]int64, gen, cseq uint64, capN int) (uint64, uint64, int, bool) {
+	keys, ngen, ncseq, ok := edgeban.ChangesSince(gen, cseq)
+	if !ok {
+		return gen, cseq, 0, false
+	}
+	extra := 0
+	for _, k := range keys {
+		it, want := edgeban.Lookup(k)
+		if want && b.edgeBanSkipped(k) {
+			want = false
+		}
+		_, have := cur[k]
+		switch {
+		case want && (have || len(cur) < capN):
+			cur[k] = edgeBanExp(it)
+		case want:
+			extra++ // no room: the next rebuild picks the longest bans
+		case have:
+			delete(cur, k)
+		}
+	}
+	return ngen, ncseq, extra, true
 }
 
 // edgeBanPublish makes cur the published list (j.mu held), journalling the

@@ -49,7 +49,7 @@ func at(r edgeBanReply) url.Values {
 func TestEdgeBanJournal(t *testing.T) {
 	s := installEdgeBans(t, "34.153.214.160", "203.0.113.5")
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
-	b.bypassFunc = func(ip string) bool { return ip == "203.0.113.5" } // IGNORE_IPS
+	setBypass(b, func(ip string) bool { return ip == "203.0.113.5" }) // IGNORE_IPS
 
 	if code, _, _ := pollEdgeBan(t, b, url.Values{}, "wrong"); code != http.StatusForbidden {
 		t.Fatalf("bad token: http %d, want 403", code)
@@ -144,7 +144,7 @@ func TestEdgeBanSyncOnlyOnChange(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 	_, first, _ := pollEdgeBan(t, b, url.Values{}, "tok")
 	scans := 0
-	b.bypassFunc = func(string) bool { scans++; return false }
+	setBypass(b, func(string) bool { scans++; return false })
 	pollEdgeBan(t, b, at(first), "tok")
 	if scans != 0 {
 		t.Fatal("an idle poll scanned the list")

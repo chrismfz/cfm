@@ -86,11 +86,11 @@ func TestDecisionAnswersEdgeBan(t *testing.T) {
 	}
 
 	// IGNORE_IPS stays exempt (operator decision, 2026-10-10).
-	b.bypassFunc = func(ip string) bool { return ip == "34.153.214.160" }
+	setBypass(b, func(ip string) bool { return ip == "34.153.214.160" })
 	if got, _ := edgeDecide(b, "34.153.214.160", "shop.example.com", ""); got["ip_action"] != "allow" {
 		t.Fatalf("an IGNORE_IPS address must stay exempt: %+v", got)
 	}
-	b.bypassFunc = nil
+	setBypass(b, nil)
 
 	// A panel-scope decision is not touched (the panel gets its own,
 	// separately rolled-out check).
@@ -128,7 +128,7 @@ func TestDecisionEdgeBanWhileShedding(t *testing.T) {
 		t.Fatalf("an unbanned client while shedding: %+v", got)
 	}
 	// IGNORE_IPS stays exempt on the shed path too.
-	b.bypassFunc = func(ip string) bool { return ip == "34.153.214.160" }
+	setBypass(b, func(ip string) bool { return ip == "34.153.214.160" })
 	if got, _ := edgeDecide(b, "34.153.214.160", "shop.example.com", ""); got["ip_action"] == "block" {
 		t.Fatalf("shedding: an IGNORE_IPS address was edge-banned: %+v", got)
 	}
