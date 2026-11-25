@@ -152,6 +152,18 @@ func TestTrafficMix_DistributedHostsPastTheCap(t *testing.T) {
 	}
 }
 
+// The cap is on NAMED vhosts: "_other" does not take one of the 16.
+func TestTMCountHostCap(t *testing.T) {
+	m := map[string]int64{}
+	for i := 0; i < tmMaxHumanClientHosts+5; i++ {
+		tmCountHost(m, fmt.Sprintf("h%d.gr", i), 1)
+	}
+	tmCountHost(m, "late.gr", 1)
+	if len(m) != tmMaxHumanClientHosts+1 || m[tmOtherKey] != 6 {
+		t.Fatalf("%d keys, _other=%d: want %d named + _other holding 6", len(m), m[tmOtherKey], tmMaxHumanClientHosts)
+	}
+}
+
 func TestTMNetCount(t *testing.T) {
 	ips := map[string]int64{
 		"10.1.2.3": 1, "10.1.9.9": 1, // one /16

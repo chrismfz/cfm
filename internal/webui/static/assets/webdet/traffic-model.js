@@ -153,9 +153,11 @@ export function topIPs(client, n) {
   return { ips: picked.map((r) => r.ip), coverage: share(got, all), known: list.length, total };
 }
 
-// DIST_ONCE_PER_IP: under this many requests per address in the hour, an
-// address is seen about once: a per-IP challenge, throttle or deny on it
-// waits for a return that rarely comes (rigel 2026-11-25: 1.02/IP).
+// DIST_ONCE_PER_IP: under this many requests per address in the hour's
+// sample, an address is seen about once: a per-IP challenge, throttle or
+// deny on it waits for a return that may not come (rigel 2026-11-25: 1.02
+// in the sample, 1.10 in the edge log). The sample's req/IP is a lower bound
+// (traffic_mix.go distributedTell), so this is a hint, never a verdict.
 export const DIST_ONCE_PER_IP = 1.5;
 
 // distributedSummary reads the distributed tell of one client for the page:

@@ -1019,14 +1019,17 @@ already opened.
      64, so an hour tops out near 768). rigel's Mac Chrome 142 read 767 IPs;
      its edge log had 18,078 distinct addresses at 1.10 req/IP, 441 /16s,
      0% evidence, 23% of the node's origin time. `distributed.est_ips` (the
-     hour's requests at the sample's requests per IP: ~18,300) is the pool.
+     hour's requests at the sample's requests per IP: ~18,300) is the pool,
+     an upper estimate: the sample misses an address's return in a full
+     5 minutes, so its req/IP is a lower bound.
    - A pool whose addresses come once each is not reached by per-IP
      actions: 500 challenged addresses are ~3% of it and they do not come
      back. Where it lands is: rigel's went 67% to one shop and 31% to
      another. `distributed.hosts` (top 5 vhosts by requests, `_other` last)
      and `distributed.nets` (/16, IPv6 /32, of the kept addresses: GeedoShop's
-     114 addresses on virgo were ONE /16, a fleet, not a proxy pool) carry
-     that, and the page says "seen once per IP" under 1.5 req/IP.
+     114 addresses on virgo were ONE /16, a fleet, not a proxy pool; an
+     IPv6 /32 is usually a whole ISP) carry that, and the page hints "seen
+     once per IP" under 1.5 req/IP in the sample.
    Seen, not changed: a mean requests per IP lets 2-3 hammering addresses
    (270-550 requests each) hide a one-request population of the same UA
    (Mac Chrome 131 on mars and virgo, ~200 s of origin); GeedoShopProductFinder

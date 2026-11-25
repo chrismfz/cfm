@@ -351,6 +351,11 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 	if tmHumanEvidence(rec.Method, rec.URI) {
 		cl.ev++
 	}
+	if cl.ips == nil && (cls == tmAutomation || cls == tmBot || cls == tmHuman) {
+		// Lazily too: a client a restored file created without addresses
+		// (mergeFileBucket) would otherwise never record one again.
+		cl.ips = make(map[string]int64)
+	}
 	if cl.ips != nil && rec.IP != "" {
 		if _, ok := cl.ips[rec.IP]; ok || len(cl.ips) < tmClientIPCap(cls) {
 			cl.ips[rec.IP]++
@@ -369,8 +374,14 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 // tmCountHost adds n requests on host to a client's per-vhost counts, within
 // tmMaxHumanClientHosts (a new vhost past the cap counts under "_other").
 func tmCountHost(m map[string]int64, host string, n int64) {
-	if _, ok := m[host]; !ok && len(m) >= tmMaxHumanClientHosts {
-		host = tmOtherKey
+	if _, ok := m[host]; !ok {
+		named := len(m)
+		if _, ok := m[tmOtherKey]; ok {
+			named-- // "_other" is not one of the named vhosts
+		}
+		if named >= tmMaxHumanClientHosts {
+			host = tmOtherKey
+		}
 	}
 	m[host] += n
 }
@@ -416,8 +427,11 @@ func distributedTell(ips int, sampled, hourReq, hourEv int64) *TrafficMixDistrib
 	// sample's requests per IP. Each bucket keeps only its first
 	// tmMaxHumanClientIPs addresses, so a pool that rotates through
 	// thousands reads ~768 kept (rigel, 2026-11-25: 767 kept, 18,078 in the
-	// edge log, an estimate of ~18,300). Like ReqPerIP it leans high: never
-	// fewer than the addresses kept.
+	// edge log, an estimate of ~18,300). An UPPER estimate, as ReqPerIP is a
+	// lower bound: an address's return in a later bucket that was already
+	// full is not counted for it, so a pool whose addresses come back reads
+	// fewer requests per IP and more addresses than it has. Never fewer than
+	// the addresses kept.
 	est := int(math.Round(float64(hourReq) / perIP))
 	if est < ips {
 		est = ips
@@ -426,9 +440,11 @@ func distributedTell(ips int, sampled, hourReq, hourEv int64) *TrafficMixDistrib
 }
 
 // tmNetCount counts the distinct networks of a client's kept addresses: /16
-// for IPv4, /32 for IPv6. A handful means one operator's fleet (GeedoShop's
-// 114 addresses on virgo were one /16); hundreds, a residential proxy pool
-// (rigel's 18k addresses, 441 /16s). Context for the operator, never a
+// for IPv4, /32 for IPv6. For IPv4, a handful means one operator's fleet
+// (GeedoShop's 114 addresses on virgo were one /16) and hundreds a
+// residential proxy pool (rigel's 18k addresses, 441 /16s). An IPv6 /32 is
+// usually one ISP's whole allocation, so there a small count can be one
+// ISP's subscribers, not one fleet. Context for the operator, never a
 // threshold.
 func tmNetCount(ips map[string]int64) int {
 	nets := make(map[netip.Prefix]struct{}, len(ips))
