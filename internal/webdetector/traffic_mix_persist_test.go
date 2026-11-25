@@ -179,3 +179,29 @@ func TestTrafficMixPersist_KeepsADistributedClientsHosts(t *testing.T) {
 		t.Fatalf("after a reload %+v, want %+v", *got.Distributed, *want.Distributed)
 	}
 }
+
+// A client the restore creates without addresses records them again: observe
+// makes its IP map lazily (it used to make one only for a client it created).
+func TestTrafficMixPersist_ARestoredClientWithoutIPsRecordsThem(t *testing.T) {
+	now := time.Now().Truncate(time.Minute).Add(-2 * time.Minute)
+	src := newTrafficMixStore()
+	tmFeed(src, tmOrigin("", "shop.gr", "GET", "/x", "python-requests/2.31", 200, 0.2), now) // no client address
+	path := filepath.Join(t.TempDir(), "m.json.gz")
+	if err := src.saveTo(path, now); err != nil {
+		t.Fatal(err)
+	}
+	dst := newTrafficMixStore()
+	if _, err := dst.loadFrom(path, now); err != nil {
+		t.Fatal(err)
+	}
+	tmFeed(dst, tmOrigin("198.51.100.7", "shop.gr", "GET", "/x", "python-requests/2.31", 200, 0.2), now.Add(time.Second))
+	for _, c := range dst.Snapshot(now.Add(2*time.Second), time.Hour, "", false, 10, 10).Clients {
+		if c.Class == "bot" && c.Requests == 2 {
+			if len(c.TopIPs) != 1 || c.TopIPs[0].IP != "198.51.100.7" {
+				t.Fatalf("restored bot client's IPs = %+v, want the address seen after the restore", c.TopIPs)
+			}
+			return
+		}
+	}
+	t.Fatal("no bot client with both requests")
+}

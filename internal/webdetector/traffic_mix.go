@@ -1069,6 +1069,12 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 		case TrafficMixSortBytes:
 			return float64(c.Bytes)
 		case TrafficMixSortIPs:
+			// A distributed population by its pool, not the sample its
+			// buckets kept (~768 at most an hour): an 18k pool must not
+			// rank under an 800-address population.
+			if c.Distributed != nil {
+				return float64(c.Distributed.EstIPs)
+			}
 			return float64(c.IPs)
 		}
 		return c.OriginSec

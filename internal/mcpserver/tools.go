@@ -980,7 +980,7 @@ type trafficMixInput struct {
 	MergeWWW bool   `json:"merge_www,omitempty" jsonschema:"with host: count example.com and www.example.com together"`
 	Hosts    int    `json:"hosts,omitempty" jsonschema:"how many top vhosts (by origin time) to list; default 20, max 500"`
 	Clients  int    `json:"clients,omitempty" jsonschema:"how many top clients to list; default 20, max 500"`
-	Sort     string `json:"sort,omitempty" jsonschema:"which clients make the list and in what order: origin (default: origin time), requests, bytes, or ips (distinct IPs in the last hour, automation and bot clients only)"`
+	Sort     string `json:"sort,omitempty" jsonschema:"which clients make the list and in what order: origin (default: origin time), requests, bytes, or ips (distinct IPs in the last hour, of the clients that keep them; a distributed population ranks by its est_ips)"`
 	Until    int64  `json:"until,omitempty" jsonschema:"end the window at this unix time instead of now: a 5-minute boundary (multiple of 300) within the last 24 h, e.g. the hour 09:00-10:00 is window=1h until=<10:00>; omit for a window ending now"`
 }
 

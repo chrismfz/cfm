@@ -183,12 +183,16 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
       const name = c.client === OTHER_KEY ? "(everything else)" : c.client;
       const acts = clientActions(c).map((a) =>
         `<button type="button" class="${a.kind === "danger" ? "btn-sm btn-danger" : "btn-quiet btn-sm"}" data-act="${a.id}" data-i="${i}">${escapeHTML(a.label)}</button>`).join(" ");
-      const ips = c.ips_last_hour ? fmtCount(c.ips_last_hour) : "—";
       const d = distributedSummary(c);
+      // A flagged pool shows its estimate, the sample under it: the column
+      // and the pill must not disagree (767 kept of ~18,300).
+      const ips = d && d.est > d.kept
+        ? `~${escapeHTML(fmtCount(d.est))}<div class="muted" style="font-size:.78rem">${escapeHTML(fmtCount(d.kept))} kept</div>`
+        : c.ips_last_hour ? escapeHTML(fmtCount(c.ips_last_hour)) : "—";
       const pool = d && d.est > d.kept ? `~${fmtCount(d.est)}` : d ? fmtCount(d.kept) : "";
       const tell = d ? ` <span class="pill warn" title="${escapeHTML(`The node's distributed tell (a label, nothing acts on it): this exact browser UA came from ${d.est > d.kept ? `up to about ${fmtCount(d.est)} addresses (${fmtCount(d.kept)} kept: each 5 minutes keeps its first 64; the estimate is high when addresses come back)` : `${fmtCount(d.kept)} addresses`}${d.nets ? ` in ${fmtCount(d.nets)} networks (/16, IPv6 /32)` : ""} in the last hour, ${d.reqPerIP.toFixed(1)} requests each, ${fmtPct(d.evidence)} of them static files / XHR / POST (real visitors: most). A scraper spread over residential proxies, under every per-IP limit.`)}">distributed: ${escapeHTML(pool)} IPs · ${escapeHTML(d.reqPerIP.toFixed(1))}/IP · ${escapeHTML(fmtPct(d.evidence, 0))} static/XHR</span>` : "";
       const lands = d && d.hosts.length ? `<div class="muted" style="font-size:.78rem">on ${d.hosts.map((h) => `${escapeHTML(h.other ? "other vhosts" : h.host)} ${escapeHTML(fmtPct(h.share, 0))}`).join(" · ")}${d.nets ? ` · ${escapeHTML(fmtCount(d.nets))} networks` : ""}</div>` : "";
-      const once = d && d.onceEach ? `<div class="muted" style="font-size:.78rem"><span class="pill warn">seen once per IP</span> in the sample each address came about once this hour (the sample misses returns in a busy 5 minutes): a challenge, throttle or deny on its addresses reaches ${escapeHTML(fmtCount(d.listed))} of up to ${escapeHTML(pool)}, and most may never return.${d.hosts.length ? " The vhosts above are where it costs the origin." : ""}</div>` : "";
+      const once = d && d.onceEach ? `<div class="muted" style="font-size:.78rem"><span class="pill warn">seen once per IP</span> in the sample each address came about once this hour (the sample misses returns in a busy 5 minutes): a challenge, throttle or deny on its addresses reaches ${escapeHTML(fmtCount(d.listed))} of ${d.est > d.kept ? "up to " : ""}${escapeHTML(pool)}, and most may never return.${d.hosts.length ? " The vhosts above are where it costs the origin." : ""}</div>` : "";
       return `<tr>
         <td><div style="font-weight:600">${swatch(c.class)}${escapeHTML(CLASS_LABELS[c.class] || c.class)}${tell}</div>
             <div class="muted" style="font-family:ui-monospace,monospace;font-size:.78rem;word-break:break-all">${escapeHTML(truncate(name, 200))}</div>${lands}${once}</td>
@@ -196,7 +200,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
         <td>${escapeHTML(fmtRate(Number(c.requests || 0) / secs))}</td>
         <td>${escapeHTML(fmtBytes(c.bytes))}<div class="muted" style="font-size:.78rem">${escapeHTML(fmtMbps(c.bytes, secs))}</div></td>
         <td><strong>${escapeHTML(fmtPct(share(c.origin_sec, totalOrigin)))}</strong><div class="muted" style="font-size:.78rem">${escapeHTML(fmtSeconds(c.origin_sec))}</div></td>
-        <td>${escapeHTML(ips)}</td>
+        <td>${ips}</td>
         <td class="actions-cell">${acts || '<span class="muted">—</span>'}</td>
       </tr>`;
     }).join("");

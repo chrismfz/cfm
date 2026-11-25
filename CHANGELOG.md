@@ -26,9 +26,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   pool rotating through 18,000 residential IPs read "767 IPs" (rigel). A
   flagged client now also carries `est_ips` (the pool behind that sample),
   `nets` (/16 networks of its addresses) and `hosts` (its top vhosts by
-  requests). The page shows "~18,300 IPs", the vhosts it lands on, and,
-  under 1.5 requests per address, that a per-IP challenge, throttle or deny
-  reaches little of it (each address comes about once). The challenge
+  requests). The page shows "~18,300 IPs" (an upper estimate: the sample
+  misses an address's return in a busy 5 minutes), the vhosts it lands on,
+  and, under 1.5 requests per address in the sample, a hint that a per-IP
+  challenge, throttle or deny likely reaches little of it. Sorting clients
+  by IPs ranks such a pool by its estimate. The challenge
   dialog's coverage is now over the hour's requests, not over the addresses
   listed (it read 100% for 3% of the pool). A reading only: nothing acts on
   it.

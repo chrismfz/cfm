@@ -143,6 +143,10 @@ test("distributedSummary: the pool behind the sample, where it lands, whether pe
   assert.deepEqual(d.hosts.map((h) => [h.host, h.other]), [["amabilecreations.com", false], ["vagoneto.gr", false], [OTHER_KEY, true]]);
   assert.ok(Math.abs(d.hosts[0].share - 12500 / 18650) < 1e-9);
 
+  // Restored from a file without vhosts: shares over what the vhosts carry.
+  const restored = distributedSummary({ ...c, distributed: { ...c.distributed, hosts: [{ host: "a.gr", requests: 300 }, { host: "b.gr", requests: 100 }] } });
+  assert.deepEqual(restored.hosts.map((h) => h.share), [0.75, 0.25]);
+
   // The dialog's preview reads the pool, not the sample.
   const t = topIPs(c, 500);
   assert.equal(t.total, 18300);

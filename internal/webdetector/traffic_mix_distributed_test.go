@@ -121,6 +121,35 @@ func TestTrafficMix_DistributedTellPastTheIPCap(t *testing.T) {
 	}
 }
 
+// sort=ips ranks a distributed pool by its estimate, not by the sample its
+// buckets kept: ~2,200 one-request addresses outrank 840 visitors.
+func TestTrafficMix_SortByIPsUsesTheEstimate(t *testing.T) {
+	s := newTrafficMixStore()
+	end := time.Now().Truncate(5 * time.Minute)
+	start := end.Add(-time.Hour)
+	for i := 0; i < 2400; i++ {
+		tmFeed(s, tmOrigin(fmt.Sprintf("10.%d.%d.%d", i/65536, i/256%256, i%256), "a.gr", "GET", fmt.Sprintf("/x/%d", i), tmMacChrome136, 200, 1),
+			start.Add(time.Duration(i)*time.Hour/2400))
+	}
+	// 840 visitors (70 a bucket: their kept count saturates like the pool's)
+	// with more origin time: by kept count they tie the pool and win on
+	// origin time; by the pool's estimate they do not.
+	for i := 0; i < 840; i++ {
+		ip := fmt.Sprintf("172.20.%d.%d", i/256, i%256)
+		for j := 0; j < 4; j++ {
+			tmFeed(s, tmOrigin(ip, "b.gr", "GET", "/wp-content/a.css", tmAndroid157, 200, 3), start.Add(time.Duration(i*4+j)*time.Hour/3360))
+		}
+	}
+	m := s.SnapshotSorted(end, time.Hour, "", false, 10, 10, TrafficMixSortIPs)
+	var order []string
+	for _, c := range m.Clients {
+		order = append(order, c.Client)
+	}
+	if len(m.Clients) < 2 || m.Clients[0].Client != tmMacChrome136 || m.Clients[0].IPs > tmFindClient(m, tmAndroid157).IPs {
+		t.Fatalf("order %q: want the pool first, ranked by its estimate over a bigger kept count", order)
+	}
+}
+
 // A client past the per-bucket vhost cap counts the rest under _other, and
 // the hour still adds up.
 func TestTrafficMix_DistributedHostsPastTheCap(t *testing.T) {

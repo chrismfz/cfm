@@ -170,9 +170,12 @@ export function distributedSummary(client) {
   const kept = num(d.ips);
   const est = Math.max(num(d.est_ips), kept);
   const requests = num(d.requests);
-  const hosts = (Array.isArray(d.hosts) ? d.hosts : [])
-    .filter((h) => h && typeof h.host === "string")
-    .map((h) => ({ host: h.host, other: h.host === OTHER_KEY, requests: num(h.requests), share: share(h.requests, requests) }));
+  const listedHosts = (Array.isArray(d.hosts) ? d.hosts : []).filter((h) => h && typeof h.host === "string");
+  // Shares over the vhosts' own sum ("_other" included): right after an
+  // upgrade the restored hour has requests but no vhosts, and a share of
+  // all requests would read low with nothing to say why.
+  const hostSum = listedHosts.reduce((s, h) => s + num(h.requests), 0);
+  const hosts = listedHosts.map((h) => ({ host: h.host, other: h.host === OTHER_KEY, requests: num(h.requests), share: share(h.requests, hostSum) }));
   const listed = Array.isArray(client.top_ips_last_hour) ? client.top_ips_last_hour.length : 0;
   const reqPerIP = num(d.req_per_ip);
   return {
