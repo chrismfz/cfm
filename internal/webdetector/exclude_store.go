@@ -320,10 +320,10 @@ func compileScopeMatcher(scopeHosts []string) compiledScopeMatcher {
 	return m
 }
 
-// Match reports whether an entry with this scope applies on host (lowercased
-// by the caller). The in-path WAF runs the same semantics
-// (cfm_waf_excl.lua scope_takes); both run
-// scripts/tests/fixtures/waf_exclude_scope.txt.
+// Match reports whether this scope names host (lowercased by the caller):
+// an exact literal or an anchored glob, WITHOUT the www. alias. An exclude
+// matcher calls scopeTakes (Match plus the alias), whose edge twin is
+// cfm_waf_excl.lua takes; both run scripts/tests/fixtures/waf_exclude_scope.txt.
 func (m compiledScopeMatcher) Match(host string) bool {
 	if !m.scoped {
 		return true
