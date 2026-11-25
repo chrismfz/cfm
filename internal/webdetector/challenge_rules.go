@@ -315,10 +315,9 @@ const vhostSuppressSweepAt = 4096
 //     scorer owns a row the manual challenge is really holding (both modes);
 //   - in edge (bridge) mode, when the host ITSELF carries an active manual
 //     challenge, refreshes it with the host's OWN remaining TTL (not the
-//     cross-variant max, which would over-extend a shorter-lived variant) and
-//     re-grants the per-IP bypasses the bottom manual-push path grants
-//     (IGNORE_IPS + dynamic chalExclude), so an excluded host under a manual
-//     challenge treats those IPs the same way every other manual host does;
+//     cross-variant max, which would over-extend a shorter-lived variant);
+//     IGNORE_IPS and the challenge-exclude file need nothing here: they are
+//     applied per request in handleDecision, as for every other manual host;
 //   - throttles its log line to once per holddown per host (matching
 //     suppressed_by_exclude) so a candidate host doesn't spam the log every tick.
 //
@@ -329,7 +328,7 @@ const vhostSuppressSweepAt = 4096
 // With no bridge wired (tests; edge mode always wires one) there is no bridge
 // entry to keep or refresh, so it only clears the auto flag and stays silent
 // rather than logging a keep it did not perform.
-func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time, ips map[string]int) {
+func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time) {
     func() {
         e.vhostMu.Lock()
         defer e.vhostMu.Unlock()
@@ -355,14 +354,8 @@ func (e *Engine) keepManualOverSuppression(host, kind string, now time.Time, ips
             kind, host, rem.Round(time.Second), kind,
         )
     }
-    // Same per-IP bypasses as the bottom manual-push path: IGNORE_IPS and
-    // dynamic chalExclude matches slip through the vhost-wide challenge.
-    bypTTL := rem + 2*time.Minute
-    for ipStr := range ips {
-        if e.isBypassed(ipStr) || e.isExcluded(ipStr, host, "", "CHALLENGE_VHOST") {
-            e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
-        }
-    }
+    // IGNORE_IPS and the challenge-exclude file are applied per request in
+    // handleDecision (bypassFunc, ChalExcludeHot): nothing per IP here.
     e.nginxBridge.ChallengeVhostWithReason(host, rem, "manual")
 }
 
@@ -1661,11 +1654,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
         // up front so the auto-suppression path below (which clears the bridge
         // entry and emits a misleading "challenge lifted" alert) does not run.
         if manualCovered, _ := e.manualChallengeCoversClear(host); manualCovered {
-            var ips map[string]int
-            if ha := short[host]; ha != nil {
-                ips = ha.ips
-            }
-            e.keepManualOverSuppression(host, "exclude", now, ips)
+            e.keepManualOverSuppression(host, "exclude", now)
             continue
         }
         if haveVhostAuto {
@@ -1726,11 +1715,7 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
             // exclude; ignore governs AUTO only).
             if len(e.cfg.ChallengeVHostIgnore) > 0 && hostMatchAny(host, e.cfg.ChallengeVHostIgnore) {
                 if manualCovered, _ := e.manualChallengeCoversClear(host); manualCovered {
-                    var ips map[string]int
-                    if ha := short[host]; ha != nil {
-                        ips = ha.ips
-                    }
-                    e.keepManualOverSuppression(host, "ignore", now, ips)
+                    e.keepManualOverSuppression(host, "ignore", now)
                     continue
                 }
                 // If auto-state is currently ON, turn it off and emit OFF (reason=ignored).
@@ -1843,23 +1828,8 @@ e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Stat
                 e.vhostMu.Unlock()
 
 if doChallenge {
-    // Protect bypass/excluded IPs from the vhost-wide challenge.
-    if ha := short[host]; ha != nil {
-        bypTTL := ttl + 2*time.Minute
-        for ipStr := range ha.ips {
-            byp := e.isBypassed(ipStr)
-            exc := e.isExcluded(ipStr, host, "", "CHALLENGE_VHOST_UNIQPATHS")
-
-//            logging.Logf("[challenge][debug] uniqpaths_bypass_check host=%s ip=%s rule=%s bypass=%v excluded=%v",
-  //              host, ipStr, "CHALLENGE_VHOST_UNIQPATHS", byp, exc)
-
-            if byp || exc {
-//                logging.Logf("[challenge][debug] uniqpaths_bypass_apply host=%s ip=%s ttl=%s",
-//                    host, ipStr, bypTTL)
-                e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
-            }
-        }
-    }
+    // IGNORE_IPS and the challenge-exclude file are applied per request in
+    // handleDecision (bypassFunc, ChalExcludeHot): nothing per IP here.
                     e.nginxBridge.ChallengeVhostWithReason(host, ttl, "uniqpaths_short")
                     // The auto-v2 resolver's view of this source: re-noted every
                     // cycle it is active, riding the challenge entry just
@@ -2278,30 +2248,13 @@ func() bool { ok, _, _ := e.manualChallengeCovering(host); return ok }()
                     vttl = e.cfg.ChallengeSuspiciousHolddown + (2 * time.Minute)
                 }
 
-                // Determine rule name for isExcluded (skip_vhost_only semantics).
-                exRule := "CHALLENGE_VHOST"
-                if !manual {
-                    exRule = "CHALLENGE_SUSPICIOUS_VHOST_SCORE"
-                }
-
-// Walk IPs seen for this vhost in the short window.
-// BypassIPTemp writes into okState (checked in handleDecision before vhState).
-if ha := short[host]; ha != nil {
-    bypTTL := vttl + 2*time.Minute // slightly longer than vhost TTL
-    for ipStr := range ha.ips {
-        byp := e.isBypassed(ipStr)
-        exc := e.isExcluded(ipStr, host, "", exRule)
-
-//        logging.Logf("[challenge][debug] vhost_bypass_check host=%s ip=%s rule=%s bypass=%v excluded=%v",
-//            host, ipStr, exRule, byp, exc)
-
-        if byp || exc {
-//            logging.Logf("[challenge][debug] vhost_bypass_apply host=%s ip=%s ttl=%s",
-//                host, ipStr, bypTTL)
-            e.nginxBridge.BypassIPTemp(ipStr, bypTTL)
-        }
-    }
-}
+                // No per-IP walk: IGNORE_IPS and the challenge-exclude file are
+                // applied per request in handleDecision (bypassFunc,
+                // ChalExcludeHot). The walk this replaced looked every IP of the
+                // window up (an inline PTR, 1 s each) on every tick, for a
+                // BypassIPTemp that had stopped writing anything (host ""): it
+                // ran the webdetector tick past its 30 s watchdog (qualityweb,
+                // ~360 timeouts a day, 2026-11-25).
 
 
                 // `manual` (defined above) is TRUE for a CHALLENGE_VHOST config-list
