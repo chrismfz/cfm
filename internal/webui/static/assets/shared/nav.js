@@ -41,6 +41,7 @@ const MENU_GROUPS = [
   { title: "Web protection", items: [
     { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },
     { label: "Vhost", href: "/cfm-admin/webdetector/vhost/", icon: "globe" },
+    { label: "Protection", href: "/cfm-admin/webdetector/protection/", icon: "shield" },
     { label: "Forensics", href: "/cfm-admin/webdetector/forensics/", icon: "search" },
     { label: "Web Traffic", href: "/cfm-admin/webdetector/traffic/", icon: "bot" },
   ]},

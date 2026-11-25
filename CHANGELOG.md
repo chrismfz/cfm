@@ -20,6 +20,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **A Protection page: what the edge stopped and why, in one place.** New
+  under Web protection, for admins and cPanel users alike (theirs shows only
+  their vhosts). It will replace the WAF engine and Forensics pages, which
+  stay for now.
+  - **WAF log**, grouped: one line per rule (or per address, or per vhost)
+    with its exact hit count, instead of hundreds of rows of the same rule.
+    Opening a group lists its requests.
+  - **Events**: the history, filtered by kind with one click, paged with
+    Newer / Older (`history/events` takes `before_ts` + `before_id`).
+  - **Overview**: WAF hits per hour and, for admins, what the edge did with
+    all traffic (challenged, blocked, rate-limited).
+  - **Every address opens a panel**: country, ASN and PTR, its WAF hits and
+    its events. An admin can exclude a logged path from the one rule that
+    stopped it, on that vhost only, from the row itself.
+
+_Nothing yet._
 ### Fixed
 - **The web detector no longer times out on a node with busy vhost
   challenges.** For every vhost under a vhost-wide challenge (automatic,
