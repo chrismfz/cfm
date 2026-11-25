@@ -94,10 +94,10 @@ func TestIsExcluded_InlinePTRBudget(t *testing.T) {
 	if !e.isExcluded(crawler, "shop.gr", "", "CHALLENGE_PATHS") {
 		t.Fatal("the crawler, past the budget, was judged without its PTR")
 	}
-	if f.inline != excludePTRBudgetPerTick {
+	if int64(f.inline) != excludePTRBudgetPerTick {
 		t.Fatalf("inline lookups=%d, want the budget %d", f.inline, excludePTRBudgetPerTick)
 	}
-	if want := 30 - excludePTRBudgetPerTick; held != want || e.excludeDeferred.Load() != int64(want+1) {
+	if want := 30 - int(excludePTRBudgetPerTick); held != want || e.excludeDeferred.Load() != int64(want+1) {
 		t.Fatalf("held=%d deferred=%d, want %d held and %d deferred", held, e.excludeDeferred.Load(), want, want+1)
 	}
 
@@ -146,5 +146,43 @@ func TestEmitIPChallenges_ResetsPTRBudget(t *testing.T) {
 	}
 	if e.excludeDeferred.Load() != 0 {
 		t.Fatal("deferred count not reset")
+	}
+}
+
+// A malpath hit held back for its PTR is judged next tick even with no new
+// request: the emit gate it was stamped with is given back. Stamped, the
+// "new match since last emit" gate skipped it for good once the burst ended
+// (review of #1818).
+func TestChallengePaths_HeldBackHitIsJudgedNextTick(t *testing.T) {
+	f := &fakeExcludeEnr{cache: map[string]enrich.Result{}, ptrOf: map[string]string{}, ptrOn: true}
+	withFakeExcludeEnr(t, f)
+	old := excludePTRBudgetPerTick
+	excludePTRBudgetPerTick = 0 // every miss is held back
+	t.Cleanup(func() { excludePTRBudgetPerTick = old })
+
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengePathsEnabled: true, ChallengePathsList: []string{"2:/.env"}, ChallengePathsCount: 2})
+	e.SetChalExcludeFunc(ptrRule)
+	tick := func(at time.Time) []string {
+		out := make(chan core.Alert, 32)
+		e.emitIPChallenges(at, out)
+		close(out)
+		var got []string
+		for a := range out {
+			if a.Extra["rule"] == "CHALLENGE_PATHS" {
+				got = append(got, a.Key)
+			}
+		}
+		return got
+	}
+	t0 := float64(time.Now().Unix())
+	for i := 0; i < 2; i++ {
+		e.ingest(LogRec{TS: t0 - 5 + float64(i), IP: "198.51.100.77", Host: "example.com", Method: "get", URI: "/.env", Status: 404, UA: "ua"}, "raw")
+	}
+	if got := tick(time.Now()); len(got) != 0 {
+		t.Fatalf("first tick: %v, want held back", got)
+	}
+	f.warm() // the background lookup lands: no PTR
+	if got := tick(time.Now().Add(10 * time.Second)); len(got) != 1 || got[0] != "198.51.100.77" {
+		t.Fatalf("second tick, no new request: %v, want the held-back hit challenged", got)
 	}
 }

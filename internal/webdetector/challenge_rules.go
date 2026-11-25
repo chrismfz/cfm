@@ -918,6 +918,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                         if !tk.can(clientOf[c.ip]) {
                                                 continue // past this section's budget: its gate stays unwritten
                                         }
+                                        prevEmit, hadEmit := time.Time{}, false
                                         skip := func() bool {
                                                 e.emitMu.Lock()
                                                 defer e.emitMu.Unlock()
@@ -928,6 +929,7 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 if ok && now.Sub(last) < cooldown {
                                                         return true
                                                 }
+                                                prevEmit, hadEmit = last, ok
                                                 e.ipLastChalEmit[c.ip] = now
                                                 return false
                                         }()
@@ -984,16 +986,38 @@ func (e *Engine) emitIPChallenges(now time.Time, out chan<- core.Alert) {
                                                 Extra:   extra,
                                         }
 
-            // record to challenge API store (best-effort)
-e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Status, ttl)
-
                                         // Skip IPs in IGNORE_IPS/IGNORE_NETS or matching a chalExclude rule.
-                                        if e.isBypassed(c.ip) || e.isExcluded(c.ip, c.host, ctx.UA, "CHALLENGE_PATHS") {
+                                        excl, pending := false, false
+                                        if !e.isBypassed(c.ip) {
+                                            excl, pending = e.isExcludedOrPending(c.ip, c.host, ctx.UA, "CHALLENGE_PATHS")
+                                        }
+                                        if pending {
+                                            // Held back for its PTR (isExcludedOrPending): give
+                                            // the emit gate back, or this match, already stamped,
+                                            // would never be judged again once the burst ends.
+                                            e.emitMu.Lock()
+                                            if hadEmit {
+                                                e.ipLastChalEmit[c.ip] = prevEmit
+                                            } else {
+                                                delete(e.ipLastChalEmit, c.ip)
+                                            }
+                                            e.emitMu.Unlock()
+                                            if e.cfg.ChallengeLogSuppressed {
+                                                logging.Logf("[challenge_suppressed] ip=%s host=%s rule=CHALLENGE_PATHS reason=ptr_pending", c.ip, c.host)
+                                            }
+                                            continue
+                                        }
+                                        if e.isBypassed(c.ip) || excl {
                                             if e.cfg.ChallengeLogSuppressed {
                                                 logging.Logf("[challenge_suppressed] ip=%s host=%s rule=CHALLENGE_PATHS reason=bypass_or_exclude", c.ip, c.host)
                                             }
                                             continue
                                         }
+
+                                        // Record to the challenge API store and history (best-effort),
+                                        // only once it is really challenged: an excluded or held-back
+                                        // IP is not (the threshold path at the top records here too).
+                                        e.RecordIPChallenge(c.ip, c.host, "CHALLENGE_PATHS", c.uri, ctx.Method, ctx.Status, ttl)
 
                                         a.Samples = e.ipSamples(c.ip, maxSamples)
                                         tk.notify(&a, clientOf[c.ip])
@@ -2648,7 +2672,8 @@ func minInt(a, b int) int {
 
 // excludePTRBudgetPerTick bounds the inline reverse lookups isExcluded does in
 // one tick (each up to 1 s): the rest wait one tick for the background lookup.
-const excludePTRBudgetPerTick = 8
+// A var only so a test can spend it.
+var excludePTRBudgetPerTick int64 = 8
 
 // logExcludeDeferred reports, at most once a minute, the IPs isExcluded held
 // back this tick for want of a PTR (they are judged next tick, from cache).

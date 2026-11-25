@@ -4441,18 +4441,26 @@ func (e *Engine) isBypassed(ip string) bool {
 // It resolves ASN / PTR via the engine's enricher if available.
 // ua is best-effort (callers pass "" when unknown; ua=* rules still match).
 func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
+	excluded, pending := e.isExcludedOrPending(ip, host, ua, rule)
+	return excluded || pending
+}
+
+// isExcludedOrPending is isExcluded that tells a held-back IP (pending: its
+// PTR is being looked up in the background, see below) from an excluded one,
+// for a caller whose emit gate must not be spent on it.
+func (e *Engine) isExcludedOrPending(ip, host, ua, rule string) (excluded, pending bool) {
 	if e.challengeExcludes != nil && e.challengeExcludes.MatchChallenge(host) {
 		//logging.Logf("[challenge][debug] exclude_store_match ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
-		return true
+		return true, false
 	}
 	if e.chalExcludeFunc == nil {
 		//logging.Logf("[challenge][debug] exclude_no_func ip=%s host=%s ua=%q rule=%s", ip, host, ua, rule)
-		return false
+		return false, false
 	}
 	enr := e.excludeEnricher()
 	if enr == nil {
 		_, matched := e.chalExcludeFunc(ip, host, ua, "", "", rule)
-		return matched
+		return matched, false
 	}
 	asnOf := func(r enrich.Result) string {
 		if r.ASN > 0 {
@@ -4473,20 +4481,20 @@ func (e *Engine) isExcluded(ip, host, ua, rule string) bool {
 	// challenges for the exclude file, never a per-IP one.
 	if r, ok := enr.LookupCached(ip); ok {
 		_, matched := e.chalExcludeFunc(ip, host, ua, asnOf(r), r.PTR, rule)
-		return matched
+		return matched, false
 	}
 	if !enr.PTREnabled() || e.excludePTRBudget.Add(-1) >= 0 {
 		// No PTR switch: Lookup is mmdb only, no DNS, no budget.
 		r := enr.Lookup(ip)
 		_, matched := e.chalExcludeFunc(ip, host, ua, asnOf(r), r.PTR, rule)
-		return matched
+		return matched, false
 	}
 	r := enr.LookupCachedOrAsync(ip) // geo now, the PTR in the background
 	if _, matched := e.chalExcludeFunc(ip, host, ua, asnOf(r), "", rule); matched {
-		return true
+		return true, false
 	}
 	e.excludeDeferred.Add(1)
-	return true
+	return false, true
 }
 
 // excludeEnr is what isExcluded needs of the enricher (a test fakes it).

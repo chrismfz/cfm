@@ -32,6 +32,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   so a crawler exempted by PTR (ahrefs, semrush) is never challenged on the
   way; a farm IP gets its challenge one tick later. `cfm.challenges.log`
   writes `exclude_ptr_deferred n=…`, at most once a minute, when IPs wait.
+  A malicious-path hit no longer writes a `challenge_issued` history row or
+  shows as challenged in cfm-admin when the IP was excluded and never
+  challenged (it did since that path recorded before the exclude check).
 
 ## 2026.11.25
 
