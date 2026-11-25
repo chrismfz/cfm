@@ -2157,10 +2157,15 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, UA: rec.UA, Sub: "post", TS: rec.TS}
 		}
 
-		// empty UA
+		// empty UA. A static file does not count, like the per-IP 4xx/5xx
+		// counters above: an integration fetching a shop's product images with
+		// no User-Agent is a feed, not a scraper, and the challenge it earned
+		// 302'd its API calls for 10 minutes (vol2.gr's e|connect stock
+		// bridge, twice a day, 2026-11). p is the path (the query cut off
+		// above), so "/page?x=/a.jpg" stays a page.
 		if e.cfg.ChallengeIPNoUAMin > 0 {
 			if rec.UA == "" || rec.UA == "-" {
-				if !isMachineStyleEndpointGo(p) {
+				if !isMachineStyleEndpointGo(p) && !isStaticAssetPath(p) {
 					if b.ipsNoUA == nil {
 						b.ipsNoUA = make(map[string]int)
 					}
