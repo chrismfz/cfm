@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.25
+
 ### Added
 - **Web Traffic: a distributed population shows how big it really is and
   where it lands.** The traffic mix kept 64 addresses per 5 minutes, so a
