@@ -93,6 +93,7 @@ export function createWebdetApp(config) {
         if (this.isVhostPage) return "WebDetector / vhost";
         if (this.isForensicsPage) return "WebDetector / forensics";
         if (this.isWAFPage) return "WebDetector / WAF engine";
+        if (this.pageMode === "protection") return "WebDetector / protection";
         if (this.isControlsPage) return "WebDetector / vhost controls";
         if (this.isRulesPage) return "WebDetector / traffic rules";
         if (this.isChallengeAccessPage) return "WebDetector / challenge access";
@@ -351,6 +352,7 @@ export function createWebdetApp(config) {
           if (this.shouldShow("excludes")) await this.refreshExcludeLists?.();
           if (this.shouldShow("history")) await this.refreshHistory?.();
           if (this.shouldShow("wafengine")) await this.refreshWAFEngine?.();
+          if (this.shouldShow("protection")) await this.refreshProtection?.();
           if (this.shouldShow("controls")) await this.refreshVhostControls?.();
           if (this.shouldShow("rules")) await this.refreshRules?.();
           if (this.shouldShow("tokens")) await this.refreshTokens?.();

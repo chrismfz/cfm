@@ -265,7 +265,11 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	rows, err := e.history.QueryEvents(host, q.Get("ip"), q.Get("type"), limit)
+	// before_ts + before_id (both of the last row of the page shown) ask for
+	// the next, older page; without a positive before_id it is the first page.
+	beforeTS, _ := strconv.ParseInt(q.Get("before_ts"), 10, 64)
+	beforeID, _ := strconv.ParseInt(q.Get("before_id"), 10, 64)
+	rows, err := e.history.QueryEventsBefore(host, q.Get("ip"), q.Get("type"), limit, beforeTS, beforeID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

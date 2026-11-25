@@ -1049,3 +1049,31 @@ td, th { font-variant-numeric: tabular-nums; }
 .sticky-first td:first-child { position: sticky; left: 0; z-index: 1; background: var(--card); }
 .sticky-first thead th:first-child { z-index: 3; }
 .table-wrap .sticky-first tbody tr:not(.bulk-selected):not(.row-editing):hover > td:first-child { background: var(--card-hover); }
+
+/* ── Protection page (webdet/partial-protection.js) ───────────────────── */
+.pt-head { display: flex; flex-wrap: wrap; gap: .6rem 1rem; justify-content: space-between; align-items: flex-start; }
+.pt-head h2 { margin-bottom: .2rem; }
+.pt-h3 { font-size: .9rem; margin: 1rem 0 .4rem; }
+.pt-r { text-align: right; font-variant-numeric: tabular-nums; }
+.pt-nowrap { white-space: nowrap; }
+.pt-sub { font-size: .76rem; }
+.pt-uri { max-width: 26rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt-uri-narrow { max-width: 13rem; }
+.pt-panel .pill { white-space: nowrap; }
+.pt-host { width: 14rem; }
+.pt-link { background: none; border: 0; padding: .2rem 0; font: inherit; color: var(--accent-strong); cursor: pointer; text-align: left; }
+.pt-link:hover { text-decoration: underline; filter: none; }
+.pt-link.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .85em; }
+.pt-a { display: inline-block; text-decoration: none; }
+.pt-open { background: var(--bg-inset); padding: .6rem .8rem; }
+.pt-pager { margin-top: .6rem; }
+.pt-out-row { grid-template-columns: 14rem minmax(0, 1fr); }
+.pt-hist { display: flex; align-items: flex-end; gap: 2px; height: 120px; border-bottom: 1px solid var(--border); }
+.pt-hist-col { flex: 1 1 0; min-width: 2px; height: 100%; display: flex; align-items: flex-end; }
+.pt-hist-bar { width: 100%; background: var(--accent-2); border-radius: 3px 3px 0 0; display: flex; align-items: flex-end; min-height: 1px; }
+.pt-hist-blocked { width: 100%; background: var(--danger); border-radius: 3px 3px 0 0; }
+.pt-sw { display: inline-block; width: .7rem; height: .7rem; border-radius: 3px; margin-right: .35rem; vertical-align: -1px; }
+.pt-sw-hit { background: var(--accent-2); }
+.pt-sw-blocked { background: var(--danger); }
+.pt-panel-backdrop { position: fixed; inset: 0; background: rgba(5, 10, 22, .6); display: flex; justify-content: flex-end; z-index: 1000; }
+.pt-panel { width: min(760px, 100%); height: 100%; overflow-y: auto; background: var(--card); border-left: 1px solid var(--border); box-shadow: var(--shadow); padding: 1.2rem; }

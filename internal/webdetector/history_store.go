@@ -370,12 +370,24 @@ func clampHistoryQueryLimit(limit int) int {
 }
 
 func (s *HistoryStore) QueryEvents(host, ip, typ string, limit int) ([]HistoryEvent, error) {
+	return s.QueryEventsBefore(host, ip, typ, limit, 0, 0)
+}
+
+// QueryEventsBefore is QueryEvents continued past a row: with beforeID > 0 it
+// returns the events that sort after the row (beforeTS, beforeID) in the
+// newest-first order (ts_unix DESC, id DESC), which is how a page asks for
+// the next, older page. beforeID <= 0 is the first page.
+func (s *HistoryStore) QueryEventsBefore(host, ip, typ string, limit int, beforeTS, beforeID int64) ([]HistoryEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	limit = clampHistoryQueryLimit(limit)
 
-	clauses := make([]string, 0, 3)
-	args := make([]interface{}, 0, 4)
+	clauses := make([]string, 0, 4)
+	args := make([]interface{}, 0, 7)
+	if beforeID > 0 {
+		clauses = append(clauses, "(ts_unix < ? OR (ts_unix = ? AND id < ?))")
+		args = append(args, beforeTS, beforeTS, beforeID)
+	}
 	if host != "" {
 		clauses = append(clauses, "host = ?")
 		args = append(args, host)
