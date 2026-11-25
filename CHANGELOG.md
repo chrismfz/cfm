@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.25
+
 ### Added
 - **A Protection page: what the edge stopped and why, in one place.** New
   under Web protection, for admins and cPanel users alike (theirs shows only
@@ -62,8 +66,6 @@ _Nothing yet._
     place: WAF excludes, challenge excludes and trusted clients (the
     Challenge access editor). The excludes card that sat on three pages is
     gone; the widest entries (the whole WAF, every vhost) are listed first.
-
-## 2026.11.25
 
 ### Added
 - **Web Traffic: what the edge did with each kind of traffic.** Every class,
