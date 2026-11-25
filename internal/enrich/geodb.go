@@ -29,8 +29,9 @@ type geoDB interface {
 }
 
 // openGeoDB opens a geo database in either schema CFM installs:
-//   - MaxMind's (GeoLite2 / GeoIP2 and the compatible DB-IP editions), read
-//     through geoip2 exactly as before;
+//   - MaxMind's (GeoLite2 / GeoIP2 and the compatible DB-IP editions): geoip2
+//     recognises the type, and the records are read into lean structs that
+//     name only the fields CFM uses (maxmindDB);
 //   - IPLocate's, which the MaxMind updater installs under the same file names
 //     when no MaxMind account is configured (maxmindupdater: source=auto
 //     without a licence key, or source=iplocate). Its records are FLAT —
@@ -66,7 +67,14 @@ func warnOpenOnce(path string, err error) {
 func openGeoDBQuiet(path string) (geoDB, error) {
 	r, err := geoip2.Open(path)
 	if err == nil {
-		return maxmindDB{r}, nil
+		// geoip2 only vouches for the type: the reads go through maxminddb
+		// into lean structs (maxmindDB).
+		_ = r.Close()
+		raw, err := maxminddb.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		return maxmindDB{raw}, nil
 	}
 	var unknown geoip2.UnknownDatabaseTypeError
 	if !errors.As(err, &unknown) {
@@ -93,27 +101,53 @@ func isIPLocateType(t string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(t)), "iplocate ")
 }
 
-// maxmindDB reads MaxMind's nested schema through geoip2.
-type maxmindDB struct{ r *geoip2.Reader }
+// maxmindDB reads MaxMind's nested schema into lean structs that name only
+// the fields CFM uses. geoip2's City() decoded the whole record for them:
+// every language's country and city name (maps), the subdivisions, the
+// location, the postal code, the continent and the registered country. On the
+// bridge's per-request path (the challenge excludes' ASN, the traffic rules'
+// country) that was the top consumer of a busy node's CPU profile
+// (qualityweb, 2026-11-25); the maxminddb decoder skips what a struct does
+// not name, without allocating it.
+type maxmindDB struct{ r *maxminddb.Reader }
+
+type maxmindASNFields struct {
+	ASN uint   `maxminddb:"autonomous_system_number"`
+	Org string `maxminddb:"autonomous_system_organization"`
+}
+
+type maxmindName struct {
+	EN string `maxminddb:"en"`
+}
+
+type maxmindCountryFields struct {
+	Country struct {
+		IsoCode string      `maxminddb:"iso_code"`
+		Names   maxmindName `maxminddb:"names"`
+	} `maxminddb:"country"`
+	City struct {
+		Names maxmindName `maxminddb:"names"`
+	} `maxminddb:"city"`
+}
 
 func (d maxmindDB) asn(ip net.IP) (uint, string, bool) {
-	rec, err := d.r.ASN(ip)
-	if err != nil || rec == nil {
+	var rec maxmindASNFields
+	if err := d.r.Lookup(ip, &rec); err != nil || rec.ASN == 0 {
 		return 0, "", false
 	}
-	return rec.AutonomousSystemNumber, rec.AutonomousSystemOrganization, true
+	return rec.ASN, rec.Org, true
 }
 
 func (d maxmindDB) country(ip net.IP) (string, string, string, bool) {
-	rec, err := d.r.City(ip)
-	if err != nil || rec == nil {
+	var rec maxmindCountryFields
+	if err := d.r.Lookup(ip, &rec); err != nil || rec.Country.IsoCode == "" {
 		return "", "", "", false
 	}
 	name := rec.Country.IsoCode
-	if n, ok := rec.Country.Names["en"]; ok && n != "" {
-		name = n
+	if rec.Country.Names.EN != "" {
+		name = rec.Country.Names.EN
 	}
-	return rec.Country.IsoCode, name, rec.City.Names["en"], true
+	return rec.Country.IsoCode, name, rec.City.Names.EN, true
 }
 
 func (d maxmindDB) Close() error { return d.r.Close() }

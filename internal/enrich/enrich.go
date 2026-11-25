@@ -340,6 +340,29 @@ func (e *Enricher) LookupGeoFast(ipStr string) Result {
 	return r
 }
 
+// LookupASNFast is LookupGeoFast for a caller that needs the AS only (the
+// challenge excludes' asn_in, on the bridge's per-request path): it reads the
+// ASN database alone, not the City one as well. 0 when unknown.
+func (e *Enricher) LookupASNFast(ipStr string) (uint, string) {
+	if e == nil || ipStr == "" {
+		return 0, ""
+	}
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return 0, ""
+	}
+	e.mu.RLock()
+	defer e.mu.RUnlock() // covers the read: the readers are mmap'd (readGeo)
+	if e.asnDB == nil {
+		return 0, ""
+	}
+	n, org, ok := e.asnDB.asn(ip)
+	if !ok {
+		return 0, ""
+	}
+	return n, org
+}
+
 // LookupCachedOrAsync returns the cached Result for ipStr if one is fresh in
 // memory. On a cache miss it returns the *fast* mmdb-only data (country +
 // ASN — microseconds, no DNS) immediately and dispatches the *full* Lookup

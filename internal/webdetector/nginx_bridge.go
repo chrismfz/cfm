@@ -2611,6 +2611,12 @@ func (b *NginxBridge) chalExcludeASN(ip string) uint32 {
 	if b.enr == nil || ip == "" {
 		return 0
 	}
+	// The ASN database alone: LookupGeoFast read the City one too, for a
+	// country this check never uses, on every request an ASN exclude asks.
+	if f, ok := b.enr.(interface{ LookupASNFast(string) (uint, string) }); ok {
+		n, _ := f.LookupASNFast(ip)
+		return uint32(n)
+	}
 	if f, ok := b.enr.(interface{ LookupGeoFast(string) enrich.Result }); ok {
 		return uint32(f.LookupGeoFast(ip).ASN)
 	}
