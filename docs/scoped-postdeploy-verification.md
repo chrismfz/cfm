@@ -29,8 +29,9 @@ In **Tab B**, open each page and confirm it renders and shows scoped mode badge:
 
 - `/cfm-admin/webdetector/controls/`
 - `/cfm-admin/webdetector/vhost/`
-- `/cfm-admin/webdetector/forensics/`
-- `/cfm-admin/webdetector/waf/`
+- `/cfm-admin/webdetector/protection/` (WAF log, Events, Overview; no Tools tab for a scoped user)
+- `/cfm-admin/webdetector/exceptions/`
+- `/cfm-admin/webdetector/waf/`, `/forensics/` and `/challenge-access/`: each redirects to its new place, keeping the query
 
 Expected:
 - Page loads without redirect loops or blank state.

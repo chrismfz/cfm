@@ -1,6 +1,6 @@
 // WebDetector / Protection: what the edge stopped and why. The WAF log
 // (grouped), the event history (paged) and the edge outcomes in one page;
-// it replaces the WAF engine and Forensics pages' reading views.
+// it replaced the WAF engine and Forensics pages.
 import "../../shared/constants.js";
 import "../../shared/auth-context.js";
 import "../../shared/auth-mode.js";

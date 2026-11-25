@@ -1,8 +1,8 @@
 // /cfm-admin/assets/webdet/protection-model.js
 //
 // Pure model for the Protection page (feature-protection.js): what the edge
-// stopped and why, in one place instead of the WAF engine and Forensics
-// pages. It reads, and never copies, three endpoints:
+// stopped and why, in one place (it replaced the WAF engine and Forensics
+// pages). It reads, and never copies, three endpoints:
 //
 //   GET v1/waf/engine/summary      WAF hits: totals, top rules / IPs / vhosts, rows
 //   GET v1/webdet/history/events   every history event, newest first, paged
@@ -22,7 +22,13 @@ export const TABS = Object.freeze([
   Object.freeze({ key: "waf", label: "WAF log" }),
   Object.freeze({ key: "events", label: "Events" }),
   Object.freeze({ key: "overview", label: "Overview" }),
+  // Admin only: the analyze tools and the history store read box-wide data.
+  Object.freeze({ key: "tools", label: "Tools", admin: true }),
 ]);
+// tabsFor lists the tabs a session sees.
+export function tabsFor({ scoped } = {}) {
+  return TABS.filter((t) => !(t.admin && scoped));
+}
 export const DEFAULT_TAB = "waf";
 export function tab(key) {
   return TABS.some((t) => t.key === key) ? key : DEFAULT_TAB;
@@ -51,6 +57,8 @@ export const GROUPINGS = Object.freeze({
   rule: Object.freeze({ label: "rule", top: "top_rule_bases", param: "rule", head: "Rule family", n: 50, enrich: false }),
   ip: Object.freeze({ label: "address", top: "top_ips", param: "ip", head: "Address", n: 20, enrich: true }),
   host: Object.freeze({ label: "vhost", top: "top_hosts", param: "host", head: "Vhost", n: 50, enrich: false }),
+  // The country comes from the enrichment, so this one asks for it too.
+  country: Object.freeze({ label: "country", top: "top_countries", param: "country", head: "Country", n: 20, enrich: true }),
 });
 export const DEFAULT_GROUPING = "rule";
 export function grouping(key) {
@@ -100,7 +108,11 @@ export function groupRows(summary, by) {
   const list = Array.isArray(summary && summary[g.top]) ? summary[g.top] : [];
   const rows = Array.isArray(summary && summary.rows) ? summary.rows : [];
   const total = num(summary && summary.total_events);
-  const keyOf = (r) => (g.param === "rule" ? str(r.rule_base) : g.param === "ip" ? str(r.ip) : str(r.host).toLowerCase());
+  // The node's country key is the name, or the ISO code when it has no name.
+  const keyOf = (r) => (g.param === "rule" ? str(r.rule_base)
+    : g.param === "ip" ? str(r.ip)
+      : g.param === "country" ? (str(r.country).trim() || str(r.country_iso).trim().toUpperCase())
+        : str(r.host).toLowerCase());
   const seen = new Map();
   for (const r of rows) {
     const k = keyOf(r);
@@ -176,7 +188,7 @@ export function excludeOffer(row, { scoped } = {}) {
   return {
     path, host, ruleID: id,
     url: `v1/waf/exclude/add?${q.toString()}`,
-    confirm: `Let ${path} through WAF rule ${id} on ${host}?\n\nRequests to that path on that vhost skip this one rule until the exclude is removed (WAF engine page). Every other rule still applies.`,
+    confirm: `Let ${path} through WAF rule ${id} on ${host}?\n\nRequests to that path on that vhost skip this one rule until the exclude is removed (Exceptions page). Every other rule still applies.`,
   };
 }
 
@@ -253,6 +265,27 @@ export function eventDetail(ev) {
   const st = num(ev.status_code);
   if (st) parts.push(String(st));
   return parts.join(" · ");
+}
+
+// impossibleUA is the reason a solve's User-Agent contradicts itself, or "".
+export function impossibleUA(ev) {
+  const p = (ev && ev.payload && typeof ev.payload === "object") ? ev.payload : {};
+  return str(p.ua_impossible).trim();
+}
+
+// solveTime is the client's real solve latency of a challenge event ("1.3 s",
+// "420 ms"), or "" when the event carries none (never a fabricated zero).
+export function solveTime(ev) {
+  const p = (ev && ev.payload && typeof ev.payload === "object") ? ev.payload : {};
+  const ms = Number(p.solve_ms);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+}
+
+// eventUA is the event's User-Agent, or "".
+export function eventUA(ev) {
+  const p = (ev && ev.payload && typeof ev.payload === "object") ? ev.payload : {};
+  return str(p.ua).trim();
 }
 
 // ── shared ───────────────────────────────────────────────────────────────

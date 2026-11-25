@@ -108,26 +108,29 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
   </div>
   <div class="chip-row" role="group" aria-label="Kind of event">
     <button v-for="t in ptEventTypes" :key="t.key" type="button" class="chip" :class="{ on: ptEventType === t.key }" :aria-pressed="ptEventType === t.key ? 'true' : 'false'" @click="ptSetEventType(t.key)">{{ t.label }}</button>
+    <label class="muted" title="Of the page shown, only the solves whose User-Agent contradicts itself"><input type="checkbox" v-model="ptOnlyImpossibleUA" /> impossible UA only</label>
   </div>
   <p class="danger-text" v-if="ptEventsError">{{ ptEventsError }}</p>
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Time</th><th>Event</th><th>Vhost</th><th>Address</th><th>Network</th><th>What</th></tr></thead>
+      <thead><tr><th>Time</th><th>Event</th><th>Vhost</th><th>Address</th><th>Network</th><th>What</th><th>Solve</th><th>Browser</th></tr></thead>
       <tbody>
-        <tr v-for="ev in ptEvents" :key="ev.id">
+        <tr v-for="ev in ptEventsShown" :key="ev.id">
           <td class="muted pt-nowrap" :title="ptTime(ev.ts_unix)">{{ ptAge(ev.ts_unix) }}</td>
           <td><span class="pill" :class="ptEventTone(ev.event_type)">{{ ptEventLabel(ev.event_type) }}</span></td>
           <td>{{ ev.host || '–' }}</td>
           <td><button v-if="ev.ip" type="button" class="pt-link mono" @click="ptOpenIP(ev.ip, $event.currentTarget)">{{ ev.ip }}</button><span v-else class="muted">–</span></td>
           <td class="muted pt-nowrap">{{ ptWho(ev) }}</td>
           <td class="mono pt-uri" :title="ptEventDetail(ev)">{{ ptEventDetail(ev) }}</td>
+          <td class="pt-nowrap">{{ ptSolveTime(ev) || '–' }}</td>
+          <td class="muted pt-uri pt-uri-narrow" :title="ptEventUA(ev)"><span class="pill danger" v-if="ptImpossibleUA(ev)" :title="ptImpossibleUA(ev)">impossible</span> {{ ptEventUA(ev) || '–' }}</td>
         </tr>
-        <tr v-if="!ptEvents.length && !ptEventsError"><td colspan="6" class="muted">No event matches.</td></tr>
+        <tr v-if="!ptEventsShown.length && !ptEventsError"><td colspan="8" class="muted">No event matches.</td></tr>
       </tbody>
     </table>
   </div>
   <div class="toolbar wrap pt-pager">
-    <span class="muted">{{ ptEvents.length }} events, newest first{{ ptEventCursors.length ? ' · page ' + (ptEventCursors.length + 1) : '' }}</span>
+    <span class="muted">{{ ptEventsShown.length }} events, newest first{{ ptEventCursors.length ? ' · page ' + (ptEventCursors.length + 1) : '' }}</span>
     <span class="toolbar-gap"></span>
     <button type="button" class="btn-quiet" :disabled="!ptEventCursors.length" @click="ptEventsNewer">Newer</button>
     <button type="button" class="btn-quiet" :disabled="!ptEventNext" @click="ptEventsOlder">Older</button>
@@ -167,6 +170,34 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
 </section>
 </template>
 
+<!-- Tools (admin) -->
+<template v-if="ptTab === 'tools' && !isScoped">
+<section class="card wide">
+  <h2>Analyze a client or a vhost</h2>
+  <p class="muted">Reads the edge's own access log for one address or vhost (the offline analyze of <code>cfm webtop</code>).</p>
+  <div class="toolbar wrap">
+    <label class="muted" for="pt-an-target">Target</label>
+    <input id="pt-an-target" class="input input-wide" type="text" v-model.trim="analyzeTarget" placeholder="address or vhost" />
+    <label class="muted" for="pt-an-last">Last</label>
+    <input id="pt-an-last" class="input" type="text" v-model.trim="analyzeLast" placeholder="30m, 1h" />
+    <button type="button" class="btn-quiet" :disabled="analyzeLoading" @click="runAnalyze('ip')">Analyze address</button>
+    <button type="button" class="btn-quiet" :disabled="analyzeLoading" @click="runAnalyze('host')">Analyze vhost</button>
+  </div>
+  <pre class="pt-pre" v-if="analyzeResult">{{ rawAnalyzePretty }}</pre>
+</section>
+<section class="card wide">
+  <h2>History store</h2>
+  <p class="muted" v-if="!ptStore">The store's size could not be read.</p>
+  <template v-else>
+    <p class="muted">{{ ptCount(ptStore.events) }} events from {{ ptCount(ptStore.unique_ips) }} addresses on {{ ptCount(ptStore.unique_hosts) }} vhosts, {{ ptBytes(ptStore.size_bytes) }}, kept {{ ptStore.retention_days }} days. <span class="mono">{{ ptStore.path }}</span></p>
+  </template>
+  <div class="toolbar wrap">
+    <button type="button" class="btn-quiet" :disabled="ptStoreBusy" @click="ptPruneHistory(30)">Prune older than 30 days</button>
+    <button type="button" class="btn-danger" :disabled="ptStoreBusy" @click="ptTruncateHistory">Delete all history</button>
+  </div>
+</section>
+</template>
+
 <!-- The address panel -->
 <div class="pt-panel-backdrop" v-if="ptPanelIP" @click.self="ptCloseIP">
   <aside ref="ptPanelEl" class="pt-panel" role="dialog" aria-modal="true" aria-labelledby="pt-panel-title">
@@ -180,6 +211,14 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
     </div>
     <p class="muted" v-if="!ptPanel">Loading…</p>
     <template v-else>
+      <template v-if="ptPanel.live">
+        <h3 class="pt-h3">Right now</h3>
+        <p class="muted" v-if="!ptPanel.live.req">No request from it in the live window.</p>
+        <template v-else>
+          <p>{{ ptCount(ptPanel.live.req) }} requests on {{ ptCount(ptPanel.live.vhosts) }} vhost{{ ptPanel.live.vhosts === 1 ? '' : 's' }} in the last {{ Math.round(ptPanel.live.window_sec || 0) }} s.</p>
+          <div class="chip-row"><span v-for="h in ptPanelLiveHosts" :key="h.key" class="pill">{{ h.key }} {{ h.count }}</span></div>
+        </template>
+      </template>
       <h3 class="pt-h3">WAF, this window</h3>
       <p class="danger-text" v-if="!ptPanel.waf">Its WAF hits could not be read.</p>
       <template v-else>
@@ -222,6 +261,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
       <div class="toolbar wrap pt-pager">
         <button type="button" class="btn-quiet" @click="ptShowEventsOf(ptPanelIP)">All its events</button>
         <button type="button" class="btn-quiet" @click="ptFilterWAFBy(ptPanelIP)">Filter the WAF log by it</button>
+        <button v-if="!isScoped" type="button" class="btn-quiet" @click="ptAnalyzeIP(ptPanelIP)">Analyze it</button>
       </div>
     </template>
   </aside>

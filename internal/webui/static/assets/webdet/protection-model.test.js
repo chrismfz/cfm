@@ -26,6 +26,8 @@ test("tabs, windows and groupings fall back to their defaults", () => {
   assert.equal(M.windowOf(5).hours, 24);
   assert.equal(M.grouping("ip"), "ip");
   assert.equal(M.grouping("__proto__"), "rule");
+  assert.deepEqual(M.tabsFor({ scoped: true }).map((t) => t.key), ["waf", "events", "overview"], "the Tools tab is the admin's");
+  assert.equal(M.tabsFor({}).length, 4);
 });
 
 test("wafQuery clamps and carries only the filters set", () => {
@@ -34,7 +36,7 @@ test("wafQuery clamps and carries only the filters set", () => {
   assert.equal(M.wafQuery(), "v1/waf/engine/summary?hours=24&limit=200&top=50");
   assert.equal(M.wafQuery({ enrich: true, top: 5 }), "v1/waf/engine/summary?hours=24&limit=200&top=5&enrich=1");
   // A PTR lookup per top address: only the address grouping asks, for few.
-  assert.deepEqual(Object.entries(M.GROUPINGS).filter(([, g]) => g.enrich).map(([k, g]) => [k, g.n]), [["ip", 20]]);
+  assert.deepEqual(Object.entries(M.GROUPINGS).filter(([, g]) => g.enrich).map(([k, g]) => [k, g.n]), [["ip", 20], ["country", 20]]);
 });
 
 test("groupRows: exact counts from the node's top list, tier and last hit from the recent requests", () => {
@@ -58,6 +60,8 @@ test("groupRows: exact counts from the node's top list, tier and last hit from t
   const hosts = M.groupRows(SUMMARY, "host");
   assert.equal(hosts[0].key, "Shop.Example.gr");
   assert.equal(hosts[0].tiers.length, 3, "vhosts match whatever their case");
+  const cc = M.groupRows({ ...SUMMARY, top_countries: [{ key: "Greece", count: 900 }, { key: "DE", count: 100 }], rows: [row({ country: "Greece" }), row({ country: "", country_iso: "de", action: "logonly" })] }, "country");
+  assert.deepEqual(cc.map((x) => [x.key, x.tiers]), [["Greece", ["block"]], ["DE", ["logonly"]]], "the name, or the ISO code when the node has no name");
   assert.deepEqual(M.groupRows(null, "rule"), []);
 });
 
@@ -105,6 +109,13 @@ test("events: the query, the cursor and the labels", () => {
   assert.equal(M.eventTone("challenge_solved"), "ok");
   assert.equal(M.eventDetail({ reason: "WAF_RCE:PHP_BODY", status_code: 403, payload: { method: "post", uri: "/x" } }), "WAF_RCE:PHP_BODY · POST /x · 403");
   assert.equal(M.eventDetail({ reason: "", payload: "not an object" }), "");
+  assert.equal(M.solveTime({ payload: { solve_ms: 420 } }), "420 ms");
+  assert.equal(M.solveTime({ payload: { solve_ms: 1300 } }), "1.3 s");
+  assert.equal(M.solveTime({ payload: { ms: 3 } }), "", "the server's verify time is not the solve time");
+  assert.equal(M.solveTime({}), "");
+  assert.equal(M.impossibleUA({ payload: { ua_impossible: "Windows + iPhone" } }), "Windows + iPhone");
+  assert.equal(M.impossibleUA({ payload: null }), "");
+  assert.equal(M.eventUA({ payload: { ua: " Mozilla/5.0 " } }), "Mozilla/5.0");
 });
 
 // The filter chips name history types: each must be one the daemon writes.

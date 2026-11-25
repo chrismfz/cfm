@@ -57,7 +57,7 @@ export function triggerLabel(t) {
 
 // Deep links into the pages that edit each setting. Every one of them takes
 // ?vhost= (Vhost controls, Traffic rules, Site cache and ClamAV filter on it);
-// the WAF engine page takes ?host=.
+// the Protection page takes ?host=.
 export function editURL(page, host) {
   const h = encodeURIComponent(str(host));
   switch (page) {
@@ -65,7 +65,7 @@ export function editURL(page, host) {
     case "rules": return `/cfm-admin/webdetector/rules/?vhost=${h}`;
     case "site-cache": return `/cfm-admin/webdetector/site-cache/?vhost=${h}`;
     case "clam": return `/cfm-admin/webdetector/clam/?vhost=${h}`;
-    case "waf": return `/cfm-admin/webdetector/waf/?host=${h}`;
+    case "waf": return `/cfm-admin/webdetector/protection/?tab=waf&host=${h}`;
     case "traffic": return "/cfm-admin/webdetector/traffic/";
   }
   return "";
@@ -126,7 +126,7 @@ export function wafTile(p) {
   const c = (p && p.controls) || {};
   const host = str(p && p.host);
   const ex = arr(p && p.waf_excludes);
-  const out = { key: "waf", title: "WAF", pills: [], why: "", inherited: false, edit: { label: "WAF engine", href: editURL("waf", host) } };
+  const out = { key: "waf", title: "WAF", pills: [], why: "", inherited: false, edit: { label: "WAF log", href: editURL("waf", host) } };
   if (c.waf_enabled === false) {
     const v = str(c.waf_matched_exclude);
     out.pills.push(pill("Off", "danger"));

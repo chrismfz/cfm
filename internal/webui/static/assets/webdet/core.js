@@ -82,11 +82,8 @@ export function createWebdetApp(config) {
       hasScopedVhosts() { return this.isScoped && this.allowedVhosts.length > 0; },
       isOverviewPage() { return this.pageMode === "overview"; },
       isVhostPage() { return this.pageMode === "vhost"; },
-      isForensicsPage() { return this.pageMode === "forensics"; },
-      isWAFPage() { return this.pageMode === "waf"; },
       isControlsPage() { return this.pageMode === "controls"; },
       isRulesPage() { return this.pageMode === "rules"; },
-      isChallengeAccessPage() { return this.pageMode === "challenge-access"; },
       isSiteCachePage() { return this.pageMode === "site-cache"; },
       isTokensPage() { return this.pageMode === "tokens"; },
       lastRefreshLabel() {
@@ -95,12 +92,10 @@ export function createWebdetApp(config) {
       },
       pageTitle() {
         if (this.isVhostPage) return "WebDetector / vhost";
-        if (this.isForensicsPage) return "WebDetector / forensics";
-        if (this.isWAFPage) return "WebDetector / WAF engine";
         if (this.pageMode === "protection") return "WebDetector / protection";
+        if (this.pageMode === "exceptions") return "WebDetector / exceptions";
         if (this.isControlsPage) return "WebDetector / vhost controls";
         if (this.isRulesPage) return "WebDetector / traffic rules";
-        if (this.isChallengeAccessPage) return "WebDetector / challenge access";
         if (this.isSiteCachePage) return "WebDetector / site cache";
         if (this.isTokensPage) return "System / API tokens";
         return "WebDetector / overview";
@@ -141,10 +136,15 @@ export function createWebdetApp(config) {
         if (!h) return "/cfm-admin/webdetector/vhost/";
         return `/cfm-admin/webdetector/vhost/?host=${encodeURIComponent(h)}`;
       },
-      forensicsURL(host) {
+      // The history of a vhost (or an address) is the Protection page's
+      // Events tab; "forensics" in these names is the page it replaced.
+      forensicsURL(host, ip = "") {
+        const q = new URLSearchParams({ tab: "events" });
         const h = String(host || "").trim();
-        if (!h) return "/cfm-admin/webdetector/forensics/";
-        return `/cfm-admin/webdetector/forensics/?host=${encodeURIComponent(h)}`;
+        const i = String(ip || "").trim();
+        if (h) q.set("host", h);
+        if (i) q.set("ip", i);
+        return `/cfm-admin/webdetector/protection/?${q.toString()}`;
       },
       openVhostLive(host, newTab = true) {
         const h = String(host || "").trim();
@@ -161,39 +161,13 @@ export function createWebdetApp(config) {
         else window.location.href = url;
       },
       openHistoryPage(host = "", ip = "") {
-        const url = new URL("/cfm-admin/webdetector/forensics/", window.location.origin);
-        const h = String(host || "").trim();
-        const i = String(ip || "").trim();
-        if (h) url.searchParams.set("host", h);
-        if (i) url.searchParams.set("ip", i);
-        url.hash = "history-card";
-        window.location.href = `${url.pathname}${url.search}${url.hash}`;
+        window.location.href = this.forensicsURL(host, ip);
       },
-      jumpToHistory() {
-        const el = document.getElementById("history-card");
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      historyForHost(host) {
+        if (host) this.openHistoryPage(host, "");
       },
-      async historyForHost(host) {
-        if (!host) return;
-        if (!this.shouldShow("history")) {
-          this.openHistoryPage(host, "");
-          return;
-        }
-        this.historyHost = host;
-        this.historyIP = "";
-        await this.refreshHistory?.();
-        this.jumpToHistory();
-      },
-      async historyForIP(ip) {
-        if (!ip) return;
-        if (!this.shouldShow("history")) {
-          this.openHistoryPage(this.activeHost || "", ip);
-          return;
-        }
-        this.historyIP = ip;
-        if (!this.historyHost) this.historyHost = this.activeHost || "";
-        await this.refreshHistory?.();
-        this.jumpToHistory();
+      historyForIP(ip) {
+        if (ip) this.openHistoryPage(this.activeHost || "", ip);
       },
 
       // ── Formatting ────────────────────────────────────────────────────
@@ -354,8 +328,6 @@ export function createWebdetApp(config) {
           if (document.getElementById("cfm-vhost-list")) this.refreshKnownVhosts();
           await this.refreshLists?.();
           if (this.shouldShow("excludes")) await this.refreshExcludeLists?.();
-          if (this.shouldShow("history")) await this.refreshHistory?.();
-          if (this.shouldShow("wafengine")) await this.refreshWAFEngine?.();
           if (this.shouldShow("protection")) await this.refreshProtection?.();
           if (this.shouldShow("controls")) await this.refreshVhostControls?.();
           if (this.shouldShow("rules")) await this.refreshRules?.();
@@ -402,7 +374,6 @@ export function createWebdetApp(config) {
         const firstHost = this.allowedVhosts[0];
         if ("vhostFocusHost" in this.$data && !this.vhostFocusHost) this.vhostFocusHost = firstHost;
         if ("vhostOverviewHost" in this.$data && !this.vhostOverviewHost) this.vhostOverviewHost = firstHost;
-        if ("historyHost" in this.$data && !this.historyHost) this.historyHost = firstHost;
         if ("ruleForm" in this.$data) this.ruleForm.vhosts = this.allowedVhosts.join(", ");
         if ("simulateForm" in this.$data && !this.simulateForm.host) this.simulateForm.host = firstHost;
       },
@@ -488,9 +459,9 @@ export function createWebdetApp(config) {
       // keys the page's mixins actually declare are loaded/saved.
       const PERSIST_KEYS = [
         "refreshIntervalSec", "topShortLimit", "longTopLimit", "ipShortLimit",
-        "hotIPsLimit", "wafHours", "wafEventLimit", "wafTopN",
+        "hotIPsLimit",
         "vhostControlsLimit", "vhostTopIPLimit", "vhostTopPathLimit",
-        "challengeTTL", "blockTTL", "historyType", "scSortKey", "scSortDir",
+        "challengeTTL", "blockTTL", "scSortKey", "scSortDir",
       ];
       const prefsKey = `cfm-prefs:${pageMode}`;
       try {
@@ -508,7 +479,6 @@ export function createWebdetApp(config) {
 
       const currentURL = new URL(window.location.href);
       const qHost = currentURL.searchParams.get("host");
-      const qIP = currentURL.searchParams.get("ip");
 
       if (this.isVhostPage && qHost && "vhostFocusHost" in this.$data) {
         this.vhostFocusHost = qHost.trim();
@@ -520,13 +490,6 @@ export function createWebdetApp(config) {
         const qVhost = (currentURL.searchParams.get("vhost") || qHost || "").trim();
         if (qVhost) this.rulesSearch = qVhost.split(",")[0].trim();
       }
-      if ((this.isForensicsPage || this.isWAFPage) && qHost && "historyHost" in this.$data) {
-        this.historyHost = qHost.trim();
-      }
-      if ((this.isForensicsPage || this.isWAFPage) && qIP && "historyIP" in this.$data) {
-        this.historyIP = qIP.trim();
-      }
-
       if (!this.tokenBootLogged) {
         console.info("[cfm-webui] token_present_at_boot", { present: Boolean(controller.getToken()) });
         this.tokenBootLogged = true;
@@ -583,10 +546,6 @@ export function createWebdetApp(config) {
       }, firstCheckDelayMs);
 
       if (this.autoRefresh) this.startAutoRefresh();
-
-      if (this.isForensicsPage && currentURL.hash === "#history-card") {
-        setTimeout(() => this.jumpToHistory(), 120);
-      }
     },
 
     beforeUnmount() {

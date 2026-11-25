@@ -242,6 +242,6 @@ test("security tiles and WAF rule rows from history/vhost-overview", () => {
 
 test("edit links carry the host as each page expects it", () => {
   assert.equal(editURL("rules", "a.com"), "/cfm-admin/webdetector/rules/?vhost=a.com");
-  assert.equal(editURL("waf", "a.com"), "/cfm-admin/webdetector/waf/?host=a.com");
+  assert.equal(editURL("waf", "a.com"), "/cfm-admin/webdetector/protection/?tab=waf&host=a.com");
   assert.equal(editURL("site-cache", "*.a.com"), "/cfm-admin/webdetector/site-cache/?vhost=*.a.com");
 });

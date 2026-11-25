@@ -2,7 +2,7 @@
   // Nav items a scoped (per-vhost cPanel/DA) user must NOT see: they are
   // server-wide/admin-only (global dashboard, global UA-emergency "Web Bots",
   // notifier/detectors config, settings, debug). Everything else (WebDetector,
-  // Vhost live/Forensics, WAF engine, Vhost controls, MySQL governor) is
+  // Vhost live, Protection, Exceptions, Vhost controls, MySQL governor) is
   // scope-filtered server-side and stays visible. Backends already fail-closed
   // (403) on these paths; this just hides the dead links from scoped users.
   // The daemon also redirects a scoped user who opens one of these pages to

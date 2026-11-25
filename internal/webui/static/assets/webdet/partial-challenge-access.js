@@ -1,0 +1,272 @@
+// The Challenge access markup (feature-challenge-access.js holds its state).
+// It was the body of its own page; it is now the "Trusted clients" tab of
+// the Exceptions page (partial-exceptions.js wraps it). A template literal:
+// no backtick, dollar-brace or backslash inside.
+
+export const CHALLENGE_ACCESS_PARTIAL = `      <section class="card wide">
+        <h2>Challenge Access</h2>
+        <p class="muted">
+          A per-vhost / global allow-list that lets specific requests through the
+          interactive challenge — by <strong>country</strong>, <strong>URL path</strong>,
+          <strong>user-agent</strong>, <strong>IP / range</strong>, <strong>ASN</strong>
+          or <strong>verified crawler</strong>. The surgical companion to the coarse
+          <a href="/cfm-admin/webdetector/controls/">challenge on/off</a> toggle.
+        </p>
+        <div class="callout-row">
+          <div class="callout">
+            <strong>Exempts the challenge only.</strong> A match downgrades a would-be
+            challenge to <em>allow</em>. It does <em>not</em> bypass the WAF
+            (SQLi/RCE/upload/webshell → 403) or an IP block — those stay armed.
+          </div>
+          <div class="callout">
+            <strong>Fails open.</strong> An unknown country or ASN never matches, so a
+            geo/enrich hiccup can neither grant nor deny an exemption.
+          </div>
+          <div class="callout warn">
+            <strong>DNAT note.</strong> Path / UA / country conditions apply in in-path
+            (OpenResty / Angie) mode; in DNAT mode only IP / ASN / host-level intent
+            takes effect (a flagged IP is redirected before the in-path decision).
+          </div>
+        </div>
+      </section>
+
+      <section class="card wide" v-if="shouldShow('challenge_access')">
+        <datalist id="cfm-vhost-list"><option v-for="h in knownVhosts" :key="h" :value="h"></option></datalist>
+
+        <div class="toolbar wrap">
+          <button :class="caEditorMode === 'editor' ? '' : 'btn-quiet'" @click="setCAEditorMode('editor')">{{ caEditID ? 'Edit exemption' : 'New exemption' }}</button>
+          <button :class="caEditorMode === 'recipes' ? '' : 'btn-quiet'" @click="setCAEditorMode('recipes')">Recipes</button>
+        </div>
+
+        <!-- ── Recipes ─────────────────────────────────────────────────── -->
+        <div v-if="caEditorMode === 'recipes'" class="recipes-pane">
+          <p class="muted">A recipe creates a ready-made exemption for a common case — pick one, fill the blanks, review, create. Created entries are tagged <code>recipe:&lt;name&gt;</code> so they group in the list.</p>
+          <div class="recipe-grid">
+            <button v-for="r in caRecipes" :key="r.key" class="recipe-card" :class="{ selected: caRecipeKey === r.key }" @click="selectCARecipe(r.key)">
+              <span class="recipe-title">{{ r.title }}</span>
+              <span class="recipe-desc muted">{{ r.description }}</span>
+            </button>
+          </div>
+
+          <section class="mini-card recipe-detail" v-if="caSelectedRecipe">
+            <h3>{{ caSelectedRecipe.title }}</h3>
+            <p class="muted">{{ caSelectedRecipe.description }}</p>
+            <div class="form-grid">
+              <template v-for="v in caSelectedRecipe.vars" :key="v.key">
+                <label :for="'ca-recipe-var-' + v.key">{{ v.label }}</label>
+                <input :id="'ca-recipe-var-' + v.key" class="input" type="text" v-model.trim="caRecipeVars[v.key]"
+                  :placeholder="v.placeholder || v.default || ''" :list="v.type === 'vhosts' ? 'cfm-vhost-list' : null" />
+              </template>
+            </div>
+            <ul class="msg-list errors" v-if="caRecipeVarErrors.length"><li v-for="e in caRecipeVarErrors" :key="e">{{ e }}</li></ul>
+
+            <div class="table-wrap" v-if="caRecipePreview.length">
+              <table class="mini-table">
+                <thead><tr><th>#</th><th>On</th><th>Vhosts</th><th>Exempts</th><th>Note</th></tr></thead>
+                <tbody>
+                  <tr v-for="(p, i) in caRecipePreview" :key="i">
+                    <td>{{ i + 1 }}</td>
+                    <td><span class="pill ok">on</span></td>
+                    <td><code>{{ caScopeLabel(p.scope.vhosts) }}</code></td>
+                    <td>{{ caMatchSummary(p) }}</td>
+                    <td class="muted">{{ p.note }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <ul class="msg-list warnings" v-if="caSelectedRecipe.warnings && caSelectedRecipe.warnings.length">
+              <li v-for="w in caSelectedRecipe.warnings" :key="w">{{ w }}</li>
+            </ul>
+            <div class="toolbar">
+              <button :disabled="caBusy || !caRecipePreview.length" @click="createCARecipe">Create exemption</button>
+              <button class="btn-quiet" :disabled="caRecipePreview.length !== 1" @click="loadCARecipeIntoEditor">Load into editor</button>
+            </div>
+          </section>
+        </div>
+
+        <div class="exclude-grid" v-if="caEditorMode === 'editor'">
+          <!-- ── Editor ─────────────────────────────────────────────────── -->
+          <section class="mini-card rule-editor">
+            <h3>{{ caEditID ? 'Edit exemption ' + caEditID : 'New exemption' }}</h3>
+
+            <div class="review-box">
+              <div class="rule-sentence"><span class="pill ok">exempt from challenge</span> the request when it matches the conditions below.</div>
+            </div>
+
+            <!-- Step 1 — conditions -->
+            <div class="step-title">1 · Which requests?</div>
+            <div class="chip-row">
+              <span class="muted">Add a condition:</span>
+              <button type="button" class="chip" :class="{ on: caChips.paths }" @click="toggleCAChip('paths')">Endpoint / path</button>
+              <button type="button" class="chip" :class="{ on: caChips.uas }" @click="toggleCAChip('uas')">User-Agent / bot</button>
+              <button type="button" class="chip" :class="{ on: caChips.countries }" @click="toggleCAChip('countries')">Country</button>
+              <button type="button" class="chip" :class="{ on: caChips.ips }" @click="toggleCAChip('ips')">IP / range</button>
+              <button type="button" class="chip" :class="{ on: caChips.asns }" @click="toggleCAChip('asns')">ASN</button>
+              <button type="button" class="chip" :class="{ on: caChips.vbot }" @click="toggleCAChip('vbot')">Verified crawler</button>
+              <button type="button" class="chip" :class="{ on: caChips.methods }" @click="toggleCAChip('methods')">Method</button>
+            </div>
+
+            <div class="form-grid">
+              <template v-if="caChips.paths">
+                <label for="ca-paths">Paths</label>
+                <input id="ca-paths" class="input" type="text" v-model.trim="caForm.paths" placeholder="*/google.xml, /wp-json/wc/*, /webhook" />
+                <p class="muted form-hint">Comma-separated. A plain value is a <strong>prefix</strong>; use <code>*</code> for globs (it crosses <code>/</code>, so <code>*/google.xml</code> matches a deep feed path).</p>
+              </template>
+
+              <template v-if="caChips.uas">
+                <label for="ca-uas">User-Agent</label>
+                <input id="ca-uas" class="input" type="text" v-model.trim="caForm.uas" placeholder="*google-xrawler*, *facebookexternalhit*" />
+                <p class="muted form-hint">
+                  Case-insensitive; a value without <code>*</code> is a substring match. UA is client-controlled — prefer <em>Verified crawler</em> or <em>ASN</em> for search bots. Quick add:
+                  <button type="button" class="chip mini" v-for="g in caBotGroups" :key="g.key" @click="addCABotGroup(g.key)" :title="g.hint">+ {{ g.label }}</button>
+                </p>
+              </template>
+
+              <template v-if="caChips.countries">
+                <label for="ca-countries">Country</label>
+                <div class="inline-field">
+                  <select id="ca-countries-mode" class="input input-mode" v-model="caForm.countriesMode">
+                    <option value="in">is one of</option>
+                    <option value="not_in">is NOT one of</option>
+                  </select>
+                  <input id="ca-countries" class="input" type="text" v-model.trim="caForm.countries" placeholder="GR, CY" />
+                </div>
+                <p class="muted form-hint">ISO 3166-1 alpha-2 codes. An <em>unknown</em> country never matches (fail-open), in either mode.</p>
+              </template>
+
+              <template v-if="caChips.ips">
+                <label for="ca-ips">IP / range</label>
+                <input id="ca-ips" class="input" type="text" v-model.trim="caForm.ips" placeholder="203.0.113.0/24, 198.51.100.7, 2001:db8::/48" />
+                <p class="muted form-hint">IPv4 / IPv6 addresses or CIDR ranges, comma-separated. Works in DNAT mode too.</p>
+              </template>
+
+              <template v-if="caChips.asns">
+                <label for="ca-asns">ASN</label>
+                <input id="ca-asns" class="input" type="text" v-model.trim="caForm.asns" placeholder="AS15169, AS8075" />
+                <p class="muted form-hint">Origin ASN of the client IP (BGP-derived, not spoofable) — e.g. <code>AS15169</code> for Google. Broad on its own (clouds host attackers too); pair with a path or <em>Verified crawler</em>. An unresolved ASN never matches.</p>
+              </template>
+
+              <template v-if="caChips.vbot">
+                <label>Verified crawler</label>
+                <p class="muted form-hint" style="grid-column: 2"><label class="form-check"><input type="checkbox" v-model="caForm.verifiedBot" /> only requests whose IP reverse-DNS forward-confirms as {{ caVerifiedBotLabel }}</label> — what the client <em>is</em>, not what it says. Unlike traffic-rule allows, this also covers Google's Translate/AMP/Feedfetcher proxies (they cannot solve a challenge either).</p>
+              </template>
+
+              <template v-if="caChips.methods">
+                <label>Methods</label>
+                <div class="chip-row">
+                  <button type="button" class="chip mini" v-for="m in caKnownMethods" :key="m" :class="{ on: caMethodOn(m) }" @click="toggleCAMethod(m)">{{ m }}</button>
+                </div>
+              </template>
+            </div>
+
+            <!-- Step 2 — where -->
+            <div class="step-title">2 · Where?</div>
+            <div class="form-grid">
+              <label for="ca-vhosts">Vhosts</label>
+              <input id="ca-vhosts" class="input" type="text" v-model.trim="caForm.vhosts" placeholder="example.com, *.example.com" list="cfm-vhost-list" />
+              <label for="ca-enabled">Enabled</label>
+              <label class="muted form-check"><input id="ca-enabled" type="checkbox" v-model="caForm.enabled" /> active immediately after save</label>
+              <label for="ca-note">Note</label>
+              <input id="ca-note" class="input" type="text" v-model.trim="caForm.note" placeholder="Why this exemption exists" />
+            </div>
+
+            <!-- Review -->
+            <div class="review-box">
+              <div class="rule-sentence">{{ caReviewSentence }}</div>
+              <ul class="msg-list errors" v-if="caValidation.errors.length"><li v-for="e in caValidation.errors" :key="e">{{ e }}</li></ul>
+              <ul class="msg-list warnings" v-if="caValidation.warnings.length"><li v-for="w in caValidation.warnings" :key="w">{{ w }}</li></ul>
+            </div>
+
+            <div class="toolbar">
+              <button :disabled="!canSaveCA" @click="saveCA">{{ caEditID ? 'Update exemption' : (caForm.enabled ? 'Save & enable' : 'Save disabled') }}</button>
+              <button class="btn-quiet" @click="prefillCASimFromForm" title="Fill the simulator with a request this exemption should match and run it">Test in simulator</button>
+              <button class="btn-quiet" @click="resetCAForm">Clear</button>
+            </div>
+          </section>
+
+          <!-- ── Simulator ──────────────────────────────────────────────── -->
+          <section class="mini-card">
+            <h3>Simulator</h3>
+            <p class="muted">Checks a request against <strong>your Challenge Access exemptions</strong> (a flat allow-list: any enabled entry that matches wins; conditions AND'd, values OR'd). Country / ASN are resolved from the IP when left blank; the verified-crawler verdict is FCrDNS-checked (or override it below). Note: the edge <em>also</em> applies the built-in verified-crawler exemption before these, so a real crawler may pass even with no entry here.</p>
+            <div class="form-grid">
+              <label for="ca-sim-host">Host</label>
+              <input id="ca-sim-host" class="input" type="text" v-model.trim="caSim.host" placeholder="shop.example.com" list="cfm-vhost-list" />
+              <label for="ca-sim-ip">IP</label>
+              <input id="ca-sim-ip" class="input" type="text" v-model.trim="caSim.ip" placeholder="74.125.76.1 (fills country/ASN when blank)" />
+              <label for="ca-sim-path">Path</label>
+              <input id="ca-sim-path" class="input" type="text" v-model.trim="caSim.path" placeholder="/wp-content/plugins/woofeed/files/google.xml" />
+              <label for="ca-sim-ua">UA</label>
+              <input id="ca-sim-ua" class="input" type="text" v-model.trim="caSim.ua" placeholder="google-xrawler" />
+              <label for="ca-sim-method">Method</label>
+              <input id="ca-sim-method" class="input input-small" type="text" v-model.trim="caSim.method" placeholder="GET" />
+              <label for="ca-sim-country">Country</label>
+              <input id="ca-sim-country" class="input input-small" type="text" v-model.trim="caSim.country" placeholder="US" />
+              <label for="ca-sim-asn">ASN</label>
+              <input id="ca-sim-asn" class="input input-small" type="text" v-model.trim="caSim.asn" placeholder="15169 (or from IP)" />
+              <label for="ca-sim-qs">Query</label>
+              <input id="ca-sim-qs" class="input" type="text" v-model.trim="caSim.qs" placeholder="a=b&amp;c=d (for has_qs / qs entries)" />
+              <label for="ca-sim-vbot">Crawler</label>
+              <label class="muted form-check"><input id="ca-sim-vbot" type="checkbox" v-model="caSim.verifiedBot" /> treat as a verified crawler (override; unticked = resolve the IP's reverse DNS)</label>
+            </div>
+            <div class="toolbar">
+              <button @click="runCASimulation">Run simulation</button>
+            </div>
+            <p class="muted" v-if="caSimNote">{{ caSimNote }}</p>
+            <div class="review-box" v-if="caSimResult">
+              <div class="rule-sentence" v-if="caSimResult.exempted">
+                <span class="pill ok">exempted</span> by <code>{{ caSimResult.entry && caSimResult.entry.id }}</code> — {{ caSimResultSummary() }}
+              </div>
+              <div class="rule-sentence" v-else>
+                <span class="pill warn">challenged</span> no exemption matches this request.
+                <span class="muted">Only <strong>saved + enabled</strong> exemptions are evaluated — save / enable an entry first if you just added or disabled it.</span>
+              </div>
+              <p class="muted" v-if="!caSimResult.exempted && caSimResult.verified_bot && !caSimResult.verified_bot_override">This IP verifies as <code>{{ caSimResult.verified_bot }}</code> — the edge's built-in verified-crawler exemption would still let it through (applied separately, not shown here).</p>
+              <p class="muted">Resolved: country <code>{{ caSimResult.country || '—' }}</code>, ASN <code>{{ caSimResult.asn ? 'AS' + caSimResult.asn : '—' }}</code>, crawler <code>{{ caSimResult.verified_bot || '—' }}</code><span v-if="caSimResult.verified_bot_inconclusive"> ({{ caSimResult.verified_bot_inconclusive }})</span>.</p>
+            </div>
+            <p class="muted" style="margin-top:10px">Verified-crawler defaults (Googlebot / Bing / Meta via FCrDNS) live in <code>/etc/cfm/webdetector_challenge_exclude.txt</code>. To keep a WAF rule off a path instead, use <a href="/cfm-admin/webdetector/waf/">WAF excludes</a>.</p>
+          </section>
+        </div>
+
+        <p class="statusline" v-if="actionMsg">{{ actionMsg }}</p>
+
+        <!-- ── List ─────────────────────────────────────────────────────── -->
+        <div class="toolbar wrap">
+          <label for="ca-vhost-filter">Vhost</label>
+          <select id="ca-vhost-filter" class="input" v-model="caVhostFilter" title="Show only exemptions scoped to this vhost">
+            <option value="">all vhosts</option>
+            <option v-for="h in caVhostOptions" :key="h" :value="h">{{ h }}</option>
+          </select>
+          <label for="ca-search">Search</label>
+          <input id="ca-search" class="input input-wide" type="text" v-model.trim="caSearch" placeholder="vhost / condition / note / id" />
+          <span class="muted">{{ caFiltered.length }} / {{ caEntries.length }} shown</span>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>On</th><th>Vhosts</th><th>Exempts</th><th>Note</th><th>ID</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in caFiltered" :key="row.id" :class="{ 'row-off': !row.enabled, 'row-editing': caEditID === row.id }">
+                <td>
+                  <button class="btn-quiet btn-sm" :class="row.enabled ? 'toggle-on' : 'toggle-off'" :disabled="caBusy" @click="toggleCAEnabled(row)" :title="row.enabled ? 'Active — click to disable' : 'Disabled — click to enable'">{{ row.enabled ? 'on' : 'off' }}</button>
+                </td>
+                <td><code>{{ caScopeLabel(row.scope?.vhosts) }}</code></td>
+                <td>{{ caMatchSummary(row) }}</td>
+                <td>
+                  <span class="pill info" v-if="caRecipeOf(row)" :title="'Created by recipe ' + caRecipeOf(row)">recipe:{{ caRecipeOf(row) }}</span>
+                  {{ caNoteText(row) || (caRecipeOf(row) ? '' : '-') }}
+                </td>
+                <td><code class="muted">{{ row.id }}</code></td>
+                <td class="actions-cell">
+                  <button class="btn-quiet btn-sm" @click="testCARow(row)" title="Run the simulator with a request this exemption should match">Test</button>
+                  <button class="btn-quiet btn-sm" @click="loadCAIntoForm(row)">Edit</button>
+                  <button class="btn-quiet btn-sm" @click="duplicateCA(row)">Duplicate</button>
+                  <button class="btn-quiet btn-sm btn-danger" :disabled="caBusy" @click="removeCA(row)">Delete</button>
+                </td>
+              </tr>
+              <tr v-if="!caFiltered.length"><td colspan="6" class="muted">{{ caEntries.length ? 'No exemptions match the filter.' : 'No challenge exemptions configured.' }}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>`;

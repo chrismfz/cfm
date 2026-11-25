@@ -42,15 +42,13 @@ const MENU_GROUPS = [
     { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },
     { label: "Vhost", href: "/cfm-admin/webdetector/vhost/", icon: "globe" },
     { label: "Protection", href: "/cfm-admin/webdetector/protection/", icon: "shield" },
-    { label: "Forensics", href: "/cfm-admin/webdetector/forensics/", icon: "search" },
     { label: "Web Traffic", href: "/cfm-admin/webdetector/traffic/", icon: "bot" },
   ]},
   { title: "Rules & engine", items: [
     { label: "Firewall", href: "/cfm-admin/firewall/", icon: "ban" },
-    { label: "WAF engine", href: "/cfm-admin/webdetector/waf/", icon: "shield" },
     { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
     { label: "Traffic rules", href: "/cfm-admin/webdetector/rules/", icon: "funnel" },
-    { label: "Challenge access", href: "/cfm-admin/webdetector/challenge-access/", icon: "pass" },
+    { label: "Exceptions", href: "/cfm-admin/webdetector/exceptions/", icon: "pass" },
     { label: "Site cache", href: "/cfm-admin/webdetector/site-cache/", icon: "bolt" },
     { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "virus" },
   ]},
@@ -87,7 +85,7 @@ function normalizePathname(pathname) {
 }
 
 // Active item = the LONGEST href that prefixes the current path, so
-// /webdetector/waf/ lights up "WAF engine" and not also "WebDetector".
+// /webdetector/protection/ lights up "Protection" and not also "WebDetector".
 function activeHref(pathname) {
   const path = normalizePathname(pathname);
   let best = null;
@@ -262,7 +260,9 @@ function hostActions(host) {
   const h = encodeURIComponent(host);
   return [
     { label: `Vhost: ${host}`, hint: "What applies, traffic, live", href: `/cfm-admin/webdetector/vhost/?host=${h}` },
-    { label: `History for ${host}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?host=${h}#history-card` },
+    { label: `Events for ${host}`, hint: "Protection", href: `/cfm-admin/webdetector/protection/?tab=events&host=${h}` },
+    { label: `WAF log for ${host}`, hint: "Protection", href: `/cfm-admin/webdetector/protection/?tab=waf&host=${h}` },
+    { label: `Exceptions for ${host}`, hint: "WAF / challenge excludes", href: `/cfm-admin/webdetector/exceptions/?host=${h}` },
     { label: `Controls for ${host}`, hint: "WAF / Challenge / HTTP3 / Clam", href: `/cfm-admin/webdetector/controls/?vhost=${h}` },
     { label: `Traffic rules for ${host}`, hint: "Rules filtered to this vhost", href: `/cfm-admin/webdetector/rules/?vhost=${h}` },
     { label: `ClamAV for ${host}`, hint: "Upload scanning / infections", href: `/cfm-admin/webdetector/clam/?vhost=${h}` },
@@ -276,8 +276,8 @@ function paletteActions(query) {
   const out = [];
   if (q && IPV4_RX.test(q) || q && IPV6_RX.test(q) && q.includes(":")) {
     out.push(
-      { label: `History for IP ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?ip=${encodeURIComponent(q)}#history-card` },
-      { label: `Analyze IP ${q}`, hint: "Forensics", href: `/cfm-admin/webdetector/forensics/?ip=${encodeURIComponent(q)}` },
+      { label: `Events of IP ${q}`, hint: "Protection", href: `/cfm-admin/webdetector/protection/?tab=events&ip=${encodeURIComponent(q)}` },
+      { label: `Analyze IP ${q}`, hint: "Protection tools", href: `/cfm-admin/webdetector/protection/?tab=tools&ip=${encodeURIComponent(q)}` },
       { label: `Firewall: is ${q} blocked?`, hint: "Check / unblock", href: `/cfm-admin/firewall/?q=${encodeURIComponent(q)}` },
     );
   } else if (q && HOST_RX.test(q)) {

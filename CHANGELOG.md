@@ -49,6 +49,20 @@ _Nothing yet._
   challenge-exclude file still apply to a vhost challenge exactly as before:
   per request, at the edge decision.
 
+### Changed
+- **cfm-admin: three pages became two.** The WAF engine, Forensics and
+  Challenge access pages are gone from the menu; their old links still work
+  (each forwards to its new place, with its `?host=` / `?ip=`).
+  - **Protection** now holds everything the WAF engine and Forensics pages
+    showed: the WAF log can also be grouped by country, the Events tab shows
+    the solve time and the impossible-UA mark (with its filter), an address's
+    panel shows what it is doing right now, and a new admin-only **Tools**
+    tab has the analyze tools and the history store (size, prune, delete).
+  - **Exceptions** (new) lists everything let through on purpose in one
+    place: WAF excludes, challenge excludes and trusted clients (the
+    Challenge access editor). The excludes card that sat on three pages is
+    gone; the widest entries (the whole WAF, every vhost) are listed first.
+
 ## 2026.11.25
 
 ### Added

@@ -1143,8 +1143,8 @@ export const RECIPES = Object.freeze([
     kind: "link",
     title: "Exempt an API / webhook / integration endpoint",
     description: "An `allow` rule does NOT do this — it only skips later rules. To keep the challenge or WAF off a path, add a Challenge / WAF exclude.",
-    href: "/cfm-admin/webdetector/waf/",
-    linkLabel: "Open Challenge / WAF excludes",
+    href: "/cfm-admin/webdetector/exceptions/",
+    linkLabel: "Open Exceptions",
   },
   // ── single-rule recipes (load into the editor for review) ──
   {
@@ -1459,14 +1459,14 @@ export const RECIPES = Object.freeze([
     kind: "link",
     title: "Keep the challenge off your uptime monitor",
     description: "An `allow` rule does NOT stop the challenge: it only ends rule evaluation, and the challenge decision is OR'd in separately. A monitor that gets the challenge page reports the site as up while customers see a puzzle — or as down. Add its IP / User-Agent as a Challenge exclude instead.",
-    href: "/cfm-admin/webdetector/waf/",
-    linkLabel: "Open Challenge / WAF excludes",
+    href: "/cfm-admin/webdetector/exceptions/",
+    linkLabel: "Open Exceptions",
   },
   {
     key: "block_scraper",
     kind: "single",
     title: "Block a scraper by User-Agent",
-    description: "Paste the User-Agent fragment(s) from Forensics / IP drilldown; optionally narrow by country.",
+    description: "Paste the User-Agent fragment(s) from Protection (Events) / the vhost drilldown; optionally narrow by country.",
     vars: [VAR_VHOSTS, { key: "uas", label: "UA fragments", type: "uas", placeholder: "*SomeScraper*, *another-bot*", required: true }, { key: "countries", label: "Only from countries (optional)", type: "countries", default: "" }],
     build(vars) {
       const uas = csvSplit(vars?.uas);
