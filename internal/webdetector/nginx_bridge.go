@@ -676,39 +676,6 @@ func (b *NginxBridge) SetHostBypassFunc(fn func(string) bool) {
 	b.hostBypassFunc = fn
 }
 
-// BypassIPTemp extends okState for one IP so that vhost-wide challenge is
-// bypassed for at least ttl. Used for ASN/UA chalExclude in vhost mode.
-// Does NOT push to Lua (okState is checked in-process in handleDecision).
-func (b *NginxBridge) BypassIPTemp(ip string, ttl time.Duration) {
-	b.BypassIPScopeTemp(ip, "", "web", ttl)
-}
-
-// BypassIPScopeTemp extends okState for one (ip,host,scope) tuple so only the
-// matching scope/host request bypasses challenge.
-func (b *NginxBridge) BypassIPScopeTemp(ip, host, scope string, ttl time.Duration) {
-	if b == nil || !b.cfg.Enabled {
-		return
-	}
-	ip = strings.TrimSpace(ip)
-	host = normalizeHost(host)
-	scope = strings.TrimSpace(scope)
-	if ip == "" || host == "" || scope == "" {
-		return
-	}
-	if ttl <= 0 {
-		ttl = b.cfg.DefaultTTL
-	}
-	exp := time.Now().Add(ttl)
-	k := okStateKey{IP: ip, Host: host, Scope: scope}
-
-	b.mu.Lock()
-	cur, ok := b.okState[k]
-	if !ok || exp.After(cur) {
-		b.okState[k] = exp
-	}
-	b.mu.Unlock()
-}
-
 // Clam Manager
 // clamHealthReporter is the optional health surface of the wired clam manager
 // (satisfied by *clam.Manager). Kept separate from clam.Enqueuer so the
