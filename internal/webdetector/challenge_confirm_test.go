@@ -49,29 +49,30 @@ func manualOn(hosts ...string) func(string) (bool, bool) {
 func TestConfirmToken(t *testing.T) {
 	t.Setenv("CFM_CHALLENGE_SECRET", "confirm-token-secret")
 	now := time.Now().UTC()
-	tok := issueConfirmToken("203.0.113.5", "Shop.Example.com", "POWTOK", now)
+	tok := issueConfirmToken("203.0.113.5", "Shop.Example.com", "web", "POWTOK", now)
 
-	at, ok := verifyConfirmToken(tok, "203.0.113.5", "shop.example.com", "POWTOK", now.Add(time.Minute))
+	at, ok := verifyConfirmToken(tok, "203.0.113.5", "shop.example.com", "web", "POWTOK", now.Add(time.Minute))
 	if !ok || at.UnixMilli() != now.UnixMilli() {
 		t.Fatalf("genuine token refused: ok=%v at=%v", ok, at)
 	}
 	cases := []struct {
-		name          string
-		tok, ip, host string
-		pow           string
-		at            time.Time
+		name                 string
+		tok, ip, host, scope string
+		pow                  string
+		at                   time.Time
 	}{
-		{"other ip", tok, "203.0.113.6", "shop.example.com", "POWTOK", now},
-		{"other host", tok, "203.0.113.5", "other.example.com", "POWTOK", now},
-		{"other pow", tok, "203.0.113.5", "shop.example.com", "POWTOK2", now},
-		{"expired", tok, "203.0.113.5", "shop.example.com", "POWTOK", now.Add(confirmTokenTTL + time.Second)},
-		{"from the future", tok, "203.0.113.5", "shop.example.com", "POWTOK", now.Add(-time.Minute)},
-		{"tampered", tamperConfirmToken(t, tok), "203.0.113.5", "shop.example.com", "POWTOK", now},
-		{"garbage", "not-a-token", "203.0.113.5", "shop.example.com", "POWTOK", now},
-		{"empty", "", "203.0.113.5", "shop.example.com", "POWTOK", now},
+		{"other ip", tok, "203.0.113.6", "shop.example.com", "web", "POWTOK", now},
+		{"other host", tok, "203.0.113.5", "other.example.com", "web", "POWTOK", now},
+		{"other scope", tok, "203.0.113.5", "shop.example.com", "panel:2083", "POWTOK", now},
+		{"other pow", tok, "203.0.113.5", "shop.example.com", "web", "POWTOK2", now},
+		{"expired", tok, "203.0.113.5", "shop.example.com", "web", "POWTOK", now.Add(confirmTokenTTL + time.Second)},
+		{"from the future", tok, "203.0.113.5", "shop.example.com", "web", "POWTOK", now.Add(-time.Minute)},
+		{"tampered", tamperConfirmToken(t, tok), "203.0.113.5", "shop.example.com", "web", "POWTOK", now},
+		{"garbage", "not-a-token", "203.0.113.5", "shop.example.com", "web", "POWTOK", now},
+		{"empty", "", "203.0.113.5", "shop.example.com", "web", "POWTOK", now},
 	}
 	for _, c := range cases {
-		if _, ok := verifyConfirmToken(c.tok, c.ip, c.host, c.pow, c.at); ok {
+		if _, ok := verifyConfirmToken(c.tok, c.ip, c.host, c.scope, c.pow, c.at); ok {
 			t.Errorf("%s: token accepted", c.name)
 		}
 	}
