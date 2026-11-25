@@ -496,6 +496,16 @@ doesn't trip legitimate panel/app traffic, and promote `logonly` →
 (FP case studies, excludes, the promotion playbook),
 `docs/challenge-waf-release-checklist.md`.
 
+**A site owner's WAF switch keeps `WAF_CVE` / `WAF_WEBSHELL` on.** A scoped
+(cPanel) token's whole-WAF exclude is stored `keep_critical`; at the edge it is
+`critical_only` (the WAF runs, `record()` keeps those families), never
+`skip_all`. Its rule excludes are one rule, never of those families, with an
+expiry (`docs/waf.md` "What a site owner may write"). The family list has
+three copies (Go, Lua, the page model) pinned by
+`TestWAFTenantKeptFamilies_LuaParity`; a hit recorded outside `record()`, or
+a new deferred block, must honour `critical_only` too
+(`cfm_waf_tenant_switch_test.lua`).
+
 ### Challenge excludes & scoping
 - Exclude/bypass matching must be scope-aware for scoped users; excludes are
   increasingly **file-presence based** rather than config flags. Pre-auth

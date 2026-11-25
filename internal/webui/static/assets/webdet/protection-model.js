@@ -14,9 +14,11 @@
 // group's requests, so nothing here is counted from a sample.
 
 import { fmtCount, fmtPct, share } from "./traffic-model.js";
+import { EXCLUDE_TTLS, tenantKeptFamily } from "./excludes-model.js";
 
 const str = (v) => (v === null || v === undefined ? "" : String(v));
 const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
 
 export const TABS = Object.freeze([
   Object.freeze({ key: "waf", label: "WAF log" }),
@@ -175,20 +177,34 @@ export function uriPath(uri) {
 }
 
 // excludeOffer is the narrowest WAF exclude that would have let one logged
-// request through: this path, this rule, this vhost. A scoped (cPanel)
-// caller may only write host excludes today, so it gets none here.
-// null when the row cannot be excluded that narrowly (no rule id or path).
-export function excludeOffer(row, { scoped } = {}) {
-  if (scoped || !row) return null;
+// request through: this path, this rule, this vhost. null when the row cannot
+// be excluded that narrowly (no rule id or path).
+//
+// A site owner (scoped) gets the same offer with two limits the daemon
+// enforces: it expires (ttl, one of EXCLUDE_TTLS), and it is never offered
+// for a rule of TENANT_KEPT_FAMILIES (nor for the CVE band, which a rule
+// exclude cannot name).
+export function excludeOffer(row, { scoped, ttl } = {}) {
+  if (!row) return null;
   const id = num(row.waf_rule_id);
   const path = uriPath(row.uri);
   const host = str(row.host).trim().toLowerCase();
-  if (id <= 0 || !host || path === "/" || /[*?\[\]]/.test(path)) return null;
+  if (id <= 0 || !host || path === "/" || /[*?\[\]\\]/.test(path) || path.includes("..")) return null;
   const q = new URLSearchParams({ type: "path", value: path, rule_ids: String(id), scope_hosts: host });
+  if (!scoped) {
+    return {
+      path, host, ruleID: id,
+      url: `v1/waf/exclude/add?${q.toString()}`,
+      confirm: `Let ${path} through WAF rule ${id} on ${host}?\n\nRequests to that path on that vhost skip this one rule until the exclude is removed (Exceptions page). Every other rule still applies.`,
+    };
+  }
+  if (id < 100 || id > 999 || tenantKeptFamily(row.rule_base || row.rule)) return null;
+  const t = EXCLUDE_TTLS.find((x) => x.key === ttl) || EXCLUDE_TTLS[0];
+  q.set("ttl", t.key);
   return {
-    path, host, ruleID: id,
+    path, host, ruleID: id, ttl: t.key,
     url: `v1/waf/exclude/add?${q.toString()}`,
-    confirm: `Let ${path} through WAF rule ${id} on ${host}?\n\nRequests to that path on that vhost skip this one rule until the exclude is removed (Exceptions page). Every other rule still applies.`,
+    confirm: `Let ${path} through WAF rule ${id} on ${host} for ${t.label}?\n\nRequests to that path on your site skip this one rule until then. Every other rule still applies, and the server's administrator is told. Remove it earlier on the Exceptions page.`,
   };
 }
 

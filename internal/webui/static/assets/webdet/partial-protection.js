@@ -80,7 +80,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
                         <td class="mono pt-uri" :title="r.uri">{{ (r.method || '').toUpperCase() }} {{ r.uri }}</td>
                         <td class="mono">{{ r.rule }}<span v-if="r.waf_rule_id" class="muted"> ({{ r.waf_rule_id }})</span></td>
                         <td><span class="pill" :class="ptTierTone(ptTier(r))">{{ ptTier(r) }}</span></td>
-                        <td class="pt-nowrap"><button v-if="ptExcludeOffer(r)" type="button" class="btn-quiet btn-sm" :title="'Let ' + ptPath(r.uri) + ' through rule ' + r.waf_rule_id + ' on ' + r.host" @click="ptExclude(r)">Exclude this path</button><a v-else class="btn-quiet btn-sm pt-a" :href="ptExceptionsURL(r.host)" title="The WAF exceptions of this vhost">Exceptions</a></td>
+                        <td class="pt-nowrap"><template v-if="ptExcludeOffer(r) && isScoped"><span class="muted pt-sub">Let through for</span> <button type="button" class="btn-quiet btn-sm" :title="'Let ' + ptPath(r.uri) + ' through rule ' + r.waf_rule_id + ' on ' + r.host + ' for 24 hours'" @click="ptExclude(r, '24h')">24 h</button> <button type="button" class="btn-quiet btn-sm" :title="'Let ' + ptPath(r.uri) + ' through rule ' + r.waf_rule_id + ' on ' + r.host + ' for 7 days'" @click="ptExclude(r, '7d')">7 d</button></template><button v-else-if="ptExcludeOffer(r)" type="button" class="btn-quiet btn-sm" :title="'Let ' + ptPath(r.uri) + ' through rule ' + r.waf_rule_id + ' on ' + r.host" @click="ptExclude(r)">Exclude this path</button><a v-else class="btn-quiet btn-sm pt-a" :href="ptExceptionsURL(r.host)" title="The WAF exceptions of this vhost">Exceptions</a></td>
                       </tr>
                     </tbody>
                   </table>
@@ -236,7 +236,7 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
                   <td>{{ r.host }}</td>
                   <td class="mono pt-uri pt-uri-narrow" :title="r.rule + ' · ' + r.uri">{{ (r.method || '').toUpperCase() }} {{ r.uri }}</td>
                   <td><span class="pill" :class="ptTierTone(ptTier(r))">{{ ptTier(r) }}</span></td>
-                  <td class="pt-nowrap"><button v-if="ptExcludeOffer(r)" type="button" class="btn-quiet btn-sm" @click="ptExclude(r)">Exclude this path</button></td>
+                  <td class="pt-nowrap"><template v-if="ptExcludeOffer(r) && isScoped"><span class="muted pt-sub">Let through for</span> <button type="button" class="btn-quiet btn-sm" @click="ptExclude(r, '24h')">24 h</button> <button type="button" class="btn-quiet btn-sm" @click="ptExclude(r, '7d')">7 d</button></template><button v-else-if="ptExcludeOffer(r)" type="button" class="btn-quiet btn-sm" @click="ptExclude(r)">Exclude this path</button></td>
                 </tr>
               </tbody>
             </table>

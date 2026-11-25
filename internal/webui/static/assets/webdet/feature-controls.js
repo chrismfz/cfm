@@ -293,7 +293,9 @@ export const controlsMixin = {
           this.actionMsg = `ClamAV mode for ${host} switched to ${currentlyEnabled ? "async (notify-only)" : "inline (blocking)"}`;
         } else if (currentlyEnabled) {
           await this.postJSON(`v1/${kind}/exclude/add?type=host&value=${encodeURIComponent(host)}`, {});
-          this.actionMsg = `${kind.toUpperCase()} disabled for ${host}`;
+          // A site owner's WAF switch leaves the named-CVE and webshell rules
+          // running (the daemon marks its entry keep_critical).
+          this.actionMsg = `${kind.toUpperCase()} disabled for ${host}` + (kind === "waf" && this.isScoped ? " (CVE and webshell rules stay on)" : "");
         } else {
           await this.postJSON(`v1/${kind}/exclude/remove?type=host&value=${encodeURIComponent(host)}`, {});
           this.actionMsg = `${kind.toUpperCase()} enabled for ${host}`;

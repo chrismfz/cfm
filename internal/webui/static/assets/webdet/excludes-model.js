@@ -22,13 +22,45 @@ export function literalVhosts(allowedVhosts = []) {
 }
 
 // Which exclude kinds may take type=path for this session. A scoped token may
-// write challenge PATH excludes on its own literal vhosts (the malpath
-// carve-out); WAF path excludes stay admin-only (the server refuses them for
-// a scoped token). The UI ships inside the daemon binary, so this always
-// matches its API.
+// write PATH excludes on its own literal vhosts: a challenge one (the malpath
+// carve-out), and a WAF one for ONE rule with an expiry (scopedWAFAddError
+// below; the server refuses a wider one). The UI ships inside the daemon
+// binary, so this always matches its API.
 export function pathTypeAllowed(kind, { isScoped, scopedExcludeManagementAllowed, allowedVhosts = [] }) {
   if (!isScoped) return true;
-  return kind === "challenge" && Boolean(scopedExcludeManagementAllowed) && literalVhosts(allowedVhosts).length > 0;
+  return (kind === "challenge" || kind === "waf") && Boolean(scopedExcludeManagementAllowed) && literalVhosts(allowedVhosts).length > 0;
+}
+
+// ── What a site owner (scoped token) may do to the WAF ───────────────────
+// The daemon enforces all of it (internal/webdetector/waf_exclude_tenant.go);
+// these copies keep the page from offering what will be refused.
+
+// The WAF reason families a site owner can neither exclude by rule nor switch
+// off: they keep running when the owner turns the site's WAF off. A copy of
+// wafTenantKeptFamilies (Go) and WAF_TENANT_KEPT_REASONS (Lua), kept equal by
+// TestWAFTenantKeptFamilies_LuaParity, which reads this line.
+export const TENANT_KEPT_FAMILIES = Object.freeze(["WAF_CVE", "WAF_WEBSHELL"]);
+export const TENANT_KEPT_NOTE = "CVE and webshell rules stay on";
+
+export function tenantKeptFamily(reason) {
+  return TENANT_KEPT_FAMILIES.includes(String(reason || "").split(":")[0].trim());
+}
+
+// How long a site owner's rule exclude may last. The first is the default.
+export const EXCLUDE_TTLS = Object.freeze([
+  Object.freeze({ key: "24h", label: "24 hours" }),
+  Object.freeze({ key: "7d", label: "7 days" }),
+]);
+
+// scopedWAFAddError: why a site owner's WAF exclude would be refused, or "".
+// No rule = the switch (a host only). A rule exclude is one rule id (no list,
+// range or group), with an expiry.
+export function scopedWAFAddError({ type, rules, ttl }) {
+  const r = String(rules || "").trim();
+  if (!r) return type === "path" ? "name the one rule to let this path through" : "";
+  if (!/^\d{3}$/.test(r)) return "name one rule (for example 402), not a list or a range";
+  if (!EXCLUDE_TTLS.some((t) => t.key === ttl)) return "choose how long: 24 hours or 7 days";
+  return "";
 }
 
 // The problem with a challenge PATH exclude's scope field, or "" when it may be
@@ -78,6 +110,8 @@ export function exceptionTab(key) {
 // an entry without rule ids, "rule 402" / "rules 401, 431" otherwise.
 export function wafExcludeSkips(row) {
   const ids = Array.isArray(row && row.rule_ids) ? row.rule_ids : [];
+  // keep_critical: a site owner's switch. The named-CVE and webshell rules keep running.
+  if (!ids.length && row && row.keep_critical === true) return { text: "the WAF (" + TENANT_KEPT_NOTE + ")", whole: true };
   if (!ids.length) return { text: "the whole WAF", whole: true };
   return { text: `rule${ids.length === 1 ? "" : "s"} ${ids.join(", ")}`, whole: false };
 }
@@ -108,6 +142,23 @@ export function sortExcludes(rows) {
 }
 
 // excludeWhen is the entry's creation time as a short local date, or "".
+// excludeBy: who wrote the entry, when it was not the operator.
+export function excludeBy(row) {
+  return row && row.by === "scoped" ? "site owner" : "";
+}
+
+// excludeExpires: when an entry stops applying. {text, soon}; text is "" for
+// an entry without an expiry. `soon` = within a day.
+export function excludeExpires(row, nowMs = Date.now()) {
+  const at = Number(row && row.expires_unix);
+  if (!Number.isFinite(at) || at <= 0) return { text: "", soon: false };
+  const left = at - Math.floor(nowMs / 1000);
+  if (left <= 0) return { text: "expired", soon: true };
+  if (left < 3600) return { text: "in " + Math.max(1, Math.round(left / 60)) + " min", soon: true };
+  if (left < 86400) return { text: "in " + Math.round(left / 3600) + " h", soon: true };
+  return { text: "in " + Math.round(left / 86400) + " d", soon: false };
+}
+
 export function excludeWhen(row) {
   const d = new Date(String((row && row.created_at) || ""));
   return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });

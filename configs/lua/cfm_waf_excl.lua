@@ -36,7 +36,7 @@
 --   wx.hosts     -- array   : decoded host-rule rows {v, rule_ids?, scope?}
 --   wx.paths     -- array   : decoded path-rule rows {v, rule_ids?, scope?}
 --   wx.rows_from_entries(entries) -> hosts, paths   (the /nginx/waf/excludes rows)
---   wx.skip_for(hosts, paths, host, uri) -> skip_all, skip_ids
+--   wx.skip_for(hosts, paths, host, uri) -> skip_all, skip_ids, critical_only
 --   wx.scope_takes(host, scope) / wx.compile_scope(scope) / wx.normalize_scope(list)
 --
 -- Mutated directly by load_waf_excludes_local_cache in cfm.lua. This
@@ -47,7 +47,7 @@
 
 local _M = {}
 
--- Cache snapshot timestamp from the shdict (key `wxsnap2_ts`). 0 means
+-- Cache snapshot timestamp from the shdict (key `wxsnap3_ts`). 0 means
 -- this worker hasn't decoded any snapshot yet. Compared in
 -- load_waf_excludes_local_cache against the live shdict ts to decide
 -- whether to skip the cjson.decode.
@@ -308,6 +308,12 @@ function _M.rows_from_entries(entries)
       if v ~= "" then
         local row = { v = v, scope = _M.normalize_scope(e.scope_hosts) }
         if type(e.rule_ids) == "table" then row.rule_ids = e.rule_ids end
+        -- keep_critical: a whole-WAF entry a site owner wrote (see skip_for).
+        if e.keep_critical == true then row.kc = true end
+        -- expires_unix: the daemon drops an expired entry from the list, but
+        -- this snapshot outlives a daemon that is down, so the edge checks too.
+        local exp = tonumber(e.expires_unix)
+        if exp and exp > 0 then row.exp = exp end
         if t == "host" then hosts[#hosts+1] = row
         elseif t == "path" then paths[#paths+1] = row end
       end
@@ -317,19 +323,32 @@ function _M.rows_from_entries(entries)
 end
 
 -- skip_for(hosts, paths, host, uri) returns:
---   skip_all (bool)   true if a matching exclude whose scope takes host is
---                     whole-WAF (no rule_ids)
---   skip_ids (table)  set of waf_rule_id integers to suppress when the WAF
---                     runs; nil if no rule-scoped exclude applies
--- Mirrors Go excludeStore.MatchWAFRules: the scope first, then the value
--- (the host for a host row, the uri for a path row); no host, no exclude.
+--   skip_all (bool)       true if a matching exclude whose scope takes host
+--                         is whole-WAF (no rule_ids) and not keep_critical
+--   skip_ids (table)      set of waf_rule_id integers to suppress when the
+--                         WAF runs; nil if no rule-scoped exclude applies
+--   critical_only (bool)  a matching whole-WAF exclude is keep_critical (a
+--                         site owner switched the site's WAF off) and no
+--                         plain whole-WAF exclude matched: the WAF runs, and
+--                         only the families of cfm_waf.WAF_TENANT_KEPT_REASONS
+--                         count (cfm_waf.lua ctx.critical_only)
+-- Mirrors Go excludeStore.MatchWAFDecision: the scope first, then the value
+-- (the host for a host row, the uri for a path row); no host, no exclude; an
+-- expired row matches nothing.
+local function now_unix()
+  if ngx and ngx.time then return ngx.time() end
+  return os.time()
+end
+
 function _M.skip_for(hosts, paths, host, uri)
   host = lower(tostring(host or "")); uri = lower(tostring(uri or "/"))
-  if host == "" then return false, nil end
+  if host == "" then return false, nil, false end
   local skip_ids = nil
+  local critical_only = false
+  local now = nil
   local function consider(target, row, kind)
     -- Back-compat: Lua before rule_ids cached this list as bare strings. The
-    -- snapshot now lives under keys of its own (cfm.lua "wxhosts2"), so an
+    -- snapshot now lives under keys of its own (cfm.lua "wxhosts3"), so an
     -- older Lua's rows are not read, but a string row keeps its old meaning
     -- if one ever reaches here: a whole-WAF exclude on every host. A table
     -- row without `scope` is global too (an entry without scope_hosts).
@@ -339,7 +358,12 @@ function _M.skip_for(hosts, paths, host, uri)
     -- cPanel row's scope is the account's whole vhost set.
     if not _M.matches_rule(target, row.v, kind) then return false end
     if not row_takes(row, host) then return false end
+    if row.exp then
+      now = now or now_unix()
+      if now >= row.exp then return false end
+    end
     if type(row.rule_ids) ~= "table" or #row.rule_ids == 0 then
+      if row.kc == true then critical_only = true; return false end
       return true -- whole-WAF skip; signal caller to short-circuit
     end
     if not skip_ids then skip_ids = {} end
@@ -350,12 +374,12 @@ function _M.skip_for(hosts, paths, host, uri)
     return false
   end
   for _, r in ipairs(hosts or {}) do
-    if consider(host, r, "host") then return true, nil end
+    if consider(host, r, "host") then return true, nil, false end
   end
   for _, r in ipairs(paths or {}) do
-    if consider(uri, r, "path") then return true, nil end
+    if consider(uri, r, "path") then return true, nil, false end
   end
-  return false, skip_ids
+  return false, skip_ids, critical_only
 end
 
 return _M

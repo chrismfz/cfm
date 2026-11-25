@@ -85,7 +85,18 @@ test("excludeOffer is the narrowest exclude: this path, this rule, this vhost", 
   const o = M.excludeOffer(row({ host: "Shop.Example.gr" }));
   assert.equal(o.url, "v1/waf/exclude/add?type=path&value=%2Fwp-admin%2Fadmin-ajax.php&rule_ids=402&scope_hosts=shop.example.gr");
   assert.match(o.confirm, /rule 402 on shop\.example\.gr/);
-  assert.equal(M.excludeOffer(row({}), { scoped: true }), null, "a scoped caller may only write host excludes");
+  // A site owner gets the same offer, with an expiry, and never for a kept family.
+  const so = M.excludeOffer(row({}), { scoped: true });
+  assert.equal(so.url, "v1/waf/exclude/add?type=path&value=%2Fwp-admin%2Fadmin-ajax.php&rule_ids=402&scope_hosts=shop.example.gr&ttl=24h");
+  assert.match(so.confirm, /for 24 hours\?/);
+  assert.match(so.confirm, /administrator is told/);
+  assert.match(M.excludeOffer(row({}), { scoped: true, ttl: "7d" }).url, /&ttl=7d$/);
+  assert.match(M.excludeOffer(row({}), { scoped: true, ttl: "90d" }).url, /&ttl=24h$/, "an unknown ttl is the default one");
+  assert.equal(M.excludeOffer(row({ rule_base: "WAF_WEBSHELL", waf_rule_id: 413 }), { scoped: true }), null, "a webshell rule is not a site owner's to exclude");
+  assert.equal(M.excludeOffer(row({ rule: "WAF_CVE:CVE_2026_1:X:Y", rule_base: "", waf_rule_id: 328 }), { scoped: true }), null);
+  assert.equal(M.excludeOffer(row({ waf_rule_id: 10021 }), { scoped: true }), null, "the CVE band");
+  assert.ok(M.excludeOffer(row({ rule_base: "WAF_WEBSHELL", waf_rule_id: 413 })), "the operator may");
+  assert.equal(M.excludeOffer(row({ uri: "/a/../b" })), null);
   assert.equal(M.excludeOffer(row({ waf_rule_id: 0 })), null, "no rule id: nothing to scope it to");
   assert.equal(M.excludeOffer(row({ uri: "/?add-to-cart=1" })), null, "never the whole site");
   assert.equal(M.excludeOffer(row({ uri: "/a/*/b" })), null, "a path that would read as a glob");

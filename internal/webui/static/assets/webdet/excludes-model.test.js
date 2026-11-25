@@ -8,6 +8,7 @@ import {
   challengePathScopeError,
   formatChallengeExcludeScope,
 } from "./excludes-model.js";
+import * as M from "./excludes-model.js";
 
 test("parseScopeHosts splits, lower-cases, trims a trailing dot, de-dups", () => {
   assert.deepEqual(parseScopeHosts(" A.gr, www.a.gr  b.gr. ,a.gr"), ["a.gr", "www.a.gr", "b.gr"]);
@@ -19,12 +20,12 @@ test("literalVhosts drops globs, lower-cases, sorts", () => {
   assert.deepEqual(literalVhosts(["b.gr", "*.t3.gr", "A.gr", "a.gr"]), ["a.gr", "b.gr"]);
 });
 
-test("pathTypeAllowed: admin both; scoped challenge only, with management and a literal vhost", () => {
+test("pathTypeAllowed: admin both; scoped both, with management and a literal vhost", () => {
   assert.equal(pathTypeAllowed("challenge", { isScoped: false }), true);
   assert.equal(pathTypeAllowed("waf", { isScoped: false }), true);
   const t = { isScoped: true, scopedExcludeManagementAllowed: true, allowedVhosts: ["t1.gr"] };
   assert.equal(pathTypeAllowed("challenge", t), true);
-  assert.equal(pathTypeAllowed("waf", t), false);
+  assert.equal(pathTypeAllowed("waf", t), true, "one rule, with an expiry: scopedWAFAddError");
   assert.equal(pathTypeAllowed("challenge", { ...t, scopedExcludeManagementAllowed: false }), false);
   assert.equal(pathTypeAllowed("challenge", { ...t, allowedVhosts: ["*.t3.gr"] }), false);
   assert.equal(pathTypeAllowed("challenge", { ...t, allowedVhosts: [] }), false);
@@ -60,7 +61,6 @@ test("formatChallengeExcludeScope marks an unscoped path entry inert", () => {
 });
 
 test("Exceptions page: tabs, what an entry skips, where, the filter and the order", async () => {
-  const M = await import("./excludes-model.js");
   assert.equal(M.exceptionTab("trusted"), "trusted");
   assert.equal(M.exceptionTab("nope"), "waf");
   assert.deepEqual(M.wafExcludeSkips({}), { text: "the whole WAF", whole: true });
@@ -84,4 +84,42 @@ test("Exceptions page: tabs, what an entry skips, where, the filter and the orde
   assert.equal(rows[0].value, "/api/callback", "the input is not reordered");
   assert.equal(M.excludeWhen({ created_at: "not a date" }), "");
   assert.notEqual(M.excludeWhen(rows[0]), "");
+});
+
+test("a site owner's WAF exclude: the switch, or one rule with an expiry", () => {
+  const e = M.scopedWAFAddError;
+  assert.equal(e({ type: "host", rules: "" }), "", "no rule on a host is the switch");
+  assert.match(e({ type: "path", rules: "" }), /one rule/);
+  assert.equal(e({ type: "host", rules: "402", ttl: "24h" }), "");
+  assert.equal(e({ type: "path", rules: " 402 ", ttl: "7d" }), "");
+  for (const rules of ["402,403", "4xx", "401-402", "10021", "42", "abc"]) assert.match(e({ type: "host", rules, ttl: "24h" }), /one rule/, rules);
+  for (const ttl of ["", "30d", "1h", undefined]) assert.match(e({ type: "host", rules: "402", ttl }), /how long/, String(ttl));
+  assert.deepEqual(M.EXCLUDE_TTLS.map((t) => t.key), ["24h", "7d"]);
+  assert.equal(pathTypeAllowed("waf", { isScoped: true, scopedExcludeManagementAllowed: true, allowedVhosts: ["*.t1.gr"] }), false, "no literal vhost to pin a path to");
+});
+
+test("the families a site owner cannot switch off", () => {
+  assert.equal(M.tenantKeptFamily("WAF_CVE:CVE_2026_1:X:Y"), true);
+  assert.equal(M.tenantKeptFamily("WAF_WEBSHELL"), true);
+  assert.equal(M.tenantKeptFamily("WAF_PHP_WEBSHELL_BODY:X"), false);
+  assert.equal(M.tenantKeptFamily("WAF_RCE:PHP_BODY"), false);
+  assert.equal(M.tenantKeptFamily(""), false);
+  assert.equal(M.wafExcludeSkips({ keep_critical: true }).text, "the WAF (CVE and webshell rules stay on)");
+  assert.equal(M.wafExcludeSkips({ keep_critical: true }).whole, true);
+  assert.equal(M.wafExcludeSkips({ keep_critical: true, rule_ids: [402] }).text, "rule 402");
+  assert.equal(M.wafExcludeSkips({ keep_critical: "yes" }).text, "the whole WAF");
+});
+
+test("who added an exclude, and when it expires", () => {
+  const now = 1_764_000_000_000;
+  const at = (s) => ({ expires_unix: now / 1000 + s });
+  assert.equal(M.excludeBy({ by: "scoped" }), "site owner");
+  assert.equal(M.excludeBy({}), "");
+  assert.deepEqual(M.excludeExpires({}, now), { text: "", soon: false });
+  assert.deepEqual(M.excludeExpires({ expires_unix: 0 }, now), { text: "", soon: false });
+  assert.deepEqual(M.excludeExpires({ expires_unix: "junk" }, now), { text: "", soon: false });
+  assert.deepEqual(M.excludeExpires(at(-5), now), { text: "expired", soon: true });
+  assert.deepEqual(M.excludeExpires(at(20), now), { text: "in 1 min", soon: true });
+  assert.deepEqual(M.excludeExpires(at(22 * 3600), now), { text: "in 22 h", soon: true });
+  assert.deepEqual(M.excludeExpires(at(6 * 86400), now), { text: "in 6 d", soon: false });
 });
