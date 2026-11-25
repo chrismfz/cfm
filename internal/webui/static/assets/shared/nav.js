@@ -283,7 +283,10 @@ function paletteActions(query) {
   for (const group of MENU_GROUPS) {
     for (const item of group.items) {
       if (hiddenInSidebar(item.href)) continue;
-      if (!q || item.label.toLowerCase().includes(ql) || group.title.toLowerCase().includes(ql)) {
+      // The group counts as part of the name ("web traffic" finds Traffic
+      // under Web), and a page keeps answering to the name it used to have.
+      const names = [item.label, group.title, group.title + " " + item.label, ...(item.aka || [])];
+      if (!q || names.some((n) => n.toLowerCase().includes(ql))) {
         out.push({ label: item.label, hint: group.title, href: item.href, icon: item.icon });
       }
     }

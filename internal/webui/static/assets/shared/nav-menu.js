@@ -12,6 +12,9 @@
 // a group (or in UNLISTED_PAGES, with the reason), and a page that moves
 // leaves a stub behind, never a menu item that forwards.
 //
+// `aka` holds names a page used to have (or the pages it absorbed): the quick
+// search answers to them, the sidebar never shows them.
+//
 // Which of these a scoped (cPanel) user is not shown is decided elsewhere:
 // ADMIN_ONLY_NAV_PATHS in controller-bootstrap.js.
 
@@ -23,20 +26,20 @@ export const MENU_GROUPS = [
   ]},
   { title: "Web", items: [
     { label: "Traffic", href: "/cfm-admin/webdetector/traffic/", icon: "bot" },
-    { label: "Protection", href: "/cfm-admin/webdetector/protection/", icon: "shield" },
-    { label: "Vhosts", href: "/cfm-admin/webdetector/vhost/", icon: "globe" },
+    { label: "Protection", href: "/cfm-admin/webdetector/protection/", icon: "shield", aka: ["WAF log", "WAF engine", "Forensics"] },
+    { label: "Vhosts", href: "/cfm-admin/webdetector/vhost/", icon: "globe", aka: ["Vhost live"] },
     { label: "WebDetector", href: "/cfm-admin/webdetector/", icon: "radar" },
   ]},
   { title: "Policy", items: [
     { label: "Vhost controls", href: "/cfm-admin/webdetector/controls/", icon: "sliders" },
     { label: "Traffic rules", href: "/cfm-admin/webdetector/rules/", icon: "funnel" },
-    { label: "Exceptions", href: "/cfm-admin/webdetector/exceptions/", icon: "pass" },
+    { label: "Exceptions", href: "/cfm-admin/webdetector/exceptions/", icon: "pass", aka: ["Excludes", "Challenge access"] },
     { label: "Site cache", href: "/cfm-admin/webdetector/site-cache/", icon: "bolt" },
     { label: "Firewall", href: "/cfm-admin/firewall/", icon: "ban" },
     { label: "ClamAV", href: "/cfm-admin/webdetector/clam/", icon: "virus" },
   ]},
   { title: "Mail", items: [
-    { label: "Mail", href: "/cfm-admin/mail/", icon: "mail" },
+    { label: "Mail", href: "/cfm-admin/mail/", icon: "mail", aka: ["Mail queue", "Mail Monitor"] },
   ]},
   { title: "System", items: [
     { label: "Detectors", href: "/cfm-admin/detectors/", icon: "layers" },
