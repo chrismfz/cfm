@@ -72,6 +72,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   button on the page.** The HTTP/3 and ClamAV OFF / not-scanned buttons used
   a style that was never defined and fell back to the solid blue primary
   look; they are now quiet (dashed, muted).
+- **Challenge excludes: a cPanel user's exclude on `example.com` now also
+  covers `www.example.com`.** cPanel lists a domain without its `www.` name,
+  so a tenant cannot name it, and the challenge decision honoured the
+  exclude's scope exactly: the www site (usually the main one) stayed
+  challenged. A literal scope host now also takes its `www.` alias, as WAF
+  and challenge path excludes already did; never a sibling
+  (`shop.example.com`) and never through a wildcard scope. The Vhost
+  controls Challenge column and the Vhost page follow.
 
 ## 2026.11.24
 

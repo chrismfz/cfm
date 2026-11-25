@@ -250,3 +250,38 @@ func TestExcludeStore_RemoveDistinguishesRuleScoping(t *testing.T) {
 		t.Fatalf("expected no excludes left; got skipAll=%v skipIDs=%v", skipAll, skipIDs)
 	}
 }
+
+// A challenge HOST exclude's literal scope host also takes its www. alias
+// (scopeTakes, as WAF and challenge path excludes): a tenant's token holds
+// example.com, never www.example.com. Only "www." + a literal scope host: a
+// glob scope host gets no alias, and the scope never widens to a sibling.
+func TestMatchChallenge_ScopeTakesWWWAlias(t *testing.T) {
+	s := newExcludeStore(filepath.Join(t.TempDir(), "excludes.json"))
+	if !s.Add("host", "example.com", map[string]struct{}{"example.com": {}}) {
+		t.Fatal("add literal-scoped")
+	}
+	if !s.Add("host", "glob.gr", map[string]struct{}{"*.glob.gr": {}}) {
+		t.Fatal("add glob-scoped")
+	}
+	for host, want := range map[string]bool{
+		"example.com":          true,
+		"www.example.com":      true,
+		"WWW.Example.com":      true,
+		"shop.example.com":     false, // value matches, scope does not
+		"www.shop.example.com": false,
+		"www.www.example.com":  false,
+		"www.other.com":        false,
+		"www.":                 false,
+		"glob.gr":              false, // *.glob.gr does not take the apex
+		"www.glob.gr":          true,  // taken by the glob itself, not an alias
+		"shop.glob.gr":         true,
+	} {
+		if got := s.MatchChallenge(host); got != want {
+			t.Errorf("MatchChallenge(%q) = %v, want %v", host, got, want)
+		}
+		_, first := s.FirstChallengeHostMatch(host)
+		if listed := len(s.ChallengeEntriesForHost(host)) > 0; first != want || listed != want {
+			t.Errorf("%q: FirstChallengeHostMatch=%v ChallengeEntriesForHost=%v, want %v", host, first, listed, want)
+		}
+	}
+}

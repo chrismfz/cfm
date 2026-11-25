@@ -176,10 +176,11 @@ func (e *Engine) vhostControlInputs() vhostControlInputs {
 // block of the vhost profile).
 func (e *Engine) vhostControlRow(in vhostControlInputs, host string) webdetVhostControlRow {
 	// The challenge and WAF columns follow the decision's own tests
-	// (MatchChallenge / MatchWAFRules, scope_hosts included). A value-only
-	// match read a tenant's exclude on example.com as covering
-	// www.example.com, which is still challenged, and a scoped whole-WAF
-	// exclude as switching the WAF off on sub-hosts the edge still guards.
+	// (MatchChallenge / MatchWAFRules: scope_hosts included, a literal scope
+	// host also taking its www. alias, scopeTakes). A value-only match read a
+	// tenant's exclude on example.com as covering shop.example.com, which its
+	// scope does not take, and a scoped whole-WAF exclude as switching the WAF
+	// off on sub-hosts the edge still guards.
 	chEntry, challengeMatched := e.challengeExcludes.FirstChallengeHostMatch(normalizeControlHost(host))
 	challengeValue, challengeExact := "", false
 	if challengeMatched {

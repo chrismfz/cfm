@@ -264,7 +264,16 @@ func TestVhostProfile_ChallengeColumnFollowsScope(t *testing.T) {
 	if !e.ChallengeExcludeAdd("host", "example.com", map[string]struct{}{"example.com": {}}) {
 		t.Fatal("scoped challenge exclude")
 	}
-	for host, wantExcluded := range map[string]bool{"example.com": true, "www.example.com": false} {
+	// A literal scope host also takes its www. alias (scopeTakes: cPanel lists
+	// a domain without it, so the tenant's token cannot name it); the value
+	// matches shop.example.com but the scope does not take it, and
+	// www.other.com is neither.
+	for host, wantExcluded := range map[string]bool{
+		"example.com":      true,
+		"www.example.com":  true,
+		"shop.example.com": false,
+		"www.other.com":    false,
+	} {
 		p := profileFor(t, mux, host)
 		if got := !p.Controls.ChallengeEnabled; got != wantExcluded {
 			t.Fatalf("%s: challenge excluded=%v, want %v", host, got, wantExcluded)
@@ -274,6 +283,12 @@ func TestVhostProfile_ChallengeColumnFollowsScope(t *testing.T) {
 		}
 		if got := len(p.ChallengeExcludes) > 0; got != wantExcluded {
 			t.Fatalf("%s: challenge_excludes=%+v", host, p.ChallengeExcludes)
+		}
+		if got := len(e.challengeExcludes.ChallengeEntriesForHost(host)) > 0; got != wantExcluded {
+			t.Fatalf("%s: ChallengeEntriesForHost disagrees with MatchChallenge", host)
+		}
+		if _, got := e.challengeExcludes.FirstChallengeHostMatch(host); got != wantExcluded {
+			t.Fatalf("%s: FirstChallengeHostMatch disagrees with MatchChallenge", host)
 		}
 	}
 }
