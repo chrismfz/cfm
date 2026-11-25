@@ -118,3 +118,56 @@ func TestConfigureChallengeV2Fallback(t *testing.T) {
 		}
 	}
 }
+
+// The panel ports get the fallback too (the same page and button behind the
+// panel listener's /__cfm_verify), and the token binds the scope: a web
+// token, or another panel port's, never passes a panel click.
+func TestVerify_FallbackPanel(t *testing.T) {
+	base, capt := startVerifyServer(t)
+	fallbackGeo(t, "GR", 6799, "OTE SA (Hellenic Telecommunications Organisation)")
+	post := verifyPoster(t, base, "198.51.100.33", "server.example.gr", linuxChromeUA, time.Now().UTC())
+	panel := func(port string, hdr map[string]string) map[string]string {
+		h := map[string]string{"X-CFM-Panel-Port": port, "X-Forwarded-Port": port}
+		for k, v := range hdr {
+			h[k] = v
+		}
+		return h
+	}
+
+	resp := post(fallbackFailing, nil)
+	webTok := resp.Header.Get(confirmHeader)
+	if resp.StatusCode != http.StatusForbidden || webTok == "" {
+		t.Fatalf("web POST: status=%d token=%q, want a 403 confirm", resp.StatusCode, webTok)
+	}
+	resp = post(fallbackFailing, panel("2083", map[string]string{confirmHeader: webTok, clickHeader: "1"}))
+	panelTok := resp.Header.Get(confirmHeader)
+	if resp.StatusCode != http.StatusForbidden || panelTok == "" || panelTok == webTok {
+		t.Fatalf("web token clicked on 2083: status=%d token=%q, want 403 and a NEW (panel) token", resp.StatusCode, panelTok)
+	}
+	resp = post(fallbackFailing, panel("2087", map[string]string{confirmHeader: panelTok, clickHeader: "1"}))
+	if t2 := resp.Header.Get(confirmHeader); resp.StatusCode != http.StatusForbidden || t2 == "" || t2 == panelTok {
+		t.Fatalf("2083 token clicked on 2087: status=%d token=%q, want 403 and a new token", resp.StatusCode, resp.Header.Get(confirmHeader))
+	}
+	if solved, rejects := capt.counts(); solved != 0 || rejects != 0 {
+		t.Fatalf("a foreign token cleared or rejected: solved=%d rejects=%d", solved, rejects)
+	}
+	resp = post(fallbackFailing, panel("2083", map[string]string{confirmHeader: panelTok, clickHeader: "1"}))
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("2083 token clicked on 2083: status=%d, want 303", resp.StatusCode)
+	}
+	solved, rejects := capt.counts()
+	if solved != 1 || rejects != 0 {
+		t.Fatalf("solved=%d rejects=%d, want 1/0", solved, rejects)
+	}
+	if s := capt.solved[0]; s.V2Rescued != v2RescuedConfirm || s.Scope != "panel:2083" {
+		t.Fatalf("solve: rescued=%q scope=%q", s.V2Rescued, s.Scope)
+	}
+}
+
+func TestFallbackScope(t *testing.T) {
+	for scope, want := range map[string]bool{"web": true, "panel:2083": true, "panel:2096": true, "panel:": false, "panel:20x3": false, "": false, "other": false} {
+		if got := fallbackScope(scope); got != want {
+			t.Errorf("%q -> %v, want %v", scope, got, want)
+		}
+	}
+}

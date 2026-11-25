@@ -967,10 +967,10 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// the solve is then checked like any other.
 		powAt := verifyAt
 		confirmAt, confirmOK := time.Time{}, false
-		// Web scope only, where tokens are issued: a panel verify never
-		// honours one (the token does not bind scope).
-		if ct := r.Header.Get(confirmHeader); ct != "" && scope == "web" {
-			if confirmAt, confirmOK = verifyConfirmToken(ct, ipStr, host, powTok, verifyAt); confirmOK {
+		// The token binds the scope it was issued for: a web token never
+		// passes a panel verify, nor one panel port's token another's.
+		if ct := r.Header.Get(confirmHeader); ct != "" {
+			if confirmAt, confirmOK = verifyConfirmToken(ct, ipStr, host, scope, powTok, verifyAt); confirmOK {
 				powAt = confirmAt
 			}
 		}
@@ -1176,7 +1176,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 					tok := r.Header.Get(confirmHeader)
 					if !confirmOK {
 						logging.LogfCHALLENGES("%s", solve.ConfirmLine())
-						tok = issueConfirmToken(ipStr, host, powTok, verifyAt)
+						tok = issueConfirmToken(ipStr, host, scope, powTok, verifyAt)
 					}
 					setNoStore(w.Header())
 					w.Header().Set(confirmHeader, tok)
@@ -1247,7 +1247,7 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 				logging.LogfCHALLENGES("%s", solve.ConfirmLine())
 				recordConfirmAsked(solve)
 				setNoStore(w.Header())
-				w.Header().Set(confirmHeader, issueConfirmToken(ipStr, host, powTok, verifyAt))
+				w.Header().Set(confirmHeader, issueConfirmToken(ipStr, host, scope, powTok, verifyAt))
 				http.Error(w, "confirm", http.StatusForbidden)
 				return
 			}

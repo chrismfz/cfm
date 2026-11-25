@@ -31,7 +31,10 @@ import (
 //
 // Where it applies: the grains the good-bot waiver softens and the all grain
 // (challengeV2WaiverBar: geo, vhost, all; never under a rung mark, never on a
-// vhost in lockdown), web scope only (the token is accepted only there). An
+// vhost in lockdown), on the web AND the panel ports (cPanel / WHM / webmail
+// logins: the same page and the same Continue button, served by the panel
+// listener's /__cfm_verify). The token binds the scope it was issued on, so a
+// click on one surface never passes another. An
 // operator's fingerprint policy and the rule / WAF / malpath marks stay
 // strict, as for the waiver; the unsolicited grain withholds instead and
 // needs no recourse.
@@ -75,7 +78,7 @@ func ConfigureChallengeV2Fallback(mode string) {
 // challengeV2FallbackOffered reports whether a solve the gate is about to
 // reject gets the confirm fallback instead (see the file header).
 func challengeV2FallbackOffered(s ChallengeSolve, grain, scope string) bool {
-	if scope != "web" || grain == "" || grain == v2GrainUnsolicited {
+	if !fallbackScope(scope) || grain == "" || grain == v2GrainUnsolicited {
 		return false
 	}
 	for _, t := range strings.Split(s.HumanityTells, ",") {
@@ -99,4 +102,23 @@ func challengeV2FallbackOffered(s ChallengeSolve, grain, scope string) bool {
 		return in && DatacenterClass(s.ASN, s.ASNName) == ""
 	}
 	return false
+}
+
+// fallbackScope reports whether a verify scope can show the fallback: the web
+// scope and a well-formed panel scope ("panel:<port>", what clearanceScope
+// returns for a panel listener's trusted X-CFM-Panel-Port).
+func fallbackScope(scope string) bool {
+	if scope == "web" {
+		return true
+	}
+	port, ok := strings.CutPrefix(scope, "panel:")
+	if !ok || port == "" {
+		return false
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
