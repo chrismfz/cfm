@@ -1503,6 +1503,9 @@ func (b *NginxBridge) ClearIPScoped(ip, host, scope string) {
 	// go too, or a config reload would re-impose a challenge the live state
 	// no longer has (challenge_unsolved_hold.go).
 	endUnsolvedHold(ip)
+	// The okstate probe remembers the solve whatever OPENRESTY_OK_IP_TTL is
+	// (okstate_probe.go): its mode=would lines are the cost of a 0.
+	noteOKProbeSolved(ip, host, scope, time.Now())
 	b.mu.Lock()
 	delete(b.ipState, ip)
 	b.unrevokeClearanceLocked(ip)
@@ -2380,9 +2383,12 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 	// Solved-ok: IP passed PoW recently for same host/scope. Not while a
 	// malpath challenge revokes the IP's (web) clearance: the solved-ok state
 	// predates it and answered "allow" over that challenge (clearance_revoke.go).
+	// The okstate probe (okstate_probe.go) reads what okState overrode.
+	preOKVh, preOKIP, okOverrode := vhAction, ipAction, false
 	if b.cfg.OkIPTTL > 0 && clrRevoked == 0 {
 		k := okStateKey{IP: ip, Host: host, Scope: scope}
 		if exp, ok := b.okState[k]; ok && exp.After(now) {
+			okOverrode = vhAction != "allow" || ipAction != "allow"
 			vhAction = "allow"
 			ipAction = "allow"
 		}
@@ -2521,6 +2527,8 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 			b.noteChalExcludeLift(host, ip, ua, rule, now)
 		}
 	}
+
+	okStateProbe(ip, host, scope, ua, preOKVh, preOKIP, vhAction, ipAction, okOverrode, now)
 
 	resp := map[string]any{
 		"ip_action":    ipAction, // "allow" | "challenge" | "block"
