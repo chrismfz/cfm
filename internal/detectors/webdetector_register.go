@@ -25,6 +25,7 @@ import (
 	"cfm/internal/detectors/solverfarm"
 	"cfm/internal/logging"
 	"cfm/internal/mailtraffic"
+	"cfm/internal/notify"
 	webdet "cfm/internal/webdetector"
 )
 
@@ -1119,6 +1120,10 @@ func init() {
 		// engine's sig-ignore store on every infected verdict (after the
 		// CLAM_SIG_IGNORE config baseline). Same replace-not-append shape.
 		clam.SetSigIgnoreLookup(engine.ClamSigIgnoreMatch)
+		// A site owner (scoped cPanel token) changed the WAF on its own site:
+		// the switch, or a one-rule exclude. The operator hears about each one
+		// (notifier + alert log). Same replace-not-append shape.
+		webdet.SetTenantPolicySink(notifyTenantPolicy)
 
 		// Wire the Unix ingest socket (log_by_lua_block path). Attached
 		// unconditionally — the arbiter in Engine.RunOnce picks between
@@ -1368,4 +1373,43 @@ func readPathListFile(key, path string) (list []string, ok bool) {
 		return list, false
 	}
 	return list, true
+}
+
+// notifyTenantPolicy turns a site owner's change to its own site's protection
+// into a notifier event. Switching protection off is a warning; switching it
+// back on is information. One event per change: the reason names the site,
+// the rule and the expiry, so two different changes never dedupe together.
+func notifyTenantPolicy(ev webdet.TenantPolicyEvent) {
+	severity := "warning"
+	if ev.Action == "remove" {
+		severity = "info"
+	}
+	extra := map[string]string{
+		"action": ev.Action,
+		"type":   ev.Type,
+		"value":  ev.Value,
+		"hosts":  strings.Join(ev.Hosts, ","),
+		"actor":  "scoped",
+	}
+	if len(ev.RuleIDs) > 0 {
+		ids := make([]string, len(ev.RuleIDs))
+		for i, id := range ev.RuleIDs {
+			ids[i] = strconv.Itoa(id)
+		}
+		extra["rule_ids"] = strings.Join(ids, ",")
+	}
+	if ev.ExpiresUnix > 0 {
+		extra["expires"] = time.Unix(ev.ExpiresUnix, 0).UTC().Format(time.RFC3339)
+	}
+	if ev.Remote != "" {
+		extra["remote"] = ev.Remote
+	}
+	notify.Enqueue(notify.Event{
+		Kind:     "tenant_waf_exclude",
+		Section:  "webdetector",
+		When:     time.Now(),
+		Reason:   ev.Summary(),
+		Severity: severity,
+		Extra:    extra,
+	})
 }

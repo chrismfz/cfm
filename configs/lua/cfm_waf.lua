@@ -887,6 +887,10 @@ local function check_impl(ctx, st)
   -- other rules), but record() drops the hit so it never logs, never
   -- counts, and never affects severity.
   local skip_rule_ids = ctx.skip_rule_ids
+  -- critical_only: the site's owner switched its WAF off (a keep_critical
+  -- whole-WAF exclude, cfm_waf_excl.skip_for). Everything still runs, and
+  -- record() keeps only the hits of WAF_TENANT_KEPT_REASONS.
+  local critical_only = ctx.critical_only == true
 
   -- One-shot gating bools so body/upload rules don't each lower(method) again.
   -- body_inspect_ok is the existing "POST + non-empty body" gate, hoisted.
@@ -1078,6 +1082,9 @@ local function check_impl(ctx, st)
     -- paid) but the hit never leaks into severity/log/counters — exactly
     -- the semantic the operator asked for ("ignore rule N on this host").
     if skip_rule_ids and rule_id and skip_rule_ids[rule_id] then
+      return false
+    end
+    if critical_only and not _M.is_tenant_kept_reason(reason) then
       return false
     end
     hits[#hits + 1] = { reason = reason, ttl = ttl, action = action, waf_rule_id = rule_id }
@@ -1992,7 +1999,7 @@ local function check_impl(ctx, st)
         -- words would buy a credential sprayer out of every ban now that
         -- 511's own is held.
         local ttl = CFG.auth_xmlrpc_pingback_ttl_sec or CFG.auth_ttl_sec or CFG.default_ttl_sec
-        local excluded = skip_rule_ids and skip_rule_ids[RULE_IDS.rule_xmlrpc_pingback]
+        local excluded = critical_only or (skip_rule_ids and skip_rule_ids[RULE_IDS.rule_xmlrpc_pingback])
         -- A real pingback that 511 STOPS here (block, challenge,
         -- challenge_v2; a server never solves a challenge) never reaches
         -- PHP. It stops this request only: its IP decision is block_ttl_sec
@@ -3119,6 +3126,9 @@ function _M.check(ctx)
   local c = type(ctx) == "table" and ctx or {}
   local ua = st.bad_ua
   if ua and c.skip_rule_ids and c.skip_rule_ids[RULE_IDS.rule_bad_ua] then ua = nil end
+  -- Under critical_only neither deferred block is of a kept family (201 is
+  -- WAF_BAD_UA; a deferred 511 is not stored at all).
+  if c.critical_only == true then ua = nil end
   local b, rid = st.xmlrpc_pingback, RULE_IDS.rule_xmlrpc_pingback
   if not b then b, rid = ua, RULE_IDS.rule_bad_ua end
   if not b then error(hit, 0) end
@@ -3291,6 +3301,23 @@ function _M.hits_auth_burst(hits)
   return nil
 end
 function _M.auth_window_sec() return tonumber(CFG.auth_window_sec) or 20 end
+
+-- WAF reason families that keep running when a SITE OWNER switches the WAF
+-- off for its site (a keep_critical whole-WAF exclude): a named vulnerability
+-- being exploited, or a webshell being reached, is never the site's own
+-- traffic. The operator's own excludes have no such limit. Go twin:
+-- wafTenantKeptFamilies (internal/webdetector/waf_exclude_tenant.go), kept
+-- equal by TestWAFTenantKeptFamilies_LuaParity.
+_M.WAF_TENANT_KEPT_REASONS = {
+  WAF_CVE      = true,
+  WAF_WEBSHELL = true,
+}
+
+function _M.is_tenant_kept_reason(reason)
+  if not reason or reason == "" then return false end
+  local prefix = reason:match("^([^:]+)") or reason
+  return _M.WAF_TENANT_KEPT_REASONS[prefix] == true
+end
 
 function _M.is_high_risk_reason(reason)
   if not reason or reason == "" then return false end

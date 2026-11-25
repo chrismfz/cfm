@@ -22,6 +22,33 @@ type excludeEntry struct {
 	// the same (type, value, scope) but different RuleIDs are distinct.
 	RuleIDs   []int     `json:"rule_ids,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
+	// By names who wrote the entry when it was not the operator: "scoped" for
+	// a scoped (cPanel) token. Empty = the operator, and every entry written
+	// before 2026-11-26. It decides what a scoped caller may list and remove
+	// among the WAF path entries (only its own kind), never what matches.
+	By string `json:"by,omitempty"`
+	// KeepCritical (WAF store, whole-WAF entries): the entry switches the WAF
+	// off EXCEPT the rules of wafTenantKeptFamilies (named CVEs, webshells),
+	// which keep running. Set on every whole-WAF entry a scoped token writes:
+	// a tenant may turn the WAF off for its own site, but not those rules.
+	// The edge reads it as keep_critical (cfm_waf_excl.lua); an edge Lua older
+	// than the field treats the entry as a plain whole-WAF exclude.
+	KeepCritical bool `json:"keep_critical,omitempty"`
+	// ExpiresUnix > 0: the entry stops matching at that time and is deleted
+	// by the next PurgeExpired. Zero = no expiry.
+	ExpiresUnix int64 `json:"expires_unix,omitempty"`
+}
+
+// expired reports an entry past its expiry at now (unix seconds).
+func (e excludeEntry) expired(now int64) bool {
+	return e.ExpiresUnix > 0 && now >= e.ExpiresUnix
+}
+
+// excludeOpts are the optional fields of a new entry (AddEntry).
+type excludeOpts struct {
+	By           string
+	KeepCritical bool
+	ExpiresUnix  int64
 }
 
 type excludeStore struct {
@@ -40,6 +67,10 @@ type excludeStore struct {
 	// Lock-free count of the SCOPED path entries (MatchChallengePath's fast
 	// path: it runs for every malpath hit under the engine lock).
 	pathCount atomic.Int64
+	// nextExpiry is the earliest ExpiresUnix among the entries (0 = none
+	// expires): the lock-free fast path of PurgeExpired and of the matchers'
+	// "is anything expired" test. Written under mu in rebuildCompiledLocked.
+	nextExpiry atomic.Int64
 }
 
 type compiledExcludeEntry struct {
@@ -51,6 +82,9 @@ type compiledExcludeEntry struct {
 	Scoped  bool   // ScopeHosts non-empty
 	Entry   excludeEntry
 }
+
+// expired: see excludeEntry.expired. now is excludeStore.expiryClock().
+func (e compiledExcludeEntry) expired(now int64) bool { return e.Entry.expired(now) }
 
 type compiledScopeMatcher struct {
 	// scoped: the entry named scope hosts. Without it the matcher takes every
@@ -140,6 +174,16 @@ func (s *excludeStore) Add(t, v string, scope map[string]struct{}) bool {
 // skip (legacy semantics, identical to Add). Two entries on the same
 // (type, value, scope) tuple but with different RuleIDs are independent.
 func (s *excludeStore) AddWithRuleIDs(t, v string, scope map[string]struct{}, ruleIDs []int) bool {
+	return s.AddEntry(t, v, scope, ruleIDs, excludeOpts{})
+}
+
+// AddEntry is AddWithRuleIDs with the optional fields. An entry already on
+// the same (type, value, scope, rule ids) is kept and the add refused, with
+// two exceptions: an expired one is replaced, and an entry that expires is
+// RENEWED by an add that expires too (same writer kind), so "let it through
+// for another 24 h" works without a remove. A permanent entry is never turned
+// into an expiring one, nor the reverse, by an add.
+func (s *excludeStore) AddEntry(t, v string, scope map[string]struct{}, ruleIDs []int, opt excludeOpts) bool {
 	t, v, ok := s.normalize(t, v)
 	if !ok {
 		return false
@@ -149,12 +193,16 @@ func (s *excludeStore) AddWithRuleIDs(t, v string, scope map[string]struct{}, ru
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := s.key(t, v, scopeHosts, ruleIDs)
-	if _, exists := s.entries[k]; exists {
-		return false
+	now := time.Now()
+	if old, exists := s.entries[k]; exists && !old.expired(now.Unix()) {
+		renew := old.ExpiresUnix > 0 && opt.ExpiresUnix > 0 && old.By == opt.By && old.KeepCritical == opt.KeepCritical
+		if !renew {
+			return false
+		}
 	}
 	s.entries[k] = excludeEntry{
 		Type: t, Value: v, ScopeHosts: scopeHosts, RuleIDs: ruleIDs,
-		CreatedAt: time.Now(),
+		CreatedAt: now, By: opt.By, KeepCritical: opt.KeepCritical, ExpiresUnix: opt.ExpiresUnix,
 	}
 	s.rebuildCompiledLocked()
 	_ = s.saveLocked()
@@ -270,15 +318,110 @@ func (s *excludeStore) RemovePathHosts(v string, strip map[string]struct{}) bool
 	return changed
 }
 
+// RemoveTenantPathHosts is RemovePathHosts for the WAF store's path entries a
+// scoped token wrote: only entries with By == excludeByScoped on (value, rule
+// ids) are touched, so an exclude the operator narrowed to a tenant's site
+// (also a path entry with scope_hosts) stays the operator's. The hosts in
+// strip come out of each such entry; one left with none is deleted. Returns
+// the entries as they were before the change (nil when nothing matched).
+func (s *excludeStore) RemoveTenantPathHosts(v string, strip map[string]struct{}, ruleIDs []int) []excludeEntry {
+	t, v, ok := s.normalize("path", v)
+	if !ok || len(strip) == 0 {
+		return nil
+	}
+	want := ruleIDsKey(normalizeRuleIDs(ruleIDs))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var touched []excludeEntry
+	for k, e := range s.entries {
+		if e.Type != t || e.Value != v || e.By != excludeByScoped || len(e.ScopeHosts) == 0 || ruleIDsKey(e.RuleIDs) != want {
+			continue
+		}
+		keep := make([]string, 0, len(e.ScopeHosts))
+		for _, h := range e.ScopeHosts {
+			if _, gone := strip[h]; !gone {
+				keep = append(keep, h)
+			}
+		}
+		if len(keep) == len(e.ScopeHosts) {
+			continue
+		}
+		touched = append(touched, e)
+		delete(s.entries, k)
+		if len(keep) == 0 {
+			continue
+		}
+		e.ScopeHosts = keep
+		if nk := s.key(e.Type, e.Value, e.ScopeHosts, e.RuleIDs); s.entries[nk].Type == "" {
+			s.entries[nk] = e
+		}
+	}
+	if len(touched) > 0 {
+		s.rebuildCompiledLocked()
+		_ = s.saveLocked()
+	}
+	return touched
+}
+
 func (s *excludeStore) List() []excludeEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]excludeEntry, 0, len(s.entries))
+	now := s.expiryClock()
 	for _, e := range s.entries {
+		if e.expired(now) {
+			continue
+		}
 		out = append(out, e)
 	}
 	sortExcludeEntries(out)
 	return out
+}
+
+// expiryClock is the time the matchers compare expiries against: now when an
+// entry can have expired, else 0 (which no expiry is below), so a store
+// without expiring entries pays no clock read per match.
+func (s *excludeStore) expiryClock() int64 {
+	next := s.nextExpiry.Load()
+	if next == 0 {
+		return 0
+	}
+	if now := time.Now().Unix(); now >= next {
+		return now
+	}
+	return 0
+}
+
+// PurgeExpired deletes the entries past their expiry and saves; it reports
+// whether any went. Cheap when nothing is due (one atomic load), so the
+// callers run it on every list read: the edge polls the WAF list every few
+// seconds, which makes it the sweeper. An expired entry has already stopped
+// matching (the matchers and List skip it); this only removes it from the
+// file.
+func (s *excludeStore) PurgeExpired() bool {
+	if s == nil {
+		return false
+	}
+	next := s.nextExpiry.Load()
+	now := time.Now().Unix()
+	if next == 0 || now < next {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gone := false
+	for k, e := range s.entries {
+		if e.expired(now) {
+			delete(s.entries, k)
+			gone = true
+		}
+	}
+	// Rebuild even when nothing went (nextExpiry was stale after a remove).
+	s.rebuildCompiledLocked()
+	if gone {
+		_ = s.saveLocked()
+	}
+	return gone
 }
 
 // sortExcludeEntries is List's order: type, scope, value, rule ids.
@@ -443,23 +586,39 @@ func (s *excludeStore) MatchWAF(host, path string) bool {
 // before matching. A nil/empty skipIDs and skipAll=false means "no exclude
 // applies".
 func (s *excludeStore) MatchWAFRules(host, path string) (skipAll bool, skipIDs map[int]struct{}) {
+	skipAll, skipIDs, _ = s.MatchWAFDecision(host, path)
+	return skipAll, skipIDs
+}
+
+// MatchWAFDecision is MatchWAFRules plus criticalOnly: a whole-WAF entry with
+// KeepCritical covers the request and no plain whole-WAF entry does. The WAF
+// then runs, and only the rules of wafTenantKeptFamilies count (the edge:
+// cfm_waf_excl.lua skip_for's third result, cfm_waf.lua ctx.critical_only).
+// skipAll wins over it: an operator's whole-WAF exclude switches everything
+// off, whatever a tenant also wrote. An expired entry matches nothing.
+func (s *excludeStore) MatchWAFDecision(host, path string) (skipAll bool, skipIDs map[int]struct{}, criticalOnly bool) {
 	start, profEnabled := globalExcludeProfiler.start()
 	defer globalExcludeProfiler.end("match_waf", start, profEnabled)
 	host = strings.ToLower(strings.TrimSpace(host))
 	path = strings.ToLower(strings.TrimSpace(path))
 	if host == "" || path == "" {
-		return false, nil
+		return false, nil, false
 	}
+	now := s.expiryClock()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, e := range s.wafEntries {
-		if !e.wafCovers(host, path) {
+		if e.expired(now) || !e.wafCovers(host, path) {
 			continue
 		}
 		if len(e.RuleIDs) == 0 {
+			if e.Entry.KeepCritical {
+				criticalOnly = true
+				continue
+			}
 			// Whole-WAF skip: short-circuit. A rule-scoped exclude can never
 			// "un-skip" what a whole-WAF exclude already covers.
-			return true, nil
+			return true, nil, false
 		}
 		if skipIDs == nil {
 			skipIDs = make(map[int]struct{}, len(e.RuleIDs))
@@ -468,7 +627,7 @@ func (s *excludeStore) MatchWAFRules(host, path string) (skipAll bool, skipIDs m
 			skipIDs[id] = struct{}{}
 		}
 	}
-	return false, skipIDs
+	return false, skipIDs, criticalOnly
 }
 
 // MatchChallengePath reports whether a request on host under path is carved
@@ -558,8 +717,9 @@ func (s *excludeStore) WAFEntriesForHost(host string) []excludeEntry {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []excludeEntry
+	now := s.expiryClock()
 	for _, e := range s.wafEntries {
-		if !e.scopeTakes(host) {
+		if e.expired(now) || !e.scopeTakes(host) {
 			continue
 		}
 		if e.Type == "path" || (e.Type == "host" && e.Value.Match(host)) {
@@ -627,8 +787,9 @@ func (s *excludeStore) FirstWAFHostMatch(host string) (excludeEntry, bool) {
 	defer s.mu.RUnlock()
 	var best excludeEntry
 	found := false
+	now := s.expiryClock()
 	for _, e := range s.wafEntries {
-		if e.Type != "host" || len(e.RuleIDs) > 0 || !e.scopeTakes(host) || !e.Value.Match(host) {
+		if e.expired(now) || e.Type != "host" || len(e.RuleIDs) > 0 || !e.scopeTakes(host) || !e.Value.Match(host) {
 			continue
 		}
 		if !found || excludeEntryLess(e.Entry, best) {
@@ -708,6 +869,13 @@ func (s *excludeStore) rebuildCompiledLocked() {
 		}
 	}
 	s.pathCount.Store(scoped)
+	next := int64(0)
+	for _, e := range s.entries {
+		if e.ExpiresUnix > 0 && (next == 0 || e.ExpiresUnix < next) {
+			next = e.ExpiresUnix
+		}
+	}
+	s.nextExpiry.Store(next)
 }
 
 func compileGlob(pattern string) *regexp.Regexp {

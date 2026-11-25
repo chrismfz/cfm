@@ -12,6 +12,10 @@
 //   - add/remove endpoints:
 //       * admin: unrestricted global management.
 //       * scoped: host excludes only, and value must stay within token scope.
+//   - a scoped token's WAF writes (scopedWAFExcludeAdd, waf_exclude_tenant.go)
+//     are narrower than "host excludes": the site's WAF switch keeps the CVE
+//     and webshell rules on, and a rule exclude (on a host, or on a path of
+//     its own vhosts) is one rule, never of those families, with an expiry.
 //   - challenge PATH excludes (challengePathExcludeWrite) are the exception:
 //     they carve a path out of the log-driven malpath checks on named hosts
 //     only, so they always carry scope_hosts (an admin must name them; a
@@ -22,6 +26,7 @@ package webdetector
 
 import (
 	"net/http"
+	"time"
 
 	"golang.org/x/net/publicsuffix"
 	"path/filepath"
@@ -424,6 +429,11 @@ func (e *Engine) handleChallengeExcludeRemove(w http.ResponseWriter, r *http.Req
 }
 
 // GET /api/v1/waf/exclude/list
+//
+// A scoped caller sees the host entries on its own vhosts
+// (filterExcludeListForScope) and the path entries a scoped token wrote that
+// name a vhost it holds literally (filterTenantWAFPathExcludes). The
+// operator's path entries stay hidden, narrowed to the caller's site or not.
 func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
@@ -433,24 +443,65 @@ func (e *Engine) handleWAFExcludeList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := vhostScopeFromContext(r.Context())
-	writeJSON(w, http.StatusOK, filterExcludeListForScope(e.WAFExcludeList(), scope))
+	all := e.WAFExcludeList()
+	if scope == nil {
+		writeJSON(w, http.StatusOK, all)
+		return
+	}
+	out := append(filterExcludeListForScope(all, scope), filterTenantWAFPathExcludes(all, scope)...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Type < out[j].Type })
+	writeJSON(w, http.StatusOK, out)
 }
 
-// POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317]
+// filterTenantWAFPathExcludes: the WAF path entries a scoped caller may see
+// and remove. Those a scoped token wrote (By), with at least one scope host
+// the caller holds literally, scope_hosts cut to those hosts.
+func filterTenantWAFPathExcludes(entries []excludeEntry, scope map[string]struct{}) []excludeEntry {
+	var own []excludeEntry
+	for _, e := range entries {
+		if e.By == excludeByScoped {
+			own = append(own, e)
+		}
+	}
+	return filterChallengePathExcludesForScope(own, scope)
+}
+
+// wafExcludeTTL reads the ttl= of a WAF exclude add and answers 400 itself on
+// a bad one (ok=false).
+func wafExcludeTTL(w http.ResponseWriter, r *http.Request) (time.Duration, bool) {
+	ttl, err := parseExcludeTTL(r.URL.Query().Get("ttl"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error() + " (use e.g. 24h or 7d)"})
+		return 0, false
+	}
+	return ttl, true
+}
+
+func expiryFromTTL(ttl time.Duration) int64 {
+	if ttl <= 0 {
+		return 0
+	}
+	return time.Now().Add(ttl).Unix()
+}
+
+// POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317][&scope_hosts=a.gr][&ttl=24h]
 //
 // rule_ids is optional. When absent/empty the legacy whole-WAF exclude is
 // added. When present the entry only suppresses hits whose waf_rule_id is in
-// the expanded set; the WAF still runs and other rules can still fire.
+// the expanded set; the WAF still runs and other rules can still fire. ttl is
+// optional for the operator (the entry then expires by itself).
+//
+// A SCOPED caller's add is scopedWAFExcludeAdd: see waf_exclude_tenant.go.
 func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 	if !RequireScopedOrAdmin(w, r) {
 		return
 	}
 	typ, value := readExcludeParams(r)
-	scope := effectiveExcludeScope(r)
-	if !validateScopedExcludeWrite(r, typ, value) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+	if !IsAdminRequest(r) {
+		e.scopedWAFExcludeAdd(w, r, typ, value)
 		return
 	}
+	scope := effectiveExcludeScope(r)
 	if strings.TrimSpace(value) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
 		return
@@ -460,25 +511,33 @@ func (e *Engine) handleWAFExcludeAdd(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule_ids: " + err.Error()})
 		return
 	}
-	if ok := e.WAFExcludeAddRules(typ, value, scope, ruleIDs); !ok {
+	ttl, ok := wafExcludeTTL(w, r)
+	if !ok {
+		return
+	}
+	if ttl > adminWAFExcludeMaxTTL {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ttl too long (leave it out for an exclude that does not expire)"})
+		return
+	}
+	if ok := e.WAFExcludeAddEntry(typ, value, scope, ruleIDs, excludeOpts{ExpiresUnix: expiryFromTTL(ttl)}); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// POST /api/v1/waf/exclude/remove?type=host&value=example.com[&rule_ids=320]
-//
-// rule_ids must match the entry being removed exactly. Absent/empty targets
-// the legacy whole-WAF entry; present targets the rule-scoped entry whose
-// expanded rule-id set equals this one.
-func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) {
-	if !RequireScopedOrAdmin(w, r) {
+// scopedWAFExcludeAdd is a scoped token's WAF exclude add: the switch, one
+// rule on a host, or one rule on a path (waf_exclude_tenant.go has the
+// rules). Fail-closed: anything else is 403. Every accepted write is recorded
+// and published (recordTenantWAFExclude).
+func (e *Engine) scopedWAFExcludeAdd(w http.ResponseWriter, r *http.Request, typ, value string) {
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	ctxScope := vhostScopeFromContext(r.Context())
+	if len(ctxScope) == 0 || (typ != "host" && typ != "path") {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
 	}
-	typ, value := readExcludeParams(r)
-	scope := effectiveExcludeScope(r)
-	if !validateScopedExcludeWrite(r, typ, value) {
+	if typ == "host" && !validateScopedExcludeWrite(r, typ, value) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
 	}
@@ -491,9 +550,156 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule_ids: " + err.Error()})
 		return
 	}
+	ttl, ok := wafExcludeTTL(w, r)
+	if !ok {
+		return
+	}
+	scope := ctxScope
+	opt := excludeOpts{By: excludeByScoped}
+	switch {
+	case typ == "host" && len(ruleIDs) == 0:
+		// The switch: the site's WAF off, the kept families still on. It has
+		// no expiry of its own; a ttl is honoured within the scoped maximum.
+		if ttl != 0 && (ttl < scopedWAFExcludeMinTTL || ttl > scopedWAFExcludeMaxTTL) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ttl must be between 1h and 7d"})
+			return
+		}
+		opt.KeepCritical = true
+	case typ == "host":
+		if code, msg := scopedWAFRuleExclude(ruleIDs, ttl); code != 0 {
+			writeJSON(w, code, map[string]string{"error": msg})
+			return
+		}
+	default: // path
+		if len(ruleIDs) == 0 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope: a site owner's path exclude must name one rule (rule_ids=<id>)"})
+			return
+		}
+		if code, msg := scopedWAFRuleExclude(ruleIDs, ttl); code != 0 {
+			writeJSON(w, code, map[string]string{"error": msg})
+			return
+		}
+		if !validChallengePathExcludeValue(value) || !plainExcludeValue(value) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a path exclude must name a path below the site root, without wildcards"})
+			return
+		}
+		pathScope, code, msg := challengePathExcludeScope(r, true)
+		if code != 0 {
+			writeJSON(w, code, map[string]string{"error": msg})
+			return
+		}
+		scope = pathScope
+	}
+	opt.ExpiresUnix = expiryFromTTL(ttl)
+	if e == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine not ready"})
+		return
+	}
+	if ok := e.WAFExcludeAddEntry(typ, value, scope, ruleIDs, opt); !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
+		return
+	}
+	hosts := scopeMapToHosts(scope)
+	if typ == "host" {
+		hosts = []string{normalizeControlHost(value)}
+	}
+	e.recordTenantWAFExclude(TenantPolicyEvent{
+		Action: "add", Hosts: hosts, Type: typ, Value: strings.ToLower(strings.TrimSpace(value)),
+		RuleIDs: normalizeRuleIDs(ruleIDs), KeepCritical: opt.KeepCritical, ExpiresUnix: opt.ExpiresUnix,
+		Remote: r.RemoteAddr,
+	})
+	resp := map[string]interface{}{"status": "ok"}
+	if opt.ExpiresUnix > 0 {
+		resp["expires_unix"] = opt.ExpiresUnix
+	}
+	if opt.KeepCritical {
+		resp["keep_critical"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// plainExcludeValue: a tenant's WAF path exclude is a literal path (a file,
+// or a folder and what is under it), never a glob: what it lets through must
+// be readable from the entry itself.
+func plainExcludeValue(value string) bool {
+	return !strings.ContainsAny(value, "*?[]\\") && !strings.Contains(value, "..")
+}
+
+// POST /api/v1/waf/exclude/remove?type=host&value=example.com[&rule_ids=320][&scope_hosts=a.gr]
+//
+// rule_ids must match the entry being removed exactly. Absent/empty targets
+// the legacy whole-WAF entry; present targets the rule-scoped entry whose
+// expanded rule-id set equals this one. A scoped caller removes host entries
+// on its own vhosts, and takes its own hosts out of the path entries a scoped
+// token wrote (RemoveTenantPathHosts); removing only restores protection.
+func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) {
+	if !RequireScopedOrAdmin(w, r) {
+		return
+	}
+	typ, value := readExcludeParams(r)
+	admin := IsAdminRequest(r)
+	path := strings.EqualFold(strings.TrimSpace(typ), "path")
+	if !admin && path {
+		if len(vhostScopeFromContext(r.Context())) == 0 {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+			return
+		}
+	} else if !validateScopedExcludeWrite(r, typ, value) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
+		return
+	}
+	if strings.TrimSpace(value) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing value"})
+		return
+	}
+	ruleIDs, err := readWAFRuleIDsParam(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid rule_ids: " + err.Error()})
+		return
+	}
+	if e == nil || e.wafExcludes == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
+		return
+	}
+	if !admin && path {
+		strip, code, msg := challengePathExcludeScope(r, false)
+		if code != 0 {
+			writeJSON(w, code, map[string]string{"error": msg})
+			return
+		}
+		gone := e.wafExcludes.RemoveTenantPathHosts(value, strip, ruleIDs)
+		logExcludeChange("waf", "remove", "path", value, strip, ruleIDs, len(gone) > 0)
+		if len(gone) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
+			return
+		}
+		var hosts []string
+		for _, g := range gone {
+			for _, h := range g.ScopeHosts {
+				if _, mine := strip[h]; mine {
+					hosts = append(hosts, h)
+				}
+			}
+		}
+		e.recordTenantWAFExclude(TenantPolicyEvent{
+			Action: "remove", Hosts: normalizeScopeHosts(hosts), Type: "path", Value: gone[0].Value,
+			RuleIDs: gone[0].RuleIDs, Remote: r.RemoteAddr,
+		})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	scope := effectiveExcludeScope(r)
 	if ok := e.WAFExcludeRemoveRules(typ, value, scope, ruleIDs); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to remove exclude (invalid or not found)"})
 		return
+	}
+	if !admin {
+		ids := normalizeRuleIDs(ruleIDs)
+		e.recordTenantWAFExclude(TenantPolicyEvent{
+			Action: "remove", Hosts: []string{normalizeControlHost(value)}, Type: "host",
+			Value: strings.ToLower(strings.TrimSpace(value)), RuleIDs: ids, KeepCritical: len(ids) == 0,
+			Remote: r.RemoteAddr,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

@@ -138,7 +138,7 @@ export const protectionMixin = {
       return v >= 1048576 ? (v / 1048576).toFixed(1) + " MB" : Math.round(v / 1024) + " KB";
     },
     ptPath: M.uriPath,
-    ptExcludeOffer(row) { return M.excludeOffer(row, { scoped: this.isScoped }); },
+    ptExcludeOffer(row, ttl) { return M.excludeOffer(row, { scoped: this.isScoped, ttl }); },
     ptTime(ts) {
       const d = new Date(Number(ts || 0) * 1000);
       return Number.isNaN(d.getTime()) ? "" : d.toLocaleString();
@@ -371,13 +371,14 @@ export const protectionMixin = {
       await this.ptSetTab("events");
     },
 
-    async ptExclude(row) {
-      const offer = this.ptExcludeOffer(row);
+    // ttl: a site owner's choice ("24h" / "7d"); the operator's exclude has none.
+    async ptExclude(row, ttl) {
+      const offer = this.ptExcludeOffer(row, ttl);
       if (!offer) return;
       if (!window.confirm(offer.confirm)) return;
       try {
         await this.postJSON(offer.url, {});
-        this.actionMsg = `WAF exclude added: ${offer.path} on ${offer.host}, rule ${offer.ruleID}`;
+        this.actionMsg = `WAF exclude added: ${offer.path} on ${offer.host}, rule ${offer.ruleID}${offer.ttl ? `, for ${offer.ttl}` : ""}`;
       } catch (err) {
         this.actionMsg = `WAF exclude failed: ${this.formatApiError(err)}`;
       }

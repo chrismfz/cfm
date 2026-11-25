@@ -1566,9 +1566,15 @@ Wrong answers, for reference:
 
 ```
 GET  /api/v1/waf/exclude/list
-POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317][&scope_hosts=a.com,b.com]
+POST /api/v1/waf/exclude/add?type=host&value=example.com[&rule_ids=320,3xx,310-317][&scope_hosts=a.com,b.com][&ttl=24h]
 POST /api/v1/waf/exclude/remove?type=path&value=/plexusnet/&rule_ids=201[&scope_hosts=a.com]
 ```
+
+`ttl` (optional for the operator; `24h`, `90m`, `7d`) makes the entry expire:
+it stops matching at that time (the daemon and the edge both check) and is
+deleted from the store by the next list read. An add on an entry that already
+expires renews it; an add never turns a permanent entry into an expiring one
+or back. The list returns `expires_unix` for such an entry.
 
 `rule_ids` is a CSV string in the same spec format as `--rule`. Empty / missing → whole-WAF entry.
 
@@ -1582,6 +1588,40 @@ entry, echo the same `scope_hosts` (the list response returns each entry's
 `(type, value, scope_hosts, rule_ids)` tuple.
 
 `GET /api/v1/waf/exclude/list` returns each entry's `rule_ids` (sorted, deduped) and `scope_hosts` (sorted, deduped) when set; either field is omitted otherwise.
+
+### What a site owner (scoped cPanel token) may write
+
+Decided 2026-11-25; enforced in `scopedWAFExcludeAdd`
+(`internal/webdetector/waf_exclude_tenant.go`), never only in the UI. Every
+write and remove is logged, written to the site's history
+(`waf_exclude_change`) and sent to the notifier (`tenant_waf_exclude`), so
+the operator hears of each one.
+
+| Write | Request | Rules |
+|---|---|---|
+| The site's WAF switch (Vhost controls) | `type=host&value=<own vhost>` | Stored with `keep_critical`: the `WAF_CVE` and `WAF_WEBSHELL` families **keep running** on that site. No expiry. |
+| One rule on its site | `type=host&value=<own vhost>&rule_ids=<id>&ttl=` | Exactly one rule id (no list, range or `Nxx`); not a rule of the two kept families (`403`); `ttl` required, 1h to 7d. |
+| One rule on a path of its site | `type=path&value=/path&rule_ids=<id>&ttl=[&scope_hosts=]` | The same, and: a literal path below the site root (no `* ? [ ]`, no `..`); pinned to the token's LITERAL vhosts, `scope_hosts` may only narrow them. |
+
+A path exclude without a rule, a rule exclude without an expiry, and anything
+on another account's vhost are refused. A scoped list shows the host entries
+on its vhosts and the path entries a scoped token wrote (`by: "scoped"`); an
+exclude the operator narrowed to the tenant's site stays the operator's to
+see and remove. A scoped remove of a path entry takes the caller's hosts out
+of the scoped-written entries on that path and rule.
+
+**The kept families are one list in three places** — Go
+`wafTenantKeptFamilies`, Lua `cfm_waf.WAF_TENANT_KEPT_REASONS`, the page
+model's `TENANT_KEPT_FAMILIES` — kept equal by
+`TestWAFTenantKeptFamilies_LuaParity`. At the edge a `keep_critical` whole-WAF
+entry does not skip the WAF: `skip_for` returns `critical_only`, the WAF runs,
+and `record()` keeps only the hits of those families
+(`cfm_waf_tenant_switch_test.lua`). An operator's whole-WAF exclude on the
+same host still switches everything off. An edge Lua older than the field
+treats the entry as a plain whole-WAF exclude (the old behaviour), so a node
+gets the new guarantee once its edge runs the new Lua. Whole-WAF entries a
+scoped token wrote before this release have no `keep_critical` and stay plain
+until the owner switches the WAF back on and off.
 
 ### Lua wiring
 

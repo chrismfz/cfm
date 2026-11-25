@@ -11,6 +11,7 @@
 
 import {
   EXCEPTION_TABS, exceptionTab, wafExcludeSkips, excludeWhere, filterExcludes, sortExcludes, excludeWhen,
+  excludeBy, excludeExpires, TENANT_KEPT_NOTE,
 } from "./excludes-model.js";
 
 export const exceptionsMixin = {
@@ -45,6 +46,9 @@ export const exceptionsMixin = {
     exSkips: wafExcludeSkips,
     exWhere: excludeWhere,
     exWhen: excludeWhen,
+    exBy: excludeBy,
+    exExpires(row) { return excludeExpires(row); },
+    exKeptNote() { return TENANT_KEPT_NOTE; },
     exSetTab(key) {
       this.exTab = exceptionTab(key);
       try {

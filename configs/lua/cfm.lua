@@ -1168,6 +1168,8 @@ end
 --                        host is whole-WAF (no rule_ids)
 --   skip_ids (table)    set of waf_rule_id integers to suppress when WAF runs;
 --                        nil if no rule-scoped exclude applies
+--   critical_only (bool) a site owner switched this site's WAF off: the WAF
+--                        runs, and only the CVE / webshell families count
 -- A whole-WAF exclude short-circuits: caller skips the WAF entirely. Otherwise
 -- the WAF runs and skip_ids is passed through ctx.skip_rule_ids so cfm_waf
 -- silently drops any rule-fire whose ID is in the set. An exclude narrowed to
@@ -1744,10 +1746,11 @@ local waf_allow_action
 -- upload through just because the client is browser-capable.
 -- A crawler a vhost lockdown held at Step 0 skips it (see there).
 if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
-  local skip_all, skip_rule_ids = waf_skip_for(host, uri)
+  local skip_all, skip_rule_ids, waf_critical_only = waf_skip_for(host, uri)
   if skip_all then
     if CFG.debug_headers then ngx.header["X-CFM-WAF-Excluded"] = "1" end
   else
+    if CFG.debug_headers and waf_critical_only then ngx.header["X-CFM-WAF-Critical-Only"] = "1" end
     if CFG.debug_headers and skip_rule_ids then
       -- Visibility for operators tuning per-vhost rule exclusions. Sorted
       -- output makes the header diffable across requests.
@@ -1791,6 +1794,7 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
       -- that reads an empty body as "not read" must not decide on it here.
       body_deferred = body_burnin or nil,
       skip_rule_ids = skip_rule_ids,
+      critical_only = waf_critical_only or nil,
       -- Rule 10022 (CVE-2026-109618): the request declared no body length
       -- (chunked, or HTTP/2-3 without the header) and nginx will stream it to
       -- the origin without one. A body read in full first goes upstream with

@@ -8,6 +8,9 @@ import {
   looksLikeHostValue,
   challengePathScopeError,
   formatChallengeExcludeScope,
+  scopedWAFAddError,
+  EXCLUDE_TTLS,
+  TENANT_KEPT_NOTE,
 } from "./excludes-model.js";
 
 export const excludesMixin = {
@@ -23,6 +26,9 @@ export const excludesMixin = {
       // means a legacy whole-WAF exclude (all rules). WAF-only: challenge
       // excludes have no per-rule scoping.
       wafExcludeRules: "",
+      // How long a WAF exclude lasts: "" (no expiry; the operator only), or
+      // one of EXCLUDE_TTLS. A site owner's rule exclude always has one.
+      wafExcludeTTL: "",
       // Comma-separated vhost(s) to scope the WAF exclude to (admin only).
       // Empty = all vhosts. The server ignores this for scoped tokens (they
       // are always pinned to their own vhost set), so the input is hidden for
@@ -36,6 +42,15 @@ export const excludesMixin = {
       // session can drop it (and only it).
       challengeScopePrefill: "",
     };
+  },
+
+  computed: {
+    wafExcludeTTLs() { return EXCLUDE_TTLS; },
+    // A site owner's exclude defaults to the shortest expiry (and its form
+    // offers no other default); the operator's default is none.
+    wafExcludeTTLChosen() {
+      return this.wafExcludeTTL || (this.isScoped ? EXCLUDE_TTLS[0].key : "");
+    },
   },
 
   methods: {
@@ -75,6 +90,8 @@ export const excludesMixin = {
     enforceScopedExcludeControls() {
       if (this.challengeExcludeType === "path" && !this.pathTypeAllowedFor("challenge")) this.challengeExcludeType = "host";
       if (this.wafExcludeType === "path" && !this.pathTypeAllowedFor("waf")) this.wafExcludeType = "host";
+      // A site owner's rule exclude always expires: no "no expiry" to keep.
+      if (this.isScoped && !this.wafExcludeTTL) this.wafExcludeTTL = EXCLUDE_TTLS[0].key;
       // A host left in the value box (the type=host prefill) is not a path.
       if (this.challengeExcludeType === "path" && looksLikeHostValue(this.challengeExcludeValue)) this.challengeExcludeValue = "";
       // A scope the session can no longer use (a mode or token change): drop
@@ -125,6 +142,13 @@ export const excludesMixin = {
           this.actionMsg = `${scope.toUpperCase()} exclude add failed: host is outside token scope (${this.allowedVhosts.join(", ") || "none"}).`;
           return;
         }
+        if (!isChallenge) {
+          const err = scopedWAFAddError({ type, rules: this.wafExcludeRules, ttl: this.wafExcludeTTLChosen });
+          if (err) {
+            this.actionMsg = `WAF exclude add failed: ${err}.`;
+            return;
+          }
+        }
       }
       try {
         // rule_ids is WAF-only and optional. When present, the server adds a
@@ -141,8 +165,13 @@ export const excludesMixin = {
         let path = `v1/${scope}/exclude/add?type=${encodeURIComponent(type)}&value=${encodeURIComponent(value)}`;
         if (rules) path += `&rule_ids=${encodeURIComponent(rules)}`;
         if (scopeHosts) path += `&scope_hosts=${encodeURIComponent(scopeHosts)}`;
+        // ttl: WAF only. A site owner's rule exclude always carries one; its
+        // switch (no rule) and the operator's entries only when one is chosen.
+        const ttl = isChallenge || (this.isScoped && !rules) ? "" : this.wafExcludeTTLChosen;
+        if (ttl) path += `&ttl=${encodeURIComponent(ttl)}`;
         await this.postJSON(path, {});
-        this.actionMsg = `${scope.toUpperCase()} exclude added: ${type}=${value}${rules ? ` rules=${rules}` : ""}${scopeHosts ? ` scope=${scopeHosts}` : ""}`;
+        this.actionMsg = `${scope.toUpperCase()} exclude added: ${type}=${value}${rules ? ` rules=${rules}` : ""}${scopeHosts ? ` scope=${scopeHosts}` : ""}${ttl ? ` for ${ttl}` : ""}`
+          + (!isChallenge && this.isScoped && !rules ? ` (${TENANT_KEPT_NOTE})` : "");
         if (isChallenge) {
           this.challengeExcludeValue = "";
           this.challengeExcludeScope = "";

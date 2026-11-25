@@ -3758,7 +3758,7 @@ func (e *Engine) InjectObserved(ip, host, uri, method string, status int, reason
 	if i := strings.IndexByte(p, '?'); i >= 0 {
 		p = p[:i]
 	}
-	if e.isWAFExcluded(host, p) {
+	if e.wafObservationExcluded(host, p, reason) {
 		return
 	}
 	method = strings.ToLower(method)
@@ -4551,6 +4551,17 @@ func (e *Engine) WAFExcludeAddRules(typ, value string, scope map[string]struct{}
 	return ok
 }
 
+// WAFExcludeAddEntry is WAFExcludeAddRules with the optional fields (who
+// wrote it, keep-critical, expiry): excludeStore.AddEntry.
+func (e *Engine) WAFExcludeAddEntry(typ, value string, scope map[string]struct{}, ruleIDs []int, opt excludeOpts) bool {
+	if e == nil || e.wafExcludes == nil {
+		return false
+	}
+	ok := e.wafExcludes.AddEntry(typ, value, scope, ruleIDs, opt)
+	logExcludeChange("waf", "add", typ, value, scope, ruleIDs, ok)
+	return ok
+}
+
 func (e *Engine) WAFExcludeRemove(typ, value string, scope map[string]struct{}) bool {
 	if e == nil || e.wafExcludes == nil {
 		return false
@@ -4575,6 +4586,8 @@ func (e *Engine) WAFExcludeList() []excludeEntry {
 	if e == nil || e.wafExcludes == nil {
 		return nil
 	}
+	// The edge polls this list every few seconds: the sweeper of expired entries.
+	e.wafExcludes.PurgeExpired()
 	return e.wafExcludes.List()
 }
 
@@ -4583,6 +4596,19 @@ func (e *Engine) isWAFExcluded(host, path string) bool {
 		return false
 	}
 	return e.wafExcludes.MatchWAF(host, path)
+}
+
+// wafObservationExcluded reports a WAF hit the edge observed on a request the
+// excludes cover, which is therefore not recorded: the whole WAF is excluded
+// there, or a tenant switched its site's WAF off and reason is not of a
+// family that stays on (wafTenantKeptFamilies). A current edge sends neither;
+// this is the daemon's own check of the same list.
+func (e *Engine) wafObservationExcluded(host, path, reason string) bool {
+	if e == nil || e.wafExcludes == nil {
+		return false
+	}
+	skipAll, _, criticalOnly := e.wafExcludes.MatchWAFDecision(host, path)
+	return skipAll || (criticalOnly && !WAFFamilyKeptForTenant(reason))
 }
 
 func (e *Engine) WAFExcludeHasAny() bool {

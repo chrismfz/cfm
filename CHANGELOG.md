@@ -20,6 +20,35 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Security
+- **A site owner's WAF switch no longer switches off the CVE and webshell
+  rules.** A cPanel user can turn the WAF off for its own site (Vhost
+  controls). That used to mean every rule, for good, with nobody told. Now
+  the rules for named vulnerabilities (`WAF_CVE`) and for webshells
+  (`WAF_WEBSHELL`) keep running on that site, and the administrator is
+  notified of each such change (notifier event `tenant_waf_exclude`, the
+  alert log, the site's history). The administrator's own WAF excludes are
+  unchanged: they still switch off everything they name.
+  - Needs the new edge Lua on the node (it ships in the package). Until the
+    edge runs it, a site owner's switch behaves as before.
+  - A site whose owner switched the WAF off before this release keeps the old
+    behaviour until the switch is turned on and off again.
+- **A site owner's per-rule WAF exclude is now one rule, with an expiry.**
+  It could be any list of rules, on the whole site, for good. It is now
+  exactly one rule (never a CVE or webshell rule), for 1 hour to 7 days, and
+  the administrator is notified. Entries written earlier stay as they are.
+
+### Added
+- **"Let through for 24 h / 7 d" on a WAF log line, for the site's owner.**
+  On the Protection page a cPanel user can let one of its own requests through
+  the one rule that stopped it, on that path of its site only, for 24 hours or
+  7 days: the answer to a false positive without switching the WAF off. Not
+  offered for CVE and webshell rules.
+- **WAF excludes can expire.** `ttl=` on `/api/v1/waf/exclude/add` (and a
+  "for" choice on the Exceptions page): the entry stops applying at that time
+  and removes itself. The Exceptions page shows when each entry expires and
+  marks the ones a site owner added.
+
 ### Changed
 - **The cfm-admin menu is grouped by what you are doing.** Five groups instead
   of "Web protection / Rules & engine / Services / System":
