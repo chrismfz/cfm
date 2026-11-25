@@ -1117,8 +1117,12 @@ local wx = require "cfm_waf_excl"
 -- value (cfm_waf_excl.rows_from_entries) so per-request matching honours
 -- them the way the Go matcher does.
 --
--- The shdict keys carry a "2" (wxsnap2_ts / wxsnap2_lock / wxhosts2 /
--- wxpaths2) since rows carry the scope: the shdict outlives a reload, and an
+-- The shdict keys carry a "3" (wxsnap3_ts / wxsnap3_lock / wxhosts3 /
+-- wxpaths3; "2" until rows gained keep_critical and the expiry, 2026-11-26:
+-- a draining worker of the older Lua would rewrite the snapshot without
+-- them, and an owner's switch would read as a plain whole-WAF exclude).
+-- A number of their own since rows carry the scope: the shdict outlives a
+-- reload, and an
 -- old worker still draining connections after one would otherwise keep
 -- rewriting the snapshot with scope-less rows (every scoped exclude global
 -- again, each time it refreshed). With its own keys the new code ignores
@@ -1126,20 +1130,20 @@ local wx = require "cfm_waf_excl"
 local function refresh_waf_excludes_if_needed()
   if not SH then return end
   local now = ngx.now()
-  local last = tonumber(SH:get("wxsnap2_ts") or "0") or 0
+  local last = tonumber(SH:get("wxsnap3_ts") or "0") or 0
   if (now - last) < CFG.waf_excl_refresh_sec then return end
-  if not SH:add("wxsnap2_lock", "1", 1) then return end
+  if not SH:add("wxsnap3_lock", "1", 1) then return end
   local body, _ = decision:rpc("waf_excludes", "GET", "/nginx/waf/excludes")
   if not body then
-    SH:set("wxsnap2_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
-    SH:delete("wxsnap2_lock"); return
+    SH:set("wxsnap3_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
+    SH:delete("wxsnap3_lock"); return
   end
   local entries = (cjson.decode(body) or {}).entries or {}
   local hosts, paths = wx.rows_from_entries(entries)
-  SH:set("wxhosts2", cjson.encode(hosts), math.max(1, CFG.waf_excl_meta_ttl_sec))
-  SH:set("wxpaths2", cjson.encode(paths), math.max(1, CFG.waf_excl_meta_ttl_sec))
-  SH:set("wxsnap2_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
-  SH:delete("wxsnap2_lock")
+  SH:set("wxhosts3", cjson.encode(hosts), math.max(1, CFG.waf_excl_meta_ttl_sec))
+  SH:set("wxpaths3", cjson.encode(paths), math.max(1, CFG.waf_excl_meta_ttl_sec))
+  SH:set("wxsnap3_ts", now, math.max(1, CFG.waf_excl_refresh_sec))
+  SH:delete("wxsnap3_lock")
 end
 
 -- Exclude matching (scope, then value) lives in cfm_waf_excl (the excludes
@@ -1150,7 +1154,7 @@ end
 
 local function load_waf_excludes_local_cache()
   if not SH then wx.ts = 0; wx.hosts = {}; wx.paths = {}; return end
-  local ts = tonumber(SH:get("wxsnap2_ts") or "0") or 0
+  local ts = tonumber(SH:get("wxsnap3_ts") or "0") or 0
   -- This shortcut is the whole point of the cache; before the
   -- access_by_lua_file pitfall fix, wx.ts (then `wx_local_ts`) reset
   -- to 0 on every request and this comparison was always false. Now
@@ -1159,8 +1163,8 @@ local function load_waf_excludes_local_cache()
   -- short-circuit here without re-decoding the shdict snapshot.
   if ts == wx.ts then return end
   wx.ts = ts
-  wx.hosts = cjson.decode(SH:get("wxhosts2") or "[]") or {}
-  wx.paths = cjson.decode(SH:get("wxpaths2") or "[]") or {}
+  wx.hosts = cjson.decode(SH:get("wxhosts3") or "[]") or {}
+  wx.paths = cjson.decode(SH:get("wxpaths3") or "[]") or {}
 end
 
 -- waf_skip_for(host, uri) returns (cfm_waf_excl.skip_for):

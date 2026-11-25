@@ -1600,14 +1600,23 @@ the operator hears of each one.
 | Write | Request | Rules |
 |---|---|---|
 | The site's WAF switch (Vhost controls) | `type=host&value=<own vhost>` | Stored with `keep_critical`: the `WAF_CVE` and `WAF_WEBSHELL` families **keep running** on that site. No expiry. |
-| One rule on its site | `type=host&value=<own vhost>&rule_ids=<id>&ttl=` | Exactly one rule id (no list, range or `Nxx`); not a rule of the two kept families (`403`); `ttl` required, 1h to 7d. |
+| One rule on its site | `type=host&value=<own vhost>&rule_ids=<id>&ttl=` | Exactly one rule id (no list, range or `Nxx`); not a rule of the two kept families (`403`); `ttl` required, 1h to 7d; the vhost must be one the token names itself, not a name a glob of its scope only matches (`403`). |
 | One rule on a path of its site | `type=path&value=/path&rule_ids=<id>&ttl=[&scope_hosts=]` | The same, and: a literal path below the site root (no `* ? [ ]`, no `..`); pinned to the token's LITERAL vhosts, `scope_hosts` may only narrow them. |
 
 A path exclude without a rule, a rule exclude without an expiry, and anything
 on another account's vhost are refused. One account's sites hold at most 40
-live rule excludes (`scopedWAFRuleExcludeMax`, `429` beyond; renewing one of
-them is always allowed), and a path value is at most 255 bytes with no
-control character. A scoped list shows the host entries
+live rule excludes and 200 entries in all, the switches included
+(`scopedWAFRuleExcludeMax`, `scopedWAFEntryMax`, `429` beyond). Renewing an
+entry is always allowed; the same path and rule with another `scope_hosts`
+subset is another entry. An add that would move an entry's expiry by less
+than an hour changes nothing and notifies nobody. A path value is at most 255
+bytes with no control character; a host value is a host name.
+
+On a site whose owner switched the WAF off, the edge still reads the request
+(body included) and ClamAV upload scanning follows the site's own Clam
+switch; before, both were skipped with the WAF. The counting rules (wp-login
+probe, XML-RPC POST burst, auth burst) do not count there at all: their
+counters are per client, not per site. A scoped list shows the host entries
 on its vhosts and the path entries a scoped token wrote (`by: "scoped"`); an
 exclude the operator narrowed to the tenant's site stays the operator's to
 see and remove. A scoped remove of a path entry takes the caller's hosts out

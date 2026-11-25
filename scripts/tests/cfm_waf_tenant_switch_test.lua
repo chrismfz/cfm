@@ -122,6 +122,46 @@ do
   check(r.hit and r.reason:find("^WAF_WEBSHELL") and r.n == 1, "owner switch: only the kept hit is recorded (" .. show(r) .. ")")
 end
 
+-- ── 2b. the counting rules do not count on a switched-off site ───────────────
+-- Their counters are per client, not per site: counted on the switched-off
+-- site, the client's first XML-RPC call or login on ANOTHER site was blocked
+-- or challenged for requests this site had dropped.
+do
+  local store = {}
+  local sh = {}
+  function sh:incr(k, n) if store[k] == nil then return nil, "not found" end store[k] = store[k] + n; return store[k] end
+  function sh:add(k, v) if store[k] ~= nil then return false, "exists" end store[k] = v; return true end
+  function sh:get(k) return store[k] end
+  function sh:set(k, v) store[k] = v; return true end
+  local function run(host, critical, t)
+    local hit, reason = waf.check({
+      critical_only = critical or nil, host = host, shdict = sh, peer = t.peer,
+      uri = t.uri, args = "", raw_uri = t.uri, method = "POST", ip = "203.0.113.5", body = t.body,
+      headers = { ["user-agent"] = "Mozilla/5.0", accept = "*/*", ["content-type"] = t.ct, host = host } })
+    return hit, tostring(reason)
+  end
+  local xml = { uri = "/xmlrpc.php", ct = "text/xml",
+    body = "<?xml version='1.0'?><methodCall><methodName>wp.getPosts</methodName><params></params></methodCall>" }
+  local login = { uri = "/wp-login.php", ct = "application/x-www-form-urlencoded",
+    body = "log=admin&pwd=secret&wp-submit=Log+In", peer = "198.51.100.1" }
+  for name, req in pairs({ xmlrpc = xml, login = login }) do
+    -- The rule is live: enough of these with the WAF on is a hit.
+    store = {}
+    local fired = false
+    for _ = 1, 40 do if run("on.gr", nil, req) then fired = true; break end end
+    check(fired, name .. ": the counting rule fires with the WAF on (the test would prove nothing otherwise)")
+    -- Switched off: nothing is counted, so nothing is stored and the next site starts clean.
+    store = {}
+    for _ = 1, 40 do
+      local hit, reason = run("off.gr", true, req)
+      check(not hit, name .. ": a hit on the switched-off site (" .. reason .. ")")
+    end
+    check(next(store) == nil, name .. ": the switched-off site moved a counter")
+    local hit, reason = run("victim.gr", nil, req)
+    check(not hit, name .. ": the client's first request on another site is a hit (" .. reason .. ")")
+  end
+end
+
 -- ── 3. the family list ────────────────────────────────────────────────────────
 do
   check(waf.is_tenant_kept_reason("WAF_CVE:CVE_2026_1:X:Y") and waf.is_tenant_kept_reason("WAF_WEBSHELL:PATH:c99.php"), "kept: CVE, WEBSHELL")

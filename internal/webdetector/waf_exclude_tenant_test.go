@@ -487,3 +487,68 @@ func TestScopedWAFRuleExcludeCap(t *testing.T) {
 		t.Fatalf("operator at t1's cap: %d", rr.Code)
 	}
 }
+
+// A token that holds a glob (*.shared.gr) may not write a rule exclude on a
+// name the glob only matches, nor a host value that is not a host name; the
+// switches of one account are bounded too; and another scope_hosts subset of
+// an existing path exclude is a new entry, not a renewal.
+func TestScopedWAFExcludeGlobScopeAndCaps(t *testing.T) {
+	e := newTenantWAFEngine(t)
+	var events int
+	SetTenantPolicySink(func(TenantPolicyEvent) { events++ })
+	defer SetTenantPolicySink(nil)
+	add := func(q string, hosts ...string) int {
+		rr := httptest.NewRecorder()
+		e.handleWAFExcludeAdd(rr, scopedReq("POST", "/api/v1/waf/exclude/add?"+q, hosts...))
+		return rr.Code
+	}
+	glob := []string{"mine.gr", "*.shared.gr"}
+	if code := add("type=host&value=victim.shared.gr&rule_ids=402&ttl=7d", glob...); code != 403 {
+		t.Fatalf("rule exclude on a glob-matched name: %d", code)
+	}
+	if _, ids, _ := e.wafExcludes.MatchWAFDecision("victim.shared.gr", "/"); len(ids) != 0 {
+		t.Fatal("it was stored")
+	}
+	if code := add("type=host&value=*.shared.gr&rule_ids=402&ttl=7d", glob...); code != 403 {
+		t.Fatalf("rule exclude on a glob value: %d", code)
+	}
+	if code := add("type=host&value=mine.gr&rule_ids=402&ttl=7d", glob...); code != 200 {
+		t.Fatalf("rule exclude on its own site: %d", code)
+	}
+	for _, v := range []string{"a%0Ab.shared.gr", "a%20evil.shared.gr", "a/b.shared.gr", "%3Cb%3E.shared.gr"} {
+		if code := add("type=host&value="+v, glob...); code != 403 {
+			t.Fatalf("host value %q: %d", v, code)
+		}
+	}
+	before := events
+	n := 0
+	for i := 0; i < scopedWAFEntryMax+20; i++ {
+		if add("type=host&value=h"+itoa(i)+".shared.gr", glob...) == 200 {
+			n++
+		}
+	}
+	if n != scopedWAFEntryMax-1 || events-before != n { // one entry (the rule exclude) is already there
+		t.Fatalf("switches written: %d, events %d, want %d", n, events-before, scopedWAFEntryMax-1)
+	}
+
+	// scope_hosts subsets of an existing path exclude count as new entries.
+	e2 := newTenantWAFEngine(t)
+	add2 := func(q string) int {
+		rr := httptest.NewRecorder()
+		e2.handleWAFExcludeAdd(rr, scopedReq("POST", "/api/v1/waf/exclude/add?"+q, "a.gr", "b.gr", "c.gr"))
+		return rr.Code
+	}
+	for i := 0; i < scopedWAFRuleExcludeMax; i++ {
+		if code := add2("type=path&value=/p" + itoa(i) + "/&rule_ids=402&ttl=24h"); code != 200 {
+			t.Fatalf("fill %d: %d", i, code)
+		}
+	}
+	for _, sub := range []string{"a.gr", "b.gr", "a.gr,b.gr", "c.gr"} {
+		if code := add2("type=path&value=/p0/&rule_ids=402&ttl=24h&scope_hosts=" + sub); code != http.StatusTooManyRequests {
+			t.Fatalf("subset %s at the cap: %d", sub, code)
+		}
+	}
+	if rules, _ := scopedWAFEntryCounts(e2.WAFExcludeList(), scopeSet("a.gr")); rules != scopedWAFRuleExcludeMax {
+		t.Fatalf("%d rule excludes, want the cap", rules)
+	}
+}

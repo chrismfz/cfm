@@ -537,7 +537,7 @@ func (e *Engine) scopedWAFExcludeAdd(w http.ResponseWriter, r *http.Request, typ
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
 	}
-	if typ == "host" && !validateScopedExcludeWrite(r, typ, value) {
+	if typ == "host" && (!scopedWAFHostValue(value) || !validateScopedExcludeWrite(r, typ, value)) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope"})
 		return
 	}
@@ -566,6 +566,13 @@ func (e *Engine) scopedWAFExcludeAdd(w http.ResponseWriter, r *http.Request, typ
 		}
 		opt.KeepCritical = true
 	case typ == "host":
+		// A rule exclude names a vhost the token holds itself: a name that
+		// only a glob of its scope matches may be another account's site
+		// (the path branch drops globs for the same reason).
+		if !scopedHoldsLiterally(ctxScope, value) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "exclude value outside token scope: name one of your own sites"})
+			return
+		}
 		if code, msg := scopedWAFRuleExclude(ruleIDs, ttl); code != 0 {
 			writeJSON(w, code, map[string]string{"error": msg})
 			return
@@ -595,15 +602,23 @@ func (e *Engine) scopedWAFExcludeAdd(w http.ResponseWriter, r *http.Request, typ
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "engine not ready"})
 		return
 	}
-	if old, ok := e.wafExcludes.Get(typ, value, scope, ruleIDs); ok && old.By == excludeByScoped && old.ExpiresUnix > 0 &&
+	tenantWAFAddMu.Lock()
+	defer tenantWAFAddMu.Unlock()
+	old, exists := e.wafExcludes.Get(typ, value, scope, ruleIDs)
+	if exists && old.By == excludeByScoped && old.ExpiresUnix > 0 &&
 		opt.ExpiresUnix > 0 && opt.ExpiresUnix-old.ExpiresUnix < int64(scopedWAFRenewMinGain/time.Second) {
 		// The same exclude again, with (nearly) the expiry it already has.
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "unchanged": true, "expires_unix": old.ExpiresUnix})
 		return
 	}
-	if len(ruleIDs) > 0 && !scopedWAFRuleExcludeRoom(e.WAFExcludeList(), ctxScope, typ, value, ruleIDs) {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many WAF rule excludes on your sites; remove one first, or ask the administrator"})
-		return
+	if !exists {
+		// A new entry (the exact key: another scope_hosts subset is another
+		// entry) needs room. A renewal of an existing one does not.
+		rules, total := scopedWAFEntryCounts(e.WAFExcludeList(), ctxScope)
+		if total >= scopedWAFEntryMax || (len(ruleIDs) > 0 && rules >= scopedWAFRuleExcludeMax) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many WAF excludes on your sites; remove one first, or ask the administrator"})
+			return
+		}
 	}
 	if ok := e.WAFExcludeAddEntry(typ, value, scope, ruleIDs, opt); !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to add exclude (invalid or exists)"})
@@ -700,7 +715,7 @@ func (e *Engine) handleWAFExcludeRemove(w http.ResponseWriter, r *http.Request) 
 		ids := normalizeRuleIDs(ruleIDs)
 		e.recordTenantWAFExclude(TenantPolicyEvent{
 			Action: "remove", Hosts: []string{normalizeControlHost(value)}, Type: "host",
-			Value: strings.ToLower(strings.TrimSpace(value)), RuleIDs: ids, KeepCritical: len(ids) == 0,
+			Value: strings.ToLower(strings.TrimSpace(value)), RuleIDs: ids,
 			Remote: r.RemoteAddr,
 		})
 	}

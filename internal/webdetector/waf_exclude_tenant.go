@@ -61,9 +61,13 @@ const (
 	// scopedWAFRuleExcludeMax caps the live rule excludes the sites of one
 	// scoped token may hold. The edge walks every exclude row for each
 	// inspected request, and each write notifies the operator, so the number
-	// one account can create is bounded; renewing an existing one stays
-	// allowed at the cap.
+	// one account can create is bounded; renewing an existing one (the same
+	// type, value, rule AND scope) stays allowed at the cap.
 	scopedWAFRuleExcludeMax = 40
+	// scopedWAFEntryMax caps ALL the live WAF entries of one account's sites
+	// (the switches included: a token holding a glob could otherwise write one
+	// per sub-host name).
+	scopedWAFEntryMax = 200
 	// scopedWAFRenewMinGain: a repeated add of a live rule exclude is a
 	// renewal only when it moves the expiry at least this far; otherwise it
 	// changes nothing and is answered without a write, a history row or a
@@ -90,38 +94,58 @@ func plainExcludeValue(value string) bool {
 	return true
 }
 
-// scopedWAFRuleExcludeRoom reports whether a scoped caller with scope may add
-// the rule exclude (typ, value, ruleIDs): its sites hold fewer than
-// scopedWAFRuleExcludeMax live scoped-written rule excludes, or this very
-// entry is among them (a renewal).
-func scopedWAFRuleExcludeRoom(entries []excludeEntry, scope map[string]struct{}, typ, value string, ruleIDs []int) bool {
-	value = strings.ToLower(strings.TrimSpace(value))
-	if typ == "path" && !strings.HasPrefix(value, "/") {
-		value = "/" + value
+// scopedWAFHostValue: a site owner's host value is a host name (or the glob
+// its token holds): letters, digits, dots, hyphens, underscores and the two
+// glob characters. Nothing else reaches the store, the history or the
+// notifier.
+func scopedWAFHostValue(value string) bool {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" || len(v) > 253 {
+		return false
 	}
-	want := ruleIDsKey(normalizeRuleIDs(ruleIDs))
-	n := 0
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == '_' || c == '*' || c == '?') {
+			return false
+		}
+	}
+	return true
+}
+
+// scopedHoldsLiterally: host is a vhost the scope names itself, not one a
+// glob of the scope merely matches (another account may own that name).
+func scopedHoldsLiterally(scope map[string]struct{}, host string) bool {
+	h := normalizeControlHost(host)
+	if h == "" || strings.ContainsAny(h, "*?[]") {
+		return false
+	}
+	_, ok := scope[h]
+	return ok
+}
+
+// scopedWAFEntryCounts counts the live WAF entries scoped tokens wrote on the
+// sites of scope: those with a rule, and all of them (the switches too).
+func scopedWAFEntryCounts(entries []excludeEntry, scope map[string]struct{}) (rules, total int) {
 	for _, e := range entries {
-		if e.By != excludeByScoped || len(e.RuleIDs) == 0 {
+		if e.By != excludeByScoped {
 			continue
 		}
-		mine := false
 		for _, h := range e.ScopeHosts {
 			if _, ok := scope[h]; ok {
-				mine = true
+				total++
+				if len(e.RuleIDs) > 0 {
+					rules++
+				}
 				break
 			}
 		}
-		if !mine {
-			continue
-		}
-		if e.Type == typ && e.Value == value && ruleIDsKey(e.RuleIDs) == want {
-			return true
-		}
-		n++
 	}
-	return n < scopedWAFRuleExcludeMax
+	return rules, total
 }
+
+// tenantWAFAddMu makes a scoped add's "is there room" check and its write
+// one step.
+var tenantWAFAddMu sync.Mutex
 
 // parseExcludeTTL reads a ttl= value: a Go duration ("24h", "90m") or whole
 // days ("7d"). Empty is (0, nil): no expiry asked.

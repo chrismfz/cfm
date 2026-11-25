@@ -891,6 +891,12 @@ local function check_impl(ctx, st)
   -- whole-WAF exclude, cfm_waf_excl.skip_for). Everything still runs, and
   -- record() keeps only the hits of WAF_TENANT_KEPT_REASONS.
   local critical_only = ctx.critical_only == true
+  -- The counting rules (wp-login probe, XML-RPC POST burst, auth burst) keep
+  -- their counters per client, not per site: counted here, a client of this
+  -- site would be blocked on a neighbouring one for requests whose hits this
+  -- site drops. None is of a kept family, so they do not count at all (no
+  -- shdict, as in the body burn-in pass).
+  if critical_only then shdict = nil end
 
   -- One-shot gating bools so body/upload rules don't each lower(method) again.
   -- body_inspect_ok is the existing "POST + non-empty body" gate, hoisted.

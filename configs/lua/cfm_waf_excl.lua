@@ -47,7 +47,7 @@
 
 local _M = {}
 
--- Cache snapshot timestamp from the shdict (key `wxsnap2_ts`). 0 means
+-- Cache snapshot timestamp from the shdict (key `wxsnap3_ts`). 0 means
 -- this worker hasn't decoded any snapshot yet. Compared in
 -- load_waf_excludes_local_cache against the live shdict ts to decide
 -- whether to skip the cjson.decode.
@@ -348,7 +348,7 @@ function _M.skip_for(hosts, paths, host, uri)
   local now = nil
   local function consider(target, row, kind)
     -- Back-compat: Lua before rule_ids cached this list as bare strings. The
-    -- snapshot now lives under keys of its own (cfm.lua "wxhosts2"), so an
+    -- snapshot now lives under keys of its own (cfm.lua "wxhosts3"), so an
     -- older Lua's rows are not read, but a string row keeps its old meaning
     -- if one ever reaches here: a whole-WAF exclude on every host. A table
     -- row without `scope` is global too (an entry without scope_hosts).
