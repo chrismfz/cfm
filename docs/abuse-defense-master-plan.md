@@ -1000,15 +1000,44 @@ already opened.
    Chrome/Safari population of either node is flagged (all 45-105 req/IP,
    85-98% evidence). Not flagged on orion: six old Chrome 86-89 UAs at ~3,000
    IPs and 3.6 req/IP each, 0% evidence, already answered by the edge
-   (origin time 0). Known blind spot: the edge log carries no "came through
-   a CDN" bit, so a population seen only on CDN-fronted vhosts (static
-   served by the CDN) reads as no-evidence; a real browser UA spans the
-   node's other vhosts too, which is why none was flagged.
+   (origin time 0). Known blind spot: the daemon's ingest carries no "came
+   through a CDN" bit, so a population seen only on CDN-fronted vhosts
+   (static served by the CDN) reads as no-evidence; a real browser UA spans
+   the node's other vhosts too, which is why none was flagged. The edge
+   ACCESS log has one for Cloudflare (`cf=`, the visitor's
+   `CF-Connecting-IP`): on earth ~30% of a flagged population's requests
+   came through Cloudflare. Counting it per client needs a new column in
+   the log socket (log-cfm.lua), an edge change of its own, not done.
    The client keeps its class; `distributed` is a label on it, and the Web
    Traffic page offers its addresses (never its UA) to the operator's
    per-IP challenge / deny / throttle. Nothing reads it to act.
-   **Exit contract (D3):** review with the traffic mix's (2026-12-22): how
-   often it fires fleet-wide, and for each firing UA whether a spot-check of
+   **First read** (2026-11-25, every web node, one hour): it fired on 7 of
+   8 nodes and every firing spot-checked in the edge log was a scraper or a
+   scanner; no current browser population was flagged (60-98% evidence
+   everywhere). Two things it got wrong as a reading, fixed the same day:
+   - The address count is the SAMPLE (each 5-minute bucket keeps its first
+     64, so an hour tops out near 768). rigel's Mac Chrome 142 read 767 IPs;
+     its edge log had 18,078 distinct addresses at 1.10 req/IP, 441 /16s,
+     0% evidence, 23% of the node's origin time. `distributed.est_ips` (the
+     hour's requests at the sample's requests per IP: ~18,300) is the pool,
+     an upper estimate: the sample misses an address's return in a full
+     5 minutes, so its req/IP is a lower bound.
+   - A pool whose addresses come once each is not reached by per-IP
+     actions: 500 challenged addresses are ~3% of it and they do not come
+     back. Where it lands is: rigel's went 67% to one shop and 31% to
+     another. `distributed.hosts` (top 5 vhosts by requests, `_other` last)
+     and `distributed.nets` (/16, IPv6 /32, of the kept addresses: GeedoShop's
+     114 addresses on virgo were ONE /16, a fleet, not a proxy pool; an
+     IPv6 /32 is usually a whole ISP) carry that, and the page hints "seen
+     once per IP" under 1.5 req/IP in the sample.
+   Seen, not changed: a mean requests per IP lets 2-3 hammering addresses
+   (270-550 requests each) hide a one-request population of the same UA
+   (Mac Chrome 131 on mars and virgo, ~200 s of origin); GeedoShopProductFinder
+   declares a bot token yet counts as a browser UA; titan's costliest
+   unflagged browser UA (Pixel 6 Chrome 114: 12 IPs, ~870 req/IP, 424
+   vhosts, 14% of the origin) is one-IP-many-vhosts, another reading's job.
+   **Exit contract (D3):** a weekly read on 2026-12-02, then review with the
+   traffic mix's (2026-12-22): how often it fires fleet-wide, and for each firing UA whether a spot-check of
    the access log shows a scraper (requests per IP, static share, origin
    cost) or visitors (a CDN-fronted site with page-per-visit traffic would
    be the false positive to look for). Outcomes: keep as a label / feed a

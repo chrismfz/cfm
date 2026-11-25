@@ -138,13 +138,51 @@ export function hostBotShare(host) {
 }
 
 // topIPs picks the client's n busiest IPs (last hour) and how much of its
-// last-hour requests they carry.
+// last-hour requests they carry. For a client the distributed tell flagged,
+// the addresses listed are a sample of a bigger pool: coverage is then over
+// the hour's requests and total is the pool's estimate (distributed.est_ips),
+// not over what is listed (500 listed of rigel's ~18,000 read "100%").
 export function topIPs(client, n) {
   const list = (client && Array.isArray(client.top_ips_last_hour)) ? client.top_ips_last_hour : [];
-  const all = list.reduce((s, r) => s + num(r.requests), 0);
+  const d = client && client.distributed;
+  const listedReq = list.reduce((s, r) => s + num(r.requests), 0);
+  const all = d ? Math.max(num(d.requests), listedReq) : listedReq;
   const picked = list.slice(0, Math.max(0, n | 0));
   const got = picked.reduce((s, r) => s + num(r.requests), 0);
-  return { ips: picked.map((r) => r.ip), coverage: share(got, all), known: list.length, total: num(client && client.ips_last_hour) };
+  const total = d ? Math.max(num(d.est_ips), num(d.ips), num(client.ips_last_hour)) : num(client && client.ips_last_hour);
+  return { ips: picked.map((r) => r.ip), coverage: share(got, all), known: list.length, total };
+}
+
+// DIST_ONCE_PER_IP: under this many requests per address in the hour's
+// sample, an address is seen about once: a per-IP challenge, throttle or
+// deny on it waits for a return that may not come (rigel 2026-11-25: 1.02
+// in the sample, 1.10 in the edge log). The sample's req/IP is a lower bound
+// (traffic_mix.go distributedTell), so this is a hint, never a verdict.
+export const DIST_ONCE_PER_IP = 1.5;
+
+// distributedSummary reads the distributed tell of one client for the page:
+// the pool (kept vs estimated addresses), its networks, where it lands
+// (vhost shares, "_other" last), and whether per-IP actions can reach it.
+// null when the tell did not fire. A reading, never an action.
+export function distributedSummary(client) {
+  const d = client && client.distributed;
+  if (!d) return null;
+  const kept = num(d.ips);
+  const est = Math.max(num(d.est_ips), kept);
+  const requests = num(d.requests);
+  const listedHosts = (Array.isArray(d.hosts) ? d.hosts : []).filter((h) => h && typeof h.host === "string");
+  // Shares over the vhosts' own sum ("_other" included): right after an
+  // upgrade the restored hour has requests but no vhosts, and a share of
+  // all requests would read low with nothing to say why.
+  const hostSum = listedHosts.reduce((s, h) => s + num(h.requests), 0);
+  const hosts = listedHosts.map((h) => ({ host: h.host, other: h.host === OTHER_KEY, requests: num(h.requests), share: share(h.requests, hostSum) }));
+  const listed = Array.isArray(client.top_ips_last_hour) ? client.top_ips_last_hour.length : 0;
+  const reqPerIP = num(d.req_per_ip);
+  return {
+    kept, est, requests, reqPerIP, evidence: num(d.evidence_share), nets: num(d.nets), hosts, listed,
+    reach: est > 0 ? Math.min(1, listed / est) : 0,
+    onceEach: reqPerIP > 0 && reqPerIP < DIST_ONCE_PER_IP,
+  };
 }
 
 // Client ranking (the clients table's sortable columns). `param` is the
