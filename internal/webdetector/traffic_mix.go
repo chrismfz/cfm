@@ -129,15 +129,40 @@ func (c *tmCounters) add(o tmCounters) {
 
 type tmSmall struct {
 	Req, OriginMs, Bytes int64
-	Out                  tmOut // what the edge did (tmOutcome); a file from before it reads zeros
+	// Out: what the edge did (tmOutcome). nil while every count is zero: most
+	// vhost and client entries only ever reach the origin, and this sits in
+	// every one of them (and in the saved file). A file from before it reads nil.
+	Out *tmOut `json:",omitempty"`
 }
 
-// addSmall adds o's counts to a.
+// addSmall adds o's counts to a. a's Out is its own: never o's pointer.
 func (a *tmSmall) addSmall(o tmSmall) {
 	a.Req += o.Req
 	a.OriginMs += o.OriginMs
 	a.Bytes += o.Bytes
-	a.Out.add(o.Out)
+	if o.Out != nil {
+		if a.Out == nil {
+			a.Out = new(tmOut)
+		}
+		a.Out.add(*o.Out)
+	}
+}
+
+// clone copies a with its own Out (a copy read after the lock is dropped).
+func (a tmSmall) clone() tmSmall {
+	if a.Out != nil {
+		o := *a.Out
+		a.Out = &o
+	}
+	return a
+}
+
+// out is a's outcomes, zero when it has none.
+func (a tmSmall) out() tmOut {
+	if a.Out == nil {
+		return tmOut{}
+	}
+	return *a.Out
 }
 
 // What the edge did with a request (tmOutcome). A request the origin answered
@@ -151,8 +176,8 @@ const (
 	tmOutRateLimited        // a 429 the edge answered itself (no upstream)
 	tmOutRedirect           // cfm_redirect
 	tmOutOtherEdge          // any other edge answer (the panel proxies)
-	tmOutVerifyPass         // a /__cfm_verify the challenge server answered 303 (solved)
-	tmOutVerifyFail         // a /__cfm_verify it answered 403 (wrong, expired or rejected)
+	tmOutVerifyPass         // a /__cfm_verify answered 303: sent on (solved; or an unsolicited v2 reject sent on without clearance)
+	tmOutVerifyFail         // a /__cfm_verify answered 403: refused (wrong, expired, a v2 reject) or asked to confirm
 	tmOutcomes
 	tmOutOrigin = -1 // tmOutcome: the origin answered
 )
@@ -169,7 +194,10 @@ func (o *tmOut) add(x tmOut) {
 
 // tmOutcome classifies what the edge did with a request, from the edge's own
 // log fields: the upstream it chose ($cfm_upstream), whether an upstream was
-// contacted, the status and the URI. CFM's own /__cfm_* locations bypass
+// contacted, the status and the URI. The file tailers' 12-column format has
+// no upstream column: there a request cfm.lua sent to the challenge server
+// reads as origin (only the /__cfm_* URIs below are caught); the socket
+// ingest, the default, carries it. CFM's own /__cfm_* locations bypass
 // cfm.lua and keep the server's default $cfm_upstream ("cfm_apache"): read
 // by upstream alone, every challenge page and verify counted as origin time
 // (titan, 2026-11-25: 15,299 challenge pages in ~45 minutes).
@@ -197,15 +225,31 @@ func tmOutcome(rec LogRec) int {
 		return tmOutOtherEdge
 	}
 	if !rec.Upstream {
-		if rec.Status == 429 {
-			return tmOutRateLimited // the edge's own limits (limit_req, the crawler limits)
+		// A cfm_apache* request no upstream answered. The default upstream
+		// stays cfm_apache on every edge exit that never set it, so the status
+		// decides: only what the cache can serve is a hit (both tiers store
+		// 200s only; 206 / 304 are served from them), a 429 is the edge's own
+		// limits (limit_req, the crawler limits, a UA emergency throttle), a
+		// 403 / 444 a refusal (a UA emergency block closes with 444), and the
+		// rest (a challenge_resume 303, a 499 before the upstream answered)
+		// is some other edge answer.
+		switch rec.Status {
+		case 200, 206, 304:
+			return tmOutCached
+		case 429:
+			return tmOutRateLimited
+		case 403, 444:
+			return tmOutBlocked
 		}
-		return tmOutCached
+		return tmOutOtherEdge
 	}
 	return tmOutOrigin
 }
 
-// tmVerifyOutcome is the challenge's answer to a /__cfm_verify, or -1.
+// tmVerifyOutcome is the challenge's answer to a /__cfm_verify, or -1. The
+// status alone is all the log carries: 303 sends the client on (nearly always
+// a solve), 403 refuses it or asks it to confirm, which a person then clicks
+// through (a second verify, 303). Read them as answers, not exact verdicts.
 func tmVerifyOutcome(rec LogRec) int {
 	if !strings.HasPrefix(rec.URI, "/__cfm_verify") {
 		return -1
@@ -419,7 +463,11 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 		h = &[tmClasses]tmSmall{}
 		b.hosts[hk] = h
 	}
-	h[cls].addSmall(tmSmall{Req: 1, OriginMs: c.OriginMs, Bytes: c.Bytes, Out: c.Out})
+	one := tmSmall{Req: 1, OriginMs: c.OriginMs, Bytes: c.Bytes}
+	if c.Out != (tmOut{}) {
+		one.Out = &c.Out
+	}
+	h[cls].addSmall(one)
 
 	cm := b.clients[cls]
 	if cm == nil {
@@ -438,7 +486,7 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 		}
 		cm[ck] = cl
 	}
-	cl.addSmall(tmSmall{Req: 1, OriginMs: c.OriginMs, Bytes: c.Bytes, Out: c.Out})
+	cl.addSmall(one)
 	if tmHumanEvidence(rec.Method, rec.URI) {
 		cl.ev++
 	}
@@ -766,28 +814,29 @@ type TrafficMixSplit struct {
 }
 
 // TrafficMixOutcomes is what the edge did with requests (tmOutcome): origin
-// is every request no edge outcome took. verify_passed / verify_failed are
-// the challenge's answers, a subset of challenged. A reading of the edge's
+// is every request no edge outcome took. verify_sent_on / verify_refused are
+// the challenge's answers to a verify (303 / 403: tmVerifyOutcome), a subset
+// of challenged; a 403 includes the v2 confirm step's question. A reading of the edge's
 // own log, never an enforcement decision. Requests a restored file counted
 // before this build kept no outcome and read as origin.
 type TrafficMixOutcomes struct {
-	Origin       int64 `json:"origin"`
-	Cached       int64 `json:"cached"`
-	Challenged   int64 `json:"challenged"`
-	Blocked      int64 `json:"blocked"`
-	RuleBlocked  int64 `json:"rule_blocked"`
-	RateLimited  int64 `json:"rate_limited"`
-	Redirect     int64 `json:"redirect"`
-	OtherEdge    int64 `json:"other_edge"`
-	VerifyPassed int64 `json:"verify_passed"`
-	VerifyFailed int64 `json:"verify_failed"`
+	Origin        int64 `json:"origin"`
+	Cached        int64 `json:"cached"`
+	Challenged    int64 `json:"challenged"`
+	Blocked       int64 `json:"blocked"`
+	RuleBlocked   int64 `json:"rule_blocked"`
+	RateLimited   int64 `json:"rate_limited"`
+	Redirect      int64 `json:"redirect"`
+	OtherEdge     int64 `json:"other_edge"`
+	VerifySentOn  int64 `json:"verify_sent_on"`
+	VerifyRefused int64 `json:"verify_refused"`
 }
 
 func tmOutcomesOut(req int64, o tmOut) *TrafficMixOutcomes {
 	out := &TrafficMixOutcomes{
 		Cached: int64(o[tmOutCached]), Challenged: int64(o[tmOutChallenge]), Blocked: int64(o[tmOutBlocked]),
 		RuleBlocked: int64(o[tmOutRuleBlocked]), RateLimited: int64(o[tmOutRateLimited]), Redirect: int64(o[tmOutRedirect]),
-		OtherEdge: int64(o[tmOutOtherEdge]), VerifyPassed: int64(o[tmOutVerifyPass]), VerifyFailed: int64(o[tmOutVerifyFail]),
+		OtherEdge: int64(o[tmOutOtherEdge]), VerifySentOn: int64(o[tmOutVerifyPass]), VerifyRefused: int64(o[tmOutVerifyFail]),
 	}
 	edge := out.Cached + out.Challenged + out.Blocked + out.RuleBlocked + out.RateLimited + out.Redirect + out.OtherEdge
 	if out.Origin = req - edge; out.Origin < 0 {
@@ -1008,7 +1057,7 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 					cls[i].Req += hv[i].Req
 					cls[i].OriginMs += hv[i].OriginMs
 					cls[i].Bytes += hv[i].Bytes
-					cls[i].Out.add(hv[i].Out)
+					cls[i].Out.add(hv[i].out())
 					bc[i] += hv[i].Req
 				}
 			}
@@ -1098,12 +1147,12 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 			h := TrafficMixHost{Host: hk, Classes: map[string]TrafficMixSplit{}}
 			var tout tmOut
 			for i := 0; i < tmClasses; i++ {
-				sp := TrafficMixSplit{Requests: hv[i].Req, OriginSec: msToSec(hv[i].OriginMs), Bytes: hv[i].Bytes, Outcomes: tmOutcomesOut(hv[i].Req, hv[i].Out)}
+				sp := TrafficMixSplit{Requests: hv[i].Req, OriginSec: msToSec(hv[i].OriginMs), Bytes: hv[i].Bytes, Outcomes: tmOutcomesOut(hv[i].Req, hv[i].out())}
 				h.Classes[tmClassKeys[i]] = sp
 				h.Total.Requests += sp.Requests
 				h.Total.OriginSec += sp.OriginSec
 				h.Total.Bytes += sp.Bytes
-				tout.add(hv[i].Out)
+				tout.add(hv[i].out())
 			}
 			h.Total.Outcomes = tmOutcomesOut(h.Total.Requests, tout)
 			out.Hosts = append(out.Hosts, h)
@@ -1136,7 +1185,7 @@ func (s *trafficMixStore) snapshot(nowSec int64, closedEnd bool, window time.Dur
 	}
 
 	for k, cl := range clients {
-		c := TrafficMixClient{Class: tmClassKeys[k.cls], Client: k.key, Requests: cl.Req, OriginSec: msToSec(cl.OriginMs), Bytes: cl.Bytes, Outcomes: tmOutcomesOut(cl.Req, cl.Out)}
+		c := TrafficMixClient{Class: tmClassKeys[k.cls], Client: k.key, Requests: cl.Req, OriginSec: msToSec(cl.OriginMs), Bytes: cl.Bytes, Outcomes: tmOutcomesOut(cl.Req, cl.out())}
 		var hourReq, hourEv int64
 		if hs := hourStat[k]; hs != nil {
 			hourReq, hourEv = hs[0], hs[1]

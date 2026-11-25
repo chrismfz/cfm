@@ -23,12 +23,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ### Added
 - **Web Traffic: what the edge did with each kind of traffic.** Every class,
   vhost and client now carries its edge outcomes: reached the origin, cached,
-  challenged, blocked (WAF, bans, fingerprint/geo deny), blocked by a traffic
-  rule, rate-limited (429), redirected, and how many challenge verifies passed
-  or failed. A new "What the edge did with it" card shows them per class, and
+  challenged, blocked (WAF, bans, fingerprint/geo deny, a UA emergency
+  block), blocked by a traffic rule, rate-limited (429), redirected, and the
+  challenge's answers to its verifies (sent on, or refused / asked to
+  confirm). A new "What the edge did with it" card shows them per class, and
   the clients and vhosts tables gain an "At the edge" / "Stopped" column, so
-  "the scraper pool was challenged 4,410 times and none passed" or "we
-  stopped 61 requests of real visitors" reads at a glance. The MCP
+  "the scraper pool was challenged 4,410 times and never answered" or "we
+  stopped 61 requests of likely humans" reads at a glance. The MCP
   `traffic_mix` tool carries them too. A reading only: nothing acts on it.
 - **The solved-ok grace is measured (`okstate` lines).** After a solve,
   `OPENRESTY_OK_IP_TTL` lets everyone behind the same IP pass the host's

@@ -23,6 +23,13 @@ func TestTMOutcome(t *testing.T) {
 		{"a static cache hit (no upstream)", rec("cfm_apache_static", false, 200, "/a.css"), tmOutCached},
 		{"a micro cache hit", rec("cfm_apache_micro", false, 200, "/"), tmOutCached},
 		{"an edge rate limit (no upstream)", rec("cfm_apache", false, 429, "/p/1"), tmOutRateLimited},
+		// Edge exits that never set $cfm_upstream keep cfm_apache: the status decides.
+		{"a range from the cache", rec("cfm_apache_static", false, 206, "/v.mp4"), tmOutCached},
+		{"a revalidation from the cache", rec("cfm_apache_static", false, 304, "/a.css"), tmOutCached},
+		{"a UA emergency block (444)", rec("cfm_apache", false, 444, "/p/1"), tmOutBlocked},
+		{"an edge 403 without an upstream name", rec("cfm_apache", false, 403, "/p/1"), tmOutBlocked},
+		{"a challenge_resume redirect", rec("cfm_apache", false, 303, "/checkout"), tmOutOtherEdge},
+		{"a client gone before the upstream", rec("cfm_apache", false, 499, "/p/1"), tmOutOtherEdge},
 		{"a WAF block / ban", rec("cfm_block", false, 403, "/x"), tmOutBlocked},
 		{"a traffic rule's block", rec("cfm_block_rule", false, 403, "/x"), tmOutRuleBlocked},
 		{"sent to the challenge", rec("cfm_challenge", true, 302, "/p/1"), tmOutChallenge},
@@ -76,7 +83,7 @@ func TestTrafficMix_Outcomes(t *testing.T) {
 		tmFeed(s, r, now.Add(time.Duration(i)*time.Second))
 	}
 	m := s.Snapshot(now.Add(time.Minute), time.Hour, "", false, 10, 10)
-	want := TrafficMixOutcomes{Origin: 1, Cached: 1, Challenged: 5, Blocked: 1, RateLimited: 1, VerifyPassed: 1, VerifyFailed: 1}
+	want := TrafficMixOutcomes{Origin: 1, Cached: 1, Challenged: 5, Blocked: 1, RateLimited: 1, VerifySentOn: 1, VerifyRefused: 1}
 	if got := tmClassOf(m, "human").Outcomes; got == nil || *got != want {
 		t.Fatalf("class outcomes = %+v, want %+v", got, want)
 	}
@@ -112,4 +119,46 @@ func TestTrafficMix_Outcomes(t *testing.T) {
 	if got := tmFindClient(dst.Snapshot(now.Add(time.Minute), time.Hour, "", false, 10, 10), tmMacChrome136).Outcomes; got == nil || *got != want {
 		t.Fatalf("after a reload: %+v", got)
 	}
+}
+
+// An entry that only ever reached the origin keeps no outcome counts (most of
+// the ring's entries: they are allocated on the first edge outcome only).
+func TestTrafficMix_OriginOnlyKeepsNoOutcomes(t *testing.T) {
+	s := newTrafficMixStore()
+	now := tmBase()
+	tmFeed(s, tmOrigin("10.0.0.6", "shop.gr", "GET", "/p/4", tmMacChrome136, 200, 0.3), now)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := &s.buckets[(now.Unix()/tmBucketSec)%tmBuckets]
+	if h := b.hosts["shop.gr"]; h == nil || h[tmHuman].Out != nil {
+		t.Fatalf("an origin-only host entry holds outcome counts: %+v", h)
+	}
+	for _, cl := range b.clients[tmHuman] {
+		if cl.Out != nil {
+			t.Fatalf("an origin-only client holds outcome counts: %+v", cl.Out)
+		}
+	}
+}
+
+// A save copies the counts under the lock and encodes them after: it must not
+// share them with the live entries that observe keeps adding to (-race).
+func TestTrafficMix_SaveWhileObserving(t *testing.T) {
+	s := newTrafficMixStore()
+	now := time.Now()
+	path := filepath.Join(t.TempDir(), "m.json.gz")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			r := tmOrigin("10.0.0.1", "shop.gr", "GET", "/p", tmMacChrome136, 403, 0)
+			r.UpstreamName, r.Upstream = "cfm_block", false
+			tmFeed(s, r, now)
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		if err := s.saveTo(path, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-done
 }

@@ -27,7 +27,7 @@ import {
   CLASS_ORDER, CLASS_LABELS, CLASS_COLORS, OTHER_KEY,
   share, fmtPct, fmtCount, fmtBytes, fmtMbps, fmtRate, fmtSeconds,
   classMap, summary, segments, hostBotShare, topIPs, clientActions, challengeableIPs, distributedSummary,
-  OUTCOMES, outcomeSummary,
+  OUTCOMES, outcomeSummary, outcomeLine, outcomeCell,
   CLIENT_SORTS, clientSort,
 } from "./webdet/traffic-model.js";
 import {
@@ -151,13 +151,6 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     return `<div role="img" aria-label="${escapeHTML(`${label}: ${aria || "no traffic"}`)}" style="display:flex;gap:2px;height:${height}px">${parts || '<div class="muted">no traffic</div>'}</div>`;
   }
 
-  // "stopped 6,940 (14.4%) · challenges passed 304 of 1,016"
-  function outText(o) {
-    let t = `stopped ${fmtCount(o.stopped)} (${fmtPct(o.stoppedShare)})`;
-    if (o.challenged) t += o.passRate === null ? ` · ${fmtCount(o.challenged)} challenged, none answered` : ` · challenges passed ${fmtCount(o.passed)} of ${fmtCount(o.passed + o.failed)} answered`;
-    return t;
-  }
-
   function renderOutcomes(mix) {
     const rows = [["All traffic", mix && mix.total]].concat(CLASS_ORDER.map((k) => [CLASS_LABELS[k], classMap(mix)[k]]));
     const read = rows.map(([label, c]) => [label, outcomeSummary(c && c.outcomes)]);
@@ -169,10 +162,10 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
     }
     el.outLegend.innerHTML = OUTCOMES.map((x) => `<span style="margin-right:1rem;white-space:nowrap"><span aria-hidden="true" style="display:inline-block;width:.7rem;height:.7rem;border-radius:3px;background:${x.color};margin-right:.35rem;vertical-align:-1px"></span>${escapeHTML(x.label)}</span>`).join("");
     el.outBars.innerHTML = read.filter(([, o]) => o).map(([label, o]) =>
-      `<div style="display:grid;grid-template-columns:minmax(7rem,14rem) minmax(0,1fr);gap:.6rem;align-items:center;margin:.55rem 0"><div class="muted">${escapeHTML(label)}</div><div>${outBar(o, 22, label)}<div class="muted" style="font-size:.78rem;margin-top:.2rem">${escapeHTML(outText(o))}</div></div></div>`).join("");
+      `<div style="display:grid;grid-template-columns:minmax(7rem,14rem) minmax(0,1fr);gap:.6rem;align-items:center;margin:.55rem 0"><div class="muted">${escapeHTML(label)}</div><div>${outBar(o, 22, label)}<div class="muted" style="font-size:.78rem;margin-top:.2rem">${escapeHTML(outcomeLine(o))}</div></div></div>`).join("");
     const human = outcomeSummary((classMap(mix).human || {}).outcomes);
     el.outNote.textContent = human && human.stopped
-      ? `Browser UAs labelled likely humans that the edge stopped: ${fmtCount(human.stopped)} requests (${fmtPct(human.stoppedShare)} of theirs)${human.passRate === null ? "" : `, ${fmtPct(human.passRate, 0)} of their answered challenges passed`}. A distributed scraper counts here too: check its row in the clients below.`
+      ? `Browser UAs labelled likely humans that the edge stopped: ${fmtCount(human.stopped)} requests (${fmtPct(human.stoppedShare)} of theirs)${human.sentOnRate === null ? "" : `; ${fmtPct(human.sentOnRate, 0)} of their verifies were sent on (a 403 includes the v2 confirm question)`}. A distributed scraper counts here too: check its row in the clients below.`
       : "";
   }
 
@@ -211,10 +204,7 @@ import { THROTTLE_PROFILES } from "./webdet/rules-model.js";
   function edgeCell(outcomes, label) {
     const o = outcomeSummary(outcomes);
     if (!o) return '<span class="muted">—</span>';
-    const parts = [];
-    for (const x of OUTCOMES) if (x.stop && o.segments.find((s) => s.key === x.key).value) parts.push(`${x.key === "rate_limited" ? "429" : x.key.replace("_", " ")} ${fmtCount(o.segments.find((s) => s.key === x.key).value)}`);
-    if (o.challenged && o.passRate !== null) parts.push(`passed ${fmtCount(o.passed)}`);
-    return `${outBar(o, 10, `${label} at the edge`)}<div class="muted" style="font-size:.75rem;margin-top:.2rem">${escapeHTML(o.stopped ? `${fmtPct(o.stoppedShare, 0)} stopped: ${parts.join(" · ")}` : "nothing stopped")}</div>`;
+    return `${outBar(o, 10, `${label} at the edge`)}<div class="muted" style="font-size:.75rem;margin-top:.2rem">${escapeHTML(outcomeCell(o))}</div>`;
   }
 
   function renderClients(mix) {

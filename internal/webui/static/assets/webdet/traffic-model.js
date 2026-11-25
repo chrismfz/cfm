@@ -142,20 +142,49 @@ export function outcomeSummary(outcomes) {
   if (!outcomes || typeof outcomes !== "object") return null;
   const total = OUTCOMES.reduce((t, o) => t + num(outcomes[o.key]), 0);
   const stopped = OUTCOMES.filter((o) => o.stop).reduce((t, o) => t + num(outcomes[o.key]), 0);
-  const passed = num(outcomes.verify_passed);
-  const failed = num(outcomes.verify_failed);
+  // The challenge's answers to a verify, by status (traffic_mix.go
+  // tmVerifyOutcome): 303 sent the client on (nearly always a solve), 403
+  // refused it or asked it to confirm (the v2 confirm step, which a person
+  // then clicks through). Answers, not exact verdicts.
+  const sentOn = num(outcomes.verify_sent_on);
+  const refused = num(outcomes.verify_refused);
   return {
     total,
     stopped,
     stoppedShare: share(stopped, total),
     segments: OUTCOMES.map((o) => ({ key: o.key, label: o.label, color: o.color, value: num(outcomes[o.key]), fraction: share(outcomes[o.key], total) })),
     challenged: num(outcomes.challenged),
-    passed,
-    failed,
-    // Of the verifies answered, how many passed: a challenge page nobody
+    sentOn,
+    refused,
+    // Of the verifies answered, the share sent on: a challenge page nobody
     // answers (a scraper that does not run it) is neither.
-    passRate: passed + failed > 0 ? passed / (passed + failed) : null,
+    sentOnRate: sentOn + refused > 0 ? sentOn / (sentOn + refused) : null,
   };
+}
+
+const OUT_SHORT = Object.freeze({ challenged: "challenged", blocked: "blocked", rule_blocked: "rule-blocked", rate_limited: "429" });
+
+// outcomeLine is the one-line reading under an outcome bar:
+// "stopped 6,940 (14.4%) · verifies sent on 304 of 1,016".
+export function outcomeLine(o) {
+  if (!o) return "";
+  let t = `stopped ${fmtCount(o.stopped)} (${fmtPct(o.stoppedShare)})`;
+  if (o.challenged) {
+    t += o.sentOnRate === null
+      ? ` · ${fmtCount(o.challenged)} challenge requests, no verify answered`
+      : ` · verifies sent on ${fmtCount(o.sentOn)} of ${fmtCount(o.sentOn + o.refused)}`;
+  }
+  return t;
+}
+
+// outcomeCell is the short reading in a table cell, or "—" from a node that
+// sent no outcomes: "92% stopped: challenged 4,410 · sent on 0".
+export function outcomeCell(o) {
+  if (!o) return "—";
+  if (!o.stopped) return "nothing stopped";
+  const parts = o.segments.filter((x) => OUT_SHORT[x.key] && x.value).map((x) => `${OUT_SHORT[x.key]} ${fmtCount(x.value)}`);
+  if (o.challenged && o.sentOnRate !== null) parts.push(`sent on ${fmtCount(o.sentOn)}`);
+  return `${fmtPct(o.stoppedShare, 0)} stopped: ${parts.join(" · ")}`;
 }
 
 // segments turns per-class values into the stacked-bar segments (fractions),
