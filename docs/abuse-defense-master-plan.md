@@ -1063,8 +1063,8 @@ already opened.
    was contacted, the status and the URI. CFM's own `/__cfm_challenge` and
    `/__cfm_verify` keep the server's default `cfm_apache` upstream, so until
    then every challenge page counted as origin time (titan: ~15,000 in 45
-   minutes). A reading, the basis of the planned "Protection" page (WAF
-   engine + Forensics merged); nothing acts on it.
+   minutes). A reading, shown on the Protection page (which replaced the
+   WAF engine and Forensics pages); nothing acts on it.
    **Exit contract (D3):** a weekly read on 2026-12-02, then review with the
    traffic mix's (2026-12-22): how often it fires fleet-wide, and for each firing UA whether a spot-check of
    the access log shows a scraper (requests per IP, static share, origin

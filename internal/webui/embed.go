@@ -7,11 +7,12 @@
 //   /                        → static/index.html          (dashboard)
 //   /webdetector/            → static/webdetector/index.html
 //   /webdetector/vhost/      → static/webdetector/vhost/index.html
-//   /webdetector/forensics/  → static/webdetector/forensics/index.html
-//   /webdetector/waf/        → static/webdetector/waf/index.html
+//   /webdetector/protection/ → static/webdetector/protection/index.html
+//   /webdetector/exceptions/ → static/webdetector/exceptions/index.html
+//   /webdetector/waf/, /forensics/, /challenge-access/ → pages that moved:
+//                              each is a stub that forwards to its new place
 //   /webdetector/controls/   → static/webdetector/controls/index.html
 //   /webdetector/rules/      → static/webdetector/rules/index.html
-//   /webdetector/challenge-access/ → static/webdetector/challenge-access/index.html
 //   /webdetector/site-cache/ → static/webdetector/site-cache/index.html
 //   /governor/               → static/governor/index.html
 //   /mail/                   → static/mail/index.html

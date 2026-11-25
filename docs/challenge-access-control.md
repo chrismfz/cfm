@@ -2,8 +2,10 @@
 
 Status: **Phase 0 (backend + edge enforcement), Phase 1 (cfm-admin UI) and
 Phase 2 (Challenge-Recipes) LANDED.** As-built notes are inline in §3/§6; the UI
-lives at `/cfm-admin/webdetector/challenge-access/`
-(`internal/webui/static/webdetector/challenge-access/`,
+lives on the Exceptions page, tab **Trusted clients** (the card is headed the same)
+(`/cfm-admin/webdetector/exceptions/?tab=trusted` since 2026-11-25; the old
+`/webdetector/challenge-access/` redirects there. Markup
+`assets/webdet/partial-challenge-access.js`,
 `assets/webdet/feature-challenge-access.js`,
 `challenge-access-model.js`, `challenge-access-recipes.js`). The
 `challenge/access/simulate` endpoint + "Test" button and the
@@ -255,12 +257,10 @@ without a second editable copy (CLAUDE.md §5).
 
 ## 4. cfm-admin UI
 
-A new page **Challenge Access** under the **Rules & engine** nav group
-(`assets/shared/nav.js:42`), served from
-`internal/webui/static/webdetector/challenge-access/index.html`
-(`pageMode:"challenge-access"`, mixin `feature-challenge-access.js`), registered
-in `embed.go`, `core.js` page computeds, and `controller-bootstrap.js` if
-admin-gated for the global view. It reuses three existing patterns wholesale.
+The **Trusted clients** tab of the Exceptions page (it was a page of its own,
+**Challenge Access**, until 2026-11-25): markup
+`assets/webdet/partial-challenge-access.js`, mixin
+`feature-challenge-access.js`, mounted by `pages/exceptions.js`. It reuses three existing patterns wholesale.
 
 ### 4.1 The exempt builder (reuse the traffic-rules chip editor)
 The same Step-2 **chip** builder as the rules editor (`rules/index.html`,

@@ -139,7 +139,7 @@
         <td class="truncate" title="${asnName}">${cc}${asn} ${asnName}</td>
         <td class="truncate" title="${escapeHTML(r.comment || '')}">${escapeHTML(r.comment || '-')}</td>
         <td class="actions-cell">
-          <a class="btn-quiet btn-sm" href="/cfm-admin/webdetector/forensics/?ip=${encodeURIComponent(r.ip)}#history-card">History</a>
+          <a class="btn-quiet btn-sm" href="/cfm-admin/webdetector/protection/?tab=events&ip=${encodeURIComponent(r.ip)}">Events</a>
           <button class="btn-danger btn-sm" data-unblock="${escapeHTML(r.ip)}">Unblock</button>
         </td>
       </tr>`;

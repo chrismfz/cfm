@@ -16,17 +16,26 @@
 // would have let a request through.
 
 import * as M from "./protection-model.js";
+import { analyzeMixin } from "./feature-forensics.js";
 import { fmtCount, fmtPct, outcomeSummary, outcomeLine, OUTCOMES } from "./traffic-model.js";
 
 export const protectionMixin = {
+  // The analyze-ip / analyze-host tools (the Tools tab) keep their own mixin:
+  // the WebDetector page uses the same one.
+  mixins: [analyzeMixin],
   data() {
-    let t = M.DEFAULT_TAB, host = "", ip = "";
+    let t = M.DEFAULT_TAB, host = "", ip = "", linked = "";
     try {
       const u = new URL(window.location.href);
       host = String(u.searchParams.get("host") || "").trim().toLowerCase();
       ip = String(u.searchParams.get("ip") || "").trim();
       // A link to one address opens where that address filters: its events.
       t = M.tab(u.searchParams.get("tab") || (ip ? "events" : ""));
+      // The address goes where the link points: the Tools tab runs its
+      // analysis for it (once), the Events tab filters by it. Never both: a
+      // link to its events must not start a log analysis on a later click.
+      if (t === "tools") linked = ip;
+      if (t !== "events") ip = "";
     } catch { /* no URL */ }
     return {
       ptTab: t,
@@ -44,6 +53,11 @@ export const protectionMixin = {
       ptEventsError: "",
       ptEventType: "",
       ptEventIP: ip,
+      ptOnlyImpossibleUA: false,
+      ptStore: null,
+      ptStoreBusy: false,
+      ptLinkedIP: linked,
+      ptEventsSummary: null,
       ptEventCursors: [], // the cursors of the pages before this one (for "Newer")
       ptEventCursor: null,
       ptEventNext: null,
@@ -57,7 +71,10 @@ export const protectionMixin = {
   },
 
   computed: {
-    ptTabs() { return M.TABS; },
+    ptTabs() { return M.tabsFor({ scoped: this.isScoped }); },
+    // "impossible UA only" narrows the page shown, as the Forensics page did.
+    ptEventTotals() { return M.eventsSummary(this.ptEventsSummary); },
+    ptEventsShown() { return this.ptOnlyImpossibleUA ? this.ptEvents.filter((e) => M.impossibleUA(e)) : this.ptEvents; },
     ptWindows() { return M.WINDOWS; },
     ptGroupings() { return Object.entries(M.GROUPINGS).map(([key, g]) => ({ key, label: g.label })); },
     ptGroupHead() { return M.GROUPINGS[M.grouping(this.ptGroupBy)].head; },
@@ -79,6 +96,7 @@ export const protectionMixin = {
     // out of the window between the two requests): always a list here.
     ptOpenRows() { return (this.ptOpen && this.ptOpen.summary && Array.isArray(this.ptOpen.summary.rows)) ? this.ptOpen.summary.rows : []; },
     ptPanelRows() { return (this.ptPanel && this.ptPanel.waf && Array.isArray(this.ptPanel.waf.rows)) ? this.ptPanel.waf.rows : []; },
+    ptPanelLiveHosts() { return (this.ptPanel && this.ptPanel.live && Array.isArray(this.ptPanel.live.hosts)) ? this.ptPanel.live.hosts.slice(0, 8) : []; },
     ptPanelRules() { return (this.ptPanel && this.ptPanel.waf && Array.isArray(this.ptPanel.waf.top_rule_bases)) ? this.ptPanel.waf.top_rule_bases : []; },
     ptTiles() { return M.wafTiles(this.ptSummary); },
     ptHist() { return M.histBars(this.ptSummary); },
@@ -111,6 +129,14 @@ export const protectionMixin = {
     ptEventTone: M.eventTone,
     ptEventDetail: M.eventDetail,
     ptWho: M.whoLine,
+    ptExceptionsURL: M.exceptionsURL,
+    ptImpossibleUA: M.impossibleUA,
+    ptSolveTime: M.solveTime,
+    ptEventUA: M.eventUA,
+    ptBytes(n) {
+      const v = Number(n) || 0;
+      return v >= 1048576 ? (v / 1048576).toFixed(1) + " MB" : Math.round(v / 1024) + " KB";
+    },
     ptPath: M.uriPath,
     ptExcludeOffer(row) { return M.excludeOffer(row, { scoped: this.isScoped }); },
     ptTime(ts) {
@@ -121,7 +147,10 @@ export const protectionMixin = {
     // refreshProtection is the page's hook in core.js refreshAll.
     async refreshProtection() {
       this.ptNow = Date.now();
+      // A scoped session never holds the admin tab (a link may name it).
+      if (!this.ptTabs.some((t) => t.key === this.ptTab)) this.ptTab = M.DEFAULT_TAB;
       if (this.ptTab === "events") return this.ptLoadEvents();
+      if (this.ptTab === "tools") return this.ptLoadStore();
       await this.ptLoadSummary();
       if (this.ptTab === "overview") await this.ptLoadMix();
     },
@@ -178,6 +207,12 @@ export const protectionMixin = {
         return;
       }
       const url = M.eventsQuery({ host: this.ptEffectiveHost, ip: this.ptEventIP, type: this.ptEventType, cursor: this.ptEventCursor });
+      // The window's totals for the same vhost and address: they do not
+      // depend on the page, so they are asked with the first one only.
+      if (!this.ptEventCursor) {
+        this.fetchJSONSafe(M.eventsSummaryQuery({ hours: this.ptHours, host: this.ptEffectiveHost, ip: this.ptEventIP }), null)
+          .then((s) => { if (seq === this.ptEventSeq) this.ptEventsSummary = s; });
+      }
       try {
         const res = await this.fetchJSON(url);
         if (seq !== this.ptEventSeq) return;
@@ -190,6 +225,52 @@ export const protectionMixin = {
         this.ptEventNext = null;
         this.ptEventsError = `The events could not be read: ${this.formatApiError(err)}`;
       }
+    },
+
+    // ── Tools (admin) ────────────────────────────────────────────────────
+    async ptLoadStore() {
+      if (this.isScoped) return;
+      this.ptStore = await this.fetchJSONSafe("v1/webdet/history/stats", null);
+      // A link that named an address (the palette's "Analyze IP", the
+      // WebDetector page's Analyze button) runs the tool for it, once.
+      if (this.ptLinkedIP) {
+        const addr = this.ptLinkedIP;
+        this.ptLinkedIP = "";
+        await this.analyzeIP(addr);
+      }
+    },
+    async ptPruneHistory(days) {
+      if (!window.confirm("Delete history events older than " + days + " days?")) return;
+      this.ptStoreBusy = true;
+      try {
+        await this.postJSON("v1/webdet/history/prune?days=" + encodeURIComponent(days), {});
+        this.actionMsg = "History pruned (older than " + days + " days)";
+      } catch (err) {
+        this.actionMsg = "History prune failed: " + this.formatApiError(err);
+      } finally {
+        this.ptStoreBusy = false;
+      }
+      await this.ptLoadStore();
+    },
+    async ptTruncateHistory() {
+      if (!window.confirm("Delete ALL history events? The WAF log and the events of every vhost go with them. This cannot be undone.")) return;
+      this.ptStoreBusy = true;
+      try {
+        await this.postJSON("v1/webdet/history/truncate?confirm=yes", {});
+        this.actionMsg = "History truncated";
+      } catch (err) {
+        this.actionMsg = "History truncate failed: " + this.formatApiError(err);
+      } finally {
+        this.ptStoreBusy = false;
+      }
+      await this.ptLoadStore();
+    },
+    async ptAnalyzeIP(ip) {
+      const addr = String(ip || "").trim();
+      this.ptCloseIP();
+      if (!addr) return;
+      await this.ptSetTab("tools");
+      await this.analyzeIP(addr);
     },
 
     ptResetEvents() { this.ptEventCursors = []; this.ptEventCursor = null; this.ptEventNext = null; },
@@ -252,9 +333,11 @@ export const protectionMixin = {
       const events = (this.isScoped && !host)
         ? Promise.resolve(null)
         : this.fetchJSONSafe(M.eventsQuery({ host: this.isScoped ? host : "", ip: addr }), null);
-      const [w, e] = await Promise.all([waf, events]);
+      // Admin only: what the address is doing right now (the short window).
+      const live = this.isScoped ? Promise.resolve(null) : this.fetchJSONSafe("v1/webdet/ip-drilldown?ip=" + encodeURIComponent(addr), null);
+      const [w, e, l] = await Promise.all([waf, events, live]);
       if (seq !== this.ptPanelSeq) return;
-      this.ptPanel = { waf: w, events: e ? this.extractRows(e).slice(0, 20) : null };
+      this.ptPanel = { waf: w, events: e ? this.extractRows(e).slice(0, 20) : null, live: l };
       await this.$nextTick();
       this.$refs.ptPanelClose?.focus();
     },

@@ -754,7 +754,7 @@ async function refreshLuaStats() {
       cards.push(linkCard('/cfm-admin/webdetector/', 'Active challenges', escapeHTML(String(n)), 'vhosts', n > 0));
     }
     if (waf) {
-      cards.push(linkCard('/cfm-admin/webdetector/waf/', 'WAF hits (24h)', escapeHTML(String(waf.total_events ?? 0)),
+      cards.push(linkCard('/cfm-admin/webdetector/protection/?tab=waf', 'WAF hits (24h)', escapeHTML(String(waf.total_events ?? 0)),
         `${escapeHTML(String(waf.blocked_events ?? 0))} blocked`, Number(waf.blocked_events) > 0));
     }
     if (susp) {

@@ -468,7 +468,7 @@ two the alert is logged without a mail. A farm runs for hours.
 | `cfm web live` (TUI) | `F` in the leading slot of the `SUP` column |
 | `/var/lib/cfm/notify.log.jsonl` | one JSON record per notification |
 | `cfm.challenges.log` | per solve: `ua=`, `solve_ms=`, `ua_impossible=` |
-| WebUI → WebDetector → Forensics | `challenge_solved` rows with the UA, a **Solve** latency column, the impossible-UA pill and filter |
+| WebUI → Protection → Events | `challenge_solved` rows with the UA, a **Solve** latency column, the impossible-UA pill and filter |
 
 Notification is on by default: the section matches the `[detector "*"]`
 catch-all in `notify.conf` (email), and the alert's `warn` severity passes the
@@ -743,7 +743,7 @@ the device-claim group); even there it never fails a solve alone (see
 Checked on every challenge solve, it is surfaced as `ua_impossible=<reasons>`
 in `cfm.challenges.log`, `payload.ua_impossible` on the `challenge_solved`
 history event, the `impossible_ua` count on solver-farm alerts, and an
-`impossible` pill and **impossible UA only** filter in the forensics table.
+`impossible` pill and **impossible UA only** filter in the Protection page's Events tab.
 Each is written only for an *impossible* verdict: absence means coherent.
 
 - **Coherence, not freshness.** An old but consistent UA is a real person on
@@ -928,7 +928,7 @@ cfm webtop challenge exclude remove /images/.tmb/ --type path --scope example.gr
   remove takes its own hosts out of every entry on that path, so an entry
   shared with another site keeps covering that site.
   `docs/endpoint_scope_inventory.md` has the rules. In cfm-admin
-  (WebDetector → WAF engine → Dynamic excludes) the challenge card offers
+  (Exceptions → Challenge) the form offers
   `path` to admins and tenants, with a required scope field (a tenant picks
   among its own sites, prefilled with the first in alphabetical order) and a
   Scope column; the WAF card's `path` stays admin-only, and so does the

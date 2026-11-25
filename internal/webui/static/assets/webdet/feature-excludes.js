@@ -154,7 +154,6 @@ export const excludesMixin = {
           this.wafExcludeScope = "";
         }
         await this.refreshExcludeLists();
-        await this.refreshHistory?.();
       } catch (err) {
         this.actionMsg = `${scope.toUpperCase()} exclude add failed: ${this.formatApiError(err)}`;
         console.error("[cfm-admin] exclude add failed", scope, err);
@@ -179,7 +178,6 @@ export const excludesMixin = {
         await this.postJSON(path, {});
         this.actionMsg = `${scope.toUpperCase()} exclude removed: ${entry.type}=${entry.value}`;
         await this.refreshExcludeLists();
-        await this.refreshHistory?.();
       } catch (err) {
         this.actionMsg = `${scope.toUpperCase()} exclude remove failed: ${this.formatApiError(err)}`;
         console.error("[cfm-admin] exclude remove failed", scope, err);

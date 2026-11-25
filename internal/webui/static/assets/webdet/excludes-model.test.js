@@ -58,3 +58,30 @@ test("formatChallengeExcludeScope marks an unscoped path entry inert", () => {
   assert.equal(formatChallengeExcludeScope({ type: "path", scope_hosts: ["a.gr", "b.gr"] }), "a.gr, b.gr");
   assert.equal(formatChallengeExcludeScope({ type: "host" }), "*");
 });
+
+test("Exceptions page: tabs, what an entry skips, where, the filter and the order", async () => {
+  const M = await import("./excludes-model.js");
+  assert.equal(M.exceptionTab("trusted"), "trusted");
+  assert.equal(M.exceptionTab("nope"), "waf");
+  assert.deepEqual(M.wafExcludeSkips({}), { text: "the whole WAF", whole: true });
+  assert.deepEqual(M.wafExcludeSkips({ rule_ids: [402] }), { text: "rule 402", whole: false });
+  assert.equal(M.wafExcludeSkips({ rule_ids: [401, 431] }).text, "rules 401, 431");
+  assert.equal(M.excludeWhere({ type: "host", value: "a.gr" }), "this host");
+  assert.equal(M.excludeWhere({ type: "path", value: "/x" }), "every vhost");
+  assert.equal(M.excludeWhere({ type: "path", scope_hosts: ["a.gr", "b.gr"] }), "a.gr, b.gr");
+  const rows = [
+    { type: "path", value: "/api/callback", rule_ids: [402], scope_hosts: ["pay.gr"], created_at: "2026-11-12T10:00:00+02:00" },
+    { type: "host", value: "white.gr", created_at: "2026-03-26T15:13:27+02:00" },
+    { type: "path", value: "/everywhere", created_at: "2026-01-01T00:00:00Z" },
+    { type: "path", value: "/k2/*", rule_ids: [305], scope_hosts: ["news.gr"], created_at: "2026-11-20T10:00:00+02:00" },
+  ];
+  assert.deepEqual(M.filterExcludes(rows, " PAY ").map((r) => r.value), ["/api/callback"], "matches the scope too");
+  assert.deepEqual(M.filterExcludes(rows, "white").map((r) => r.value), ["white.gr"]);
+  assert.equal(M.filterExcludes(rows, "").length, 4);
+  assert.deepEqual(M.filterExcludes(null, "x"), []);
+  // Widest first: whole WAF on every vhost, whole WAF on one host, then rule-scoped ones newest first.
+  assert.deepEqual(M.sortExcludes(rows).map((r) => r.value), ["/everywhere", "white.gr", "/k2/*", "/api/callback"]);
+  assert.equal(rows[0].value, "/api/callback", "the input is not reordered");
+  assert.equal(M.excludeWhen({ created_at: "not a date" }), "");
+  assert.notEqual(M.excludeWhen(rows[0]), "");
+});
