@@ -65,6 +65,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   queue's frozen mark (a pill) are plain text or theme pills.
 
 ### Fixed
+- **CHALLENGE_NO_UA no longer counts static files the site has.** An integration that
+  fetches a shop's product images with no User-Agent (vol2.gr's e|connect stock
+  bridge sends `HEAD /s1images/*.jpg` without one) put its own IP under a
+  10-minute per-IP challenge, and every WooCommerce REST call it made in that
+  window got a 302 to the challenge page: the stock sync failed twice a day.
+  A static file now counts only when it is a miss (4xx/5xx), so a no-UA
+  scanner probing `/composer.json` or `/.vscode/sftp.json` is still caught;
+  pages with an empty User-Agent still count, and a query cannot make a page
+  look like a file.
 - **cfm-admin pages fit a phone.** 14 of the 23 pages were wider than a
   400px screen (up to 705px) and scrolled sideways: the shared card grid
   kept a column as wide as its widest child. Every page now fits.

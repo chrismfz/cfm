@@ -2157,10 +2157,18 @@ func (e *Engine) ingest(rec LogRec, rawLine string) {
 			e.chalLast[rec.IP] = chalCtx{Host: rec.Host, URI: p, Method: rec.Method, Status: rec.Status, UA: rec.UA, Sub: "post", TS: rec.TS}
 		}
 
-		// empty UA
+		// empty UA. A static file the site HAS (status < 400) does not count:
+		// an integration fetching a shop's product images with no User-Agent
+		// is a feed, not a scraper, and the challenge it earned 302'd its API
+		// calls for 10 minutes (vol2.gr's e|connect stock bridge, twice a day,
+		// 2026-11). A miss still counts: isStaticAssetPath also takes json,
+		// xml and txt, and a no-UA scanner probing /composer.json or
+		// /.vscode/sftp.json gets 404s. p is the path (the query cut off
+		// above), so "/page?x=/a.jpg" stays a page.
 		if e.cfg.ChallengeIPNoUAMin > 0 {
 			if rec.UA == "" || rec.UA == "-" {
-				if !isMachineStyleEndpointGo(p) {
+				staticHit := isStaticAssetPath(p) && rec.Status > 0 && rec.Status < 400
+				if !isMachineStyleEndpointGo(p) && !staticHit {
 					if b.ipsNoUA == nil {
 						b.ipsNoUA = make(map[string]int)
 					}

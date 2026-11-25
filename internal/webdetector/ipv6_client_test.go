@@ -433,3 +433,47 @@ func TestChallengePathsSeventeenthAddress(t *testing.T) {
 		t.Fatalf("the client's 17th address was not challenged: %v", got)
 	}
 }
+
+// CHALLENGE_NO_UA counts pages, never static files: an integration fetching a
+// shop's product images with no User-Agent (vol2.gr's e|connect bridge) was
+// challenged, and its WooCommerce REST calls got the challenge page for ten
+// minutes. A query cannot make a page look like a file.
+func TestNoUAChallengeSkipsStaticFiles(t *testing.T) {
+	run := func(uris []string) bool { return noUAChallenged(t, uris, 200) }
+	if !noUAChallenged(t, []string{"/composer.json", "/.vscode/sftp.json", "/config.json"}, 404) {
+		t.Fatal("a no-UA scanner probing missing json files was not challenged: a static MISS must still count")
+	}
+	if !run([]string{"/shop/", "/product/a/", "/product/b/"}) {
+		t.Fatal("three pages with no User-Agent were not challenged: pages must still count")
+	}
+	var images []string
+	for i := 0; i < 10; i++ {
+		images = append(images, fmt.Sprintf("/s1images/item_%d_05.jpg", i))
+	}
+	if run(images) {
+		t.Fatal("ten image HEADs with no User-Agent challenged the IP: static files the site has must not count")
+	}
+	if !run([]string{"/shop/?x=/a.jpg", "/product/a/?f=b.css", "/product/b/?y=/c.png"}) {
+		t.Fatal("pages whose query ends in a file extension were not challenged: the query must not hide a page")
+	}
+}
+
+// noUAChallenged reports whether uris, fetched with no User-Agent and
+// answered with status, earn the IP a CHALLENGE_NO_UA.
+func noUAChallenged(t *testing.T, uris []string, status int) bool {
+	t.Helper()
+	e := NewEngine(Config{Every: time.Second, Window: 2 * time.Minute, ChallengeIPNoUAMin: 3, ChallengeNotify: true})
+	t0 := float64(time.Now().Add(-time.Minute).Unix())
+	for i, u := range uris {
+		e.ingest(LogRec{TS: t0 + float64(i), IP: "194.48.152.107", Host: "vol2.gr", Method: "head", URI: u, Status: status, UA: ""}, "raw")
+	}
+	out := make(chan core.Alert, 32)
+	e.emitIPChallenges(time.Now(), out)
+	close(out)
+	for a := range out {
+		if a.Extra["rule"] == "CHALLENGE_NO_UA" {
+			return true
+		}
+	}
+	return false
+}
