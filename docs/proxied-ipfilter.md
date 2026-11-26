@@ -110,9 +110,9 @@ One line per client and outcome every 10 minutes in `cfm.log`, `n=` saying how
 many decisions it stands for:
 
 ```
-[proxied_ipfilter] would_block ip=20.43.87.186 host=olicatessen.gr block=feed:MYBLOCK allow=- mode=feed:log,local:log n=37 cc=US asn=8075 asn_name=MICROSOFT-CORP-MSN-AS-BLOCK
+[proxied_ipfilter] would_block ip=20.43.87.186 host=olicatessen.gr block=feed:MYBLOCK allow=- mode=feed:log,local:enforce n=37 cc=US asn=8075 asn_name=MICROSOFT-CORP-MSN-AS-BLOCK
 [proxied_ipfilter] allowed ip=… host=… block=block_v4 allow=allow_dyn_v4 mode=… n=1 cc=GR asn=6799 asn_name=OTEnet_S.A.
-[proxied_ipfilter] block ip=… host=… block=block_v4,feed:MYBLOCK allow=- mode=feed:enforce,local:log n=4 cc=- asn=- asn_name=-
+[proxied_ipfilter] block ip=… host=… block=block_v4 allow=- mode=feed:log,local:enforce n=4 cc=- asn=- asn_name=-
 ```
 
 `block=` names every block source the address is on, `allow=` every allow
@@ -132,9 +132,11 @@ every geo field reads `-`) and `sources` (each source's `entries` and
 
 ## Rollout and open items
 
-The burn-in reads and the order of `enforce` (feed first; local only after
-Meta's forward proxies, `fwdproxy-*.fbsv.net` / AS32934, come off `block_v4`
-on mars and titan) are tracked in `docs/imunify360-gap-analysis.md` ("Order").
+The burn-in reads and the order of `enforce` are tracked in
+`docs/imunify360-gap-analysis.md` ("Order"): LOCAL first (2026-11-26, once
+Meta's forward proxies, `fwdproxy-*.fbsv.net` / AS32934, were off every node's
+`block_v4`), FEED after the fleet list's permanent bans on shared mobile /
+CGNAT addresses are gone.
 
 Not built: **promote on hit**. A client the bridge blocks from these lists
 would also go to the edge ban store (a bounded quota of its 20 k, with the feed
