@@ -20,7 +20,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Changed
+- **`OPENRESTY_OK_IP_TTL` defaults to 0 (cookie-only).** After a solve the
+  old 1m code default (10m in the stock `detectors.conf`) let everyone behind
+  that IP pass the host without a cookie of their own: a whole CGNAT, office
+  or proxy rode one person's solve, and every cleared browser there kept it
+  alive. The fleet has run 0 since 2026-11-25: about 1-2% of the pairs that
+  solved solved again within 45 minutes (offices and webmail behind one IP),
+  and no challenge loop was measured. A node that sets the key keeps its
+  value; one that never set it now runs 0.
+
 ### Fixed
+- **The `okstate mode=would` lines now appear.** The probe never recorded a
+  solve (it was given no host), so it wrote nothing at all; now each solve on
+  the web or a panel port is recorded, and a challenge within 45 minutes of
+  it is logged as what the 0 costs.
 - **The sslcollector's `/stats` no longer hashes every certificate on each
   call.** The edge polls it to see a renewal, and each call hashed every
   host and pair again: ~10 % of the daemon's CPU on the nodes with the most
