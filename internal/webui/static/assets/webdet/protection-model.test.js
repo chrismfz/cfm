@@ -26,8 +26,9 @@ test("tabs, windows and groupings fall back to their defaults", () => {
   assert.equal(M.windowOf(5).hours, 24);
   assert.equal(M.grouping("ip"), "ip");
   assert.equal(M.grouping("__proto__"), "rule");
-  assert.deepEqual(M.tabsFor({ scoped: true }).map((t) => t.key), ["waf", "events", "overview"], "the Tools tab is the admin's");
-  assert.equal(M.tabsFor({}).length, 4);
+  assert.deepEqual(M.tabsFor({ scoped: true }).map((t) => t.key), ["waf", "challenges", "events", "overview"], "the Tools tab is the admin's");
+  assert.equal(M.tabsFor({}).length, 5);
+  assert.equal(M.tab("challenges"), "challenges");
 });
 
 test("wafQuery clamps and carries only the filters set", () => {

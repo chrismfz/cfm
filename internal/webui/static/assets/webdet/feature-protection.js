@@ -3,6 +3,10 @@
 //   WAF log   GET v1/waf/engine/summary       grouped by rule / address / vhost;
 //                                             opening a group asks for its requests
 //   Events    GET v1/webdet/history/events    every event, newest first, paged
+//   Challenges GET v1/webdet/edge-outcomes    what reached the site, what was
+//             GET v1/waf/hit-rates             sent to the check or stopped, and
+//                                             how the challenge pages were
+//                                             answered (challenges-model.js)
 //   Overview  the WAF summary's totals and hourly bars, plus (admin only)
 //             GET v1/webdet/traffic-mix       the edge outcomes
 //
@@ -18,6 +22,7 @@
 import * as M from "./protection-model.js";
 import { analyzeMixin } from "./feature-forensics.js";
 import { fmtCount, fmtPct, outcomeSummary, outcomeLine, OUTCOMES } from "./traffic-model.js";
+import * as CH from "./challenges-model.js";
 
 export const protectionMixin = {
   // The analyze-ip / analyze-host tools (the Tools tab) keep their own mixin:
@@ -63,6 +68,11 @@ export const protectionMixin = {
       ptEventNext: null,
       ptEventSeq: 0,
       ptMix: null,
+      // Challenges tab: the two replies, each null until read; an error each.
+      ptChEdge: null,
+      ptChWaf: null,
+      ptChError: "",
+      ptChSeq: 0,
       ptPanelIP: "",
       ptPanel: null,
       ptPanelSeq: 0,
@@ -111,6 +121,22 @@ export const protectionMixin = {
         .map((s) => ({ ...s, width: max > 0 ? s.value / max : 0 }));
     },
     ptMixWindow() { return M.windowOf(this.ptHours).mix; },
+    // ── Challenges tab ───────────────────────────────────────────────────
+    ptChWindow() { return CH.chHours(this.ptHours); },
+    ptChBreak() { return this.ptChEdge ? CH.breakdown(this.ptChEdge.outcomes, this.ptChEdge.requests) : null; },
+    ptChFunnel() { return this.ptChEdge ? CH.funnel(this.ptChEdge.outcomes) : null; },
+    ptChWafSum() { return CH.wafSummary(this.ptChWaf); },
+    ptChTiles() { return CH.tiles(this.ptChEdge, this.ptChWafSum); },
+    ptChStack() { return CH.stack(this.ptChEdge); },
+    ptChPass() { return CH.passRate(this.ptChEdge); },
+    ptChAxis() { return CH.axis(this.ptChStack.points); },
+    ptChHosts() { return this.isScoped ? [] : CH.hostRows(this.ptChEdge && this.ptChEdge.hosts); },
+    ptChReasons() { return this.isScoped ? [] : CH.reasonRows(this.ptChEdge && this.ptChEdge.reasons); },
+    ptChSplitAria() { return this.ptChBreak ? this.ptChBreak.parts.map((p) => p.label + " " + p.pct).join(", ") : ""; },
+    ptChScopeLine() {
+      const h = this.ptEffectiveHost;
+      return `${h || "every vhost"} · last ${this.ptChWindow.hours} h`;
+    },
     ptPanelWho() {
       const top = this.ptPanel && this.ptPanel.waf && Array.isArray(this.ptPanel.waf.top_ips) ? this.ptPanel.waf.top_ips[0] : null;
       if (top) return M.whoLine(top);
@@ -151,6 +177,7 @@ export const protectionMixin = {
       if (!this.ptTabs.some((t) => t.key === this.ptTab)) this.ptTab = M.DEFAULT_TAB;
       if (this.ptTab === "events") return this.ptLoadEvents();
       if (this.ptTab === "tools") return this.ptLoadStore();
+      if (this.ptTab === "challenges") return this.ptLoadChallenges();
       await this.ptLoadSummary();
       if (this.ptTab === "overview") await this.ptLoadMix();
     },
@@ -198,6 +225,30 @@ export const protectionMixin = {
       const host = this.ptHost;
       this.ptMix = await this.fetchJSONSafe(`v1/webdet/traffic-mix?window=${this.ptMixWindow}&hosts=1&clients=1${host ? `&host=${encodeURIComponent(host)}` : ""}`, null);
     },
+
+    // ptLoadChallenges reads the Challenges tab's two replies. A scoped
+    // session reads its own vhost (the first it holds when none is picked):
+    // the node refuses it the node view.
+    async ptLoadChallenges() {
+      const seq = ++this.ptChSeq;
+      const host = this.ptEffectiveHost;
+      if (this.isScoped && !host) {
+        this.ptChEdge = null;
+        this.ptChWaf = null;
+        this.ptChError = "Pick one of your vhosts.";
+        return;
+      }
+      const q = CH.query(this.ptHours, host);
+      const [edge, waf] = await Promise.allSettled([this.fetchJSON(q.outcomes), this.fetchJSON(q.waf)]);
+      if (seq !== this.ptChSeq) return;
+      // A failed read is an error, never an empty chart.
+      this.ptChEdge = edge.status === "fulfilled" ? edge.value : null;
+      this.ptChWaf = waf.status === "fulfilled" ? waf.value : null;
+      this.ptChError = edge.status === "rejected" ? `What the edge did could not be read: ${this.formatApiError(edge.reason)}` : "";
+    },
+    ptChOpenHost(host) { return this.ptSetFilter("host", host); },
+    ptChPct: CH.pct,
+    ptChCount: CH.count,
 
     async ptLoadEvents() {
       const seq = ++this.ptEventSeq;

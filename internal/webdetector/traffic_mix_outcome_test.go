@@ -83,7 +83,7 @@ func TestTrafficMix_Outcomes(t *testing.T) {
 		tmFeed(s, r, now.Add(time.Duration(i)*time.Second))
 	}
 	m := s.Snapshot(now.Add(time.Minute), time.Hour, "", false, 10, 10)
-	want := TrafficMixOutcomes{Origin: 1, Cached: 1, Challenged: 5, Blocked: 1, RateLimited: 1, VerifySentOn: 1, VerifyRefused: 1}
+	want := TrafficMixOutcomes{Origin: 1, Cached: 1, Challenged: 5, Blocked: 1, RateLimited: 1, VerifySentOn: 1, VerifyRefused: 1, ChallengePages: 1}
 	if got := tmClassOf(m, "human").Outcomes; got == nil || *got != want {
 		t.Fatalf("class outcomes = %+v, want %+v", got, want)
 	}

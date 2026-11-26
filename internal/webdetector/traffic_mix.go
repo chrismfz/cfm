@@ -167,7 +167,8 @@ func (a tmSmall) out() tmOut {
 
 // What the edge did with a request (tmOutcome). A request the origin answered
 // is none of them: "reached the origin" is Req minus the edge outcomes. The
-// two verify counts are a SUBSET of tmOutChallenge (the challenge's answers).
+// two verify counts and the page count are a SUBSET of tmOutChallenge (the
+// challenge's answers, and the page they answer).
 const (
 	tmOutCached      = iota // a cfm_apache* location answered without its upstream: a static / micro cache hit
 	tmOutChallenge          // the challenge: cfm.lua sent the client to it, or the client loaded /__cfm_challenge or posted /__cfm_verify
@@ -178,6 +179,12 @@ const (
 	tmOutOtherEdge          // any other edge answer (the panel proxies)
 	tmOutVerifyPass         // a /__cfm_verify answered 303: sent on (solved; or an unsolicited v2 reject sent on without clearance)
 	tmOutVerifyFail         // a /__cfm_verify answered 403: refused (wrong, expired, a v2 reject) or asked to confirm
+	// tmOutChallengePage: a /__cfm_challenge load answered 200, the page itself (also a
+	// subset of tmOutChallenge). A challenged visit is up to three challenge
+	// requests (the 303 to the page, the page, the verify): the page count is
+	// what the answers are a share of. Appended last: a saved file from before
+	// it decodes with this count at zero.
+	tmOutChallengePage
 	tmOutcomes
 	tmOutOrigin = -1 // tmOutcome: the origin answered
 )
@@ -450,6 +457,12 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 	}
 	if v := tmVerifyOutcome(rec); v >= 0 {
 		c.Out[v] = 1
+	}
+	// Only a page actually served (200): /__cfm_challenge also answers 303 /
+	// 302, sending a cleared or exempt client on to `next` (challengePageExempt)
+	// or back to a clean URL, and those are no page anyone could answer.
+	if rec.Status == 200 && strings.HasPrefix(rec.URI, "/__cfm_challenge") {
+		c.Out[tmOutChallengePage] = 1
 	}
 	tmStatus(&c, rec.Status)
 	b.c[cls].add(c)
@@ -830,6 +843,9 @@ type TrafficMixOutcomes struct {
 	OtherEdge     int64 `json:"other_edge"`
 	VerifySentOn  int64 `json:"verify_sent_on"`
 	VerifyRefused int64 `json:"verify_refused"`
+	// ChallengePages: loads of the challenge page (/__cfm_challenge), a subset
+	// of challenged; zero for the hours a build before it counted.
+	ChallengePages int64 `json:"challenge_pages"`
 }
 
 func tmOutcomesOut(req int64, o tmOut) *TrafficMixOutcomes {
@@ -837,6 +853,7 @@ func tmOutcomesOut(req int64, o tmOut) *TrafficMixOutcomes {
 		Cached: int64(o[tmOutCached]), Challenged: int64(o[tmOutChallenge]), Blocked: int64(o[tmOutBlocked]),
 		RuleBlocked: int64(o[tmOutRuleBlocked]), RateLimited: int64(o[tmOutRateLimited]), Redirect: int64(o[tmOutRedirect]),
 		OtherEdge: int64(o[tmOutOtherEdge]), VerifySentOn: int64(o[tmOutVerifyPass]), VerifyRefused: int64(o[tmOutVerifyFail]),
+		ChallengePages: int64(o[tmOutChallengePage]),
 	}
 	edge := out.Cached + out.Challenged + out.Blocked + out.RuleBlocked + out.RateLimited + out.Redirect + out.OtherEdge
 	if out.Origin = req - edge; out.Origin < 0 {
