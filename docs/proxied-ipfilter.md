@@ -2,8 +2,8 @@
 
 Gives a client behind a trusted proxy (Cloudflare) the verdict CFM's nft IP
 filter would give it if it came direct. Default modes: the node's own block
-sets (`LOCAL`) are **enforced** since 2026-11-26; the fleet feeds (`FEED`) are
-`log` (nothing is blocked).
+sets (`LOCAL`) and the fleet BLOCK feeds (`FEED`) are both **enforced** since
+2026-11-26.
 
 ## Why
 
@@ -74,8 +74,19 @@ the edge reports to the daemon), and 268 k there is the regression ruled out. So
   enforce would see them. An address an allow cancels gets a plain, cacheable
   allow.
 - **Not covered:** the static-asset locations (css/js/images, which check only
-  the edge copy of `edgeban`), and URLs a client warmed with a clean allow in
-  the 90 s (`decision_cache_ttl_ms`) before it was listed.
+  the edge copy of `edgeban`), URLs a client warmed with a clean allow in
+  the 90 s (`decision_cache_ttl_ms`) before it was listed, and a client
+  holding a valid clearance cookie (cfm.lua Step 2b returns before the
+  decision). The challenge page (`/__cfm_challenge`, reached directly) and
+  its verify do not ask this filter, so a listed client can still solve a
+  challenge and then pass on the cookie.
+- **Its refusals never escalate.** The edge logs them as `cfm_block`, and the
+  web detector's 403 counters (403_flood, 40x_combo, the per-IP 4xx challenge
+  counters) skip a 403 `cfm_block` for a client this filter enforces on
+  (`isProxiedIPFilterBlock403`, inside `skip403`). Counted, a shared mobile /
+  CGNAT address on the fleet list could reach 150 refusals in minutes and
+  become this node's own nft + edge ban, which clearing the entry in cfm-web does not
+  lift.
 - **After a daemon start** the feed lists are empty until each feed's first
   successful apply (the first fetch is never skipped as unchanged): with
   cfm-web unreachable, nft keeps the old feed and this filter answers nothing
@@ -90,7 +101,7 @@ the edge reports to the daemon), and 268 k there is the regression ruled out. So
 
 Each is `log`, `enforce` (the decision answers `ip_action=block` with header
 `X-CFM-Proxied-IPFilter: 1`), or `off` (`0` also means off). An empty value is
-the group's default: `FEED` `log`, `LOCAL` `enforce` (since 2026-11-26). An
+the group's default: `enforce` for both (since 2026-11-26). An
 unknown value is `log` and logged as such. A source in an `off` group is not
 consulted.
 
@@ -99,10 +110,15 @@ consulted.
 45.138.12.0/24 panel scanner, Techoff, an Iranian address. No customer, and no
 network that serves real users, once Meta's forward proxies were cleared and
 the flood / portscan autoblock was taught to spare forward-confirmed good bots.
-A few hundred lines per node a week. **Why FEED is not (yet).** The fleet list
-holds permanent bans on shared mobile / CGNAT addresses (a Cosmote
-`cgn.athe.cosmote.net` address, a Vodafone one): enforced, they would refuse
-every customer behind them. Enforce it once those bans expire on their own.
+A few hundred lines per node a week. **Why FEED is enforced too (2026-11-26).** A day of log on seven nodes:
+~22 700 decisions for ~14 400 addresses, >98% of them MYBLOCK, mostly US /
+BD / UA / BR datacenter and residential proxies. Four Greek residential
+addresses: three 1h greylist entries (GR leniency, gone within the hour) and
+one permanent modsec ban on a Vodafone address since July. That is the risk:
+the fleet list holds permanent bans on shared mobile / CGNAT addresses (a
+Cosmote `cgn.athe.cosmote.net` one, a Vodafone one), and enforced, each
+refuses every customer behind it on a proxied site. Clear them in cfm-web;
+`PROXIED_IPFILTER_FEED = log` is the per-node way back.
 
 ## CHALLENGE feeds (`LIST_CHALLENGE`)
 
@@ -174,8 +190,9 @@ every geo field reads `-`) and `sources` (each source's `entries` and
 The burn-in reads and the order of `enforce` are tracked in
 `docs/imunify360-gap-analysis.md` ("Order"): LOCAL first (2026-11-26, once
 Meta's forward proxies, `fwdproxy-*.fbsv.net` / AS32934, were off every node's
-`block_v4`), FEED after the fleet list's permanent bans on shared mobile /
-CGNAT addresses are gone.
+`block_v4`), then FEED the same day (106 permanent / long bans on Greek and
+Cypriot ISP addresses were unblocked in cfm-web that day; detectors no longer
+ban GR/CY permanently).
 
 Not built: **promote on hit**. A client the bridge blocks from these lists
 would also go to the edge ban store (a bounded quota of its 20 k, with the feed

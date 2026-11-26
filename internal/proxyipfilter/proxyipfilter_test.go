@@ -73,14 +73,14 @@ func TestVerdictOrderAndModes(t *testing.T) {
 	setLocal("block_v4", false, []string{"20.43.87.186", "5.6.7.8"})
 	setLocal("allow_dyn_v4", true, []string{"5.6.7.8"})
 
-	// The defaults: LOCAL enforce, so an address on block_v4 is enforced
-	// (whatever the feed's log mode says); with both in log, only listed.
+	// The defaults: both enforce, so an address on block_v4 or only on a feed
+	// is enforced; with both in log, only listed.
 	v := Check("20.43.87.186")
 	if fmt.Sprint(v.Blocks) != "[block_v4 feed:MYBLOCK]" || !v.Enforce {
 		t.Fatalf("default modes (local enforce): %+v", v)
 	}
-	if v := Check("45.138.12.1"); v.Enforce || !v.Listed() {
-		t.Fatalf("default modes (feed log): %+v", v)
+	if v := Check("45.138.12.1"); !v.Enforce {
+		t.Fatalf("default modes (feed enforce): %+v", v)
 	}
 	SetModes("log", "log")
 	v = Check("20.43.87.186")
@@ -123,16 +123,16 @@ func TestVerdictOrderAndModes(t *testing.T) {
 		t.Fatal("an unknown mode is log; an empty LOCAL is its default, enforce")
 	}
 	SetModes("", "bogus")
-	if modeFeed.Load() != ModeLog || modeLocal.Load() != ModeLog {
-		t.Fatal("an empty FEED is its default, log; an unknown LOCAL is log")
+	if modeFeed.Load() != ModeEnforce || modeLocal.Load() != ModeLog {
+		t.Fatal("an empty FEED is its default, enforce; an unknown LOCAL is log")
 	}
-	// The defaults (2026-11-26): LOCAL enforce, FEED log; an explicit value wins.
-	if DefaultModeLocal != ModeEnforce || DefaultModeFeed != ModeLog {
+	// The defaults (2026-11-26): both enforce; an explicit value wins.
+	if DefaultModeLocal != ModeEnforce || DefaultModeFeed != ModeEnforce {
 		t.Fatalf("defaults: feed %q local %q", DefaultModeFeed, DefaultModeLocal)
 	}
 	SetModes("log", "log")
-	if modeLocal.Load() != ModeLog {
-		t.Fatal("an explicit LOCAL = log keeps log")
+	if modeLocal.Load() != ModeLog || modeFeed.Load() != ModeLog {
+		t.Fatal("an explicit log keeps log")
 	}
 
 	DropFeed("MYBLOCK")
@@ -144,6 +144,7 @@ func TestVerdictOrderAndModes(t *testing.T) {
 func TestDecideLogsOncePerWindow(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
+	SetModes("log", "log") // the log-mode leg (both groups enforce by default)
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	setClock(func() time.Time { return now })
 	SetFeed("MYBLOCK", false, []string{"20.43.87.186"}, nil)
@@ -392,6 +393,7 @@ func TestGeoFields(t *testing.T) {
 func TestDecideLineCarriesGeo(t *testing.T) {
 	ResetForTest()
 	t.Cleanup(ResetForTest)
+	SetModes("log", "") // FEED in log (both groups enforce by default)
 	var lines []string
 	orig := logf
 	logf = func(f string, a ...interface{}) { lines = append(lines, fmt.Sprintf(f, a...)) }

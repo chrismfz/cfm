@@ -234,6 +234,13 @@ func TestDecisionProxiedIPFilter(t *testing.T) {
 	proxyipfilter.SetFeed("MYALLOW", true, []string{"45.138.12.99"}, nil)
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 
+	// The defaults (no detectors.conf key): FEED enforces, so a listed
+	// proxied client is answered block.
+	if got, hdr := edgeDecide(b, "20.43.87.186", "olicatessen.gr", ""); got["ip_action"] != "block" || hdr.Get("X-CFM-Proxied-IPFilter") != "1" {
+		t.Fatalf("default modes: %+v %v", got, hdr)
+	}
+	proxyipfilter.SetModes("log", "log")
+
 	// Log mode: an allow, but marked so the edge does not cache it (every
 	// request of a listed client is decided and counted).
 	if got, hdr := edgeDecide(b, "20.43.87.186", "olicatessen.gr", ""); got["ip_action"] != "allow" || got["rule_action"] != "observe" || hdr.Get("X-CFM-Proxied-IPFilter") != "" {
