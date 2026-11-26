@@ -35,7 +35,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **The reference `cfm.blocklists` `TOR` line** (still commented out) points
   at the Tor Project's current exit list (`/torbulkexitlist`, refreshed
   hourly) instead of the old CGI URL, which now answers with a redirect.
-### Changed
+- **Greek and Cypriot addresses are no longer banned permanently, or fleet-wide,
+  by any detector.** Every detector section that bans and has no
+  `[<section>.leniency]` now runs with a built-in one: a GR/CY address gets a
+  15 minute local ban, recorded on cfm-web's lenient list and never served to
+  the fleet. Before, `[modsec]`, `[ssh_auth]`, `[ftpd]`, `[cpanel]`, `[mysql]`
+  and `[postfix_security]` had none, and the fleet blocklist held permanent
+  ModSecurity bans on Greek mobile / CGNAT addresses (Cosmote, Vodafone, Nova)
+  that every node dropped for everyone behind them. A written companion is kept
+  as written; `ENABLED = 0` in it turns leniency off. A lenient ban is never
+  harsher than the section's own (a dryrun section keeps logging), and a
+  detector's per-alert ban length (`block_ttl`) no longer lengthens it.
+- **`[modsec]` bans for 30 days instead of permanently** in the reference
+  `detectors.conf` (new installs; an existing `/etc/cfm/detectors.conf` keeps
+  its own `BLOCK`).
 - **The node's own bans now reach clients behind Cloudflare by default.**
   `PROXIED_IPFILTER_LOCAL` defaults to `enforce`: an address on the node's
   block sets (cfm.deny, SSH / mail / portscan / flood TTL bans) is refused

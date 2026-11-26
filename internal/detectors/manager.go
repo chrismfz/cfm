@@ -272,6 +272,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		// Only from a config that was read: the degraded start-up keeps to the
 		// control-plane protection above.
 		applyBuiltinLoginBruteforce(&secs)
+		applyBuiltinLeniency(&secs)
 	}
 	sig := cfgSig(&secs, m.readCache.files)
 	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))
