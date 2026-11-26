@@ -25,6 +25,8 @@ package webdetector
 //	                (ip, host) recently (noteRuleChallenge, below)
 //	fp              the client's TLS fingerprint has a challenge-tier policy
 //	geo             a country/ASN challenge-tier policy covers the client IP
+//	list            a CHALLENGE feed of cfm.blocklists lists the client IP
+//	                (Tor exits; LIST_CHALLENGE = enforce)
 //
 // src=- means the snapshot found none: a challenge that is purely edge-local
 // by then (an entry that expired between serve and verify, or a stale page).
@@ -39,6 +41,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/proxyipfilter"
 )
 
 // Source tokens (a grep surface — keep them short and stable).
@@ -49,6 +53,7 @@ const (
 	srcRule  = "rule"
 	srcFP    = "fp"
 	srcGeo   = "geo"
+	srcList  = "list"
 )
 
 // srcTokenMax bounds one reason inside a token. Reasons are operator/config
@@ -167,6 +172,11 @@ func (b *NginxBridge) challengeSources(fpID, ip, host, country string, asn uint)
 	}
 	if geo != "" {
 		out = append(out, srcGeo)
+	}
+	// Only in enforce: in log mode the list challenged nobody, and a solve
+	// it did not cause must keep reading as whatever did (or as unsolicited).
+	if proxyipfilter.CheckChallenge(ip).Enforce {
+		out = append(out, srcList)
 	}
 	return out
 }

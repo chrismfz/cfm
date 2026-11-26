@@ -1010,6 +1010,10 @@ func init() {
 		// log = a line per client naming the lists, nothing changes; enforce =
 		// the bridge answers block; off. Every allow set cancels a block.
 		proxyipfilter.SetModes(cleanScalar(kv["PROXIED_IPFILTER_FEED"]), cleanScalar(kv["PROXIED_IPFILTER_LOCAL"]))
+		// LIST_CHALLENGE (default log, proxyipfilter.DefaultModeChallenge):
+		// the CHALLENGE feeds of cfm.blocklists (Tor exits), a challenge
+		// floor for an uncleared listed web client in enforce.
+		proxyipfilter.SetChallengeMode(cleanScalar(kv["LIST_CHALLENGE"]))
 
 		webdet.ConfigureFingerprintPolicyEnforcement(
 			kvBool(kv, "FP_POLICY", true),

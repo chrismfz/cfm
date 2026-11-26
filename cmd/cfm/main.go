@@ -951,11 +951,7 @@ func runDaemon(args []string) {
 			logging.Logf("[blocklists] reload applied: %d feeds in %s", len(feeds), time.Since(start))
 
 			if be != nil {
-				keys := make([]string, 0, len(feeds))
-				for _, f := range feeds {
-					keys = append(keys, f.Name)
-				}
-				_ = be.PruneExternalFeeds(keys)
+				_ = be.PruneExternalFeeds(blocklists.NFTFeedNames(feeds))
 			}
 		}
 	}()

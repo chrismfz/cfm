@@ -170,11 +170,7 @@ func (m *Manager) Reload(feeds []Feed) {
 
 	// NEW: ask applier to prune stale per-feed sets
 	if pr, ok := m.applier.(Pruner); ok {
-		var active []string
-		for name := range m.feeds {
-			active = append(active, name)
-		}
-		_ = pr.PruneExternalFeeds(active)
+		_ = pr.PruneExternalFeeds(NFTFeedNames(feeds))
 	}
 }
 
@@ -279,11 +275,15 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 		return
 	}
 
-	if err := m.applier.ApplyFeed(ctx, r.feed, res); err != nil {
-		m.mu.Lock()
-		r.lastErr = fmt.Errorf("apply feed %q: %w", r.feed.Name, err)
-		m.mu.Unlock()
-		return
+	// A CHALLENGE feed never reaches nft: it lives only in the daemon's
+	// memory, below.
+	if r.feed.Type != TypeChallenge {
+		if err := m.applier.ApplyFeed(ctx, r.feed, res); err != nil {
+			m.mu.Lock()
+			r.lastErr = fmt.Errorf("apply feed %q: %w", r.feed.Name, err)
+			m.mu.Unlock()
+			return
+		}
 	}
 	r.lastHash, r.haveHash = h, true
 	r.lastApply = time.Now() // start the resync clock at apply completion
@@ -294,7 +294,12 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	// the fleet list), published under it only while this runner is still the
 	// feed's: a fetch that finishes after Reload removed the feed (and dropped
 	// it from the filter) must not bring it back.
-	prep := proxyipfilter.PrepareFeed(r.feed.Name, r.feed.Type == TypeAllow, res.V4, res.V6)
+	var prep proxyipfilter.PreparedFeed
+	if r.feed.Type == TypeChallenge {
+		prep = proxyipfilter.PrepareChallengeFeed(r.feed.Name, res.V4, res.V6)
+	} else {
+		prep = proxyipfilter.PrepareFeed(r.feed.Name, r.feed.Type == TypeAllow, res.V4, res.V6)
+	}
 	m.mu.Lock()
 	if cur, ok := m.runs[r.feed.Name]; ok && cur == r && ctx.Err() == nil {
 		prep.Publish()
@@ -302,6 +307,20 @@ func (m *Manager) fetchOnce(ctx context.Context, r *runner) {
 	r.lastAppliedAt = r.lastApply
 	r.lastErr = nil
 	m.mu.Unlock()
+}
+
+// NFTFeedNames is the names of the feeds that have nft sets: every feed but a
+// CHALLENGE one. The nft prune keeps the sets of exactly these, so a feed
+// turned from BLOCK into CHALLENGE loses its old block sets (left in place,
+// they would go on dropping every listed client).
+func NFTFeedNames(feeds []Feed) []string {
+	out := make([]string, 0, len(feeds))
+	for _, f := range feeds {
+		if f.Type != TypeChallenge {
+			out = append(out, f.Name)
+		}
+	}
+	return out
 }
 
 // hashResult returns a content hash of a fetched feed that is independent of the

@@ -26,6 +26,12 @@ const (
 	TypeBlock ListType = iota
 	TypeAllow
 	TypeIgnore
+	// TypeChallenge: never written to nft. The daemon keeps the list in
+	// memory (internal/proxyipfilter) and the nginx bridge's decision raises
+	// an uncleared listed client to a challenge ([webdetector] LIST_CHALLENGE,
+	// log by default). For a list whose members include people (Tor exits),
+	// where a block is too much.
+	TypeChallenge
 )
 
 func (t ListType) String() string {
@@ -34,6 +40,8 @@ func (t ListType) String() string {
                 return "ALLOW"
         case TypeIgnore:
                 return "IGNORE"
+        case TypeChallenge:
+                return "CHALLENGE"
         default:
                 return "BLOCK"
         }
@@ -41,7 +49,7 @@ func (t ListType) String() string {
 
 type Feed struct {
 	Name     string         // e.g. SPAMDROP
-	Type     ListType       // BLOCK or ALLOW
+	Type     ListType       // BLOCK, ALLOW, IGNORE or CHALLENGE
 	Interval time.Duration  // refresh interval
 	Max      int            // 0 = all
 	URL      string         // source URL
@@ -78,6 +86,8 @@ func ParseConfig(r io.Reader) ([]Feed, error) {
 			typ = TypeAllow
                 case "IGNORE":
                         typ = TypeIgnore
+		case "CHALLENGE":
+			typ = TypeChallenge
 		default:
 			// συμβατότητα με CSF που δεν έχει TYPE: αν δίνεται μόνο 4 πεδία και λείπει TYPE,
 			// μπορείς να προσαρμόσεις εδώ. Προς το παρόν απαιτούμε 5 πεδία.

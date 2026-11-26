@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cfm/internal/abuseshadow"
+	"cfm/internal/proxyipfilter"
 )
 
 // Challenge-solve provenance (challenge_src.go): the src= snapshot of what
@@ -600,5 +601,25 @@ func TestIsCpanelSessionPath(t *testing.T) {
 		if got := isCpanelSessionPath(p); got != want {
 			t.Errorf("%q: %v, want %v", p, got, want)
 		}
+	}
+}
+
+// A CHALLENGE feed is a source only when it challenged (enforce): in log
+// mode a solve it did not cause keeps reading as whatever did, or as
+// unsolicited (an empty snapshot arms that grain).
+func TestChallengeSourcesList(t *testing.T) {
+	proxyipfilter.ResetForTest()
+	t.Cleanup(proxyipfilter.ResetForTest)
+	proxyipfilter.PrepareChallengeFeed("TOR", []string{"185.220.101.1"}, nil).Publish()
+	b := NewNginxBridge("/tmp/cfm-test-src-list.sock", "tok", time.Minute, time.Minute)
+	if got := b.challengeSources("", "185.220.101.1", "example.com", "", 0); len(got) != 0 {
+		t.Fatalf("log mode: %v", got)
+	}
+	proxyipfilter.SetChallengeMode("enforce")
+	if got := b.challengeSources("", "185.220.101.1", "example.com", "", 0); strings.Join(got, ",") != "list" {
+		t.Fatalf("enforce: %v", got)
+	}
+	if got := b.challengeSources("", "198.51.100.1", "example.com", "", 0); len(got) != 0 {
+		t.Fatalf("unlisted: %v", got)
 	}
 }

@@ -2341,6 +2341,25 @@ func (b *NginxBridge) handleDecision(w http.ResponseWriter, r *http.Request) {
 		ipAction = "challenge"
 		geoFloored = true
 	}
+	// CHALLENGE feeds of cfm.blocklists (Tor exits; internal/proxyipfilter,
+	// [webdetector] LIST_CHALLENGE): the same floor, for every web client,
+	// direct or behind a trusted proxy (ip is the visitor's address either
+	// way). Population suspicion like the geo floor, so it takes the same
+	// path: a per-IP entry overrides it, a solve clears it, the M2M carve-out
+	// and the good-bot / Challenge Access exemptions lift it. Every allow
+	// set cancels it. In log mode (the default) it only logs, and the allow
+	// below is not cached (rule_action=observe), so every request is counted.
+	// Web scope only: the panel probe is observe-only for challenge tiers.
+	if sc := r.URL.Query().Get("scope"); sc == "" || sc == "web" {
+		chalEnforce, chalListed := proxyipfilter.DecideChallenge(ip, host)
+		if chalEnforce && ipAction == "allow" {
+			ipAction = "challenge"
+			geoFloored = true
+		}
+		if chalListed {
+			pxListed = true
+		}
+	}
 
 	b.mu.RLock()
 	if e, ok := b.ipState[ip]; ok && e.Expires.After(now) {
