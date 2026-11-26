@@ -79,9 +79,14 @@ actually causes the reported stalls is the window").
   window may still stall. After enabling HTTP/3 on a vhost, look for
   `bytes=65536` or `bytes=262144` with `rt=60` on `proto="HTTP/3.0"` lines.
 - **Memory.** The value is both the per-stream read/write buffer and, times
-  the streams, the per-connection receive window (`initial_max_data`):
-  128 × 256k = up to 32 MB per QUIC connection, 4× nginx's default (a flat
-  1m would be 128 MB).
+  the streams, the per-connection window (`initial_max_data`, the 128
+  request streams plus nginx's 3 unidirectional ones): (128 + 3) × 256k ≈
+  32 MB per QUIC connection, 4× nginx's default (a flat 1m would be ~128 MB).
+  The bound holds in both directions: nginx keeps up to 256k of unacked
+  response data per stream, so a client that asks for large objects on every
+  stream and never ACKs pins up to ~32 MB per connection in worker memory
+  (8 MB before). If memory pressure ever shows on UDP 9043, lower
+  `http3_max_concurrent_streams`.
 - **Who sees it.** The QUIC listener answers any client that speaks HTTP/3
   to UDP 9043, on every vhost. Alt-Svc, per-vhost opt-in (`cfm webtop http3
   enable <host>`), only invites browsers to switch; HTTP/1.1 and HTTP/2 are

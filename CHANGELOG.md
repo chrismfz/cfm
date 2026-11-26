@@ -28,8 +28,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   HTTP/2 (nginx/nginx#1407). 256k is a mitigation still to be measured (the
   issue's measured fix was 1m plus a patch). It applies to every client that
   speaks HTTP/3 to the edge (Alt-Svc, per-vhost opt-in, only invites
-  browsers), and allows up to 32 MB of stream buffers per QUIC connection,
-  4x before. HTTP/1.1 and HTTP/2 are untouched.
+  browsers), and allows up to ~32 MB of stream buffers per QUIC connection
+  in each direction, 4x before (unacked response data included: lower
+  `http3_max_concurrent_streams` under memory pressure on UDP 9043). HTTP/1.1 and HTTP/2 are untouched.
 
 ### Fixed
 - **The sslcollector's `/stats` no longer hashes every certificate on each
