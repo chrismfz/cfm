@@ -8,11 +8,13 @@ import (
 	"errors"
 	"net"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"cfm/internal/firewall"
+	"cfm/internal/ipquery"
 	"cfm/internal/reporting"
 )
 
@@ -113,9 +115,41 @@ func runCmd(ctx context.Context, r *Result, src Source, name string, args ...str
 	addStep(r, runTool(ctx, src, name, args...))
 }
 
-// listSetNamesByPrefixes parses a single "nft -t -n list table inet cfm" output
-// and returns set names that start with any of the provided prefixes.
-func listSetNamesByPrefixes(be firewall.Backend, prefixes ...string) ([]string, error) {
+// setsLister is a backend's listing of the sets without their elements
+// (both engines: `nft -j -t list sets` on exec, netlink on nftlib).
+type setsLister interface {
+	ListSetsJSON(ctx context.Context, family string) ([]byte, error)
+}
+
+// listSetNamesByPrefixes returns the names of table inet cfm's sets that start
+// with any of the provided prefixes. It reads the sets listing
+// (ListSetsJSON); the table's text listing it read before loads every
+// element first on EL8's nft: 2.7-6.1 s on orion, past its 5 s deadline, and
+// 107 of 114 unblocks there checked no feed set (2026-11-26). The text
+// listing stays the fallback for a backend without the sets listing, or one
+// whose listing failed other than by running out of time.
+func listSetNamesByPrefixes(ctx context.Context, be firewall.Backend, prefixes ...string) ([]string, error) {
+	if l, ok := be.(setsLister); ok {
+		lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		raw, err := l.ListSetsJSON(lctx, "inet")
+		cancel()
+		if err == nil {
+			var names []string
+			for _, n := range ipquery.SetNames(raw) {
+				for _, p := range prefixes {
+					if p = strings.TrimSpace(p); p != "" && strings.HasPrefix(n, p) {
+						names = append(names, n)
+						break
+					}
+				}
+			}
+			sort.Strings(names)
+			return names, nil
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return nil, err
+		}
+	}
 	outS, err := be.ListTableTextNoDNS("inet", "cfm")
 	if err != nil {
 		return nil, err

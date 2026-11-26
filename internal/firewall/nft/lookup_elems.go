@@ -5,6 +5,7 @@ package nft
 import (
 	"context"
 	"net/netip"
+	"strings"
 
 	"cfm/internal/firewall/setprobe"
 )
@@ -26,4 +27,21 @@ func (b *Backend) LookupSetElems(ctx context.Context, table, set string, addrs [
 		from[i], to[i] = m[i].From, m[i].To
 	}
 	return from, to, ok, nil
+}
+
+// hasAddrElem answers HasElem for an address with one kernel lookup; false
+// in its second result when elem is not an address or the kernel could not
+// answer (the caller runs nft then).
+func hasAddrElem(b *Backend, set, elem string) (found, ok bool) {
+	a, err := netip.ParseAddr(strings.TrimSpace(elem))
+	if err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), setprobe.Timeout)
+	defer cancel()
+	_, _, held, err := b.LookupSetElems(ctx, tableName, set, []netip.Addr{a.Unmap()})
+	if err != nil || len(held) != 1 {
+		return false, false
+	}
+	return held[0], true
 }

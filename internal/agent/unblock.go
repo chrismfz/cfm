@@ -81,11 +81,17 @@ func (c *APIClient) processUnblockPart(ctx context.Context, be firewall.Backend,
 // the request's locate result and confirms the request to the API.
 func (c *APIClient) confirmUnblock(id int, ipStr string, found *locate.Result, res *unblock.Result) {
 	if res != nil {
+		// Each step with its time (one batch step's time is the batch's, on
+		// every IP of it): the line that says where an unblock spent 28 s.
 		for _, s := range res.Steps {
+			took := ""
+			if s.Dur > 0 {
+				took = " [" + s.Dur.Round(time.Millisecond).String() + "]"
+			}
 			if s.Err != "" {
-				logging.LogfAPI("[unblock] %s %-9s via %-10s ERR=%s %s", ipStr, s.Action, s.Source, s.Err, strings.TrimSpace(s.Detail))
+				logging.LogfAPI("[unblock] %s %-9s via %-10s ERR=%s %s%s", ipStr, s.Action, s.Source, s.Err, strings.TrimSpace(s.Detail), took)
 			} else {
-				logging.LogfAPI("[unblock] %s %-9s via %-10s %s", ipStr, s.Action, s.Source, strings.TrimSpace(s.Detail))
+				logging.LogfAPI("[unblock] %s %-9s via %-10s %s%s", ipStr, s.Action, s.Source, strings.TrimSpace(s.Detail), took)
 			}
 		}
 

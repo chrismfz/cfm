@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,7 +88,7 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 	// 0) Feeds: which feed host sets hold each IP. A set it couldn't read is
 	// an error step: the IP may still be blocked by that feed.
 	t0 := time.Now()
-	feeds, unchecked := feedsBlockingMany(opts.BE, list)
+	feeds, unchecked := feedsBlockingMany(ctx, opts.BE, list)
 	each(func(r *Result) {
 		if fks := feeds[r.IP.String()]; len(fks) > 0 {
 			r.FromFeeds = fks
@@ -305,19 +306,33 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 	return out
 }
 
+// elemLooker asks the kernel which element of a set holds each address (both
+// engines: setprobe.Lookup over netlink, a few gets per address whatever the
+// set's size).
+type elemLooker interface {
+	LookupSetElems(ctx context.Context, table, set string, addrs []netip.Addr) (from, to []netip.Addr, ok []bool, err error)
+}
+
+// feedLookupMax is the most addresses of one family asked of a set by
+// lookup; a larger batch reads the set once instead.
+const feedLookupMax = 4096
+
 // feedsBlockingMany returns, per IP, the feed keys whose per-feed HOST sets
-// hold it, and the sets it couldn't check for it (why). One terse table
-// listing discovers the sets. Each set is asked only about the IPs of its
-// address family (nft rejects the other one): one IP with HasElem (a point
-// lookup on exec nft), more by reading the set once — read again once if
-// that fails other than by timing out, then asked IP by IP until a lookup
-// fails too. A table or set that isn't there holds nothing.
-func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[string][]string) {
+// hold it, and the sets it couldn't check for it (why). The sets listing
+// discovers the sets (listSetNamesByPrefixes). Each set is asked only about
+// the IPs of its address family (nft rejects the other one): by kernel lookup
+// (elemLooker) up to feedLookupMax of them, which costs the same whatever the
+// set's size. Without a lookup, or when it fails: one IP with HasElem, more
+// by reading the set once — read again once if that fails other than by
+// timing out, then asked IP by IP until a lookup fails too. Reading a fleet
+// feed set (277 000 addresses on orion) took 5-6 s per set and per unblock
+// batch (2026-11-26). A table or set that isn't there holds nothing.
+func feedsBlockingMany(ctx context.Context, be firewall.Backend, ips []net.IP) (out, unchecked map[string][]string) {
 	out, unchecked = map[string][]string{}, map[string][]string{}
 	if be == nil || len(ips) == 0 {
 		return out, unchecked
 	}
-	sets, err := listSetNamesByPrefixes(be, feedHostSetPrefixes...)
+	sets, err := listSetNamesByPrefixes(ctx, be, feedHostSetPrefixes...)
 	if err != nil {
 		if !nftMissing(err) {
 			for _, ip := range ips {
@@ -369,7 +384,28 @@ func feedsBlockingMany(be firewall.Backend, ips []net.IP) (out, unchecked map[st
 				fam = append(fam, ip)
 			}
 		}
-		if len(fam) <= 1 {
+		if len(fam) == 0 {
+			continue
+		}
+		if l, ok := be.(elemLooker); ok && len(fam) <= feedLookupMax {
+			addrs := make([]netip.Addr, len(fam))
+			for i, ip := range fam {
+				a, _ := netip.AddrFromSlice(ip)
+				addrs[i] = a.Unmap()
+			}
+			lctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			_, _, held, lerr := l.LookupSetElems(lctx, "cfm", s, addrs)
+			cancel()
+			if lerr == nil && len(held) == len(fam) {
+				for i, ip := range fam {
+					if held[i] {
+						hit(ip.String(), s)
+					}
+				}
+				continue
+			}
+		}
+		if len(fam) == 1 {
 			probe(s, fam)
 			continue
 		}

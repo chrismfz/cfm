@@ -81,6 +81,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (above). See `docs/proxied-ipfilter.md`.
 
 ### Fixed
+- **An unblock checks the fleet feeds again, in a fraction of the time.**
+  On EL8 (nft 1.0.4) an unblock from cfm-web took 8–28 s, and on orion 107
+  of 114 unblocks that day checked no feed at all (`feed sets not checked`):
+  it found the feed sets with `nft list table`, which loads every element
+  first (2.7–6.1 s, past its 5 s deadline), then read each fleet feed set
+  whole (277 000 addresses, 5–6 s each). An IP the feed still held then got
+  no temporary allow. The sets now come from `nft -t list sets` (8 ms; over
+  netlink on nftlib), and each IP is asked of each set by kernel lookup;
+  the old reads stay the fallback. The agent's unblock log shows each step's
+  time.
+- **`HasElem` asks the kernel for an address on both engines** instead of
+  `nft get element` (3–14 s on a fleet feed set on EL8) or a dump of the set
+  (nftlib), with the old way as the fallback. The kernel autoblock's
+  allow/ignore checks use it too.
 - **Three periodic jobs cost less on the busiest nodes** (measured on the
   fleet, 2026-11-26):
   - The notifier's history (`notify.log.jsonl`) at `max_entries` (mars and

@@ -566,6 +566,18 @@ func unreadErr(stop error, unread []string) error {
 
 var addrType = map[string]string{"v4": "ipv4_addr", "v6": "ipv6_addr"}
 
+// SetNames are the names of table inet cfm's sets in a set listing from
+// either backend (ListSetsJSON: nft's `-j -t list sets`, nftlib's netlink
+// set_info), as FindMany reads it.
+func SetNames(listing []byte) []string {
+	sets := cfmSets(listing)
+	out := make([]string, 0, len(sets))
+	for _, sd := range sets {
+		out = append(out, sd.name)
+	}
+	return out
+}
+
 // cfmSets lists the table's classifiable address sets from either backend's
 // table JSON: nft's {"nftables":[{"set":{…}}]} or nftlib's
 // "set_info" (which, like nft's listing, leaves out meters). A set counts
