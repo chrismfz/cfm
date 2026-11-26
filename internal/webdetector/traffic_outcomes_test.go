@@ -86,7 +86,11 @@ func TestEdgeOutcomesHostAndNode(t *testing.T) {
 	if node.Requests != 25+300+300+100 {
 		t.Fatalf("node requests %d", node.Requests)
 	}
-	if len(node.Hosts) != 2 || node.Hosts[0].Host != "b.example" || node.Hosts[1].Host != "c.example" || node.Hosts[0].Outcomes.Challenged != 100 {
+	for i := 0; i < 250; i++ {
+		tmFeed(s, tmOrigin("203.0.113.9", "www.c.example", "GET", "/", tmChrome152, 200, 0.01), now.Add(-20*time.Minute))
+	}
+	node = s.Outcomes(now, 24*time.Hour, "", true)
+	if len(node.Hosts) != 2 || node.Hosts[0].Host != "b.example" || node.Hosts[1].Host != "c.example" || node.Hosts[0].Outcomes.Challenged != 100 || node.Hosts[1].Requests != 550 {
 		t.Fatalf("node hosts (min %d requests, most challenged first): %+v", edgeOutcomeHostMinReq, node.Hosts)
 	}
 	if s.Outcomes(now, 24*time.Hour, "", false).Hosts != nil {

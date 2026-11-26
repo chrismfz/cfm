@@ -160,6 +160,9 @@ func (s *trafficMixStore) Outcomes(now time.Time, window time.Duration, host str
 					if hk == tmOtherKey {
 						continue
 					}
+					// A vhost and its www. alias are one row, as a vhost's own
+					// view reads them (edgeOutcomeHostKeys).
+					hk = strings.TrimPrefix(hk, "www.")
 					acc := hosts[hk]
 					if acc == nil {
 						acc = &tmSmall{}
