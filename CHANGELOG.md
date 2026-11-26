@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.26
+
 ### Changed
 - **cfm-edge is the documented edge; OpenResty is the fallback, Angie is
   deprecated.** README, `CLAUDE.md` and `docs/ROADMAP.md` now set a node up with
@@ -43,8 +47,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   failed without OpenResty. Every edge installer (`install-edge.sh`,
   `install-openresty.sh`, `install-angie.sh`) and the package's config deploy
   already create the shared fallback cert in `/var/lib/cfm/certs/selfsigned/`.
-
-## 2026.11.26
 
 ### Added
 - **`CHALLENGE` lists in `cfm.blocklists`** (`NAME|CHALLENGE|…`). A list whose
