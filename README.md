@@ -105,8 +105,8 @@ WAF, challenges, traffic rules and Site Cache are all managed there.
 
 The WAF, challenge and Site Cache need the in-path edge. **cfm-edge** is the
 edge: CFM's own package of nginx.org nginx plus the OpenResty Lua set
-(`chrismfz/cfm-edge`, EL 8/9/10), which every node in the fleet runs. Set a
-node up with [`docs/node-setup.md`](docs/node-setup.md):
+(`chrismfz/cfm-edge`, EL 8/9/10), which every CFM node that runs an edge
+runs. Set an EL node up with [`docs/node-setup.md`](docs/node-setup.md):
 
 ```bash
 dnf install cfm cfm-edge
@@ -116,7 +116,9 @@ bash /usr/share/cfm/scripts/install-edge.sh     # prepares cfm-edge only: no sta
 **OpenResty is the fallback**, for a node where cfm-edge cannot run (or a bad
 cfm-edge build): `cfm-edge.conf` is rendered from `openresty.conf`, so it runs
 the same config and Lua, built by someone else
-(`bash scripts/install-openresty.sh`). **Angie is deprecated**: no new
+(`bash /usr/share/cfm/scripts/install-openresty.sh`). cfm-edge is an EL rpm
+for now, so on **Debian / Ubuntu** the edge is OpenResty until its `.deb`
+ships. **Angie is deprecated**: no new
 installs; `install-angie.sh` stays only for a node that still runs it, until
 Angie support is removed.
 

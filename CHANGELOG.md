@@ -25,8 +25,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   deprecated.** README, `CLAUDE.md` and `docs/ROADMAP.md` now set a node up with
   `dnf install cfm cfm-edge` + `install-edge.sh` (every node with an edge runs
   cfm-edge). OpenResty stays as the fallback (`cfm-edge.conf` is rendered from
-  `openresty.conf`). `install-angie.sh` still works but warns that Angie is
-  deprecated; removing Angie support is a later change. Nothing changes on a
+  `openresty.conf`; on Debian / Ubuntu it is the edge until the cfm-edge `.deb`
+  ships). `install-angie.sh` still works but warns that Angie is deprecated; removing Angie support is a later change. Nothing changes on a
   running node.
 
 ### Removed
