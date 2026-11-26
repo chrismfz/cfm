@@ -20,12 +20,15 @@ defence-in-depth across five layers, from the HTTP edge down to the kernel:
 | **cfm-lsm** | CO-RE BPF LSM behavioural detection at syscall boundary | `internal/lsm` |
 | **kernsec** | KSPP-grade kernel-surface hardening (sysctls, boot args, modules) | `internal/kernsec` |
 
-The in-path edge proxy is **OpenResty** (default) or **Angie**; the daemon,
-Lua decision files, and sslcollector socket are identical for both.
-**cfm-edge** (`chrismfz/cfm-edge`: nginx.org nginx + the OpenResty Lua set,
-`/usr/sbin/cfm-edge`, `/etc/cfm-edge`, `/var/log/cfm-edge`) is the third
-engine the daemon knows, being adopted; it runs the same shared Lua (its
-conf comes with its install script).
+The in-path edge proxy is **cfm-edge** (`chrismfz/cfm-edge`: nginx.org nginx
++ the OpenResty Lua set, `/usr/sbin/cfm-edge`, `/etc/cfm-edge`,
+`/var/log/cfm-edge`), on every CFM node that runs an edge since 2026-11 (an
+EL rpm for now; Debian / Ubuntu use OpenResty until its `.deb`). **OpenResty**
+is the fallback: `configs/cfm-edge.conf` is rendered from
+`configs/openresty.conf`, so the two run the same config. **Angie** is
+deprecated (no new installs; its removal is its own change, after a fleet
+check). The daemon, Lua decision files and sslcollector socket are identical
+for all three.
 
 `README.md` is the short overview (install, config files, feature tour with
 links); the reference for each subsystem is its doc under `docs/` (§7).

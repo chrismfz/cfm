@@ -366,6 +366,15 @@ Proposal: `docs/roadmaps/security_headers.md`.
 
 ## 12. Other decided items
 
+- **cfm-edge is the edge, OpenResty the one fallback, Angie deprecated** —
+  [decided 2026-11-26]. Every node with an edge runs cfm-edge (8 of 8 on
+  2026-11-26; none runs OpenResty or Angie). OpenResty costs almost nothing to
+  keep, because `cfm-edge.conf` is rendered from `openresty.conf`, and its
+  packages come from someone else, so it covers a bad cfm-edge build. Angie
+  keeps its own hand-kept `angie.conf` and installer, plus Angie-only code
+  paths, for no node. Removing it (`angie.conf`, `install-angie.sh`, its
+  `edgeengine` Profile and the guards that check it) is a separate PR, after
+  a `list_nodes` check that no node runs it.
 - **No per-tenant futex-PI seccomp filter (GhostLock, CVE-2026-43499)** —
   [decided 2026-11-18]. It could only apply to bare-metal / custom installs;
   on cPanel / DirectAdmin / CloudLinux tenant confinement is CageFS / LVE's

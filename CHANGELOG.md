@@ -20,7 +20,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **cfm-edge is the documented edge; OpenResty is the fallback, Angie is
+  deprecated.** README, `CLAUDE.md` and `docs/ROADMAP.md` now set a node up with
+  `dnf install cfm cfm-edge` + `install-edge.sh` (every node with an edge runs
+  cfm-edge). OpenResty stays as the fallback (`cfm-edge.conf` is rendered from
+  `openresty.conf`; on Debian / Ubuntu it is the edge until the cfm-edge `.deb`
+  ships). `install-angie.sh` still works but warns that Angie is deprecated; removing Angie support is a later change. Nothing changes on a
+  running node.
+
+### Removed
+- **`scripts/openresty_generate_self-signed.sh`.** Nothing called it, and it
+  failed without OpenResty. Every edge installer (`install-edge.sh`,
+  `install-openresty.sh`, `install-angie.sh`) and the package's config deploy
+  already create the shared fallback cert in `/var/lib/cfm/certs/selfsigned/`.
 
 ## 2026.11.26
 
