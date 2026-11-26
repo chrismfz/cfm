@@ -17,7 +17,9 @@ import (
 // --- Applier: καλείται από τον blocklists.Manager για κάθε feed ----
 
 func (b *Backend) ApplyFeed(ctx context.Context, f blocklists.Feed, res *blocklists.FetchResult) error {
-	if res == nil {
+	// A CHALLENGE feed has no nft set (the manager never applies one); a
+	// stray call must not turn it into a block.
+	if res == nil || f.Type == blocklists.TypeChallenge {
 		return nil
 	}
 	feedKey := SanitizeFeedName(f.Name)

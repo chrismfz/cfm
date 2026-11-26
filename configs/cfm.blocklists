@@ -9,11 +9,16 @@ MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 #DSHIELD|BLOCK|14400|0|https://www.dshield.org/block.txt
 # Tor exits (the Tor Project's own list, ~1.2k addresses, one per line; exits
 # change daily, hence 1h). Exits only: a relay that is not an exit never sends
-# a user's traffic, so a "full" relay list blocks servers, not visitors. This
-# drops every Tor user connecting directly, on every port of this node (web,
-# mail, panels); a client behind Cloudflare meets it only through
-# PROXIED_IPFILTER_FEED (default log, docs/proxied-ipfilter.md).
-#TOR|BLOCK|3600|0|https://check.torproject.org/torbulkexitlist
+# a user's traffic, so a "full" relay list blocks servers, not visitors.
+# CHALLENGE, not BLOCK: Tor also carries people (readers of news sites, the
+# privacy-minded), and measured on 8 nodes (2026-11-26) Tor was <= 0.13% of
+# the traffic, 62% of it the quoted-UA form-spam tool rule 202 flags. A
+# CHALLENGE list is never written to nft: the web decision raises an
+# uncleared listed client to a challenge, direct or behind Cloudflare alike
+# ([webdetector] LIST_CHALLENGE, default log; docs/proxied-ipfilter.md).
+# Mail and panel ports are untouched. BLOCK instead drops every Tor user on
+# every port of this node.
+#TOR|CHALLENGE|3600|0|https://check.torproject.org/torbulkexitlist
 #BOGON|BLOCK|14400|0|http://www.cymru.com/Documents/bogon-bn-agg.txt
 #HONEYPOT|BLOCK|14400|0|https://www.projecthoneypot.org/list_of_ips.php?t=d&rss=1
 #CIARMY|BLOCK|14400|0|http://www.ciarmy.com/list/ci-badguys.txt

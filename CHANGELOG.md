@@ -21,6 +21,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **`CHALLENGE` lists in `cfm.blocklists`** (`NAME|CHALLENGE|…`). A list whose
+  members include people, where a block is too much: the stock file's Tor
+  exit line is now one (still commented out). It is never written to nft; the
+  web decision raises an uncleared listed client to a challenge, direct or
+  behind Cloudflare alike, with the geo policy's exemptions (a solve, payment
+  webhooks / WooCommerce REST, verified crawlers, Challenge Access), and every
+  allow cancels it. `[webdetector] LIST_CHALLENGE` = `log` (default: a
+  `[list_challenge] would_challenge` line per client in cfm.log, nothing
+  changes) | `enforce` | `off`. See `docs/proxied-ipfilter.md`.
 - **WAF rule 202 (`rule_ua_quoted`, `WAF_BAD_UA:QUOTED`), logonly.** Flags a
   User-Agent that starts with a double quote. That is the tell of a form-spam
   tool now on every edge node: ~7,300 requests in about a day of logs, ~93% from

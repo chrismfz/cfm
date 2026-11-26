@@ -21,7 +21,8 @@
 // client.
 //
 // Sources: feeds (blocklists.Manager hands each applied feed over, BLOCK and
-// ALLOW) and the node's local sets, read from the kernel every minute
+// ALLOW; a CHALLENGE feed is kept apart, for every web client, direct or not:
+// challenge.go) and the node's local sets, read from the kernel every minute
 // (StartLocalRefresh). Each block source belongs to a group with its own mode,
 // [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (FEED's
 // default: a line per client says which lists it is on and what would happen,
@@ -57,11 +58,13 @@ type source struct {
 	label string // what the log names: "feed:MYBLOCK", "block_v4", "allow_dyn_v4"
 	group string // GroupFeed / GroupLocal for a block source; "" for an allow
 	allow bool
-	t     table
+	// challenge: a CHALLENGE feed (challenge.go), never a block source.
+	challenge bool
+	t         table
 }
 
 type snapshot struct {
-	blocks, allows []*source
+	blocks, allows, challenges []*source
 }
 
 var (
@@ -104,6 +107,7 @@ const (
 func init() {
 	modeFeed.Store(DefaultModeFeed)
 	modeLocal.Store(DefaultModeLocal)
+	modeChallenge.Store(DefaultModeChallenge)
 	cur.Store(&snapshot{})
 	setClock(time.Now)
 }
@@ -314,9 +318,12 @@ func pruneForgotten() {
 func publishLocked() {
 	snap := &snapshot{}
 	add := func(s *source) {
-		if s.allow {
+		switch {
+		case s.challenge:
+			snap.challenges = append(snap.challenges, s)
+		case s.allow:
 			snap.allows = append(snap.allows, s)
-		} else {
+		default:
 			snap.blocks = append(snap.blocks, s)
 		}
 	}
@@ -331,6 +338,7 @@ func publishLocked() {
 	}
 	byLabel(snap.blocks)
 	byLabel(snap.allows)
+	byLabel(snap.challenges)
 	cur.Store(snap)
 }
 
@@ -544,7 +552,7 @@ func evictLogKeys(t int64) {
 func Stats() map[string]any {
 	snap := cur.Load()
 	srcs := map[string]any{}
-	for _, l := range [][]*source{snap.blocks, snap.allows} {
+	for _, l := range [][]*source{snap.blocks, snap.allows, snap.challenges} {
 		for _, s := range l {
 			srcs[s.label] = map[string]int{"entries": s.t.n, "unparsed": s.t.bad}
 		}
@@ -559,6 +567,12 @@ func Stats() map[string]any {
 		"forgotten":   nForgotten.Load(),
 		"geo":         geo.Load() != nil, // the log line's cc= / asn= fields are filled
 		"sources":     srcs,
+		// CHALLENGE feeds (challenge.go): every web client, direct or not.
+		"mode_challenge":   modeChallenge.Load().(string),
+		"challenge_listed": nChalChecks.Load(),
+		"would_challenge":  nChalWould.Load(),
+		"challenged":       nChalEnforced.Load(),
+		"challenge_allow":  nChalAllowed.Load(),
 	}
 }
 
@@ -577,6 +591,11 @@ func ResetForTest() {
 	nLogKeys.Store(0)
 	modeFeed.Store(DefaultModeFeed)
 	modeLocal.Store(DefaultModeLocal)
+	modeChallenge.Store(DefaultModeChallenge)
+	nChalChecks.Store(0)
+	nChalWould.Store(0)
+	nChalEnforced.Store(0)
+	nChalAllowed.Store(0)
 	forgotten.Range(func(k, _ any) bool { forgotten.Delete(k); return true })
 	nForgotten.Store(0)
 	forgottenNets.Store(nil)

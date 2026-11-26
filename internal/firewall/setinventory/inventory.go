@@ -26,6 +26,9 @@ func BuildSetNames(feeds []blocklists.Feed) map[string]string {
 		"allow_dyn_v6":     "allow_dyn_v6",
 	}
 	for _, f := range feeds {
+		if f.Type == blocklists.TypeChallenge {
+			continue // in the daemon's memory only, no nft set
+		}
 		key := feedutil.SanitizeFeedName(f.Name)
 		base := "block_ext"
 		if f.Type == blocklists.TypeAllow {

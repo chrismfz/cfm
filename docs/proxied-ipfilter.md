@@ -104,6 +104,45 @@ holds permanent bans on shared mobile / CGNAT addresses (a Cosmote
 `cgn.athe.cosmote.net` address, a Vodafone one): enforced, they would refuse
 every customer behind them. Enforce it once those bans expire on their own.
 
+## CHALLENGE feeds (`LIST_CHALLENGE`)
+
+A `cfm.blocklists` line with type `CHALLENGE` (`TOR|CHALLENGE|3600|0|https://check.torproject.org/torbulkexitlist`)
+is a list whose members include people, where a block is too much. It is
+**never written to nft** (the manager does not apply it, the nft prune drops a
+feed's old block sets when its type turns to CHALLENGE, and `cfm firewall
+status` expects no set for it). The daemon keeps it here, next to the block
+feeds, and the bridge's decision asks it (`DecideChallenge`) for **every**
+web-scope request, direct or behind a trusted proxy: the decision's `ip` is the
+visitor's address either way.
+
+In enforce it is a challenge **floor**, the geo policy's, at the same place in
+`handleDecision`: only an uncleared client meets it (a cleared one returns at
+`cfm.lua` Step 2b), a real per-IP entry overrides it, a solve (okState) clears
+it, and the machine-to-machine carve-out (payment webhooks, WooCommerce REST),
+the verified good-bot and Challenge Access exemptions lift it. Every allow
+source (MYALLOW, cfm.allow, dyndns) cancels it. A solve it caused carries
+`src=list`. Panel scope (`cfm_panel.lua`) is never challenged by it, and mail
+ports never see it.
+
+`[webdetector] LIST_CHALLENGE` = `log` (default) | `enforce` | `off`. In log
+mode the decision's allow carries `rule_action=observe` (not cached), and one
+line per client and outcome every 10 minutes goes to `cfm.log`:
+
+```
+[list_challenge] would_challenge ip=185.220.101.1 host=example.gr list=feed:TOR allow=- mode=log n=12 cc=DE asn=… asn_name=…
+```
+
+(`challenge` in enforce, `allowed` when an allow cancelled it). Stats, in the
+same `proxied_ipfilter` block: `mode_challenge`, `challenge_listed`,
+`would_challenge`, `challenged`, `challenge_allow`.
+
+Measured before it was built (2026-11-26, the edge access logs of 8 nodes,
+3.5–18.5 h each): ~4 700 requests from 1 260 Tor exits, <= 0.13% of any node's
+traffic, 22% of them through Cloudflare, ~85% answered 200 by the origin; 62%
+the quoted-UA form-spam tool (rule 202), the rest contact forms, `wp-login` /
+`xmlrpc`, shop newsletters, WHMCS sign-ups, and a few plain GETs on news sites
+(readers).
+
 ## Log and stats
 
 One line per client and outcome every 10 minutes in `cfm.log`, `n=` saying how
