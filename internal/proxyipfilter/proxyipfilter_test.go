@@ -73,7 +73,17 @@ func TestVerdictOrderAndModes(t *testing.T) {
 	setLocal("block_v4", false, []string{"20.43.87.186", "5.6.7.8"})
 	setLocal("allow_dyn_v4", true, []string{"5.6.7.8"})
 
+	// The defaults: LOCAL enforce, so an address on block_v4 is enforced
+	// (whatever the feed's log mode says); with both in log, only listed.
 	v := Check("20.43.87.186")
+	if fmt.Sprint(v.Blocks) != "[block_v4 feed:MYBLOCK]" || !v.Enforce {
+		t.Fatalf("default modes (local enforce): %+v", v)
+	}
+	if v := Check("45.138.12.1"); v.Enforce || !v.Listed() {
+		t.Fatalf("default modes (feed log): %+v", v)
+	}
+	SetModes("log", "log")
+	v = Check("20.43.87.186")
 	if fmt.Sprint(v.Blocks) != "[block_v4 feed:MYBLOCK]" || v.Enforce || !v.Listed() {
 		t.Fatalf("log mode: %+v", v)
 	}
@@ -109,8 +119,20 @@ func TestVerdictOrderAndModes(t *testing.T) {
 		t.Fatalf("feed off, local enforce: %+v", v)
 	}
 	SetModes("bogus", "")
+	if modeFeed.Load() != ModeLog || modeLocal.Load() != ModeEnforce {
+		t.Fatal("an unknown mode is log; an empty LOCAL is its default, enforce")
+	}
+	SetModes("", "bogus")
 	if modeFeed.Load() != ModeLog || modeLocal.Load() != ModeLog {
-		t.Fatal("unknown and empty modes are log")
+		t.Fatal("an empty FEED is its default, log; an unknown LOCAL is log")
+	}
+	// The defaults (2026-11-26): LOCAL enforce, FEED log; an explicit value wins.
+	if DefaultModeLocal != ModeEnforce || DefaultModeFeed != ModeLog {
+		t.Fatalf("defaults: feed %q local %q", DefaultModeFeed, DefaultModeLocal)
+	}
+	SetModes("log", "log")
+	if modeLocal.Load() != ModeLog {
+		t.Fatal("an explicit LOCAL = log keeps log")
 	}
 
 	DropFeed("MYBLOCK")
@@ -386,7 +408,7 @@ func TestDecideLineCarriesGeo(t *testing.T) {
 	}
 	Decide("69.63.184.14", "infonews24.gr")
 	want := "[proxied_ipfilter] would_block ip=69.63.184.14 host=infonews24.gr block=feed:MYBLOCK allow=- " +
-		"mode=feed:log,local:log n=1 cc=US asn=32934 asn_name=Facebook,_Inc."
+		"mode=feed:log,local:enforce n=1 cc=US asn=32934 asn_name=Facebook,_Inc."
 	if len(lines) != 1 || lines[0] != want {
 		t.Fatalf("line:\n got %q\nwant %q", lines, want)
 	}

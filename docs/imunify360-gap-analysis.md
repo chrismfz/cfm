@@ -242,7 +242,8 @@ reached a client behind Cloudflare either (two scanners other nodes had
 fleet-banned for WAF hits got 200/301/404 from the origin through Cloudflare on
 earth). Built as `internal/proxyipfilter`: the lists in the daemon's memory,
 asked by the bridge decision for proxied requests; `[webdetector]
-PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` (default) | `enforce` | `off`.
+PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` | `enforce` | `off` (defaults: FEED
+`log`, LOCAL `enforce` since 2026-11-26).
 Design, precedence and log format: `docs/proxied-ipfilter.md`.
 
 Open:

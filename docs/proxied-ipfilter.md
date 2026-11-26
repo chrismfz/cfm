@@ -1,8 +1,9 @@
 # Proxied-client IP filter (`internal/proxyipfilter`)
 
 Gives a client behind a trusted proxy (Cloudflare) the verdict CFM's nft IP
-filter would give it if it came direct. Default mode: `log` (nothing is
-blocked).
+filter would give it if it came direct. Default modes: the node's own block
+sets (`LOCAL`) are **enforced** since 2026-11-26; the fleet feeds (`FEED`) are
+`log` (nothing is blocked).
 
 ## Why
 
@@ -87,10 +88,21 @@ the edge reports to the daemon), and 268 k there is the regression ruled out. So
 - `PROXIED_IPFILTER_FEED` — the block feeds;
 - `PROXIED_IPFILTER_LOCAL` — the node's own block sets.
 
-Each is `log` (default), `enforce` (the decision answers `ip_action=block`
-with header `X-CFM-Proxied-IPFilter: 1`), or `off` (`0` also means off). An
-empty value is `log`; an unknown one is `log` and logged as such. A source in
-an `off` group is not consulted.
+Each is `log`, `enforce` (the decision answers `ip_action=block` with header
+`X-CFM-Proxied-IPFilter: 1`), or `off` (`0` also means off). An empty value is
+the group's default: `FEED` `log`, `LOCAL` `enforce` (since 2026-11-26). An
+unknown value is `log` and logged as such. A source in an `off` group is not
+consulted.
+
+**Why LOCAL is enforced by default.** A week of `log` on eight nodes
+(2026-11-18 to 11-24) found only scanners on the local sets: Censys, the
+45.138.12.0/24 panel scanner, Techoff, an Iranian address. No customer, and no
+network that serves real users, once Meta's forward proxies were cleared and
+the flood / portscan autoblock was taught to spare forward-confirmed good bots.
+A few hundred lines per node a week. **Why FEED is not (yet).** The fleet list
+holds permanent bans on shared mobile / CGNAT addresses (a Cosmote
+`cgn.athe.cosmote.net` address, a Vodafone one): enforced, they would refuse
+every customer behind them. Enforce it once those bans expire on their own.
 
 ## Log and stats
 
