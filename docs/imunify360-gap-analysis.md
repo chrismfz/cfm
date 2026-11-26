@@ -25,7 +25,7 @@ kept where they size a gap or justify a decision.
 | G6 malware at rest | open | ClamAV-vs-Imunify signature comparison not done |
 | G7 smaller items | open, unmeasured | |
 | W0 WebShield DNAT ahead of CFM | **built** | `edge_health` check H, `internal/apiserver/edge_health_webshield.go:137` |
-| W1 IP lists for clients behind Cloudflare | **built, log mode** | `internal/proxyipfilter` (`Decide`, `filter.go:377`; bridge `internal/webdetector/nginx_bridge.go:2135`); modes `internal/detectors/webdetector_register.go:1007`. Open: `enforce`, promote on hit |
+| W1 IP lists for clients behind Cloudflare | **built; local sets enforced since 2026-11-26, fleet feeds log** | `internal/proxyipfilter` (`Decide`; bridge `writeEdgeBan` in `internal/webdetector/nginx_bridge.go`); modes `PROXIED_IPFILTER_*` in `internal/detectors/webdetector_register.go`. Open: FEED `enforce`, promote on hit |
 | W2 Imunify's splash list as a challenge source | open, measure first | |
 | W3 graylisted direct visitors dropped | **decided: no CFM code** | warned in check H's fix text (`edge_health_webshield.go:175-181`) |
 | W4 never ban a CDN node as a client | open | |
@@ -235,18 +235,20 @@ drew almost none. No country was blocked.
 | reCAPTCHA, captcha-DoS blacklisting | covered: CFM's PoW challenge, the page rate-limit ban, `CHALLENGE_V2_PATHS_REJECT_BAN` | — |
 | Country block | n/a: not configured; CFM's geo policy is challenge-tier only by doctrine | — |
 
-### W1. IP lists for clients behind Cloudflare (built, log mode)
+### W1. IP lists for clients behind Cloudflare (built; LOCAL enforced, FEED log)
 
 The gap was not only Imunify's: CFM's own fleet blacklist and local bans never
 reached a client behind Cloudflare either (two scanners other nodes had
 fleet-banned for WAF hits got 200/301/404 from the origin through Cloudflare on
 earth). Built as `internal/proxyipfilter`: the lists in the daemon's memory,
 asked by the bridge decision for proxied requests; `[webdetector]
-PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` (default) | `enforce` | `off`.
+PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` | `enforce` | `off` (defaults: FEED
+`log`, LOCAL `enforce` since 2026-11-26).
 Design, precedence and log format: `docs/proxied-ipfilter.md`.
 
 Open:
-- `enforce`, after the `node="all"` reads (see Order);
+- FEED `enforce`, once the fleet list's permanent bans on shared mobile /
+  CGNAT addresses are gone (see Order);
 - **promote on hit** (a client blocked from these lists also goes to the edge
   ban store, so the static locations and cached URLs are covered): not built;
 - **Imunify's lists as a second source** (`i360.ipv4.blacklist`,
@@ -300,16 +302,18 @@ mechanisms, and none is a measured gap.
 ## Order
 
 1. **Burn-in reads** (2026-11-20, 2026-11-24): rules 417, 415 by extension,
-   530, and the proxied IP filter with its `cc=` / `asn=` fields. Promotions
-   and `PROXIED_IPFILTER_FEED = enforce` are decided there.
-2. **Meta's forward proxies** (`fwdproxy-*.fbsv.net`, AS32934) before
-   `PROXIED_IPFILTER_LOCAL = enforce`: 59 of them were permanently banned on
-   mars and titan by the SYN / port-flood detectors in May-June 2026, breaking
-   link previews and in-app visits. New bans are prevented: the L4 flood and
-   port-scan autoblock spares a forward-confirmed good bot
-   (`internal/firewall/autoblock_goodbot.go`, kill switch
-   `THROTTLE_GOODBOT_EXEMPT = 0`). Still to do: unban the existing entries on
-   those nodes.
+   530, and the proxied IP filter with its `cc=` / `asn=` fields. Done: 417 and
+   415 block (bans held); `PROXIED_IPFILTER_LOCAL` defaults to `enforce` since
+   2026-11-26 (scanners only on the local sets).
+2. **Meta's forward proxies** (`fwdproxy-*.fbsv.net`, AS32934), the condition
+   for LOCAL enforce: 59 of them were permanently banned on mars and titan by
+   the SYN / port-flood detectors in May-June 2026, breaking link previews and
+   in-app visits. Done: new bans are prevented (the L4 flood and port-scan
+   autoblock spares a forward-confirmed good bot,
+   `internal/firewall/autoblock_goodbot.go`, kill switch
+   `THROTTLE_GOODBOT_EXEMPT = 0`), and on 2026-11-26 no node held an AS32934
+   ban. Next: `PROXIED_IPFILTER_FEED = enforce`, once the fleet list's
+   permanent bans on shared mobile / CGNAT addresses are TTL or gone.
 3. **G1 public feeds:** measure blocklist.de / Spamhaus DROP against the PAM
    RBL locks for a week; no code until a feed proves itself.
 4. **G4 collector** (`vulnerability_hits` → cfm-web).

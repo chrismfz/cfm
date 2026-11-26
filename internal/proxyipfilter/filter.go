@@ -23,7 +23,7 @@
 // Sources: feeds (blocklists.Manager hands each applied feed over, BLOCK and
 // ALLOW) and the node's local sets, read from the kernel every minute
 // (StartLocalRefresh). Each block source belongs to a group with its own mode,
-// [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (the
+// [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (FEED's
 // default: a line per client says which lists it is on and what would happen,
 // nothing changes), enforce (the bridge answers ip_action=block), off.
 package proxyipfilter
@@ -91,9 +91,19 @@ var (
 	nChecks, nWould, nBlocked, nAllowed atomic.Int64
 )
 
+// The defaults, when detectors.conf names no mode. LOCAL (the node's own
+// block sets) is enforce since 2026-11-26, after a week of log mode on eight
+// nodes: scanners only (Censys, 45.138.12.x, Techoff, an Iranian address),
+// no customer, no network that serves real users. FEED stays log: the fleet
+// blacklist still holds permanent bans on shared mobile / CGNAT addresses.
+const (
+	DefaultModeFeed  = ModeLog
+	DefaultModeLocal = ModeEnforce
+)
+
 func init() {
-	modeFeed.Store(ModeLog)
-	modeLocal.Store(ModeLog)
+	modeFeed.Store(DefaultModeFeed)
+	modeLocal.Store(DefaultModeLocal)
 	cur.Store(&snapshot{})
 	setClock(time.Now)
 }
@@ -105,14 +115,16 @@ func setClock(f func() time.Time) { clock.Store(&f) }
 // SetModes sets the mode of each group; an empty or unknown value is "log",
 // the safe default (logged, so a typo is visible).
 func SetModes(feed, local string) {
-	modeFeed.Store(normMode("PROXIED_IPFILTER_FEED", feed))
-	modeLocal.Store(normMode("PROXIED_IPFILTER_LOCAL", local))
+	modeFeed.Store(normMode("PROXIED_IPFILTER_FEED", feed, DefaultModeFeed))
+	modeLocal.Store(normMode("PROXIED_IPFILTER_LOCAL", local, DefaultModeLocal))
 }
 
-func normMode(key, m string) string {
+// normMode reads one knob: empty is the group's default, an unknown value is
+// log (the safe side, logged).
+func normMode(key, m, def string) string {
 	switch m = strings.ToLower(strings.TrimSpace(m)); m {
 	case "":
-		return ModeLog
+		return def
 	case ModeOff, ModeLog, ModeEnforce:
 		return m
 	case "0":
@@ -563,8 +575,8 @@ func ResetForTest() {
 	bansMu.Unlock()
 	logSeen.Range(func(k, _ any) bool { logSeen.Delete(k); return true })
 	nLogKeys.Store(0)
-	modeFeed.Store(ModeLog)
-	modeLocal.Store(ModeLog)
+	modeFeed.Store(DefaultModeFeed)
+	modeLocal.Store(DefaultModeLocal)
 	forgotten.Range(func(k, _ any) bool { forgotten.Delete(k); return true })
 	nForgotten.Store(0)
 	forgottenNets.Store(nil)

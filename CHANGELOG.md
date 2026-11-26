@@ -35,6 +35,18 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 - **The reference `cfm.blocklists` `TOR` line** (still commented out) points
   at the Tor Project's current exit list (`/torbulkexitlist`, refreshed
   hourly) instead of the old CGI URL, which now answers with a redirect.
+### Changed
+- **The node's own bans now reach clients behind Cloudflare by default.**
+  `PROXIED_IPFILTER_LOCAL` defaults to `enforce`: an address on the node's
+  block sets (cfm.deny, SSH / mail / portscan / flood TTL bans) is refused
+  when it comes through a trusted proxy, as nft refuses it direct. A week of
+  log mode on eight nodes found only scanners there. A detectors.conf that
+  writes `PROXIED_IPFILTER_LOCAL = log` keeps log (delete the line, or set
+  it to enforce). The fleet feeds (`PROXIED_IPFILTER_FEED`) stay `log`: the
+  fleet list still holds permanent bans on shared mobile / CGNAT addresses.
+  See `docs/proxied-ipfilter.md`.
+
+_Nothing yet._
 
 ## 2026.11.26
 
