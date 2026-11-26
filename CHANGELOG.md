@@ -20,6 +20,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **WAF rule 202 (`rule_ua_quoted`, `WAF_BAD_UA:QUOTED`), logonly.** Flags a
+  User-Agent that starts with a double quote. That is the tell of a form-spam
+  tool now on every edge node: ~7,300 requests in about a day of logs, ~93% from
+  Tor exits. It
+  fills contact forms, comments, and shop / WHMCS registration and ticket
+  forms, so the site mails spam to third parties; about a quarter of the
+  fleet's Contact Form 7 POSTs on 2026-11-26 were its. The burn-in decides
+  the move to `challenge_v2`. The rule never blocks (a `block` setting is
+  capped at `challenge_v2`), so it arms no autoblock.
+
+### Changed
+- **The reference `cfm.blocklists` `TOR` line** (still commented out) points
+  at the Tor Project's current exit list (`/torbulkexitlist`, refreshed
+  hourly) instead of the old CGI URL, which now answers with a redirect.
 ### Changed
 - **The node's own bans now reach clients behind Cloudflare by default.**
   `PROXIED_IPFILTER_LOCAL` defaults to `enforce`: an address on the node's

@@ -179,6 +179,7 @@ local CFG = {
                                        -- solve. A real user's UA never trips the scored tier, and a non-JS
                                        -- script never solves either way, so v2 adds no FP (webhooks are
                                        -- suppressed pre-score by the machine-style endpoint list).
+  rule_ua_quoted        = "logonly",  -- rule 202: a User-Agent that starts with a double quote ("Mozilla/5.0 ...": nginx logs \x22). A form-spam tool on every edge node (2026-11-26: ~7.3k requests in about a day of logs, from ~210 IPs, ~93% Tor exits, the rest VPN / datacenter) filling CF7, comment, WooCommerce / OpenCart / WHMCS register and ticket forms; no browser sends it. Logonly burn-in, then challenge_v2 (the tool is headless); never block (family WAF_BAD_UA has no block-tier rule, so no autoblock).
   rule_shellshock       = "challenge_v2",  -- Shellshock CVE-2014-6271 () { pattern in headers (CGI env vars)
   rule_header_vulns     = "challenge_v2",  -- httpoxy (Proxy:), CVE-2025-24813 (Tomcat PUT
                                       -- /session + Content-Range); If:/Lock-Token: removed (FP case 12)
@@ -620,6 +621,7 @@ local RULE_IDS = {
 
   -- 2xx client identity
   rule_bad_ua                  = 201,
+  rule_ua_quoted               = 202,
 
   -- 3xx injection
   rule_sqli                    = 301,
@@ -1263,6 +1265,20 @@ local function check_impl(ctx, st)
         else
           record(reason, ttl, action, RULE_IDS.rule_bad_ua)
         end
+      end
+    end
+  end
+
+  -- ── 1b) Quoted User-Agent (rule 202) ────────────────────────────────────
+  -- Not block-capable by design: a held or un-armed block here would shadow
+  -- the armed families below (CLAUDE.md §6); promote it to challenge_v2 only.
+  do
+    local mode = rule_mode(CFG.rule_ua_quoted, "logonly")
+    if mode ~= "disabled" then
+      local tag = det.detect_quoted_ua(headers)
+      if tag then
+        if mode == "block" then mode = "challenge_v2" end
+        record("WAF_BAD_UA:" .. tag, CFG.default_ttl_sec, mode, RULE_IDS.rule_ua_quoted)
       end
     end
   end

@@ -224,6 +224,19 @@ week missed is a week lost on virgo and speedhost.
 | Payload stripping under an arm | `hs=-` solve lines that carry `v2=` (a pass: D5b never fails a missing payload) | read 1 | A rising share on a convicted fp = the farm bypasses the arm by stripping the body → a master-plan decision |
 | Hidden-page solves | `sig=` `hid:1` (page hidden at POST time, no window size sent), humans vs convicted-farm fps | 2026-10-22 | A rising `hid` share on a convicted fp means the arm lost that catch → a master-plan decision. Read 4: 793 in 4.9 days, 70 % GR/CY; 4 farm solves passed that a 0x0 size would have failed. (The farms' `outer_zero` rejects had already fallen before #1615.) Read 5: 1 533, 45 % GR/CY; the drop is `95070673` sending `hid:1` from DigitalOcean on orion (702), at hs 0, so a 0x0 size would not have failed them either. Read 7: orion 3, virgo 0 at hs 60–99 under an arm; closed as a watch item. |
 | Farm catch rate under an arm | farm-fp `result=solved` vs `result=v2_reject` lines carrying `v2=` (per node: `c28caa00`, `95070673`) | read 3 | Sizes how much of a farm the arm stops (read 3: ~39 %; read 6: 14 % fleet-wide, the farm at hs 90; read 7: 52 %, the farm's passes now at hs 0); a falling rate on a convicted fp = the farm scores under the fail score → the operator fingerprint policy (E3), not a harder score |
+| `OPENRESTY_OK_IP_TTL = 0` cost | `okstate mode=would` lines in `cfm.challenges.log` (solves are recorded since #1825); 2+ solves of one (ip, host) within 45m | 2026-11-25 (fleet at 0), #1825 (code default 0) | Day-one read (2026-11-26): 1-2 % of solving pairs solved again within 45m, earth 7 % (mostly `webmail.*`), no loop. A host or client class paying far more → a narrower grace for it, never a whole-IP one again |
+| Panel proxy subdomains: logins or wanderers | `webmail.*` / `cpanel.*` / `whm.*` … on 443: `/cpsess<N>/` 200 = a session, `POST /login/` = a try, the rest challenged without either | 2026-11-26 (24h and 48h reads scheduled for 11-27 / 11-28) | earth sample: 813 challenge page loads vs 38 login POSTs on `webmail.*`. Mostly wanderers → a stronger treatment for them; real users re-challenged → a path-scoped grace |
+| Confirm fallback clicks | `result=v2_confirm … confirm=fallback` (asks) vs solves with `v2_rescued=confirm` (clicks), web and `scope=panel:*` | #1809, #1811 | Day one: 3 asks, 0 clicks. Widen `CHALLENGE_V2_FALLBACK` from `audience` to `all` only when the clicks' trajectory readings say a farm does not script them |
+| Fingerprints that are populations | per fingerprint: GR/CY residential solves with real input vs farm-shaped solves | 2026-11-26 | `9e4a75d5` is on dozens of ordinary GR Chrome/Edge-on-Windows panel logins; `c28caa00` on GR residential webmail users solving 3-4 times. Neither is a farm by fingerprint alone: measure both before any cfm-web `deny` |
+
+### Open items (waiting on time or data)
+
+Kept here so a later session finds them; strike one when it is done or decided.
+
+- **Audience floor S1** (`docs/targeted-challenge-design.md` §3): the shadow tag `aud=in|out|dc` and a per-vhost estimate; S2 decided on its read.
+- **PR C**: remove the grain / mark / note / tier-pin machinery `v2=all` made redundant, after ~a week of `v2=all` data and the fleet check of CLAUDE.md §9.
+- **`verify_fcrdns` on a vhost-wide challenge**: a `ptr=… verify_fcrdns=1` exclude rule never lifts one at the edge (`MatchNoDNS` skips it). The goodbot registry covers Google / Bing / Meta; ahrefs, semrush and googlezip.net are covered only on per-IP challenges. Decide when a vhost challenge first hits one.
+- **Inline PTR in the per-IP emits' `isExcluded`** (closed draft chrismfz/cfm#1818): bounded-budget design ready; reopen only if `webdetector run timeout` returns with that stack (0 since #1813).
 
 ## 5. Entry template
 
