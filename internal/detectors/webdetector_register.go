@@ -1002,8 +1002,8 @@ func init() {
 		// the edge's own check, before every exemption (cfm.lua Step 0e,
 		// static files), 403s; "log" only counts and logs.
 		edgeban.SetEdgeMode(cleanScalar(kv["EDGE_BAN_MODE"]))
-		// PROXIED_IPFILTER_FEED (default enforce since 2026-11-26) / _LOCAL
-		// (default log): the verdict CFM's nft
+		// PROXIED_IPFILTER_FEED / _LOCAL (defaults: both enforce since
+		// 2026-11-26, proxyipfilter.DefaultMode*): the verdict CFM's nft
 		// IP filter would give a client behind a trusted proxy, which nft never
 		// sees (internal/proxyipfilter). FEED: the block feeds (cfm-web's
 		// MYBLOCK); LOCAL: the node's own block sets (cfm.deny, TTL bans).

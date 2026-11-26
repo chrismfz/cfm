@@ -25,8 +25,8 @@
 // (StartLocalRefresh). Each block source belongs to a group with its own mode,
 // [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (a line
 // per client says which lists it is on and what would happen, nothing
-// changes; LOCAL's default), enforce (the bridge answers ip_action=block;
-// FEED's default since 2026-11-26), off.
+// changes), enforce (the bridge answers ip_action=block; both groups' default
+// since 2026-11-26), off.
 package proxyipfilter
 
 import (
@@ -92,9 +92,23 @@ var (
 	nChecks, nWould, nBlocked, nAllowed atomic.Int64
 )
 
+// The defaults, when detectors.conf names no mode. LOCAL (the node's own
+// block sets) is enforce since 2026-11-26, after a week of log mode on eight
+// nodes: scanners only (Censys, 45.138.12.x, Techoff, an Iranian address),
+// no customer, no network that serves real users. FEED is enforce since
+// 2026-11-26 too: a day of log on seven nodes, ~22.7k decisions for ~14.4k
+// addresses, >98% MYBLOCK, four Greek residential ones (three 1h greylist
+// entries, one permanent modsec ban). A permanent fleet ban on a shared mobile
+// / CGNAT address now refuses everyone behind it on proxied sites: clear such
+// entries in cfm-web.
+const (
+	DefaultModeFeed  = ModeEnforce
+	DefaultModeLocal = ModeEnforce
+)
+
 func init() {
-	modeFeed.Store(defaultModeFeed)
-	modeLocal.Store(defaultModeLocal)
+	modeFeed.Store(DefaultModeFeed)
+	modeLocal.Store(DefaultModeLocal)
 	cur.Store(&snapshot{})
 	setClock(time.Now)
 }
@@ -103,22 +117,15 @@ func now() time.Time { return (*clock.Load())() }
 
 func setClock(f func() time.Time) { clock.Store(&f) }
 
-// The group defaults, taken by an empty (absent) value. FEED enforces since
-// 2026-11-26: a day's would_block lines on seven nodes were >98% MYBLOCK and
-// almost no Greek residential address. LOCAL (cfm.deny, TTL bans, which can
-// hold a customer's own address after an SSH or mail lockout) stays log.
-const (
-	defaultModeFeed  = ModeEnforce
-	defaultModeLocal = ModeLog
-)
-
-// SetModes sets the mode of each group; an empty value is the group's default,
-// an unknown one is "log", the safe answer (logged, so a typo is visible).
+// SetModes sets the mode of each group; an empty or unknown value is "log",
+// the safe default (logged, so a typo is visible).
 func SetModes(feed, local string) {
-	modeFeed.Store(normMode("PROXIED_IPFILTER_FEED", feed, defaultModeFeed))
-	modeLocal.Store(normMode("PROXIED_IPFILTER_LOCAL", local, defaultModeLocal))
+	modeFeed.Store(normMode("PROXIED_IPFILTER_FEED", feed, DefaultModeFeed))
+	modeLocal.Store(normMode("PROXIED_IPFILTER_LOCAL", local, DefaultModeLocal))
 }
 
+// normMode reads one knob: empty is the group's default, an unknown value is
+// log (the safe side, logged).
 func normMode(key, m, def string) string {
 	switch m = strings.ToLower(strings.TrimSpace(m)); m {
 	case "":
@@ -573,8 +580,8 @@ func ResetForTest() {
 	bansMu.Unlock()
 	logSeen.Range(func(k, _ any) bool { logSeen.Delete(k); return true })
 	nLogKeys.Store(0)
-	modeFeed.Store(defaultModeFeed)
-	modeLocal.Store(defaultModeLocal)
+	modeFeed.Store(DefaultModeFeed)
+	modeLocal.Store(DefaultModeLocal)
 	forgotten.Range(func(k, _ any) bool { forgotten.Delete(k); return true })
 	nForgotten.Store(0)
 	forgottenNets.Store(nil)

@@ -67,14 +67,23 @@ func TestTableLargeAndAllocFree(t *testing.T) {
 
 func TestVerdictOrderAndModes(t *testing.T) {
 	ResetForTest()
-	SetModes("log", "log") // the log-mode leg (FEED enforces by default)
 	t.Cleanup(ResetForTest)
 	SetFeed("MYBLOCK", false, []string{"20.43.87.186", "45.138.12.0/24"}, []string{"2001:db8::/32"})
 	SetFeed("MYALLOW", true, []string{"45.138.12.99"}, nil)
 	setLocal("block_v4", false, []string{"20.43.87.186", "5.6.7.8"})
 	setLocal("allow_dyn_v4", true, []string{"5.6.7.8"})
 
+	// The defaults: both enforce, so an address on block_v4 or only on a feed
+	// is enforced; with both in log, only listed.
 	v := Check("20.43.87.186")
+	if fmt.Sprint(v.Blocks) != "[block_v4 feed:MYBLOCK]" || !v.Enforce {
+		t.Fatalf("default modes (local enforce): %+v", v)
+	}
+	if v := Check("45.138.12.1"); !v.Enforce {
+		t.Fatalf("default modes (feed enforce): %+v", v)
+	}
+	SetModes("log", "log")
+	v = Check("20.43.87.186")
 	if fmt.Sprint(v.Blocks) != "[block_v4 feed:MYBLOCK]" || v.Enforce || !v.Listed() {
 		t.Fatalf("log mode: %+v", v)
 	}
@@ -109,13 +118,21 @@ func TestVerdictOrderAndModes(t *testing.T) {
 	if v := Check("20.43.87.186"); fmt.Sprint(v.Blocks) != "[block_v4]" || !v.Enforce {
 		t.Fatalf("feed off, local enforce: %+v", v)
 	}
-	SetModes("bogus", "bogus")
-	if modeFeed.Load() != ModeLog || modeLocal.Load() != ModeLog {
-		t.Fatal("unknown modes are log")
+	SetModes("bogus", "")
+	if modeFeed.Load() != ModeLog || modeLocal.Load() != ModeEnforce {
+		t.Fatal("an unknown mode is log; an empty LOCAL is its default, enforce")
 	}
-	SetModes("", "")
+	SetModes("", "bogus")
 	if modeFeed.Load() != ModeEnforce || modeLocal.Load() != ModeLog {
-		t.Fatalf("empty modes are the defaults (feed enforce, local log): %v %v", modeFeed.Load(), modeLocal.Load())
+		t.Fatal("an empty FEED is its default, enforce; an unknown LOCAL is log")
+	}
+	// The defaults (2026-11-26): both enforce; an explicit value wins.
+	if DefaultModeLocal != ModeEnforce || DefaultModeFeed != ModeEnforce {
+		t.Fatalf("defaults: feed %q local %q", DefaultModeFeed, DefaultModeLocal)
+	}
+	SetModes("log", "log")
+	if modeLocal.Load() != ModeLog || modeFeed.Load() != ModeLog {
+		t.Fatal("an explicit log keeps log")
 	}
 
 	DropFeed("MYBLOCK")
@@ -126,8 +143,8 @@ func TestVerdictOrderAndModes(t *testing.T) {
 
 func TestDecideLogsOncePerWindow(t *testing.T) {
 	ResetForTest()
-	SetModes("log", "log") // the log-mode leg (FEED enforces by default)
 	t.Cleanup(ResetForTest)
+	SetModes("log", "log") // the log-mode leg (both groups enforce by default)
 	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	setClock(func() time.Time { return now })
 	SetFeed("MYBLOCK", false, []string{"20.43.87.186"}, nil)
@@ -375,8 +392,8 @@ func TestGeoFields(t *testing.T) {
 // resolver is set.
 func TestDecideLineCarriesGeo(t *testing.T) {
 	ResetForTest()
-	SetModes("log", "log") // the log-mode leg (FEED enforces by default)
 	t.Cleanup(ResetForTest)
+	SetModes("log", "") // FEED in log (both groups enforce by default)
 	var lines []string
 	orig := logf
 	logf = func(f string, a ...interface{}) { lines = append(lines, fmt.Sprintf(f, a...)) }
@@ -393,7 +410,7 @@ func TestDecideLineCarriesGeo(t *testing.T) {
 	}
 	Decide("69.63.184.14", "infonews24.gr")
 	want := "[proxied_ipfilter] would_block ip=69.63.184.14 host=infonews24.gr block=feed:MYBLOCK allow=- " +
-		"mode=feed:log,local:log n=1 cc=US asn=32934 asn_name=Facebook,_Inc."
+		"mode=feed:log,local:enforce n=1 cc=US asn=32934 asn_name=Facebook,_Inc."
 	if len(lines) != 1 || lines[0] != want {
 		t.Fatalf("line:\n got %q\nwant %q", lines, want)
 	}
@@ -439,13 +456,5 @@ func TestSetLocalBansExpireWithoutARead(t *testing.T) {
 	SetLocalBans(clock, map[string][]BanElem{"block_v4": {}})
 	if Check("198.51.100.8").Listed() || !Check("2001:db8:5:5::9").Listed() {
 		t.Error("a partial SetLocalBans did not replace block_v4 alone")
-	}
-}
-
-func TestResetStartsAtTheDefaults(t *testing.T) {
-	ResetForTest()
-	t.Cleanup(ResetForTest)
-	if modeFeed.Load() != ModeEnforce || modeLocal.Load() != ModeLog {
-		t.Fatalf("defaults: feed %v local %v, want enforce / log", modeFeed.Load(), modeLocal.Load())
 	}
 }

@@ -37,12 +37,21 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   enables it) is now refused at the edge, as nft refuses it when it comes
   direct. One day's log-mode lines on seven nodes: ~22,700 decisions for
   ~14,400 addresses, >98% of them MYBLOCK, almost no Greek residential
-  address. `PROXIED_IPFILTER_LOCAL` (cfm.deny, TTL bans) stays `log`: those
-  sets can hold a customer's own address after an SSH or mail lockout. Set
+  address: three 1h greylist entries and one permanent modsec ban. A
+  permanent fleet ban on a shared mobile / CGNAT address now refuses everyone
+  behind it on proxied sites, so clear such entries in cfm-web. Set
   `PROXIED_IPFILTER_FEED = log` in `[webdetector]` to keep the old behaviour.
 - **The reference `cfm.blocklists` `TOR` line** (still commented out) points
   at the Tor Project's current exit list (`/torbulkexitlist`, refreshed
   hourly) instead of the old CGI URL, which now answers with a redirect.
+- **The node's own bans now reach clients behind Cloudflare by default.**
+  `PROXIED_IPFILTER_LOCAL` defaults to `enforce`: an address on the node's
+  block sets (cfm.deny, SSH / mail / portscan / flood TTL bans) is refused
+  when it comes through a trusted proxy, as nft refuses it direct. A week of
+  log mode on eight nodes found only scanners there. A detectors.conf that
+  writes `PROXIED_IPFILTER_LOCAL = log` keeps log (delete the line, or set
+  it to enforce). The fleet feeds (`PROXIED_IPFILTER_FEED`) enforce too
+  (above). See `docs/proxied-ipfilter.md`.
 
 ## 2026.11.26
 
