@@ -154,9 +154,16 @@ func (m *Manager) Reload(feeds []Feed) {
 		next[f.Name] = f
 	}
 
-	// stop removed runners
-	for name := range m.runs {
-		if _, ok := next[name]; !ok {
+	// stop removed runners, and a runner whose feed crossed the CHALLENGE
+	// line (TOR|BLOCK edited to TOR|CHALLENGE, or back): an in-place edit
+	// otherwise keeps the running runner, and with it the old type, until a
+	// restart (see feedResyncInterval's NOTE); here that would go on writing
+	// the nft block sets the prune below removes. A fetch of the old runner
+	// still in flight can finish its nft write after the prune; the next
+	// reload or restart removes what it left.
+	for name, r := range m.runs {
+		nf, ok := next[name]
+		if !ok || (nf.Type == TypeChallenge) != (r.feed.Type == TypeChallenge) {
 			m.stopOneLocked(name)
 			proxyipfilter.DropFeed(name)
 		}

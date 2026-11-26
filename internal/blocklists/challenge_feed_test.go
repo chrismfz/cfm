@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"cfm/internal/proxyipfilter"
 )
@@ -66,4 +67,45 @@ func TestManagerChallengeFeedSkipsNFT(t *testing.T) {
 	if !reflect.DeepEqual(got, []string{"MYBLOCK", "MYALLOW"}) {
 		t.Errorf("NFTFeedNames = %v", got)
 	}
+}
+
+// TOR|BLOCK edited to TOR|CHALLENGE: the reload restarts the runner with the
+// new type (an in-place edit otherwise keeps the old one until a restart, and
+// it would go on writing the nft block sets the prune removes).
+func TestReloadRestartsAFeedThatTurnsChallenge(t *testing.T) {
+	proxyipfilter.ResetForTest()
+	t.Cleanup(proxyipfilter.ResetForTest)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("185.220.101.1\n"))
+	}))
+	defer ts.Close()
+	m := NewManager(applierFunc(func(context.Context, Feed, *FetchResult) error { return nil }))
+	m.Start(context.Background())
+	defer m.Stop()
+
+	m.Reload([]Feed{{Name: "TOR", Type: TypeBlock, URL: ts.URL, Interval: time.Hour}})
+	waitFor(t, func() bool { return proxyipfilter.Check("185.220.101.1").Listed() })
+
+	m.Reload([]Feed{{Name: "TOR", Type: TypeChallenge, URL: ts.URL, Interval: time.Hour}})
+	waitFor(t, func() bool { return len(proxyipfilter.CheckChallenge("185.220.101.1").Lists) == 1 })
+	if proxyipfilter.Check("185.220.101.1").Listed() {
+		t.Fatal("still a block source after the type change")
+	}
+	m.mu.Lock()
+	typ := m.runs["TOR"].feed.Type
+	m.mu.Unlock()
+	if typ != TypeChallenge {
+		t.Fatalf("runner type %v", typ)
+	}
+}
+
+func waitFor(t *testing.T, ok func() bool) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out")
 }
