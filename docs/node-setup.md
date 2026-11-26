@@ -56,14 +56,15 @@ Setting them in `cfm.conf` instead works too (older nodes do); then make
 | Key | When |
 |---|---|
 | `NFT_DNAT_PRIORITY = -101` | **Imunify360 nodes.** WebShield DNATs at -100, ahead of CFM's default -99, and a connection is NAT'd once (`docs/imunify360-gap-analysis.md`, "WebShield"). `cfm edge check` `web-dnat-order` confirms it |
-| `ADMIN_TOKEN_IP_BINDING = "enforce"` | as the fleet runs it (`docs/security/control-plane.md` §4) |
+| `ADMIN_TOKEN_IP_BINDING = "enforce"` | as the reference node runs it, if it does; the conf's own comment asks for a canary first on a new kind of node (`docs/security/control-plane.md` §4) |
 | `MAIL_RBL_SPAMHAUS_DQS_KEY` | the fleet's Spamhaus DQS key, on mail nodes |
 | `CLAMD_SOCKET` | `/run/nixpal-clamd.sock` with `nixpal-clamav` (the shipped default is `/run/cfm-clamd.sock`) |
 | `SMTP_ALLOWUSER` | only if the node has local accounts that send directly |
 
-Leave the generated tokens alone (`CHALLENGE_TOKEN`, `OPENRESTY_TOKEN`,
-`SSLCOLLECTOR_SOCK_TOKEN`, `MCP_TOKEN`): the daemon keeps per-node values in
-`/var/lib/cfm/secrets/`. `TCP_IN` needs no edge ports (9080/9043/12xxx): the
+Leave the generated tokens alone: the daemon keeps per-node values of
+`CHALLENGE_TOKEN`, `OPENRESTY_TOKEN` and `SSLCOLLECTOR_SOCK_TOKEN` in
+`/var/lib/cfm/secrets/`, and with `MCP_TOKEN` empty it generates one into
+`/var/lib/cfm/mcp_token`. `TCP_IN` needs no edge ports (9080/9043/12xxx): the
 DNAT accepts are scoped `ct status dnat` rules.
 
 **The lists:**
@@ -96,8 +97,8 @@ node UP in cfm-web and answering `node_call … whats_wrong`.
 
 - **`209/STDOUT` on every restart** = `/var/log/cfm` is missing. The unit's
   `StandardOutput=append:` file is opened before systemd creates
-  `LogsDirectory=`. Packages from 2026-11-26 on create the directory; with an
-  older one, `install -d -m 0700 /var/log/cfm`.
+  `LogsDirectory=`. Packages released after 2026.11.25 create the directory
+  (CHANGELOG); with an older one, `install -d -m 0700 /var/log/cfm`.
 - A fresh start also writes the edge's Lua token files
   (`/var/lib/cfm/lua/cfm_token.lua`, `cfm_bridge_token.lua`), which the edge
   installer needs (§5).
@@ -154,4 +155,5 @@ Check from another host: a few sites over http and https, the panel ports
 - `whats_wrong` still lists `service flapping: cfm.service` for a while if the
   first start looped (§3).
 - An `output` hook "priority 0 ambiguity" against iptables-nft / cPanel's
-  `cpanel_smtp_restrict` is present fleet-wide and harmless.
+  `cpanel_smtp_restrict` also shows on long-running nodes (rigel, 2026-11-26),
+  so it is not a sign of a bad setup; it was not analysed further.
