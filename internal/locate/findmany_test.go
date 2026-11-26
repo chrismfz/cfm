@@ -73,7 +73,7 @@ func TestFindMany_ReadsEachSourceOnce(t *testing.T) {
 			t.Errorf("%s: Query = %q", arg, r.Query)
 		}
 		// Each source's time rides on every result of the batch.
-		if _, ok := r.TookMS["nft"]; !ok {
+		if r.TookMS["nft"] < 1 {
 			t.Errorf("%s: no nft time in %v", arg, r.TookMS)
 		}
 		if _, ok := r.TookMS["csf"]; ok {

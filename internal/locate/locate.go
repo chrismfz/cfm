@@ -203,7 +203,8 @@ func FindMany(ctx context.Context, args []string, opts Options) (map[string]*Res
 	took := map[string]int64{}
 	for s, ans := range answers {
 		if ans.took > 0 {
-			took[sources[s]] = ans.took.Milliseconds()
+			// At least 1 for a source that ran: 0 would read as "did not run".
+			took[sources[s]] = max(ans.took.Milliseconds(), 1)
 		}
 	}
 	for a, i := range byArg {
