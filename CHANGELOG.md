@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.26
+
 ### Added
 - **`CHALLENGE` lists in `cfm.blocklists`** (`NAME|CHALLENGE|…`). A list whose
   members include people, where a block is too much: the stock file's Tor
@@ -109,8 +113,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   - The edge ban store's file is written at most every 5 minutes instead of
     every 30 s (7 % of the daemon's CPU on earth, 52 000 bans); it is still
     flushed on a stop, and the edge sees a ban at once as before.
-
-## 2026.11.26
 
 ### Changed
 - **`OPENRESTY_OK_IP_TTL` defaults to 0 (cookie-only).** After a solve the
