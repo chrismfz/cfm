@@ -621,7 +621,8 @@ family/rule arming table and the decision records:
   `EDGE_BAN`. The rest of nft's IP filter (fleet feeds, `block_v4`, every
   allow) reaches a proxied client through `internal/proxyipfilter` (daemon
   memory, never Lua), after the edge ban store, allows first;
-  `PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` (default) | `enforce` | `off`
+  `PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` | `enforce` | `off` (defaults:
+  FEED `log`, LOCAL `enforce` since 2026-11-26)
   (`docs/proxied-ipfilter.md`).
 - **Never a static `listen [::]` in the reference edge confs.** On a host
   without an IPv6 stack it fails the config test and the edge does not
