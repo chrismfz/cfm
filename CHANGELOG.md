@@ -656,8 +656,9 @@ _Nothing yet._
   burn-in. On 8 nodes from 2026-11-19 to 11-24 (5.5 days), 307 had 220 hits
   from 91 IPs and 416 had 74 from 66. Every hit came from a datacenter
   scanner or webshell uploader. None came from GR/CY, none hit a panel port,
-  and none was a false positive. A hit now gives the usual soft 6 h ban
-  (15 min for GR/CY under leniency). `RULE_307 = 0` / `RULE_416 = 0` in
+  and none was a false positive. A hit now bans for the `[waf_security]`
+  `BLOCK` TTL (6 h by default; a node that sets `BLOCK = 7d` bans for 7
+  days), or 15 min for GR/CY under leniency. `RULE_307 = 0` / `RULE_416 = 0` in
   `[waf_security]` hold one again. Both rules move back to their earlier
   place in the WAF: in the late group, rule 303 (still held) could take the
   hit, and with it the ban. Rule 303 stays held: its sweep sends one request
