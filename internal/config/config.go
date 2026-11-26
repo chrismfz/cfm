@@ -128,7 +128,7 @@ type DebugConfig struct {
 	RateLimitScale             float64       // RATE_LIMIT_SCALE (optional multiplier on code-default ceilings; default 1.0)
 }
 
-// SMTPBlockConfig — CSF-like outbound SMTP control (no INI sections, flat keys only)
+// SMTPBlockConfig — outbound SMTP control (no INI sections, flat keys only)
 type SMTPBlockConfig struct {
 	Enabled      bool     // SMTP_BLOCK
 	Ports        []uint16 // SMTP_PORTS (defaults: 25,465,587)
@@ -753,7 +753,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "CHALLENGES_LOG_FILE":
 			cfg.Logging.CHALLENGESFile = val
 
-		// SMTP log sink (file/stdout) — CSF-like flat keys
+		// SMTP log sink (file/stdout) — flat keys
 		case "SMTP_LOG_STDOUT":
 			cfg.Logging.SMTPStdout = parseBool(val)
 		case "SMTP_LOG_FILE":
@@ -842,7 +842,7 @@ func ParseCFMConf(r io.Reader) (*Config, error) {
 		case "PS_PORTS":
 			cfg.Portscan.Ports = parseIntCSV(val)
 
-		// --- SMTPBlock (CSF-like keys only) ---
+		// --- SMTPBlock (flat keys only) ---
 		case "SMTP_BLOCK":
 			cfg.SMTPBlock.Enabled = parseBool(val)
 		case "SMTP_PORTS":

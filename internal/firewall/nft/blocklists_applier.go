@@ -145,7 +145,7 @@ func listSetElems(setName string, strict bool) ([]string, error) {
 		return nil, err
 	}
 	// Stdout only: a warning nft prints on success (a table another tool
-	// manages, on a CSF / firewalld host) is not JSON and would fail every read.
+	// manages, on a firewalld host) is not JSON and would fail every read.
 	var root map[string]any
 	if err := json.Unmarshal([]byte(res.Stdout), &root); err != nil {
 		return nil, err
@@ -195,7 +195,7 @@ func (b *Backend) ListSetElementsTimed(setName string) ([]firewall.SetElementTim
 		return nil, err
 	}
 	// Stdout only: a warning nft prints on success (a table another tool
-	// manages, on a CSF / firewalld host) is not JSON and would fail every read.
+	// manages, on a firewalld host) is not JSON and would fail every read.
 	return parseTimedSetJSON([]byte(res.Stdout))
 }
 

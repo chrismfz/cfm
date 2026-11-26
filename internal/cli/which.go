@@ -21,7 +21,7 @@ import (
 )
 
 // RunWhich implements `cfm which|search <IP|CIDR>`: a read-only,
-// multi-source lookup across nft, cfm.deny, csf, fail2ban and
+// multi-source lookup across nft, cfm.deny, fail2ban and
 // imunify360 (sources that aren't installed are reported as skipped).
 //
 // For a single IP it also appends a best-effort "CFM detection history"

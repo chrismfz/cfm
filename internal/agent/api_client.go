@@ -172,7 +172,7 @@ func (c *APIClient) FetchPendingUnblocks() ([]PendingUnblock, error) {
 // ConfirmUnblock reports completion to cfm-web. When found is non-nil and
 // has locations, they ride along as "found_on" so the central unblock table
 // and notifications can show WHERE the IP was actually blocked on this
-// server (nft set, csf file, fail2ban jail, imunify list) and why.
+// server (nft set, cfm.deny, fail2ban jail, imunify list) and why.
 func (c *APIClient) ConfirmUnblock(id int, ip string, success bool, found *locate.Result) error {
 	u := c.endpoint("/api/blocklist/unblock-confirm")
 

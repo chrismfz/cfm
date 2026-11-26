@@ -903,8 +903,6 @@ func owner(table, chain string) string {
 		return "cfm"
 	case strings.Contains(s, "imunify") || strings.Contains(s, "webshield"):
 		return "imunify"
-	case strings.Contains(s, "csf"):
-		return "csf"
 	case table == "nat" || table == "filter" || table == "mangle" || table == "raw":
 		return "iptables-nft"
 	default:

@@ -13,7 +13,7 @@ import (
 )
 
 // allowedBinary restricts exec to the two read-only query CLIs locate
-// needs. csf and cfm.deny are probed via file reads, never exec.
+// needs. cfm.deny is probed by reading the file, never exec.
 func allowedBinary(name string) bool {
 	switch name {
 	case "fail2ban-client", "imunify360-agent":

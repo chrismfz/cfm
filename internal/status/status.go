@@ -1201,7 +1201,7 @@ func summaryFromNftJSON(raw []byte, out *statusOut) bool {
 	}
 	// A Decoder reads the first JSON value and ignores what follows it: the
 	// exec backend appends nft's stderr (a warning about a table another tool
-	// manages, on a CSF / firewalld host) to the JSON on stdout.
+	// manages, on a firewalld host) to the JSON on stdout.
 	if err := json.NewDecoder(bytes.NewReader(raw)).Decode(&parsed); err != nil {
 		return false
 	}

@@ -67,16 +67,15 @@ func TestParseQueryRejectsJunk(t *testing.T) {
 // scanOne scans content as a list file and matches one query against it.
 func scanOne(content string, q *query) []Location {
 	idx := ipquery.NewIndex[Location]()
-	scanListFile(strings.NewReader(content), "csf", "csf.deny", ActionBlock, idx)
+	scanListFile(strings.NewReader(content), "cfm.deny", "cfm.deny", ActionBlock, idx)
 	return matchAll(idx, []*query{q})[0]
 }
 
 func TestScanListFile(t *testing.T) {
-	content := `# CSF deny file
+	content := `# cfm.deny
 1.2.3.4 # lfd: (smtpauth) Failed SMTP AUTH login
 10.0.0.0/8 # manual block
 5.6.7.8
-tcp|in|d=22|s=9.9.9.9 # advanced rule
 `
 	q := mustQuery(t, "1.2.3.4")
 	locs := scanOne(content, q)
@@ -94,76 +93,11 @@ tcp|in|d=22|s=9.9.9.9 # advanced rule
 		t.Fatalf("subnet containment failed: %+v", locs)
 	}
 
-	// csf advanced syntax
-	q = mustQuery(t, "9.9.9.9")
-	locs = scanOne(content, q)
-	if len(locs) != 1 || locs[0].Match != "9.9.9.9" {
-		t.Fatalf("advanced-syntax match failed: %+v", locs)
-	}
-
 	// CIDR query finds hosts inside it
 	q = mustQuery(t, "5.6.7.0/24")
 	locs = scanOne(content, q)
 	if len(locs) != 1 || locs[0].Match != "5.6.7.8" {
 		t.Fatalf("cidr-query match failed: %+v", locs)
-	}
-}
-
-func TestScanCSFTempFile(t *testing.T) {
-	content := `1781097784|1.2.3.4|*|in|3600|lfd - *Port Scan* detected
-1781097785|4.3.2.1|80|in|600|manual temp ban
-`
-	q := mustQuery(t, "1.2.3.4")
-	idx := ipquery.NewIndex[Location]()
-	scanCSFTempFile(strings.NewReader(content), "csf.tempban", ActionBlock, idx)
-	locs := matchAll(idx, []*query{q})[0]
-	if len(locs) != 1 {
-		t.Fatalf("want 1 hit, got %d: %+v", len(locs), locs)
-	}
-	if !strings.Contains(locs[0].Reason, "Port Scan") || !strings.Contains(locs[0].Reason, "since ") {
-		t.Errorf("reason = %q", locs[0].Reason)
-	}
-}
-
-// withCSF makes csf look installed (or not) for the test.
-func withCSF(t *testing.T, installed bool) {
-	t.Helper()
-	orig := csfInstalled
-	csfInstalled = func() bool { return installed }
-	t.Cleanup(func() { csfInstalled = orig })
-}
-
-func TestSearchCSFFromDirs(t *testing.T) {
-	withCSF(t, true)
-	etc := t.TempDir()
-	data := t.TempDir()
-	if err := os.WriteFile(filepath.Join(etc, "csf.deny"), []byte("1.2.3.0/24 # bad net\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(data, "csf.tempban"), []byte("1781097784|1.2.3.4|*|in|3600|lfd temp\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	q := mustQuery(t, "1.2.3.4")
-	all, why := searchCSF(Options{CSFDir: etc, CSFDataDir: data}, []*query{q})
-	if why != "" {
-		t.Fatalf("unexpected skip: %s", why)
-	}
-	locs := all[0]
-	if len(locs) != 2 {
-		t.Fatalf("want 2 hits (deny subnet + tempban), got %d: %+v", len(locs), locs)
-	}
-
-	// missing dir = not installed
-	if _, why := searchCSF(Options{CSFDir: filepath.Join(etc, "nope")}, []*query{q}); why != "not installed" {
-		t.Errorf("want 'not installed', got %q", why)
-	}
-
-	// Files left behind by an uninstall enforce nothing: no csf binary, no
-	// csf source, whatever /etc/csf still holds.
-	withCSF(t, false)
-	if all, why := searchCSF(Options{CSFDir: etc, CSFDataDir: data}, []*query{q}); why != "not installed" || all != nil {
-		t.Errorf("leftover csf files: locs %+v, why %q; want 'not installed'", all, why)
 	}
 }
 

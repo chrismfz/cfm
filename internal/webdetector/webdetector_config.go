@@ -121,7 +121,7 @@ type Config struct {
 	// Default: true.
 	ChallengeLogExpired bool
 
-	// IP threshold detectors (CSF-like)
+	// IP threshold detectors
 	IP404Count int
 	IP403Count int
 

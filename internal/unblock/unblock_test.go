@@ -11,7 +11,7 @@ import (
 	"cfm/internal/firewall"
 )
 
-// TestMain runs the package's tests with an empty PATH: an unblock runs csf,
+// TestMain runs the package's tests with an empty PATH: an unblock runs
 // fail2ban-client, imunify360-agent and systemctl when it finds them, and a
 // test must never reach the host's own. fakeTools puts fakes on it.
 func TestMain(m *testing.M) {
