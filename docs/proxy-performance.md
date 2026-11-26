@@ -64,6 +64,34 @@ connections skip the full handshake. No knobs, no caveats; session
 resumption bypasses `ssl_certificate_by_lua`, so it coexists with
 sslcollector's dynamic certs.
 
+## Knob 1b (default ON, matters only for HTTP/3): the HTTP/3 stream window
+
+`http3_stream_buffer_size 256k; http3_max_concurrent_streams 128;` in the
+HTTPS server of both confs (next to `listen 9043 quic`). nginx's default is
+64k per stream, and with it parallel HTTP/3 fetches stalled on lossy mobile
+paths: of ~50 images on one page, all but one stopped at exactly 65536 bytes
+(`bytes=65536 rt=60.000` in the access log) and the browser fell back to
+HTTP/2 after 60 s (nginx/nginx#1407, Cosmote 5G client; the maintainer: "what
+actually causes the reported stalls is the window").
+
+- **256k is a mitigation still to be measured.** The fix measured in the
+  issue was 1m plus a `STREAM_DATA_BLOCKED` patch; an object larger than the
+  window may still stall. After enabling HTTP/3 on a vhost, look for
+  `bytes=65536` or `bytes=262144` with `rt=60` on `proto="HTTP/3.0"` lines.
+- **Memory.** The value is both the per-stream read/write buffer and, times
+  the streams, the per-connection window (`initial_max_data`, the 128
+  request streams plus nginx's 3 unidirectional ones): (128 + 3) × 256k ≈
+  32 MB per QUIC connection, 4× nginx's default (a flat 1m would be ~128 MB).
+  The bound holds in both directions: nginx keeps up to 256k of unacked
+  response data per stream, so a client that asks for large objects on every
+  stream and never ACKs pins up to ~32 MB per connection in worker memory
+  (8 MB before). If memory pressure ever shows on UDP 9043, lower
+  `http3_max_concurrent_streams`.
+- **Who sees it.** The QUIC listener answers any client that speaks HTTP/3
+  to UDP 9043, on every vhost. Alt-Svc, per-vhost opt-in (`cfm webtop http3
+  enable <host>`), only invites browsers to switch; HTTP/1.1 and HTTP/2 are
+  untouched.
+
 ## Knob 2 (OPT-IN): origin keepalive — `[webdetector] ORIGIN_KEEPALIVE = 1`
 
 Set in `/etc/cfm/detectors.conf`:
