@@ -179,7 +179,7 @@ const (
 	tmOutOtherEdge          // any other edge answer (the panel proxies)
 	tmOutVerifyPass         // a /__cfm_verify answered 303: sent on (solved; or an unsolicited v2 reject sent on without clearance)
 	tmOutVerifyFail         // a /__cfm_verify answered 403: refused (wrong, expired, a v2 reject) or asked to confirm
-	// tmOutChallengePage: a /__cfm_challenge load, the page itself (also a
+	// tmOutChallengePage: a /__cfm_challenge load answered 200, the page itself (also a
 	// subset of tmOutChallenge). A challenged visit is up to three challenge
 	// requests (the 303 to the page, the page, the verify): the page count is
 	// what the answers are a share of. Appended last: a saved file from before
@@ -458,7 +458,10 @@ func (s *trafficMixStore) observe(rec LogRec, host, nu string, now time.Time) {
 	if v := tmVerifyOutcome(rec); v >= 0 {
 		c.Out[v] = 1
 	}
-	if strings.HasPrefix(rec.URI, "/__cfm_challenge") {
+	// Only a page actually served (200): /__cfm_challenge also answers 303 /
+	// 302, sending a cleared or exempt client on to `next` (challengePageExempt)
+	// or back to a clean URL, and those are no page anyone could answer.
+	if rec.Status == 200 && strings.HasPrefix(rec.URI, "/__cfm_challenge") {
 		c.Out[tmOutChallengePage] = 1
 	}
 	tmStatus(&c, rec.Status)

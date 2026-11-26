@@ -25,6 +25,8 @@ func feedOutcomes(s *trafficMixStore, at time.Time) {
 		tmFeed(s, edgeRec("a.example", "/p", "cfm_challenge", 403, false), at)
 	}
 	tmFeed(s, edgeRec("a.example", "/__cfm_challenge?next=%2Fp", "cfm_apache", 200, true), at)
+	// A cleared / exempt client the page sends on (303): no page served.
+	tmFeed(s, edgeRec("a.example", "/__cfm_challenge?next=%2Fp", "cfm_apache", 303, true), at)
 	tmFeed(s, edgeRec("a.example", "/__cfm_verify", "cfm_apache", 303, false), at)
 	tmFeed(s, edgeRec("a.example", "/__cfm_verify", "cfm_apache", 303, false), at)
 	tmFeed(s, edgeRec("a.example", "/__cfm_verify", "cfm_apache", 403, false), at)
@@ -50,7 +52,7 @@ func TestEdgeOutcomesHostAndNode(t *testing.T) {
 
 	a := s.Outcomes(now, 24*time.Hour, "A.example", false)
 	o := a.Outcomes
-	if a.Requests != 25 || o.Challenged != 8 || o.ChallengePages != 1 || o.VerifySentOn != 2 || o.VerifyRefused != 1 || o.Blocked != 2 || o.RuleBlocked != 1 || o.Origin != 14 {
+	if a.Requests != 26 || o.Challenged != 9 || o.ChallengePages != 1 || o.VerifySentOn != 2 || o.VerifyRefused != 1 || o.Blocked != 2 || o.RuleBlocked != 1 || o.Origin != 14 {
 		t.Fatalf("a.example 24h: %d requests, %+v", a.Requests, *o)
 	}
 	if a.StepSec != 3600 || a.Since%3600 != 0 || a.Hosts != nil {
@@ -70,11 +72,11 @@ func TestEdgeOutcomesHostAndNode(t *testing.T) {
 
 	// 1h: the 3-hours-ago page is out; 5-minute steps.
 	h1 := s.Outcomes(now, time.Hour, "a.example", false)
-	if h1.Outcomes.Challenged != 7 || h1.StepSec != tmBucketSec {
+	if h1.Outcomes.Challenged != 8 || h1.StepSec != tmBucketSec {
 		t.Fatalf("1h: %+v step %d", *h1.Outcomes, h1.StepSec)
 	}
 	// 6h: 15-minute steps, the old page is in.
-	if h6 := s.Outcomes(now, 6*time.Hour, "a.example", false); h6.Outcomes.Challenged != 8 || h6.StepSec != 900 {
+	if h6 := s.Outcomes(now, 6*time.Hour, "a.example", false); h6.Outcomes.Challenged != 9 || h6.StepSec != 900 {
 		t.Fatalf("6h: %+v step %d", *h6.Outcomes, h6.StepSec)
 	}
 	// www.x never brings x.
@@ -83,7 +85,7 @@ func TestEdgeOutcomesHostAndNode(t *testing.T) {
 	}
 
 	node := s.Outcomes(now, 24*time.Hour, "", true)
-	if node.Requests != 25+300+300+100 {
+	if node.Requests != 26+300+300+100 {
 		t.Fatalf("node requests %d", node.Requests)
 	}
 	for i := 0; i < 250; i++ {
@@ -145,7 +147,7 @@ func TestEdgeOutcomesAPIScope(t *testing.T) {
 		t.Fatalf("admin reasons: %+v", node.Reasons)
 	}
 	_, ah := call(adminReq("GET", p+"?hours=6&host=a.example"))
-	if ah.Requests != 24 || ah.Hosts != nil || len(ah.Reasons) != 1 || ah.Reasons[0].Decisions != 3 {
+	if ah.Requests != 25 || ah.Hosts != nil || len(ah.Reasons) != 1 || ah.Reasons[0].Decisions != 3 {
 		t.Fatalf("admin host: %+v", ah)
 	}
 
@@ -156,7 +158,7 @@ func TestEdgeOutcomesAPIScope(t *testing.T) {
 		t.Fatalf("scoped, another site: %d", rr.Code)
 	}
 	rr, sc := call(scopedReq("GET", p+"?hours=24&host=a.example", "a.example"))
-	if rr.Code != 200 || sc.Requests != 24 || sc.Hosts != nil || sc.Reasons != nil {
+	if rr.Code != 200 || sc.Requests != 25 || sc.Hosts != nil || sc.Reasons != nil {
 		t.Fatalf("scoped own site: %d %s", rr.Code, rr.Body.String())
 	}
 	for _, q := range []string{"?hours=7&host=a.example", "?hours=x&host=a.example", "?hours=168&host=a.example"} {
