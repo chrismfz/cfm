@@ -615,7 +615,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 
 	if s.leniency != nil && ipStr != "" && s.enr != nil {
 		if matched, reason := s.leniency.matchesIP(ipStr, s.enr); matched {
-			effectivePol = s.leniency.Pol
+			// Never harsher than the section: a dryrun section keeps
+			// logging, a TTL section's ban is not lengthened.
+			effectivePol = softerPolicy(s.pol, s.leniency.Pol)
 			sendToAPI = s.leniency.SendToAPI
 			lenientReport = s.leniency.SendToBlocklist == "lenient"
 			out.Extra["leniency"] = "yes"

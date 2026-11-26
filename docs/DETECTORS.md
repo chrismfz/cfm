@@ -971,11 +971,24 @@ fleet blocklist. Origin is never trusted to skip enforcement: a match only
 `[ssh_auth]` reads `[ssh_auth.leniency]`, `[custom:x]` reads
 `[custom:x.leniency]`. There is no type-level or global `[leniency]`
 fallback, and one companion per section (named multi-leniency is not built).
-`login_bruteforce` is the one section given a built-in companion (§2).
+**Built in.** A section that has no companion runs with one
+(`applyBuiltinLeniency`, `internal/detectors/builtin_leniency.go`), for every
+type the catalog marks `LeniencySupported`: `MATCH_COUNTRY = "GR,CY"`,
+`BLOCK = 15m`, `BLOCK_COOLDOWN = 15m`, `SEND_TO_API = yes`,
+`SEND_TO_BLOCKLIST = lenient`. Before it, a section without one (`[modsec]`,
+`[ssh_auth]`, `[ftpd]`, `[cpanel]`, `[mysql]`, …) banned a Greek customer with
+its full policy and reported the address to the fleet blocklist: in 2026-11
+MYBLOCK held permanent `MODSEC/403` bans on a Cosmote CGNAT address, a Vodafone
+one and two Nova ones. A written companion is kept as written; one with no
+`MATCH_COUNTRY` / `MATCH_ASN` (cfm-admin's "Add leniency companion" writes it
+empty) takes the built-in values for the keys it leaves empty. `login_bruteforce`
+keeps its own built-in companion, which also matches the Greek eyeball ASNs (§2).
 
 **Where it runs.** The section sink checks it after enrichment, before the
 cooldown and block switch. A match replaces the whole policy (`BLOCK` and
-`BLOCK_COOLDOWN`) and the report settings. It never applies when the section's
+`BLOCK_COOLDOWN`) and the report settings, but is never harsher than the
+section's own (`softerPolicy`): a `dryrun` section keeps logging, and a
+permanent or longer companion ban is cut to the section's TTL. It never applies when the section's
 own `BLOCK` is `no` (the sink returns earlier), when the alert has no IP, when
 enrichment is off (`[global] ENRICH = 0`) or has no record for the address,
 or when the companion has no `MATCH_COUNTRY` / `MATCH_ASN`. A per-alert dry
@@ -1001,8 +1014,8 @@ SEND_TO_BLOCKLIST = lenient        ; lenient | blacklist (default): the
 - Keys default like a section's: an omitted `BLOCK` means **no block**, and
   `BLOCK_COOLDOWN` is 15m. Write both.
 - `BLOCK = no`: the alert is logged, with no firewall action and no report.
-- `ENABLED = 0` in a companion is read only for `login_bruteforce`; elsewhere
-  remove the `MATCH_*` keys or the section.
+- `ENABLED = 0` in a companion turns leniency off for that section (removing
+  the companion only brings the built-in one back).
 - Hot reload picks up edits like any other section. Companions are not listed
   in the `sections: enabled=[…]` log line; a parsed one logs `[detectors]
   <section>: leniency enabled countries=[…] asns=[…] block=… cooldown=…
