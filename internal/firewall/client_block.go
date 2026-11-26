@@ -588,6 +588,15 @@ func (v *guardView) refuses(p netip.Prefix) string {
 // tests set 0.
 var guardCacheTTL = 10 * time.Second
 
+// guardCountTTL is how old a view a counter (firewall.CountKey, through
+// staleGuardView) answers from before it refreshes it in the background. A
+// counter only picks the key it counts under (the /64 or the address), and a
+// ban reads its guards through cachedGuardView within guardCacheTTL anyway:
+// refreshed at guardCacheTTL, the IPv6 traffic alone re-read every guard set
+// every 10 s, 4-8 % of the daemon's CPU on orion and mars (2026-11-26). A
+// var: tests set it.
+var guardCountTTL = time.Minute
+
 var (
 	guardCacheMu sync.Mutex
 	guardCache   struct {
@@ -644,8 +653,9 @@ func cachedGuardView(be Backend) (*guardView, error) {
 }
 
 // staleGuardView is cachedGuardView for a hot path (firewall.CountKey, per
-// IPv6 event): a stale view is answered at once while one background
-// refresh replaces it, so no log tailer or HTTP handler waits on nft's reads.
+// IPv6 event): a view up to guardCountTTL old is answered at once, and an
+// older one too while one background refresh replaces it, so no log tailer
+// or HTTP handler waits on nft's reads.
 // With no view at all it reads as cachedGuardView does.
 func staleGuardView(be Backend) (*guardView, error) {
 	sets := len(guardSetsNow())
@@ -653,7 +663,7 @@ func staleGuardView(be Backend) (*guardView, error) {
 	c := &guardCache
 	if guardCacheTTL > 0 && c.be == be && c.sets == sets && c.view != nil {
 		v := c.view
-		if time.Since(c.at) >= guardCacheTTL && !c.refreshing {
+		if time.Since(c.at) >= max(guardCacheTTL, guardCountTTL) && !c.refreshing {
 			c.refreshing = true
 			gen := c.gen
 			go func() {

@@ -40,6 +40,7 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the move to `challenge_v2`. The rule never blocks (a `block` setting is
   capped at `challenge_v2`), so it arms no autoblock.
 
+
 ### Changed
 - **`PROXIED_IPFILTER_FEED` defaults to `enforce`.** A client behind
   Cloudflare that is on a BLOCK feed (cfm-web's MYBLOCK; CHALLENGE lists such as
@@ -79,6 +80,22 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   writes `PROXIED_IPFILTER_LOCAL = log` keeps log (delete the line, or set
   it to enforce). The fleet feeds (`PROXIED_IPFILTER_FEED`) enforce too
   (above). See `docs/proxied-ipfilter.md`.
+
+### Fixed
+- **Three periodic jobs cost less on the busiest nodes** (measured on the
+  fleet, 2026-11-26):
+  - The notifier's history (`notify.log.jsonl`) at `max_entries` (mars and
+    orion: 100 000 rows, 48 MB) was read, parsed and rewritten whole every
+    5 minutes to drop a few rows, ~0.6 s of CPU and a 48 MB fsync each time.
+    It is now pruned once it is a tenth past `max_entries` (or its oldest row
+    passes `max_age`, or the file was rewritten by something else), back to
+    `max_entries`: the file holds up to 10 % more rows than the limit.
+  - The IPv6 client counters re-read every IPv6 guard set every 10 s (4–8 %
+    of the daemon's CPU on orion and mars); they now refresh their view every
+    minute. A ban still reads its guards within 10 s.
+  - The edge ban store's file is written at most every 5 minutes instead of
+    every 30 s (7 % of the daemon's CPU on earth, 52 000 bans); it is still
+    flushed on a stop, and the edge sees a ban at once as before.
 
 ## 2026.11.26
 

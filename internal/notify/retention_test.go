@@ -145,3 +145,72 @@ func BenchmarkPruneJSONL(b *testing.B) {
 		}
 	}
 }
+
+// At MAX_ENTRIES the periodic prune no longer rewrites the whole history to
+// drop a few rows: it waits until the file is pruneSlack past the limit, or
+// its oldest row has passed MAX_AGE, or someone else rewrote the file.
+func TestPeriodicPruneWaitsForTheSlack(t *testing.T) {
+	prev := retentionPrunerOn.Load()
+	retentionPrunerOn.Store(true)
+	t.Cleanup(func() { retentionPrunerOn.Store(prev) })
+	path := filepath.Join(t.TempDir(), "notify.log.jsonl")
+	installTestConfig(t, &config{JSONLPath: path, MaxEntries: 100, MaxAge: time.Hour})
+	jsonlRetentionMu.Lock()
+	delete(jsonlAppendsSincePrune, path)
+	delete(jsonlPruned, path)
+	jsonlRetentionMu.Unlock()
+	now := time.Now().UTC()
+	add := func(n int, ts time.Time) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			if err := appendJSONL(path, map[string]any{"time": ts.Format(time.RFC3339Nano), "i": i}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	add(150, now)
+	if err := runRetentionPrune(); err != nil {
+		t.Fatal(err)
+	}
+	if got := countLines(t, path); got != 100 {
+		t.Fatalf("first prune: %d rows, want 100", got)
+	}
+	st, _ := os.Stat(path)
+
+	// Under the slack (100 + 10): no rewrite.
+	add(pruneSlack(100), now)
+	if err := runRetentionPrune(); err != nil {
+		t.Fatal(err)
+	}
+	if st2, _ := os.Stat(path); !os.SameFile(st, st2) || countLines(t, path) != 110 {
+		t.Fatalf("under the slack: rewritten or trimmed (%d rows)", countLines(t, path))
+	}
+	// Past it: trimmed back to MAX_ENTRIES.
+	add(1, now)
+	if err := runRetentionPrune(); err != nil {
+		t.Fatal(err)
+	}
+	if got := countLines(t, path); got != 100 {
+		t.Fatalf("past the slack: %d rows, want 100", got)
+	}
+
+	// An oldest row past MAX_AGE prunes, whatever the count.
+	old := now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	if err := os.WriteFile(path, []byte(`{"time":"`+old+`"}`+"\n"+`{"time":"`+now.Format(time.RFC3339Nano)+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// (a file rewritten behind the daemon's back is pruned in full, too)
+	if err := runRetentionPrune(); err != nil {
+		t.Fatal(err)
+	}
+	if got := countLines(t, path); got != 1 {
+		t.Fatalf("an expired row in a rewritten file: %d rows, want 1", got)
+	}
+	jsonlRetentionMu.Lock()
+	jsonlPruned[path] = jsonlPruneState{ino: jsonlPruned[path].ino, size: jsonlPruned[path].size, kept: 1, oldest: now.Add(-2 * time.Hour)}
+	needed := pruneNeeded(path, 100, time.Hour, now)
+	jsonlRetentionMu.Unlock()
+	if !needed {
+		t.Fatal("an oldest row past MAX_AGE did not ask for a prune")
+	}
+}
