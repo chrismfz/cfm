@@ -69,6 +69,11 @@ var wafRuleIDs = []WAFRule{
 	// 2xx client identity
 	// Mixed-mode: challenge is the parent default; score >= 99 is hard-blocked in Lua.
 	{ID: 201, Name: "rule_bad_ua", ReasonFamily: "WAF_BAD_UA", DefaultMode: "challenge_v2"},
+	// A User-Agent that starts with a double quote: a form-spam tool seen on
+	// every edge node, ~93% from Tor exits (2026-11-26). Logonly burn-in, then
+	// challenge_v2; the Lua caps a "block" setting at challenge_v2, so it never
+	// arms WAF_BAD_UA's autoblock.
+	{ID: 202, Name: "rule_ua_quoted", ReasonFamily: "WAF_BAD_UA", DefaultMode: "logonly"},
 
 	// 3xx injection
 	{ID: 301, Name: "rule_sqli", ReasonFamily: "WAF_SQLI", DefaultMode: "block"},

@@ -7,7 +7,13 @@ MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 #SPAMDROPV6|BLOCK|14400|0|https://www.spamhaus.org/drop/dropv6.txt
 #SPAMEDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/edrop.txt
 #DSHIELD|BLOCK|14400|0|https://www.dshield.org/block.txt
-#TOR|BLOCK|14400|0|https://check.torproject.org/cgi-bin/TorBulkExitList.py?ip=1.2.3.4
+# Tor exits (the Tor Project's own list, ~1.2k addresses, one per line; exits
+# change daily, hence 1h). Exits only: a relay that is not an exit never sends
+# a user's traffic, so a "full" relay list blocks servers, not visitors. This
+# drops every Tor user connecting directly, on every port of this node (web,
+# mail, panels); a client behind Cloudflare meets it only through
+# PROXIED_IPFILTER_FEED (default log, docs/proxied-ipfilter.md).
+#TOR|BLOCK|3600|0|https://check.torproject.org/torbulkexitlist
 #BOGON|BLOCK|14400|0|http://www.cymru.com/Documents/bogon-bn-agg.txt
 #HONEYPOT|BLOCK|14400|0|https://www.projecthoneypot.org/list_of_ips.php?t=d&rss=1
 #CIARMY|BLOCK|14400|0|http://www.ciarmy.com/list/ci-badguys.txt

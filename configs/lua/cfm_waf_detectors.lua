@@ -3586,6 +3586,22 @@ function _M.detect_bad_ua_scored(headers, uri, method, args)
   return score, table.concat(tags, "+")
 end
 
+-- Rule 202: a User-Agent whose first byte is a double quote. A form-spam tool
+-- seen on every edge node (2026-11-26: ~7.3k requests in about a day of logs, ~93% from Tor
+-- exits, the rest from VPN / datacenter ranges) sends its UA wrapped in
+-- literal quotes ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...
+-- Chrome/142..." and an iPhone iOS 18.3.2 one; nginx logs them as \x22). It
+-- fills Contact Form 7, comment, WooCommerce / OpenCart / WHMCS registration
+-- and ticket forms, so the site mails its text to third parties. No browser
+-- sends a quote there: a quoted config value pasted into a headless tool does.
+-- The tool can drop the quotes, so this is a cheap tell, not a defence.
+function _M.detect_quoted_ua(headers)
+  headers = headers or {}
+  local ua = header_string(headers["user-agent"] or headers["User-Agent"])
+  if ua:byte(1) == 34 then return "QUOTED" end
+  return nil
+end
+
 -- [top-6b] Shellshock CVE-2014-6271 / CVE-2014-7169.
 -- Source: uusec shellshock-vulnerability.lua.
 -- Pattern: () { in any header value (CGI exposes headers as env vars).

@@ -1296,6 +1296,39 @@ set `HoldAutoblock` on 503 (edge 403, no nft ban). A hit means the site stores
 a payload in something an admin just opened (an order, comment, review, form
 entry): find and clean it, as was done for PixelYourSite's `pys_enrich_data`.
 
+## Rule 202 — `rule_ua_quoted` (a User-Agent wrapped in quotes)
+
+Family **`WAF_BAD_UA`**, reason `WAF_BAD_UA:QUOTED`, `logonly`. Fires when the
+User-Agent's first byte is a double quote: `"Mozilla/5.0 (Macintosh; Intel Mac
+OS X 10_15_7) … Chrome/142.0.0.0 Safari/537.36"` (nginx logs the quote as
+`\x22`). No browser sends one; a quoted value pasted into a headless tool's
+config does.
+
+**Why.** A form-spam tool on every edge node (2026-11-26, one to one and a half
+days of logs): ~7 300 requests from ~210 addresses, ~93 % of them Tor exits
+(earth), the rest VPN / datacenter ranges. It fills Contact Form 7, comment,
+WooCommerce / OpenCart / WHMCS registration and ticket forms, so the site
+mails its text to third parties (myip.gr's WHMCS, ticket 623054); about a
+quarter of the fleet's CF7 POSTs that day were its. Per-IP counting never sees
+it: a few requests per address, one site visit each.
+
+**Tiers.** Logonly for the burn-in, then `challenge_v2` (the tool is a
+headless browser; v2 rejects its solve). Never block: a `block` setting is
+capped at `challenge_v2` in Lua, because family `WAF_BAD_UA` has no block-tier
+rule (no autoblock), and a block here would shadow the armed families below it.
+Runs right after 201. The tool can drop the quotes in one edit, so this is a
+cheap tell, not a defence: the burn-in also shows when it does. Count it from
+the headline and from `also_rule_ids` (201 at `challenge_v2` takes the
+headline when both match).
+
+**Side effects of logonly.** A logonly hit is never micro-cached (cfm.lua
+Step 2 sets `cfm_no_micro`), so the tool's page views reach the origin on a
+micro-armed vhost; a few thousand a day fleet-wide, the tool's cost, not a
+visitor's. **Push key:** 201 and 202 share the family, and pushes de-dup on
+(IP, family, tier): at `challenge_v2` both, a 202 push in the 60 s window
+hides a 201 one for that IP. Give 202 its own family at the promotion if
+201's tags matter there.
+
 ## Rule 530 — `rule_wc_cart_get_crawl` (WooCommerce add-to-cart crawling)
 
 Family **`WAF_CART_CRAWL`**, `logonly`, a cost signal. WooCommerce adds to the
