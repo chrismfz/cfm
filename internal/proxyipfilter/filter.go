@@ -21,7 +21,8 @@
 // client.
 //
 // Sources: feeds (blocklists.Manager hands each applied feed over, BLOCK and
-// ALLOW) and the node's local sets, read from the kernel every minute
+// ALLOW; a CHALLENGE feed is kept apart, for every web client, direct or not:
+// challenge.go) and the node's local sets, read from the kernel every minute
 // (StartLocalRefresh). Each block source belongs to a group with its own mode,
 // [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (FEED's
 // default: a line per client says which lists it is on and what would happen,
