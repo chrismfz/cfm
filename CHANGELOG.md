@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.26
+
 ### Changed
 - **`OPENRESTY_OK_IP_TTL` defaults to 0 (cookie-only).** After a solve the
   old 1m code default (10m in the stock `detectors.conf`) let everyone behind
