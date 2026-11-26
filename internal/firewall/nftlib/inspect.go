@@ -128,10 +128,16 @@ func (b *Backend) listHostSetPair(v4Name, v6Name string) ([]firewall.BlockedEntr
 	return result, nil
 }
 
-// HasElem returns true if elem is currently in the named set.
-// Fetches elements via netlink and scans for a match — no fork.
-// Used by interactive commands, not hot paths.
+// HasElem returns true if elem is currently in the named set: an address
+// held by an element of an interval set, or an exact element. An address is
+// asked of the kernel (LookupSetElems: a few netlink gets, whatever the set's
+// size); a CIDR, or a lookup the kernel cannot answer, reads the whole set.
+// The dump was the only path, and an unblock asked it of each fleet feed set
+// (277 000 addresses on orion): 5-6 s per call (2026-11-26).
 func (b *Backend) HasElem(setName, elem string) (bool, error) {
+	if found, ok := hasAddrElem(b, setName, elem); ok {
+		return found, nil
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -289,6 +295,14 @@ func (b *Backend) ListSetJSON(family, table, set string) ([]byte, error) {
 		"set":      set,
 		"elements": elems,
 	}, "", "  ")
+}
+
+// ListSetsJSON lists the sets of table inet cfm without their elements, as
+// ListTableJSON does over netlink: the cheap listing callers that need only
+// the set names (ipquery, unblock) prefer over a `nft list table`, which on
+// EL8's nft loads every element first (2.7-6.1 s on orion, 2026-11-26).
+func (b *Backend) ListSetsJSON(_ context.Context, family string) ([]byte, error) {
+	return b.ListTableJSON(family, cfmTableName)
 }
 
 func (b *Backend) ListTableTextNoDNS(family, table string) (string, error) {

@@ -3,7 +3,6 @@
 package nft
 
 import (
-	"bufio"
 	"bytes"
 	cfgpkg "cfm/internal/config"
 	enrichpkg "cfm/internal/enrich"
@@ -2045,8 +2044,16 @@ func (b *Backend) isSelfIPString(s string) bool {
 	return b.selfResolver.Contains(s)
 }
 
-// HasElem returns true if elem is in setName without dumping the set.
+// HasElem returns true if elem is in setName without dumping the set: an
+// address held by an element of an interval set, or an exact element. An
+// address is asked of the kernel over netlink (LookupSetElems); a CIDR, or a
+// lookup the kernel cannot answer, runs `nft get element`, which on EL8's nft
+// loads the whole set first (3-14 s for a fleet feed set on orion,
+// 2026-11-26).
 func (b *Backend) HasElem(setName, elem string) (bool, error) {
+	if found, ok := hasAddrElem(b, setName, elem); ok {
+		return found, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	args := []string{"get", "element", family, tableName, setName, "{", elem, "}"}
@@ -2069,12 +2076,16 @@ func (b *Backend) HasElem(setName, elem string) (bool, error) {
 
 // //// helpers caching allow lists for ignore feature /////
 // listSetsByPrefixes returns set names that start with any of the given prefixes.
+// The listing is `nft -t list sets`: `list table`, even with -t, loads every
+// element on EL8's nft (2.7-6.1 s on orion with the fleet feeds, 2026-11-26),
+// `list sets` does not (8 ms).
 func (b *Backend) listSetsByPrefixes(prefixes ...string) ([]string, error) {
-	res, err := runNFTCommand(context.Background(), "-t", "-n", "list", "table", string(family), tableName)
+	res, err := runNFTCommand(context.Background(), "-t", "list", "sets", string(family))
 	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
-		return nil, fmt.Errorf("nft list table: %v: %s", err, string(out))
+		return nil, fmt.Errorf("nft list sets: %v: %s", err, string(out))
 	}
+	inTable := firewall.SetNamesInTable(string(out), string(family), tableName)
 	var names []string
 	pfx := make([]string, 0, len(prefixes))
 	for _, p := range prefixes {
@@ -2083,17 +2094,7 @@ func (b *Backend) listSetsByPrefixes(prefixes ...string) ([]string, error) {
 			pfx = append(pfx, p)
 		}
 	}
-	sc := bufio.NewScanner(bytes.NewReader(out))
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if !strings.HasPrefix(line, "set ") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		name := fields[1]
+	for name := range inTable {
 		for _, p := range pfx {
 			if strings.HasPrefix(name, p) {
 				names = append(names, name)
@@ -2101,6 +2102,7 @@ func (b *Backend) listSetsByPrefixes(prefixes ...string) ([]string, error) {
 			}
 		}
 	}
+	sort.Strings(names)
 	return names, nil
 }
 
