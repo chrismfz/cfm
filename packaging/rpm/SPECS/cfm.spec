@@ -73,6 +73,12 @@ fi
 # detectors.conf conffile stays pristine and updateable.
 mkdir -p %{buildroot}/etc/cfm/detectors.d
 
+# /var/log/cfm: the unit's StandardOutput=append:/var/log/cfm/... is opened
+# BEFORE systemd creates LogsDirectory=, so without this directory the daemon
+# never starts (209/STDOUT on every restart; a fresh node, 2026-11-26). The
+# package owns it, with the unit's LogsDirectoryMode.
+install -d -m 0700 %{buildroot}/var/log/cfm
+
 
 # ensure canonical shared assets are always shipped, even if %%{pkgroot} staging omitted them
 mkdir -p "%{buildroot}%{_datadir}/cfm"
@@ -139,6 +145,7 @@ install -Dm644 %{projectroot}/LICENSES/GPL-2.0-only.txt %{buildroot}/usr/share/l
 %config(noreplace) /etc/cfm/cfm-admin.htpasswd
 
 %dir /var/lib/cfm
+%dir %attr(0700,root,root) /var/log/cfm
 %dir %attr(0750,root,cfm) /var/lib/cfm/lua
 %attr(0640,root,cfm) /var/lib/cfm/lua/*
 

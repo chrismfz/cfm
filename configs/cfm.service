@@ -34,6 +34,8 @@ UMask=0077
 
 
 # File logging (since you're not using the journal)
+# systemd opens these files before it creates LogsDirectory=, so the package
+# creates /var/log/cfm itself (the rpm files list, the deb postinst).
 StandardOutput=append:/var/log/cfm/cfm-service.log
 StandardError=append:/var/log/cfm/cfm-error.log
 

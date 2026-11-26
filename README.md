@@ -82,7 +82,13 @@ dnf install https://repo.nixpal.com/el/nixpal.rpm
 dnf install cfm
 ```
 
-Packages create the `cfm` system user and group.
+Packages create the `cfm` system user and group, and the `/var/log/cfm` the
+service writes to.
+
+**A whole node, step by step** (a new server, or rebuilding one after a
+disaster): [`docs/node-setup.md`](docs/node-setup.md). It covers what is per
+node (`cfm.api.conf`, the Imunify360 DNAT priority, the lists), what no package
+sets up (clamd, the cPanel plugin, the first admin user) and the edge switch.
 
 ### First login
 
