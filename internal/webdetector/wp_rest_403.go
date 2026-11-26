@@ -281,10 +281,11 @@ func wpAdminReferer(ref, host, prefix string) bool {
 // skip403 reports whether rec is a 403 the web detector's error counters
 // (403_flood, 40x_combo and the per-IP CHALLENGE_RPS_4XX / ERR_RATIO
 // challenge counters) do not count: the app's own answer to a client it
-// knows (isWPRestOrigin403, isWPAdminAjaxOrigin403) or the edge's refusal for
-// a traffic rule's block (isRuleBlock403). The ONE such predicate; a new
+// knows (isWPRestOrigin403, isWPAdminAjaxOrigin403), the edge's refusal for
+// a traffic rule's block (isRuleBlock403) or for a client the proxied IP
+// filter refuses (isProxiedIPFilterBlock403). The ONE such predicate; a new
 // counter of client-fault 4xx reads it too.
 func skip403(rec LogRec) bool {
 	return rec.Status == 403 &&
-		(isWPRestOrigin403(rec) || isWPAdminAjaxOrigin403(rec) || isRuleBlock403(rec))
+		(isWPRestOrigin403(rec) || isWPAdminAjaxOrigin403(rec) || isRuleBlock403(rec) || isProxiedIPFilterBlock403(rec))
 }

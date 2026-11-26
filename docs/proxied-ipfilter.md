@@ -74,8 +74,19 @@ the edge reports to the daemon), and 268 k there is the regression ruled out. So
   enforce would see them. An address an allow cancels gets a plain, cacheable
   allow.
 - **Not covered:** the static-asset locations (css/js/images, which check only
-  the edge copy of `edgeban`), and URLs a client warmed with a clean allow in
-  the 90 s (`decision_cache_ttl_ms`) before it was listed.
+  the edge copy of `edgeban`), URLs a client warmed with a clean allow in
+  the 90 s (`decision_cache_ttl_ms`) before it was listed, and a client
+  holding a valid clearance cookie (cfm.lua Step 2b returns before the
+  decision). The challenge page (`/__cfm_challenge`, reached directly) and
+  its verify do not ask this filter, so a listed client can still solve a
+  challenge and then pass on the cookie.
+- **Its refusals never escalate.** The edge logs them as `cfm_block`, and the
+  web detector's 403 counters (403_flood, 40x_combo, the per-IP 4xx challenge
+  counters) skip a 403 `cfm_block` for a client this filter enforces on
+  (`isProxiedIPFilterBlock403`, inside `skip403`). Counted, a shared mobile /
+  CGNAT address on the fleet list could reach 150 refusals in minutes and
+  become this node's own nft + edge ban, which clearing the entry in cfm-web does not
+  lift.
 - **After a daemon start** the feed lists are empty until each feed's first
   successful apply (the first fetch is never skipped as unchanged): with
   cfm-web unreachable, nft keeps the old feed and this filter answers nothing

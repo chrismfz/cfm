@@ -48,8 +48,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   ~14,400 addresses, >98% of them MYBLOCK, almost no Greek residential
   address: three 1h greylist entries and one permanent modsec ban. A
   permanent fleet ban on a shared mobile / CGNAT address now refuses everyone
-  behind it on proxied sites, so clear such entries in cfm-web. Set
-  `PROXIED_IPFILTER_FEED = log` in `[webdetector]` to keep the old behaviour.
+  behind it on proxied sites, so clear such entries in cfm-web. Its refusals
+  no longer count toward 403_flood / 40x_combo, so a listed client is not also
+  given a local nft + edge ban that clearing the entry would not lift. A
+  detectors.conf that writes `PROXIED_IPFILTER_FEED = log` (the stock file did
+  until now) keeps log: delete the line, or set it to enforce; check
+  `mode=feed:` in cfm.log's `[proxied_ipfilter]` lines.
 - **The reference `cfm.blocklists` `TOR` line** (still commented out) points
   at the Tor Project's current exit list (`/torbulkexitlist`, refreshed
   hourly) instead of the old CGI URL, which now answers with a redirect.

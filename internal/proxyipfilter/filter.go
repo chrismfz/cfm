@@ -121,8 +121,9 @@ func now() time.Time { return (*clock.Load())() }
 
 func setClock(f func() time.Time) { clock.Store(&f) }
 
-// SetModes sets the mode of each group; an empty or unknown value is "log",
-// the safe default (logged, so a typo is visible).
+// SetModes sets the mode of each group: an empty value is the group's
+// default (DefaultModeFeed / DefaultModeLocal), an unknown one is "log", the
+// safe answer (logged, so a typo is visible).
 func SetModes(feed, local string) {
 	modeFeed.Store(normMode("PROXIED_IPFILTER_FEED", feed, DefaultModeFeed))
 	modeLocal.Store(normMode("PROXIED_IPFILTER_LOCAL", local, DefaultModeLocal))
