@@ -131,10 +131,15 @@ func probeSourceStatus(kv KV) (bool, string) {
 // overlay; LayerSig = the overlay set's name+mtime+size hash, the independent
 // signal for an overlay edited/removed/renamed/added-with-an-older-mtime) OR
 // any watched LOG_PATH is rotated (inode/dev changes — prevents tailers
-// sticking to a deleted FD).
-func cfgSig(secs *Sections) uint64 {
+// sticking to a deleted FD). files is the config files' stamp
+// (configFilesStamp: size, mtime and inode of the base file and of each
+// overlay; 0 when they could not be stat'ed): without it, a file replaced
+// with its mtime kept (rsync -a, cp -p) never reloaded.
+func cfgSig(secs *Sections, files uint64) uint64 {
 	h := fnv.New64a()
 	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], files)
+	_, _ = h.Write(b[:])
 	binary.LittleEndian.PutUint64(b[:], uint64(secs.StampNS))
 	_, _ = h.Write(b[:])
 	binary.LittleEndian.PutUint64(b[:], secs.LayerSig)
@@ -243,7 +248,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
 
-	secs, err, fallback := m.readForReload(path, time.Now())
+	secs, err, fallback := m.readForReload(path)
 	readErr, firstLoad := err, !m.running // err is reused below; the governor sync needs this one
 	if err != nil {
 		switch {
@@ -268,7 +273,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		// control-plane protection above.
 		applyBuiltinLoginBruteforce(&secs)
 	}
-	sig := cfgSig(&secs)
+	sig := cfgSig(&secs, m.readCache.files)
 	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))
 	configuredSections := make([]string, 0, len(secs.ByName))
 	enabledCount := 0

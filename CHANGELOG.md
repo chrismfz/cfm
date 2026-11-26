@@ -32,9 +32,13 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   manager re-read and parsed detectors.conf and its overlays every 2.5 s,
   6-8 % of the daemon's CPU on a quiet node (qualityweb). A poll now stats
   the files and parses only when one moved (size, mtime, inode, an overlay
-  added or removed), plus once every 30 s for an edit no stat shows. An edit
-  still applies within seconds, and a rotated detector log is followed as
-  before (that check still runs every poll).
+  added or removed). An edit still applies within seconds, and a rotated
+  detector log is followed as before (that check still runs every poll).
+- **A detectors.conf replaced with its mtime kept now reloads.** The reload
+  signature keyed on the file's mtime alone, so a file deployed with
+  `rsync -a` or `cp -p` (an older mtime, a new inode or size) never applied
+  until something touched it. The signature now carries the files' size,
+  mtime and inode, base file and overlays alike.
 - **A geo lookup costs a quarter of what it did.** A country lookup from
   the GeoLite2-City database decoded the whole record (every language's
   country and city names, the continent, the registered country, location,

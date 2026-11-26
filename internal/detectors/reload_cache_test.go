@@ -20,8 +20,7 @@ func countReads(t *testing.T) *int {
 	return n
 }
 
-// A poll parses detectors.conf only when the base file or an overlay moved,
-// or when the last read is older than reloadFullReadEvery.
+// A poll parses detectors.conf only when the base file or an overlay moved.
 func TestReadForReloadParsesOnlyOnAChange(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "detectors.conf")
@@ -30,10 +29,9 @@ func TestReadForReloadParsesOnlyOnAChange(t *testing.T) {
 	}
 	reads := countReads(t)
 	m := &manager{}
-	now := time.Now()
 	read := func() Sections {
 		t.Helper()
-		s, err, fb := m.readForReload(path, now)
+		s, err, fb := m.readForReload(path)
 		if err != nil || fb {
 			t.Fatalf("read: %v fallback=%v", err, fb)
 		}
@@ -68,20 +66,6 @@ func TestReadForReloadParsesOnlyOnAChange(t *testing.T) {
 		t.Fatalf("after a new overlay: B=%q, %d reads; want 3, 3", s.Global["B"], *reads)
 	}
 
-	// An edit the stamp cannot see (same size, mtime put back) is read once
-	// the last read is reloadFullReadEvery old.
-	st, _ := os.Stat(path)
-	if err := os.WriteFile(path, []byte("[global]\nA = 99\n\n[ssh]\nENABLED = 1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_ = os.Chtimes(path, st.ModTime(), st.ModTime())
-	if s := read(); s.Global["A"] != "22" || *reads != 3 {
-		t.Fatalf("an invisible edit: A=%q, %d reads; want the cached 22, 3", s.Global["A"], *reads)
-	}
-	now = now.Add(reloadFullReadEvery)
-	if s := read(); s.Global["A"] != "99" || *reads != 4 {
-		t.Fatalf("after %s: A=%q, %d reads; want 99, 4", reloadFullReadEvery, s.Global["A"], *reads)
-	}
 }
 
 // What the poll adds to its copy (the built-in sections) never reaches the
@@ -94,12 +78,11 @@ func TestReadForReloadCopyIsTheCallers(t *testing.T) {
 	}
 	countReads(t)
 	m := &manager{}
-	now := time.Now()
-	s1, _, _ := m.readForReload(path, now)
+	s1, _, _ := m.readForReload(path)
 	s1.ByName["extra"] = KV{"X": "1"}
 	s1.ByName["ssh"]["ENABLED"] = "0"
 	s1.Global["A"] = "changed"
-	s2, _, _ := m.readForReload(path, now)
+	s2, _, _ := m.readForReload(path)
 	if _, ok := s2.ByName["extra"]; ok || s2.ByName["ssh"]["ENABLED"] != "1" || s2.Global["A"] != "1" {
 		t.Fatalf("the cached read changed through a copy: %+v", s2.ByName)
 	}
@@ -114,10 +97,49 @@ func TestReadForReloadDoesNotCacheAMissingFile(t *testing.T) {
 	reads := countReads(t)
 	m := &manager{running: true}
 	path := filepath.Join(t.TempDir(), "detectors.conf")
-	now := time.Now()
-	m.readForReload(path, now)
-	m.readForReload(path, now)
+	m.readForReload(path)
+	m.readForReload(path)
 	if *reads != 2 {
 		t.Fatalf("a missing file: %d reads, want 2", *reads)
+	}
+}
+
+// A file replaced with its mtime kept (rsync -a writes a temp file and
+// renames it; cp -p keeps the source's mtime) is read again AND moves the
+// reload signature: cfgSig's mtime alone missed it, and the detectors kept
+// the old config.
+func TestAnMtimeKeepingReplaceReloads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "detectors.conf")
+	if err := os.WriteFile(path, []byte("[global]\nA = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := os.Stat(path)
+	m := &manager{}
+	s1, _, _ := m.readForReload(path)
+	sig1 := cfgSig(&s1, m.readCache.files)
+
+	tmp := filepath.Join(dir, ".detectors.conf.tmp")
+	if err := os.WriteFile(tmp, []byte("[global]\nA = 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(tmp, st.ModTime(), st.ModTime())
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	s2, _, _ := m.readForReload(path)
+	if s2.Global["A"] != "2" {
+		t.Fatalf("after the replace: A=%q, want 2 (the cached read was reused)", s2.Global["A"])
+	}
+	if s2.StampNS != s1.StampNS {
+		t.Fatal("setup: the mtime moved")
+	}
+	if cfgSig(&s2, m.readCache.files) == sig1 {
+		t.Fatal("the reload signature did not move: the detectors keep the old config")
+	}
+	// Unchanged files: the same signature, poll after poll.
+	s3, _, _ := m.readForReload(path)
+	if cfgSig(&s3, m.readCache.files) != cfgSig(&s2, m.readCache.files) {
+		t.Fatal("the signature moved with nothing changed")
 	}
 }

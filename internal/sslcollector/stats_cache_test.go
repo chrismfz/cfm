@@ -63,3 +63,20 @@ func BenchmarkStats5000(b *testing.B) {
 		_ = col.Stats()
 	}
 }
+
+// forgetStats (a scan calls it when it replaces the maps) drops the cache
+// and the maps it holds: the old index is not kept until the next /stats.
+func TestForgetStatsReleasesTheMaps(t *testing.T) {
+	col := statsCollector(5)
+	_ = col.Stats()
+	if col.statsCache.exact == nil {
+		t.Fatal("setup: nothing cached")
+	}
+	col.forgetStats()
+	if col.statsCache.exact != nil || col.statsCache.wild != nil {
+		t.Fatal("the cache still holds the old maps")
+	}
+	if v := col.Stats().Version; v == "" {
+		t.Fatal("no version after the cache was dropped")
+	}
+}

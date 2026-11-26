@@ -153,7 +153,7 @@ func TestManagerSyncsGovernorConfigInTheFactorySweep(t *testing.T) {
 	}
 	body = regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(body, "")
 
-	read := strings.Index(body, "m.readForReload(path, time.Now())") // readSectionsForReload behind the stamp
+	read := strings.Index(body, "m.readForReload(path)") // readSectionsForReload behind the stamp
 	capture := regexp.MustCompile(`readErr, firstLoad := err, !m\.running`).FindStringIndex(body)
 	earlyReturn := strings.Index(body, "sig == m.lastSig")
 	call := strings.Index(body, "syncPendingGovernor(secs.ByName, readErr, firstLoad)")

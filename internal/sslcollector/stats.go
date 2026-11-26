@@ -24,7 +24,8 @@ type Stats struct {
 
 // statsCache is the part of Stats computed from exact and wildSuffix, and
 // the two maps it was computed from (held, so neither can be freed and its
-// address reused while the cache names it).
+// address reused while the cache names it; a scan drops the cache when it
+// replaces them, forgetStats, so the old index is not kept alive).
 type statsCache struct {
 	exact, wild map[string]*Entry
 	exactN      int
@@ -42,6 +43,13 @@ func (sc *statsCache) fresh(exact, wild map[string]*Entry) bool {
 
 func sameMap(a, b map[string]*Entry) bool {
 	return reflect.ValueOf(a).UnsafePointer() == reflect.ValueOf(b).UnsafePointer()
+}
+
+// forgetStats drops the cached version and the maps it holds.
+func (c *Collector) forgetStats() {
+	c.statsMu.Lock()
+	c.statsCache = statsCache{}
+	c.statsMu.Unlock()
 }
 
 // Stats reports the collector's sizes and its version. The edge polls it

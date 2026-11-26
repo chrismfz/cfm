@@ -476,7 +476,7 @@ func TestGetCertificateLoadsChain(t *testing.T) {
 		NotBefore:   leaf.NotBefore,
 		NotAfter:    leaf.NotAfter,
 	}
-	col.exact["leaf.example.com"] = e
+	putExact(col, "leaf.example.com", e)
 
 	tlsCert, err := col.GetCertificate(&tls.ClientHelloInfo{ServerName: "leaf.example.com"})
 	if err != nil {

@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"syscall"
-	"time"
 
 	"cfm/internal/detconf"
 )
@@ -18,19 +17,21 @@ import (
 // (qualityweb, 2026-11-24). A poll now stats the files first and parses only
 // when one moved; the rest of the poll (the tailed logs' inodes, the source
 // probes) still runs every tick, so a rotated log is followed as before.
-
-// reloadFullReadEvery bounds how long a read is reused on an unchanged stamp:
-// an edit the stamp cannot see (same size and mtime, written in place) is
-// picked up within it.
-const reloadFullReadEvery = 30 * time.Second
+//
+// The stamp is also part of the reload signature (cfgSig): a file replaced
+// with its mtime kept (rsync -a, cp -p, a rename into place) moves the
+// stamp's inode or size, so it is both read and applied. An edit no stat
+// shows (same size, mtime and inode) is neither, as before this cache.
 
 // reloadCache is the last successful layered read and the stamp of the files
 // it read. Poll goroutine only.
 type reloadCache struct {
 	ok    bool
 	stamp uint64
-	at    time.Time
 	secs  Sections
+	// files is the stamp the latest poll took (0 when it could not stat
+	// the files), for the reload signature.
+	files uint64
 }
 
 // configFilesStamp hashes what a layered read of path depends on: the base
@@ -74,12 +75,15 @@ func configFilesStamp(path, dropinDir string) (uint64, error) {
 
 // readForReload is readSectionsForReload behind the stamp: the last read is
 // reused (a copy: the poll adds the built-in sections to what it gets) while
-// the files' stamp is unchanged and the read is younger than
-// reloadFullReadEvery. Only a clean read is reused.
-func (m *manager) readForReload(path string, now time.Time) (Sections, error, bool) {
+// the files' stamp is unchanged. Only a clean read is reused.
+func (m *manager) readForReload(path string) (Sections, error, bool) {
 	stamp, serr := configFilesStamp(path, detconf.DefaultDropinDir(path))
 	c := &m.readCache
-	if serr == nil && c.ok && c.stamp == stamp && now.Sub(c.at) < reloadFullReadEvery {
+	c.files = 0
+	if serr == nil {
+		c.files = stamp
+	}
+	if serr == nil && c.ok && c.stamp == stamp {
 		return cloneSections(c.secs), nil, false
 	}
 	secs, err, fallback := readSectionsForReload(path, m.running)
@@ -87,7 +91,7 @@ func (m *manager) readForReload(path string, now time.Time) (Sections, error, bo
 	if c.ok {
 		// The stamp from before the read: a write during it moves the
 		// stamp, and the next poll reads again.
-		c.stamp, c.at, c.secs = stamp, now, cloneSections(secs)
+		c.stamp, c.secs = stamp, cloneSections(secs)
 	}
 	return secs, err, fallback
 }
