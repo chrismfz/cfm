@@ -41,6 +41,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   capped at `challenge_v2`), so it arms no autoblock.
 
 ### Changed
+- **`PROXIED_IPFILTER_FEED` defaults to `enforce`.** A client behind
+  Cloudflare that is on a BLOCK feed (cfm-web's MYBLOCK; CHALLENGE lists such as
+  TOR are not blocks and are unaffected) is now refused at the edge, as nft refuses it when it comes
+  direct. One day's log-mode lines on seven nodes: ~22,700 decisions for
+  ~14,400 addresses, >98% of them MYBLOCK, almost no Greek residential
+  address: three 1h greylist entries and one permanent modsec ban. A
+  permanent fleet ban on a shared mobile / CGNAT address now refuses everyone
+  behind it on proxied sites, so clear such entries in cfm-web. Set
+  `PROXIED_IPFILTER_FEED = log` in `[webdetector]` to keep the old behaviour.
 - **The reference `cfm.blocklists` `TOR` line** (still commented out) points
   at the Tor Project's current exit list (`/torbulkexitlist`, refreshed
   hourly) instead of the old CGI URL, which now answers with a redirect.
@@ -64,11 +73,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   when it comes through a trusted proxy, as nft refuses it direct. A week of
   log mode on eight nodes found only scanners there. A detectors.conf that
   writes `PROXIED_IPFILTER_LOCAL = log` keeps log (delete the line, or set
-  it to enforce). The fleet feeds (`PROXIED_IPFILTER_FEED`) stay `log`: the
-  fleet list still holds permanent bans on shared mobile / CGNAT addresses.
-  See `docs/proxied-ipfilter.md`.
-
-_Nothing yet._
+  it to enforce). The fleet feeds (`PROXIED_IPFILTER_FEED`) enforce too
+  (above). See `docs/proxied-ipfilter.md`.
 
 ## 2026.11.26
 

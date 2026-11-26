@@ -24,9 +24,10 @@
 // ALLOW; a CHALLENGE feed is kept apart, for every web client, direct or not:
 // challenge.go) and the node's local sets, read from the kernel every minute
 // (StartLocalRefresh). Each block source belongs to a group with its own mode,
-// [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (FEED's
-// default: a line per client says which lists it is on and what would happen,
-// nothing changes), enforce (the bridge answers ip_action=block), off.
+// [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (a line
+// per client says which lists it is on and what would happen, nothing
+// changes), enforce (the bridge answers ip_action=block; both groups' default
+// since 2026-11-26), off.
 package proxyipfilter
 
 import (
@@ -97,10 +98,14 @@ var (
 // The defaults, when detectors.conf names no mode. LOCAL (the node's own
 // block sets) is enforce since 2026-11-26, after a week of log mode on eight
 // nodes: scanners only (Censys, 45.138.12.x, Techoff, an Iranian address),
-// no customer, no network that serves real users. FEED stays log: the fleet
-// blacklist still holds permanent bans on shared mobile / CGNAT addresses.
+// no customer, no network that serves real users. FEED is enforce since
+// 2026-11-26 too: a day of log on seven nodes, ~22.7k decisions for ~14.4k
+// addresses, >98% MYBLOCK, four Greek residential ones (three 1h greylist
+// entries, one permanent modsec ban). A permanent fleet ban on a shared mobile
+// / CGNAT address now refuses everyone behind it on proxied sites: clear such
+// entries in cfm-web.
 const (
-	DefaultModeFeed  = ModeLog
+	DefaultModeFeed  = ModeEnforce
 	DefaultModeLocal = ModeEnforce
 )
 
