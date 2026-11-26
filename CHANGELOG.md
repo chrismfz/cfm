@@ -21,6 +21,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Fixed
+- **The sslcollector's `/stats` no longer hashes every certificate on each
+  call.** The edge polls it to see a renewal, and each call hashed every
+  host and pair again: ~10 % of the daemon's CPU on the nodes with the most
+  certificates (earth, virgo). The version is now computed once per scan
+  (a file change, the watcher, or the 15-minute rescan) and reused until
+  the next: 5.7 ms per call at 5 000 hosts, now under a microsecond. A
+  renewal moves the version as before.
+- **The detectors.conf poll parses the file only when it changed.** The
+  manager re-read and parsed detectors.conf and its overlays every 2.5 s,
+  6-8 % of the daemon's CPU on a quiet node (qualityweb). A poll now stats
+  the files and parses only when one moved (size, mtime, inode, an overlay
+  added or removed), plus once every 30 s for an edit no stat shows. An edit
+  still applies within seconds, and a rotated detector log is followed as
+  before (that check still runs every poll).
 - **A geo lookup costs a quarter of what it did.** A country lookup from
   the GeoLite2-City database decoded the whole record (every language's
   country and city names, the continent, the registered country, location,

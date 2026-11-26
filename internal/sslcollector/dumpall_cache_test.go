@@ -118,9 +118,11 @@ func TestWriteSnapshotSkipsAnUnchangedVersion(t *testing.T) {
 func TestVersionReflectsTheNameToPairMapping(t *testing.T) {
 	col, _ := newSnapshotCollector(t)
 	v1 := col.Stats().Version
+	// As a scan does: new maps (Stats reuses its version for the same maps).
 	col.mu.Lock()
 	a, w := col.exact["a.example.com"], col.wildSuffix["example.com"]
-	col.exact["a.example.com"], col.wildSuffix["example.com"] = w, a
+	col.exact = map[string]*Entry{"a.example.com": w}
+	col.wildSuffix = map[string]*Entry{"example.com": a}
 	col.mu.Unlock()
 	if col.Stats().Version == v1 {
 		t.Fatal("swapping which pair serves each name did not change the version")

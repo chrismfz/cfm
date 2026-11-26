@@ -326,12 +326,8 @@ func TestStripPrivateKeyBlocksCoversAllVariants(t *testing.T) {
 // the lua workers detect the change and re-/dumpall promptly instead
 // of waiting up to FORCE_DUMPALL_AFTER (1h).
 func TestVersionReflectsChainRotation(t *testing.T) {
-	// Single-goroutine test: we mutate cert.ChainMTime in place to
-	// simulate a chain rotation. In production this field is set once
-	// in buildEntry before the Entry is published into c.exact under
-	// c.mu.Lock, then never mutated — so the lock-free reads in Stats()
-	// are safe. Do NOT copy this in-place mutation into a test that
-	// runs Refresh() concurrently with Stats(); it would race.
+	// A rotation is a new entry with a later ChainMTime in new maps, as
+	// buildEntry and a scan make it: an entry is never changed in place.
 	cert := &Entry{
 		Fingerprint: hex.EncodeToString(sha256.New().Sum(nil)),
 		CertMTime:   time.Unix(1_700_000_000, 0),
@@ -348,8 +344,19 @@ func TestVersionReflectsChainRotation(t *testing.T) {
 	}
 	v1 := col.Stats().Version
 
-	// Simulate chain rotation: only ChainMTime advances.
-	cert.ChainMTime = time.Unix(1_700_000_999, 0)
+	// Simulate chain rotation: only ChainMTime advances. A scan builds a new
+	// entry and new maps for it (an entry is never changed in place, and
+	// Stats reuses its version for the same maps).
+	rotated := &Entry{
+		Fingerprint: cert.Fingerprint,
+		CertMTime:   cert.CertMTime,
+		KeyMTime:    cert.KeyMTime,
+		ChainMTime:  time.Unix(1_700_000_999, 0),
+		Names:       cert.Names,
+	}
+	col.mu.Lock()
+	col.exact = map[string]*Entry{"a.example.com": rotated}
+	col.mu.Unlock()
 	v2 := col.Stats().Version
 	if v1 == v2 {
 		t.Fatal("Version did not change after chain rotation — lua workers would miss the new chain until FORCE_DUMPALL_AFTER")

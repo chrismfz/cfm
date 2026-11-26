@@ -49,6 +49,10 @@ type manager struct {
 	// signature it was taken under. Poll goroutine only.
 	modsecProbes map[string]cachedProbe
 
+	// readCache: the last detectors.conf read, reused while the files are
+	// unchanged (reload_cache.go). Poll goroutine only.
+	readCache reloadCache
+
 	running bool
 	state   *core.State
 
@@ -215,7 +219,8 @@ func Start(parent context.Context, opts Options) {
 func (m *manager) loop(parent context.Context) {
 
 	// Poll frequently, but reload only after debounce (stable signature).
-	// Config is tiny, so 1500ms polling is fine.
+	// A poll parses the config only when its files moved (readForReload);
+	// the rest of it (the tailed logs' inodes, the source probes) is stats.
 	t := time.NewTicker(2500 * time.Millisecond)
 
 	defer t.Stop()
@@ -238,7 +243,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
 
-	secs, err, fallback := readSectionsForReload(path, m.running)
+	secs, err, fallback := m.readForReload(path, time.Now())
 	readErr, firstLoad := err, !m.running // err is reused below; the governor sync needs this one
 	if err != nil {
 		switch {

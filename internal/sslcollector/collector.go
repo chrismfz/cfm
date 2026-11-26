@@ -37,8 +37,14 @@ type Collector struct {
 
 	// host index
 	mu         sync.RWMutex
+	// exact and wildSuffix are REPLACED by a scan, never changed in place:
+	// Stats reuses its version while both maps are the ones it hashed
+	// (statsCache). An entry is never changed after it is built.
 	exact      map[string]*Entry // host -> entry
 	wildSuffix map[string]*Entry // suffix ("example.com") -> entry for "*.example.com"
+
+	statsMu    sync.Mutex
+	statsCache statsCache
 
 	// known files + memo sigs (for cheap stat loop)
 	filesMu    sync.RWMutex
