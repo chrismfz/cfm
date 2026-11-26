@@ -94,8 +94,11 @@ const ttlBanRestoreWait = 30 * time.Second
 // watchTTLBanShutdown, which catches the stop signals once the TTL ban restore
 // is done: a crash, an os.Exit, or a stop during that restore loses the bans
 // of the last edgeBanSaveDelay from the file (nft still holds them; the edge
-// answers them again from the next ban of that client).
-const edgeBanSaveDelay = 30 * time.Second
+// answers them again from the next ban of that client). Each write marshals
+// the whole store (52 000 bans on earth): at 30 s that was 7 % of the
+// daemon's CPU there (2026-11-26), for a file that is read only at the next
+// start.
+const edgeBanSaveDelay = 5 * time.Minute
 
 // restoreTTLBans loads the persisted TTL bans, re-adds those with time left
 // and installs the store as the default (Forget, the snapshots). Called once,
@@ -175,7 +178,7 @@ func watchTTLBanShutdown(s *ttlban.Store, be firewall.Backend) {
 		// second Ctrl-C, systemd's SIGKILL aside).
 		signal.Reset(sigs...)
 		// The edge ban store coalesces its file writes (SetSaveDelay): the
-		// bans of the last few seconds are written now, before the nft read.
+		// bans of the last few minutes are written now, before the nft read.
 		edgeban.Default().Flush()
 		done := make(chan error, 1)
 		go func() { done <- snapshotTTLBans(s, be) }()

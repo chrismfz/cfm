@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"sync"
 	"testing"
@@ -112,10 +113,10 @@ func TestCountKeyWithoutASetElemWriter(t *testing.T) {
 // Once warm, CountKey never waits on nft: a stale guard view is answered
 // while one background refresh replaces it.
 func TestCountKeyServesAStaleGuardView(t *testing.T) {
-	oldG, oldC := guardCacheTTL, countKeyTTL
-	guardCacheTTL, countKeyTTL = 20*time.Millisecond, 0
+	oldG, oldC, oldGC := guardCacheTTL, countKeyTTL, guardCountTTL
+	guardCacheTTL, countKeyTTL, guardCountTTL = 20*time.Millisecond, 0, 20*time.Millisecond
 	t.Cleanup(func() {
-		guardCacheTTL, countKeyTTL = oldG, oldC
+		guardCacheTTL, countKeyTTL, guardCountTTL = oldG, oldC, oldGC
 		SetCountBackend(nil)
 		ResetCountKeyCache()
 		ResetGuardCache()
@@ -188,9 +189,9 @@ func TestCountKeyFollowsANewCheckAtOnce(t *testing.T) {
 // A background refresh that started before a reset does not write its view
 // back over it.
 func TestStaleGuardRefreshLosesToAReset(t *testing.T) {
-	oldG := guardCacheTTL
-	guardCacheTTL = 20 * time.Millisecond
-	t.Cleanup(func() { guardCacheTTL = oldG; ResetGuardCache() })
+	oldG, oldC := guardCacheTTL, guardCountTTL
+	guardCacheTTL, guardCountTTL = 20*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { guardCacheTTL, guardCountTTL = oldG, oldC; ResetGuardCache() })
 	ResetGuardCache()
 	f := &lockedNetFake{netFake: newNetFake()}
 	if _, err := staleGuardView(f); err != nil {
@@ -220,5 +221,37 @@ func TestStaleGuardRefreshLosesToAReset(t *testing.T) {
 			t.Fatal("refresh never finished")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// A counter answers from a view up to guardCountTTL old without a refresh: the
+// IPv6 traffic alone no longer re-reads every guard set each guardCacheTTL. A
+// ban still reads its guards within guardCacheTTL.
+func TestCountKeyRefreshesAtTheCountTTL(t *testing.T) {
+	oldG, oldC, oldGC := guardCacheTTL, countKeyTTL, guardCountTTL
+	guardCacheTTL, countKeyTTL, guardCountTTL = 20*time.Millisecond, 0, time.Hour
+	t.Cleanup(func() {
+		guardCacheTTL, countKeyTTL, guardCountTTL = oldG, oldC, oldGC
+		SetCountBackend(nil)
+		ResetCountKeyCache()
+		ResetGuardCache()
+	})
+	ResetGuardCache()
+	f := &lockedNetFake{netFake: newNetFake()}
+	SetCountBackend(f)
+	_ = CountKey("2001:db8:a:1::1")
+	time.Sleep(30 * time.Millisecond) // past guardCacheTTL, not guardCountTTL
+	for i := 0; i < 5; i++ {
+		_ = CountKey(fmt.Sprintf("2001:db8:a:%d::1", i+2))
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := f.readsOf("self_v6"); n != 1 {
+		t.Fatalf("counters re-read the guards %d times, want 1 (the first)", n)
+	}
+	if _, err := cachedGuardView(f); err != nil { // a ban: fresh within guardCacheTTL
+		t.Fatal(err)
+	}
+	if n := f.readsOf("self_v6"); n != 2 {
+		t.Fatalf("a ban after guardCacheTTL: %d reads, want 2", n)
 	}
 }

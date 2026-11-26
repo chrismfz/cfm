@@ -403,15 +403,19 @@ func appendJSONL(path string, v interface{}) error {
 	// The retention is the 5 minute pruner's job (ensureRetentionPruner).
 	// Pruning here re-read, re-parsed and rewrote the whole history on every
 	// alert: on mars (2026-11-11, 87 000 rows, 42 MB) that was 60% of the
-	// daemon's CPU. A storm still prunes every pruneEveryAppends rows, so the
-	// file never outgrows MAX_ENTRIES by more than that between ticks. A
-	// process without the pruner (a one-shot CLI) prunes on every append.
+	// daemon's CPU. A process without the pruner (a one-shot CLI) prunes on
+	// every append.
+	// Each pruneEveryAppends-th row asks pruneNeeded (a stat), which prunes
+	// only past MAX_ENTRIES + pruneSlack or an expired oldest row.
 	jsonlAppendsSincePrune[path]++
-	if retentionPrunerOn.Load() && jsonlAppendsSincePrune[path] < pruneEveryAppends {
-		return nil
+	now := time.Now().UTC()
+	if retentionPrunerOn.Load() {
+		if jsonlAppendsSincePrune[path]%pruneEveryAppends != 0 || !pruneNeeded(path, maxEntries, maxAge, now) {
+			return nil
+		}
 	}
 	jsonlAppendsSincePrune[path] = 0
-	return pruneJSONLWithLimits(path, maxEntries, maxAge, time.Now().UTC())
+	return pruneJSONLWithLimits(path, maxEntries, maxAge, now)
 }
 
 func renderLiteral(tmpl string, ev Event) string {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -25,9 +26,60 @@ var (
 	jsonlAppendsSincePrune = map[string]int{}
 )
 
-// pruneEveryAppends: appendJSONL prunes after this many rows when the 5
-// minute pruner has not run since (an alert storm).
+// pruneEveryAppends: every this many rows appended since the last prune,
+// appendJSONL asks pruneNeeded (a stat) whether to prune between the 5 minute
+// pruner's ticks (an alert storm).
 const pruneEveryAppends = 1000
+
+// A history at MAX_ENTRIES (mars and orion: 100 000 rows, 48 MB) was read,
+// parsed and rewritten whole by every 5 minute prune, to drop the few rows
+// added since: ~0.6 s of CPU and a 48 MB fsync each time (2026-11-26). The
+// daemon now prunes only when the file has grown past MAX_ENTRIES by
+// pruneSlack, or its oldest kept row has passed MAX_AGE, and then trims it
+// back to MAX_ENTRIES: the file holds up to MAX_ENTRIES + pruneSlack rows.
+// A file the daemon did not leave as it is (another inode, a smaller size: a
+// CLI prune, a hand edit) is pruned in full. Rows another process appended
+// without a rewrite (a one-shot CLI's prune that dropped nothing) are not
+// counted: the file can then pass the slack by those few rows.
+
+// pruneSlack is how far past MAX_ENTRIES the history may grow before a
+// prune: a tenth, and at least one row.
+func pruneSlack(maxEntries int) int {
+	return max(maxEntries/10, 1)
+}
+
+// jsonlPruneState is what the last prune of a file left (under
+// jsonlRetentionMu): the file it wrote (inode, size), the rows it kept, and
+// the oldest kept row's time (zero when none had one).
+type jsonlPruneState struct {
+	ino    uint64
+	size   int64
+	kept   int
+	oldest time.Time
+}
+
+var jsonlPruned = map[string]jsonlPruneState{}
+
+// pruneNeeded reports whether a prune of path would drop a row, from what the
+// last prune left and the rows appended since (jsonlRetentionMu held). True
+// when it cannot tell.
+func pruneNeeded(path string, maxEntries int, maxAge time.Duration, now time.Time) bool {
+	st, ok := jsonlPruned[path]
+	if !ok {
+		return true
+	}
+	ino, size, err := fileIdentity(path)
+	if err != nil || ino != st.ino || size < st.size {
+		return true
+	}
+	if maxEntries > 0 && st.kept+jsonlAppendsSincePrune[path] > maxEntries+pruneSlack(maxEntries) {
+		return true
+	}
+	if maxAge > 0 && !st.oldest.IsZero() && !st.oldest.After(now.Add(-maxAge)) {
+		return true
+	}
+	return false
+}
 
 type RetentionUsage struct {
 	Path            string `json:"path"`
@@ -92,8 +144,12 @@ func runRetentionPrune() error {
 	}
 	jsonlRetentionMu.Lock()
 	defer jsonlRetentionMu.Unlock()
+	now := time.Now().UTC()
+	if !pruneNeeded(current.JSONLPath, maxEntries, maxAge, now) {
+		return nil
+	}
 	jsonlAppendsSincePrune[current.JSONLPath] = 0
-	return pruneJSONLWithLimits(current.JSONLPath, maxEntries, maxAge, time.Now().UTC())
+	return pruneJSONLWithLimits(current.JSONLPath, maxEntries, maxAge, now)
 }
 
 func pruneJSONLWithLimits(path string, maxEntries int, maxAge time.Duration, now time.Time) error {
@@ -132,9 +188,27 @@ func pruneJSONLWithLimits(path string, maxEntries int, maxAge time.Duration, now
 	if maxEntries > 0 && len(rows) > maxEntries {
 		rows = rows[len(rows)-maxEntries:]
 	}
+	var oldest time.Time
+	for _, r := range rows {
+		if !r.ts.IsZero() && (oldest.IsZero() || r.ts.Before(oldest)) {
+			oldest = r.ts
+		}
+	}
+	// What this prune leaves, for pruneNeeded (callers hold
+	// jsonlRetentionMu); a failed write records nothing, so the next prune
+	// reads the file again.
+	record := func() {
+		if ino, size, err := fileIdentity(path); err == nil {
+			jsonlPruned[path] = jsonlPruneState{ino: ino, size: size, kept: len(rows), oldest: oldest}
+		} else {
+			delete(jsonlPruned, path)
+		}
+	}
+	delete(jsonlPruned, path)
 	if len(rows) == read {
 		// Nothing to drop: leave the file as it is. Rewriting and fsyncing
 		// a 40 MB history every 5 minutes for nothing is ~12 GB a day.
+		record()
 		return nil
 	}
 
@@ -167,7 +241,20 @@ func pruneJSONLWithLimits(path string, maxEntries int, maxAge time.Duration, now
 		_ = d.Sync()
 		_ = d.Close()
 	}
+	record()
 	return nil
+}
+
+// fileIdentity is path's inode and size.
+func fileIdentity(path string) (uint64, int64, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	if sys, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return uint64(sys.Ino), fi.Size(), nil
+	}
+	return 0, fi.Size(), nil
 }
 
 func parseJSONLTime(line string) time.Time {
