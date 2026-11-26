@@ -20,7 +20,23 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **A Challenges tab on the Protection page.** What the edge did with the
+  requests, for the whole server or one vhost (and for a cPanel user, on
+  their own sites):
+  - the share that reached the site, was sent to the visitor check, was
+    blocked (WAF, ban, policy) or stopped by a traffic rule or rate limit,
+    over the window and per hour (per 15 or 5 minutes on shorter windows);
+  - how the check pages were answered: passed, never answered (a script that
+    does not run the page), refused; the pass rate per hour;
+  - the WAF hit rate (hits per inspected request) and the rules with the most
+    hits;
+  - for the administrator only: the vhosts sent to the check the most, and
+    the per-address challenge decisions by reason.
+  The edge now also counts the challenge page's own loads, so a challenged
+  visit (redirect, page, answer) is not read as three visitor requests. For
+  the 24 hours before the upgrade the page count is missing and the tab says
+  so.
 
 ## 2026.11.26
 

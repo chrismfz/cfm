@@ -22,6 +22,7 @@ const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 export const TABS = Object.freeze([
   Object.freeze({ key: "waf", label: "WAF log" }),
+  Object.freeze({ key: "challenges", label: "Challenges" }),
   Object.freeze({ key: "events", label: "Events" }),
   Object.freeze({ key: "overview", label: "Overview" }),
   // Admin only: the analyze tools and the history store read box-wide data.

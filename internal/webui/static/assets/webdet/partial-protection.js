@@ -140,6 +140,114 @@ export const PROTECTION_PARTIAL = `<template v-if="shouldShow('protection')">
 </template>
 
 <!-- Overview -->
+<!-- Challenges -->
+<template v-if="ptTab === 'challenges'">
+<section class="card wide">
+  <p class="danger-text" v-if="ptChError">{{ ptChError }}</p>
+  <p class="muted" v-if="ptChWindow.capped">The edge keeps 24 hours: these are the last 24.</p>
+  <div class="ch-tiles">
+    <div class="summary-card" v-for="t in ptChTiles" :key="t.key"><h4>{{ t.label }}</h4><div class="vp-big">{{ t.value }}</div><div class="muted pt-sub">{{ t.sub }}</div></div>
+  </div>
+</section>
+<section class="card wide">
+  <div class="pt-head"><h2>What the edge did with the requests</h2><span class="muted">{{ ptChScopeLine }}</span></div>
+  <p class="muted" v-if="!ptChBreak">No reply from the node yet.</p>
+  <template v-else-if="ptChBreak.total > 0">
+    <p class="muted">Every request of the visitors ends one of these ways (the check's own page and answers are not counted twice). Hover a part for its count.</p>
+    <div class="ch-split" role="img" :aria-label="ptChSplitAria">
+      <span v-for="p in ptChBreak.parts" v-show="p.value > 0" :key="p.key" :style="{ flexGrow: p.value, background: p.color }" :title="p.label + ': ' + ptChCount(p.value) + ' (' + p.pct + ')'"></span>
+    </div>
+    <div class="ch-legend">
+      <span v-for="p in ptChBreak.parts" :key="p.key"><i class="ch-sw" :style="{ background: p.color }"></i>{{ p.label }} <span class="muted">{{ p.pct }} · {{ ptChCount(p.value) }}</span></span>
+    </div>
+    <h3 class="pt-h3">Sent to the check or stopped, per {{ ptChEdge.step_sec >= 3600 ? 'hour' : (ptChEdge.step_sec / 60) + ' minutes' }}</h3>
+    <p class="muted pt-sub">The requests that reached the site are left out: they would flatten the rest.</p>
+    <div class="ch-cols" role="img" :aria-label="'Requests sent to the check or stopped per step, highest ' + ptChCount(ptChStack.max)">
+      <div class="ch-gl" style="bottom: 100%"><b>{{ ptChCount(ptChStack.max) }}</b></div>
+      <div class="ch-gl" style="bottom: 50%"><b>{{ ptChCount(ptChStack.max / 2) }}</b></div>
+      <div v-for="c in ptChStack.points" :key="c.t" class="ch-col" :title="c.tip">
+        <span :style="{ height: (c.h.limited * 100) + '%', background: 'var(--ch-4)' }"></span>
+        <span :style="{ height: (c.h.blocked * 100) + '%', background: 'var(--ch-3)' }"></span>
+        <span :style="{ height: (c.h.sent * 100) + '%', background: 'var(--ch-2)' }"></span>
+      </div>
+    </div>
+    <div class="ch-axis"><span v-for="(x, i) in ptChAxis" :key="i">{{ x }}</span></div>
+    <div class="ch-legend">
+      <span><i class="ch-sw" style="background: var(--ch-2)"></i>Sent to the check</span>
+      <span><i class="ch-sw" style="background: var(--ch-3)"></i>Blocked (WAF, ban, policy)</span>
+      <span><i class="ch-sw" style="background: var(--ch-4)"></i>Traffic rule or rate limit</span>
+    </div>
+  </template>
+  <p class="muted" v-else>No request in this window.</p>
+</section>
+<div class="ch-pair" v-if="ptChFunnel">
+<section class="card">
+  <h2>Did they pass the check?</h2>
+  <p class="muted">The share of the challenge pages served in each step that were passed. A low step is usually a script that never runs the page.</p>
+  <div class="ch-cols ch-cols-short" role="img" aria-label="Share of challenge pages passed, per step">
+    <div class="ch-gl" style="bottom: 100%"><b>100%</b></div>
+    <div class="ch-gl" style="bottom: 50%"><b>50%</b></div>
+    <div v-for="p in ptChPass" :key="p.t" class="ch-col" :title="p.tip"><span :style="{ height: (p.h * 100) + '%', background: 'var(--ch-1)' }"></span></div>
+  </div>
+  <div class="ch-axis"><span v-for="(x, i) in ptChAxis" :key="i">{{ x }}</span></div>
+</section>
+<section class="card">
+  <h2>From page served to page passed</h2>
+  <p class="muted" v-if="ptChFunnel.noPages">This node answered checks but counted no page: the page count starts with this version.</p>
+  <p class="muted" v-else-if="!ptChFunnel.pages">No challenge page was served in this window.</p>
+  <p class="muted" v-else>"Never answered" is a client that did not run the page: almost always a script. "Refused" includes the confirm step a person then clicks through.</p>
+  <div class="ch-funnel">
+    <template v-for="f in ptChFunnel.rows" :key="f.key">
+      <span>{{ f.label }}</span>
+      <div class="ch-fbar"><div :style="{ width: Math.max(f.value ? 0.6 : 0, f.share * 100) + '%', opacity: f.strong ? 1 : 0.55 }"></div></div>
+      <span class="pt-r">{{ ptChCount(f.value) }} <span class="muted" v-if="f.key !== 'pages'">{{ ptChPct(f.value, ptChFunnel.pages, 0) }}</span></span>
+    </template>
+  </div>
+</section>
+</div>
+<section class="card wide" v-if="!isScoped && !ptEffectiveHost">
+  <div class="pt-head"><h2>Vhosts, most sent to the check first</h2><span class="muted">vhosts with 200 requests or more; click one for its own view</span></div>
+  <p class="muted" v-if="!ptChHosts.length">No vhost with enough requests in this window.</p>
+  <div class="table-wrap" v-else>
+    <table>
+      <thead><tr><th>Vhost</th><th class="pt-r">Requests</th><th class="pt-r">Sent to the check</th><th class="pt-r">Passed</th><th class="pt-r">Blocked</th><th>Split</th></tr></thead>
+      <tbody>
+        <tr v-for="h in ptChHosts" :key="h.host">
+          <td><button type="button" class="pt-link" @click="ptChOpenHost(h.host)">{{ h.host }}</button></td>
+          <td class="pt-r">{{ h.requests }}</td><td class="pt-r">{{ h.sent }}</td><td class="pt-r">{{ h.passed }}</td><td class="pt-r">{{ h.blocked }}</td>
+          <td><div class="ch-mini"><span v-for="p in h.parts" v-show="p.value > 0" :key="p.key" :style="{ flexGrow: p.value, background: p.color }" :title="p.label + ' ' + p.pct"></span></div></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+<div class="ch-pair">
+<section class="card" v-if="!isScoped">
+  <h2>Addresses sent to the check, by reason</h2>
+  <p class="muted">The per-address decisions of the window (a detector, a WAF rule at challenge level, odd paths). A vhost under challenge covers every visitor and is not listed here.</p>
+  <p class="muted" v-if="!ptChReasons.length">None in this window.</p>
+  <div class="table-wrap" v-else>
+    <table>
+      <thead><tr><th>Reason</th><th class="pt-r">Decisions</th><th class="pt-r">Addresses</th></tr></thead>
+      <tbody><tr v-for="r in ptChReasons" :key="r.reason"><td><code>{{ r.reason }}</code> <span class="muted pt-sub">{{ r.kind }}</span></td><td class="pt-r">{{ r.decisions }}</td><td class="pt-r">{{ r.addresses }}</td></tr></tbody>
+    </table>
+  </div>
+</section>
+<section class="card">
+  <h2>{{ isScoped ? 'WAF on your site: the rules that fired' : 'WAF rules by hits' }}</h2>
+  <p class="muted">Hits against the requests the WAF inspected. A rule far above the rest on one site is usually that site's own traffic (a false positive), not an attack.</p>
+  <p class="muted" v-if="!ptChWafSum">The WAF's counts could not be read.</p>
+  <p class="muted" v-else-if="!ptChWafSum.rules.length">No WAF hit in this window.</p>
+  <div class="table-wrap" v-else>
+    <table>
+      <thead><tr><th>Rule</th><th class="pt-r">Hits</th><th class="pt-r">Of inspected</th><th>Level</th></tr></thead>
+      <tbody><tr v-for="r in ptChWafSum.rules" :key="r.id"><td><code>{{ r.id }}</code> <span class="muted pt-sub">{{ r.family }}</span></td><td class="pt-r">{{ ptChCount(r.hits) }}</td><td class="pt-r">{{ r.pct }}</td><td><span class="pill">{{ r.mode }}</span></td></tr></tbody>
+    </table>
+  </div>
+</section>
+</div>
+</template>
+
 <template v-if="ptTab === 'overview'">
 <section class="card wide">
   <h2>WAF</h2>

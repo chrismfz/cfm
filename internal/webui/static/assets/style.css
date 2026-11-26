@@ -45,6 +45,13 @@
   --c-crawler: #3987e5;
   --c-bot: #c98500;
   --c-human: #199e70;
+  /* Challenges tab (Protection): four categorical slots, one per outcome,
+     validated against the card surface (dataviz validator: CVD and
+     normal-vision separation, contrast). */
+  --ch-1: #338ced;
+  --ch-2: #e76624;
+  --ch-3: #00a888;
+  --ch-4: #d28e05;
 }
 
 :root[data-theme="light"] {
@@ -75,6 +82,10 @@
   --c-crawler: #2a78d6;
   --c-bot: #eda100;
   --c-human: #1baf7a;
+  --ch-1: #257de0;
+  --ch-2: #f47230;
+  --ch-3: #00b894;
+  --ch-4: #f2a600;
 }
 
 * { box-sizing: border-box; }
@@ -1098,3 +1109,26 @@ td, th { font-variant-numeric: tabular-nums; }
 .ml-age[hidden] { display: none; }
 .ml-wide { grid-column: 1 / -1; }
 @media (min-width: 900px) { .ml-mid { grid-column: span 2; } }
+
+/* ── Protection › Challenges (feature-protection.js, challenges-model.js) ─ */
+.ch-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .6rem; }
+.ch-split { display: flex; gap: 2px; height: 22px; border-radius: 6px; overflow: hidden; margin: .4rem 0; }
+.ch-split span { display: block; height: 100%; min-width: 2px; }
+.ch-mini { display: flex; gap: 2px; height: 10px; border-radius: 4px; overflow: hidden; min-width: 140px; }
+.ch-mini span { display: block; height: 100%; min-width: 1px; }
+.ch-legend { display: flex; flex-wrap: wrap; gap: .3rem 1.1rem; font-size: .8rem; margin: .5rem 0 0; }
+.ch-sw { display: inline-block; width: .7rem; height: .7rem; border-radius: 3px; margin-right: .35rem; vertical-align: -1px; }
+.ch-cols { position: relative; display: flex; align-items: flex-end; gap: 3px; height: 170px; border-bottom: 1px solid var(--border); margin-top: 1.2rem; }
+.ch-cols-short { height: 130px; }
+.ch-col { flex: 1 1 0; min-width: 3px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; gap: 1px; }
+.ch-col:hover { filter: brightness(1.2); }
+.ch-col span { display: block; width: 100%; }
+.ch-col span:first-child { border-radius: 3px 3px 0 0; }
+.ch-gl { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--border-soft); pointer-events: none; }
+.ch-gl b { position: absolute; right: 0; top: -1.05rem; font-weight: 400; font-size: .7rem; color: var(--muted); }
+.ch-axis { display: flex; justify-content: space-between; font-size: .7rem; color: var(--muted); margin-top: .35rem; }
+.ch-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; grid-column: 1 / -1; }
+.ch-pair > .card { min-width: 0; }
+.ch-funnel { display: grid; grid-template-columns: 8.5rem minmax(0, 1fr) 7.5rem; gap: .5rem .7rem; align-items: center; font-size: .85rem; }
+.ch-fbar { background: var(--bg-inset); border-radius: 0 4px 4px 0; height: 14px; }
+.ch-fbar div { height: 100%; background: var(--ch-1); border-radius: 0 4px 4px 0; }
