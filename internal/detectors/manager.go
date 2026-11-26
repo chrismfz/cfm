@@ -49,6 +49,10 @@ type manager struct {
 	// signature it was taken under. Poll goroutine only.
 	modsecProbes map[string]cachedProbe
 
+	// readCache: the last detectors.conf read, reused while the files are
+	// unchanged (reload_cache.go). Poll goroutine only.
+	readCache reloadCache
+
 	running bool
 	state   *core.State
 
@@ -127,10 +131,15 @@ func probeSourceStatus(kv KV) (bool, string) {
 // overlay; LayerSig = the overlay set's name+mtime+size hash, the independent
 // signal for an overlay edited/removed/renamed/added-with-an-older-mtime) OR
 // any watched LOG_PATH is rotated (inode/dev changes — prevents tailers
-// sticking to a deleted FD).
-func cfgSig(secs *Sections) uint64 {
+// sticking to a deleted FD). files is the config files' stamp
+// (configFilesStamp: size, mtime and inode of the base file and of each
+// overlay; 0 when they could not be stat'ed): without it, a file replaced
+// with its mtime kept (rsync -a, cp -p) never reloaded.
+func cfgSig(secs *Sections, files uint64) uint64 {
 	h := fnv.New64a()
 	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], files)
+	_, _ = h.Write(b[:])
 	binary.LittleEndian.PutUint64(b[:], uint64(secs.StampNS))
 	_, _ = h.Write(b[:])
 	binary.LittleEndian.PutUint64(b[:], secs.LayerSig)
@@ -215,7 +224,8 @@ func Start(parent context.Context, opts Options) {
 func (m *manager) loop(parent context.Context) {
 
 	// Poll frequently, but reload only after debounce (stable signature).
-	// Config is tiny, so 1500ms polling is fine.
+	// A poll parses the config only when its files moved (readForReload);
+	// the rest of it (the tailed logs' inodes, the source probes) is stats.
 	t := time.NewTicker(2500 * time.Millisecond)
 
 	defer t.Stop()
@@ -238,7 +248,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		return
 	}
 
-	secs, err, fallback := readSectionsForReload(path, m.running)
+	secs, err, fallback := m.readForReload(path)
 	readErr, firstLoad := err, !m.running // err is reused below; the governor sync needs this one
 	if err != nil {
 		switch {
@@ -263,7 +273,7 @@ func (m *manager) maybeReload(parent context.Context) {
 		// control-plane protection above.
 		applyBuiltinLoginBruteforce(&secs)
 	}
-	sig := cfgSig(&secs)
+	sig := cfgSig(&secs, m.readCache.files)
 	configured := make([]detectorstatus.SectionConfig, 0, len(secs.ByName))
 	configuredSections := make([]string, 0, len(secs.ByName))
 	enabledCount := 0

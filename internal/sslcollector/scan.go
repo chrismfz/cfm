@@ -128,6 +128,7 @@ func (c *Collector) Refresh(ctx context.Context) error {
 	c.exact = nextExact
 	c.wildSuffix = nextWild
 	c.mu.Unlock()
+	c.forgetStats() // the old maps go now, not at the next /stats
 	c.forgetBuildFailures(failed)
 
 	c.filesMu.Lock()

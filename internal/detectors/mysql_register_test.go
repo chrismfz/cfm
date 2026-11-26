@@ -153,7 +153,7 @@ func TestManagerSyncsGovernorConfigInTheFactorySweep(t *testing.T) {
 	}
 	body = regexp.MustCompile(`(?m)//.*$`).ReplaceAllString(body, "")
 
-	read := strings.Index(body, "readSectionsForReload(path, m.running)")
+	read := strings.Index(body, "m.readForReload(path)") // readSectionsForReload behind the stamp
 	capture := regexp.MustCompile(`readErr, firstLoad := err, !m\.running`).FindStringIndex(body)
 	earlyReturn := strings.Index(body, "sig == m.lastSig")
 	call := strings.Index(body, "syncPendingGovernor(secs.ByName, readErr, firstLoad)")
@@ -163,7 +163,7 @@ func TestManagerSyncsGovernorConfigInTheFactorySweep(t *testing.T) {
 		t.Fatalf("maybeReload is missing a piece: read=%d capture=%v early-return=%d sync=%d loop=%d",
 			read, capture, earlyReturn, call, loop)
 	case !(read < capture[0] && strings.Count(body[read:capture[0]], "\n") <= 1):
-		t.Fatal("readErr/firstLoad must be captured on the line right after readSectionsForReload")
+		t.Fatal("readErr/firstLoad must be captured on the line right after the read (readForReload)")
 	case !(earlyReturn < call && call < loop):
 		t.Fatal("syncPendingGovernor must run after the unchanged-config early return and before the section loop")
 	}

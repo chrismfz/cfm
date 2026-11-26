@@ -99,9 +99,7 @@ func TestWriteSnapshotSkipsAnUnchangedVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A changed index is written.
-	col.mu.Lock()
-	col.exact["b.example.com"] = col.exact["a.example.com"]
-	col.mu.Unlock()
+	putExact(col, "b.example.com", col.exact["a.example.com"])
 	col.WriteSnapshot()
 	if st, _ := os.Stat(path); st.ModTime().Equal(old2) {
 		t.Error("changed index not written")
@@ -118,9 +116,11 @@ func TestWriteSnapshotSkipsAnUnchangedVersion(t *testing.T) {
 func TestVersionReflectsTheNameToPairMapping(t *testing.T) {
 	col, _ := newSnapshotCollector(t)
 	v1 := col.Stats().Version
+	// As a scan does: new maps (Stats reuses its version for the same maps).
 	col.mu.Lock()
 	a, w := col.exact["a.example.com"], col.wildSuffix["example.com"]
-	col.exact["a.example.com"], col.wildSuffix["example.com"] = w, a
+	col.exact = map[string]*Entry{"a.example.com": w}
+	col.wildSuffix = map[string]*Entry{"example.com": a}
 	col.mu.Unlock()
 	if col.Stats().Version == v1 {
 		t.Fatal("swapping which pair serves each name did not change the version")
@@ -173,7 +173,7 @@ func TestIncompleteSnapshotIsNeitherServedNorKept(t *testing.T) {
 	if err := os.WriteFile(key, fakePEM("PRIVATE KEY", 4), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	col.exact["a.example.com"] = &Entry{Fingerprint: "fpA2", CertPath: col.exact["a.example.com"].CertPath, KeyPath: key, NotAfter: time.Now().Add(24 * time.Hour)}
+	putExact(col, "a.example.com", &Entry{Fingerprint: "fpA2", CertPath: col.exact["a.example.com"].CertPath, KeyPath: key, NotAfter: time.Now().Add(24 * time.Hour)})
 	if err := os.Rename(key, key+".gone"); err != nil {
 		t.Fatal(err)
 	}
@@ -201,9 +201,7 @@ func TestIncompleteSnapshotIsNeitherServedNorKept(t *testing.T) {
 func TestPayloadRacingARefreshIsNotComplete(t *testing.T) {
 	col, path := newSnapshotCollector(t)
 	dumpAllAfterStatsHook = func() {
-		col.mu.Lock()
-		col.exact["late.example.com"] = col.exact["a.example.com"]
-		col.mu.Unlock()
+		putExact(col, "late.example.com", col.exact["a.example.com"])
 	}
 	t.Cleanup(func() { dumpAllAfterStatsHook = nil })
 	col.WriteSnapshot()
@@ -250,9 +248,7 @@ func TestDumpAllBuildsOncePerVersion(t *testing.T) {
 	}
 
 	// A new version is built afresh (and becomes the snapshot).
-	col.mu.Lock()
-	col.exact["b.example.com"] = col.exact["a.example.com"]
-	col.mu.Unlock()
+	putExact(col, "b.example.com", col.exact["a.example.com"])
 	if b := dumpAllBody(t, s); builds != 2 || !strings.Contains(b, `"b.example.com"`) {
 		t.Errorf("new version: builds=%d", builds)
 	}
@@ -284,7 +280,7 @@ func TestDumpAllRebuildsAnIncompletePayload(t *testing.T) {
 	if err := os.WriteFile(key, fakePEM("PRIVATE KEY", 4), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	col.exact["a.example.com"] = &Entry{Fingerprint: "fpA2", CertPath: col.exact["a.example.com"].CertPath, KeyPath: key, NotAfter: time.Now().Add(24 * time.Hour)}
+	putExact(col, "a.example.com", &Entry{Fingerprint: "fpA2", CertPath: col.exact["a.example.com"].CertPath, KeyPath: key, NotAfter: time.Now().Add(24 * time.Hour)})
 	if err := os.Rename(key, key+".gone"); err != nil {
 		t.Fatal(err)
 	}
@@ -411,9 +407,7 @@ func TestWriteSnapshotDoesNotHoldThePayloadInMemory(t *testing.T) {
 func TestDumpAllAfterAVersionChangeDoesNotHoldThePayloadInMemory(t *testing.T) {
 	col, path := bigCollector(t)
 	col.WriteSnapshot()
-	col.mu.Lock()
-	col.exact["new.example"] = col.exact["h00.d000.example"]
-	col.mu.Unlock()
+	putExact(col, "new.example", col.exact["h00.d000.example"])
 	s := &sockServer{col: col, cfg: SockServerConfig{Token: strongToken}}
 	var w discardWriter
 	alloc := allocatedBy(func() {
@@ -596,4 +590,18 @@ func TestDumpAllBuiltRechecksAfterWaiting(t *testing.T) {
 	if _, _, err := col.dumpAllBuilt(context.Background()); !errors.Is(err, errSnapshotCurrent) || builds != 0 {
 		t.Errorf("snapshot current: err=%v builds=%d", err, builds)
 	}
+}
+
+// putExact sets host in col's exact index the way a scan changes it: a new
+// map (Stats reuses its version while the maps are the ones it hashed, so a
+// test that changed a map in place could read a stale version).
+func putExact(col *Collector, host string, e *Entry) {
+	col.mu.Lock()
+	defer col.mu.Unlock()
+	m := make(map[string]*Entry, len(col.exact)+1)
+	for k, v := range col.exact {
+		m[k] = v
+	}
+	m[host] = e
+	col.exact = m
 }

@@ -880,8 +880,8 @@ cPanel — every rule here exists because of that. Design + as-built:
   mix, then re-raises),
   so `systemctl reload cfm` restarts it (systemd `Restart=always`). A config
   reload builds a new webdetector Engine, which empties the in-memory Site
-  Cache stats view; it follows any save (file mtime) and the rotation of a
-  tailed detector log (inode).
+  Cache stats view; it follows any save (a file's mtime, size or inode) and
+  the rotation of a tailed detector log (inode).
 
 ---
 
