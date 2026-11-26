@@ -31,8 +31,22 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   browsers), and allows up to ~32 MB of stream buffers per QUIC connection
   in each direction, 4x before (unacked response data included: lower
   `http3_max_concurrent_streams` under memory pressure on UDP 9043). HTTP/1.1 and HTTP/2 are untouched.
+### Added
+- **`docs/node-setup.md`: setting up a node from installed packages to the
+  edge in the path**, for a new server or a rebuild after a disaster: the
+  order of the steps, which values are per node (`cfm.api.conf`,
+  `NFT_DNAT_PRIORITY = -101` on Imunify360 nodes, `MYBLOCK` commented out in
+  the shipped `cfm.blocklists`), what no package sets up (clamd, the cPanel
+  plugin, the first admin user) and the checks before and after `cfm edge on`.
+  Linked from the README.
 
 ### Fixed
+- **The daemon starts on a fresh node.** The unit writes its stdout/stderr to
+  `/var/log/cfm/…`, and systemd opens those files before it creates
+  `LogsDirectory=`, so on a server that never had `/var/log/cfm` the service
+  failed with `209/STDOUT` on every restart and never came up. The rpm now
+  owns the directory (0700 root:root, the unit's mode) and the deb postinst
+  creates it when it is missing.
 - **The sslcollector's `/stats` no longer hashes every certificate on each
   call.** The edge polls it to see a renewal, and each call hashed every
   host and pair again: ~10 % of the daemon's CPU on the nodes with the most
