@@ -33,7 +33,6 @@ type Source string
 const (
 	SrcNFT      Source = "nft"
 	SrcCFMDeny  Source = "cfm.deny"
-	SrcCSF      Source = "csf"
 	SrcImunify  Source = "imunify360"
 	SrcFeeds    Source = "feeds"
 	SrcFail2Ban Source = "fail2ban"
@@ -110,10 +109,6 @@ func Do(ctx context.Context, ip net.IP, opts Options) (*Result, error) {
 // ----------------- helpers -----------------------
 
 func binaryExists(name string) bool { _, err := exec.LookPath(name); return err == nil }
-
-func runCmd(ctx context.Context, r *Result, src Source, name string, args ...string) {
-	addStep(r, runTool(ctx, src, name, args...))
-}
 
 // setsLister is a backend's listing of the sets without their elements
 // (both engines: `nft -j -t list sets` on exec, netlink on nftlib).
@@ -219,7 +214,7 @@ func unitActive(unit string) bool {
 
 func allowedBinary(name string) bool {
 	switch name {
-	case "csf", "fail2ban-client", "imunify360-agent":
+	case "fail2ban-client", "imunify360-agent":
 		return true
 	default:
 		return false
@@ -232,7 +227,7 @@ func allowedConfigFile(name string) bool {
 
 func allowedSystemdUnit(unit string) bool {
 	switch unit {
-	case "csf", "fail2ban", "imunify360", "imunify360-agent", "imunify360.service", "imunify360-agent.service":
+	case "fail2ban", "imunify360", "imunify360-agent", "imunify360.service", "imunify360-agent.service":
 		return true
 	default:
 		return false

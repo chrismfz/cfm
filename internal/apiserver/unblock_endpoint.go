@@ -7,7 +7,7 @@
 //
 //   - Accepts POST with query (?ip=1.2.3.4), JSON, form, or plain-text body
 //   - Immediately removes the IP from nft and replies with JSON
-//   - Fires a background goroutine for CSF / Fail2Ban / Imunify cleanup
+//   - Fires a background goroutine for Fail2Ban / Imunify cleanup
 //     (via unblock.Do) and writes the full step log to api.log
 package apiserver
 
@@ -34,7 +34,7 @@ var unblockDo = unblock.Do
 // RegisterUnblock adds the /unblock route to the provided mux.
 //
 // Manual IP unblock is admin-only: it removes the IP from every blocking plane
-// (nft, cfm.deny, csf, fail2ban, imunify360, OpenResty/Lua WAF), allows it in
+// (nft, cfm.deny, fail2ban, imunify360, OpenResty/Lua WAF), allows it in
 // nft for 24h when a feed lists it and gives it a 1h imunify360 white grace
 // entry (unblock.DoMany says when not). That is a host-wide state change with
 // no per-vhost meaning, so a scoped (cPanel/DA) token must

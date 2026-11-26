@@ -5,7 +5,7 @@
 //	GET /search?ip=1.2.3.4        (also accepts a CIDR)
 //
 // It runs the same multi-source locate used by `cfm search`: nft,
-// cfm.deny, csf, fail2ban and imunify360 — strictly read-only, no state
+// cfm.deny, fail2ban and imunify360 — strictly read-only, no state
 // changes. It is nonetheless admin-only: the result enumerates every place
 // an arbitrary IP is blocked host-wide (all vhosts, all planes), which is
 // cross-tenant reconnaissance with no per-vhost scoping, so a scoped

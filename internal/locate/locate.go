@@ -6,7 +6,6 @@
 //
 //   - nft        — the cfm table (manual sets, dyn sets, per-feed sets)
 //   - cfm.deny   — the static deny file in the config dir
-//   - csf        — csf.deny / csf.allow / csf.tempban / csf.tempallow
 //   - fail2ban   — banned entries per jail
 //   - imunify360 — local ip-list (white / drop / captcha=GRAY)
 //
@@ -31,7 +30,7 @@ import (
 
 // Location is one place the queried IP/CIDR was found.
 type Location struct {
-	Source string `json:"source"`           // nft | cfm.deny | csf | fail2ban | imunify360
+	Source string `json:"source"`           // nft | cfm.deny | fail2ban | imunify360
 	List   string `json:"list"`             // set name / file / jail / purpose
 	Action string `json:"action"`           // ALLOW | BLOCK | CHALLENGE | MATCH
 	Match  string `json:"match"`            // the stored entry that matched (ip, cidr or range)
@@ -51,15 +50,16 @@ type Result struct {
 	Query     string            `json:"query"`
 	Locations []Location        `json:"locations"`
 	Skipped   map[string]string `json:"skipped,omitempty"` // source -> why it was not probed
+	// TookMS is how long each source took, in milliseconds (the sources run
+	// in parallel, so the slowest one is the lookup's time). One batch's
+	// sources are shared by all of its results.
+	TookMS map[string]int64 `json:"took_ms,omitempty"`
 }
 
 // Options configures which sources Find can reach.
 type Options struct {
 	BE        firewall.Backend // nft backend; nil = nft skipped
 	ConfigDir string           // for cfm.deny; "" = skipped
-	// CSFDir / CSFDataDir override the default csf paths (tests).
-	CSFDir     string // default /etc/csf
-	CSFDataDir string // default /var/lib/csf
 }
 
 // query holds the parsed search argument (plain IP or CIDR).
@@ -98,7 +98,7 @@ func Find(ctx context.Context, arg string, opts Options) (*Result, error) {
 }
 
 // FindMany is Find for many IPs/CIDRs: each source is read once — the nft
-// table and its sets, cfm.deny, the csf files, fail2ban's ban list,
+// table and its sets, cfm.deny, fail2ban's ban list,
 // imunify360's local list — and matched against every query, where Find per
 // query read them all each time. Results are keyed by the argument as given;
 // an unparsable argument is an error for the whole call.
@@ -129,13 +129,19 @@ func FindMany(ctx context.Context, args []string, opts Options) (map[string]*Res
 		why     string   // the source couldn't be probed
 		partial string   // probed, but not all of it (locs stand)
 		skip    []string // per query, where only some couldn't be answered
+		took    time.Duration
 	}
-	sources := []string{"nft", "cfm.deny", "csf", "fail2ban", "imunify360"}
+	sources := []string{"nft", "cfm.deny", "fail2ban", "imunify360"}
 	answers := make([]answer, len(sources))
 	var wg sync.WaitGroup
 	run := func(i int, fn func() answer) {
 		wg.Add(1)
-		go func() { defer wg.Done(); answers[i] = fn() }()
+		go func() {
+			defer wg.Done()
+			t0 := time.Now()
+			answers[i] = fn()
+			answers[i].took = time.Since(t0)
+		}()
 	}
 
 	// nft — ipquery is containment- and feed-aware.
@@ -181,28 +187,30 @@ func FindMany(ctx context.Context, args []string, opts Options) (map[string]*Res
 		answers[1].why = "no config dir"
 	}
 
-	// csf (file-based; works even when the csf service is stopped,
-	// since csf.deny content is what csf would enforce).
-	run(2, func() answer {
-		locs, why := searchCSF(opts, qs)
-		return answer{locs: locs, why: why}
-	})
-
 	// fail2ban
-	run(3, func() answer {
+	run(2, func() answer {
 		locs, why := searchFail2Ban(ctx, qs)
 		return answer{locs: locs, why: why}
 	})
 
 	// imunify360
-	run(4, func() answer {
+	run(3, func() answer {
 		locs, skip, why := searchImunify(ctx, qs)
 		return answer{locs: locs, skip: skip, why: why}
 	})
 
 	wg.Wait()
+	took := map[string]int64{}
+	for s, ans := range answers {
+		if ans.took > 0 {
+			took[sources[s]] = ans.took.Milliseconds()
+		}
+	}
 	for a, i := range byArg {
 		r := out[a]
+		if len(took) > 0 {
+			r.TookMS = took
+		}
 		for s, ans := range answers {
 			switch {
 			case ans.why != "":

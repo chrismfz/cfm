@@ -7,7 +7,7 @@
 //   GET  /api/v1/firewall/path      — host-wide nft hook order + NAT conflicts
 //   POST /api/v1/firewall/block     — manual block (same as Quick controls)
 //   POST /unblock?ip=…              — cross-layer unblock (nft + WAF planes +
-//                                     CSF/Fail2Ban/Imunify background cleanup)
+//                                     Fail2Ban/Imunify background cleanup)
 //
 // Admin-only endpoints; scoped tokens never see this page's data.
 
@@ -217,7 +217,7 @@
 
   async function unblockIP(ip) {
     if (!ip) return;
-    if (!window.confirm(`Unblock ${ip}?\n\nRemoves it from nft immediately and clears WAF/challenge state; CSF/Fail2Ban/Imunify cleanup runs in the background.`)) return;
+    if (!window.confirm(`Unblock ${ip}?\n\nRemoves it from nft immediately and clears WAF/challenge state; Fail2Ban/Imunify cleanup runs in the background.`)) return;
     try {
       // /unblock lives at the root (not under /api) — call it through the
       // cfm-admin prefix directly.

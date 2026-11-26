@@ -56,7 +56,7 @@ type Feed struct {
 	TTL      *time.Duration // optional, per-feed element timeout
 }
 
-// ParseConfig διαβάζει ένα αρχείο τύπου CSF (NAME|TYPE|INTERVAL|MAX|URL[|TTL=1h])
+// ParseConfig διαβάζει ένα αρχείο blocklists (NAME|TYPE|INTERVAL|MAX|URL[|TTL=1h])
 // Αγνοεί κενές γραμμές και σχόλια (#...).
 func ParseConfig(r io.Reader) ([]Feed, error) {
 	var feeds []Feed
@@ -89,14 +89,14 @@ func ParseConfig(r io.Reader) ([]Feed, error) {
 		case "CHALLENGE":
 			typ = TypeChallenge
 		default:
-			// συμβατότητα με CSF που δεν έχει TYPE: αν δίνεται μόνο 4 πεδία και λείπει TYPE,
+			// συμβατότητα με την παλιά μορφή χωρίς TYPE: αν δίνεται μόνο 4 πεδία και λείπει TYPE,
 			// μπορείς να προσαρμόσεις εδώ. Προς το παρόν απαιτούμε 5 πεδία.
 			continue
 		}
 		ivalS := strings.TrimSpace(parts[2])
 		ivalSec, err := strconv.Atoi(ivalS)
 		if err != nil || ivalSec < 3600 {
-			// ελάχιστο 3600s, όπως CSF
+			// ελάχιστο 3600s
 			continue
 		}
 		maxS := strings.TrimSpace(parts[3])

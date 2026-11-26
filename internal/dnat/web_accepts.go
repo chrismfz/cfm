@@ -19,7 +19,7 @@ import (
 // path printed nothing. The helpers below parse the live input chain and let
 // the CLI report the same information for the web scope, which turns an
 // invisible mechanism into a diagnosable one: if an accept shows `open` but
-// traffic is still blocked, the drop is upstream (CSF/Imunify INPUT filtering
+// traffic is still blocked, the drop is upstream (Imunify INPUT filtering
 // or the edge not listening on that port), not a missing CFM rule.
 
 // webDNATAcceptSpec is one expected scoped accept for the global web redirect:
@@ -168,7 +168,7 @@ func printWebDNATAcceptsOnEnable(backend firewall.Backend, httpPort, httpsPort i
 		case "blocked":
 			fmt.Printf("Firewall: WARNING scoped accept %s is present but sits AFTER the default drop; traffic to :%d will be dropped — run `cfm dnat off` then `cfm dnat on` to reinstall it\n", st.mapping(), st.To)
 		default:
-			fmt.Printf("Firewall: WARNING scoped accept %s NOT installed; traffic to :%d will be dropped unless an external firewall (CSF/Imunify) or TCP_IN opens :%d\n", st.mapping(), st.To, st.To)
+			fmt.Printf("Firewall: WARNING scoped accept %s NOT installed; traffic to :%d will be dropped unless an external firewall (Imunify) or TCP_IN opens :%d\n", st.mapping(), st.To, st.To)
 		}
 	}
 }
@@ -180,6 +180,6 @@ func webDNATAcceptStateLabel(state string) string {
 	case "blocked":
 		return "BLOCKED (accept present but after the default drop; reinstall via cfm dnat off/on)"
 	default:
-		return "ABSENT (listener port not opened — check external firewall/CSF/Imunify or add to TCP_IN)"
+		return "ABSENT (listener port not opened — check external firewall/Imunify or add to TCP_IN)"
 	}
 }

@@ -197,7 +197,7 @@ line per mapping, and `cfm dnat` (status) lists each mapping under
 - `ABSENT`: not installed.
 
 If every mapping is `open` and a client still cannot connect, the drop is
-outside CFM: an external firewall filtering the listener ports (a CSF or
+outside CFM: an external firewall filtering the listener ports (an
 Imunify `INPUT` chain runs after CFM's input chain and knows nothing of
 them), or an edge proxy listening only on `127.0.0.1`.
 

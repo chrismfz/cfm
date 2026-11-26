@@ -43,18 +43,13 @@ func sources(locs []Location) string {
 // Many queries read each source once, and each gets its own answer — the
 // nft one from an nftlib backend too, where Find used to find nothing.
 func TestFindMany_ReadsEachSourceOnce(t *testing.T) {
-	withCSF(t, true)
 	cfg := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cfg, "cfm.deny"), []byte("8.8.0.0/16 # bulk\n1.1.1.1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	etc, data := t.TempDir(), t.TempDir()
-	if err := os.WriteFile(filepath.Join(etc, "csf.deny"), []byte("1.1.1.0/24 # csf net\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	be := &nftlibBE{reads: map[string]int{}}
 	args := []string{"198.51.100.9", "192.0.2.7", "8.8.4.4", "1.1.1.1", "9.9.9.9", "198.51.100.9", "1.1.0.0/16"}
-	res, err := FindMany(context.Background(), args, Options{BE: be, ConfigDir: cfg, CSFDir: etc, CSFDataDir: data})
+	res, err := FindMany(context.Background(), args, Options{BE: be, ConfigDir: cfg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,9 +57,9 @@ func TestFindMany_ReadsEachSourceOnce(t *testing.T) {
 		"198.51.100.9": "nft:block_v4:198.51.100.9",
 		"192.0.2.7":    "nft:block_ext_v4_nets_MYBLOCK:192.0.2.0/24",
 		"8.8.4.4":      "cfm.deny:cfm.deny:8.8.0.0/16",
-		"1.1.1.1":      "cfm.deny:cfm.deny:1.1.1.1 csf:csf.deny:1.1.1.0/24",
+		"1.1.1.1":      "cfm.deny:cfm.deny:1.1.1.1",
 		"9.9.9.9":      "",
-		"1.1.0.0/16":   "cfm.deny:cfm.deny:1.1.1.1 csf:csf.deny:1.1.1.0/24",
+		"1.1.0.0/16":   "cfm.deny:cfm.deny:1.1.1.1",
 	} {
 		r := res[arg]
 		if r == nil {
@@ -76,6 +71,13 @@ func TestFindMany_ReadsEachSourceOnce(t *testing.T) {
 		}
 		if r.Query != arg {
 			t.Errorf("%s: Query = %q", arg, r.Query)
+		}
+		// Each source's time rides on every result of the batch.
+		if _, ok := r.TookMS["nft"]; !ok {
+			t.Errorf("%s: no nft time in %v", arg, r.TookMS)
+		}
+		if _, ok := r.TookMS["csf"]; ok {
+			t.Errorf("%s: a csf source ran", arg)
 		}
 	}
 	if len(res) != 6 {

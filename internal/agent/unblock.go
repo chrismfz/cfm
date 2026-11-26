@@ -23,7 +23,7 @@ import (
 const unblockPart = 500
 
 // ProcessUnblocks unblocks a batch of pending requests — one unblock.DoMany
-// per part of up to unblockPart requests (nft, cfm.deny, csf, fail2ban,
+// per part of up to unblockPart requests (nft, cfm.deny, fail2ban,
 // imunify, feeds allow, WAF planes) — and confirms each part's requests to
 // the API as it finishes, success=true always so the queue never sticks.
 // found holds each request's pre-removal locate result (where & why), keyed

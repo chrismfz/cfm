@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -149,7 +150,12 @@ func locateUnblocks(ctx context.Context, reqs []PendingUnblock, opts locate.Opti
 		logging.LogfAPI("[unblock] locate failed (%d IPs): %v", len(ips), err)
 		return found
 	}
-	logging.LogfAPI("[unblock] located %d IPs in %s", len(ips), time.Since(start).Round(time.Millisecond))
+	var took map[string]int64
+	for _, r := range res {
+		took = r.TookMS // one batch: every result carries the same times
+		break
+	}
+	logging.LogfAPI("[unblock] located %d IPs in %s%s", len(ips), time.Since(start).Round(time.Millisecond), formatSourceTimes(took))
 	for _, it := range reqs {
 		r := res[it.IP]
 		if r == nil {
@@ -309,4 +315,22 @@ func hostForLog(baseURL string) string {
 		return baseURL
 	}
 	return u.Host
+}
+
+// formatSourceTimes is " (fail2ban 64ms, imunify360 8.9s, nft 12ms)": each
+// locate source's time, sorted by name; "" without any.
+func formatSourceTimes(took map[string]int64) string {
+	if len(took) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(took))
+	for n := range took {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		parts = append(parts, n+" "+(time.Duration(took[n])*time.Millisecond).String())
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }

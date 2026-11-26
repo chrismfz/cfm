@@ -48,7 +48,7 @@ const graceComment = "CFM auto-unblock"
 //     instead, and a set that can't be read is looked up IP by IP);
 //   - the block sets are written in one batch (RemoveBlockBatch);
 //   - cfm.deny is rewritten once;
-//   - csf, fail2ban and imunify360 are each checked for once;
+//   - fail2ban and imunify360 are each checked for once;
 //   - every IP is unbanned from fail2ban, many per fail2ban-client run (an
 //     unban also clears the IP's ban history, which bantime.increment reads,
 //     so it isn't limited to the IPs banned right now);
@@ -170,28 +170,10 @@ func DoMany(ctx context.Context, ips []net.IP, opts Options) map[string]*Result 
 		})
 	}
 
-	// 2) csf, fail2ban, imunify360 — each checked for once, run in parallel.
+	// 2) fail2ban, imunify360 — each checked for once, run in parallel.
 	// Their steps go through addStep: the goroutines append to the same
 	// results.
 	var wg sync.WaitGroup
-	if binaryExists("csf") && unitActive("csf") {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			// csf takes one address per command.
-			for _, ip := range list {
-				r := out[ip.String()]
-				runCmd(ctx, r, SrcCSF, "csf", "-tr", ip.String())
-				runCmd(ctx, r, SrcCSF, "csf", "-dr", ip.String())
-				runCmd(ctx, r, SrcCSF, "csf", "-ta", ip.String())
-			}
-		}()
-	} else {
-		each(func(r *Result) {
-			addStep(r, Step{Source: SrcCSF, Action: ActionChecked, Detail: "not present or inactive"})
-		})
-	}
-
 	if binaryExists("fail2ban-client") && unitActive("fail2ban") {
 		wg.Add(1)
 		go func() { defer wg.Done(); fail2banUnbanMany(ctx, list, out) }()

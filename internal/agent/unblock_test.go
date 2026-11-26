@@ -38,7 +38,7 @@ func (b *unblockBackend) ListTableTextNoDNS(string, string) (string, error) {
 // IP (and unblock.Do ran it again): 2x 10-70s on busy nodes, per IP, on the
 // agent's work loop.
 func TestProcessUnblocks_NoEnsureBase(t *testing.T) {
-	t.Setenv("PATH", t.TempDir()) // never run a real csf/fail2ban/imunify here
+	t.Setenv("PATH", t.TempDir()) // never run a real fail2ban/imunify here
 	var confirmed atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/unblock-confirm") {
@@ -122,5 +122,15 @@ func TestProcessUnblocks_PartsConfirmedAsTheyFinish(t *testing.T) {
 	if confirmed.Load() != int32(len(reqs)) || confirmedDuringFirst.Load() != int32(len(reqs)/2) {
 		t.Errorf("confirmed %d (%d before the second part ran); want all %d, the first %d before",
 			confirmed.Load(), confirmedDuringFirst.Load(), len(reqs), len(reqs)/2)
+	}
+}
+
+// The located line names each locate source's time, sorted by name.
+func TestFormatSourceTimes(t *testing.T) {
+	if got := formatSourceTimes(map[string]int64{"nft": 12, "imunify360": 8900, "fail2ban": 64}); got != " (fail2ban 64ms, imunify360 8.9s, nft 12ms)" {
+		t.Errorf("got %q", got)
+	}
+	if got := formatSourceTimes(nil); got != "" {
+		t.Errorf("no times: %q", got)
 	}
 }

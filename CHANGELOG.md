@@ -28,8 +28,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `openresty.conf`; on Debian / Ubuntu it is the edge until the cfm-edge `.deb`
   ships). `install-angie.sh` still works but warns that Angie is deprecated; removing Angie support is a later change. Nothing changes on a
   running node.
+- **An IP lookup (`cfm which`/`search`, the unblock's "where & why") reports
+  each source's time** (`took_ms`: nft, cfm.deny, fail2ban, imunify360), and
+  the agent's `located N IPs` line shows them: orion's first lookup of a
+  batch took 9 s with no slow nft read, and the total alone could not say
+  which source it was.
 
 ### Removed
+- **csf support.** The vendor has closed down and no node runs it: an IP
+  lookup no longer reads `/etc/csf` / `/var/lib/csf`, an unblock no longer
+  runs `csf -tr/-dr/-ta`, and csf is gone from the help texts, docs and the
+  firewall diagnostics' rule owners.
 - **`scripts/openresty_generate_self-signed.sh`.** Nothing called it, and it
   failed without OpenResty. Every edge installer (`install-edge.sh`,
   `install-openresty.sh`, `install-angie.sh`) and the package's config deploy
