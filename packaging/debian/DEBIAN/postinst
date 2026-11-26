@@ -24,6 +24,13 @@ if ! getent passwd cfm >/dev/null 2>&1; then
         cfm
 fi
 
+# /var/log/cfm must exist before the first start: the unit's
+# StandardOutput=append:/var/log/cfm/... is opened BEFORE systemd creates
+# LogsDirectory=, so without it the daemon fails 209/STDOUT on every restart
+# (a fresh node, 2026-11-26). Same mode as the unit's LogsDirectoryMode; an
+# existing directory is left as it is.
+[ -d /var/log/cfm ] || install -d -m 0700 -o root -g root /var/log/cfm
+
 # ensure config dir, force 0700 on both new and upgrade installs.
 # /etc/cfm holds bypass lists, kernsec.conf, lsm.conf and other root-only
 # config; anything needing non-root read access lives in /var/lib/cfm/.
