@@ -20,6 +20,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Changed
+- **The edge's HTTP/3 stream window is 256k, not nginx's 64k**
+  (`http3_stream_buffer_size 256k`, with the default 128 streams stated).
+  With 64k, parallel HTTP/3 fetches stalled on lossy mobile paths: images
+  stopped at exactly 65536 bytes for 60 s before the browser fell back to
+  HTTP/2 (nginx/nginx#1407). 256k is a mitigation still to be measured (the
+  issue's measured fix was 1m plus a patch). It applies to every client that
+  speaks HTTP/3 to the edge (Alt-Svc, per-vhost opt-in, only invites
+  browsers), and allows up to 32 MB of stream buffers per QUIC connection,
+  4x before. HTTP/1.1 and HTTP/2 are untouched.
+
 ### Fixed
 - **The sslcollector's `/stats` no longer hashes every certificate on each
   call.** The edge polls it to see a renewal, and each call hashed every
