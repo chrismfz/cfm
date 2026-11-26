@@ -109,3 +109,37 @@ func httptestDecision(t *testing.T, b *NginxBridge, ip, host string) map[string]
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)
 	return out
 }
+
+// A real verify records the solve for the probe under its host and scope.
+// The release goes through ClearIP, which carries no host, so before this the
+// probe never saw a solve and wrote no mode=would line at all (0 fleet-wide,
+// 2026-11-26 read).
+func TestOKStateProbe_VerifyRecordsTheSolve(t *testing.T) {
+	got := captureOKProbe(t)
+	base, _ := startVerifyServer(t)
+	const ip, host = "198.51.100.73", "shop.example"
+	body := `{"v":1,"wd":false,"ptr":12,"tch":0,"key":0,"mv":400}`
+	if resp := verifyPoster(t, base, ip, host, confirmUA, time.Now().UTC())(body, nil); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("web solve: status=%d, want 303", resp.StatusCode)
+	}
+	if _, ok := okProbeSolved.get(okProbeKey(ip, host, "web"), time.Now()); !ok {
+		t.Fatal("the web solve was not recorded for the okstate probe")
+	}
+	// End to end: the edge's decision for the same pair (no cookie of its
+	// own, TTL 0) reads the verify's record and writes the would line.
+	b := NewNginxBridge("/tmp/cfm-test-okprobe-e2e.sock", "tok", time.Minute, 0)
+	b.ChallengeVhostWithReason(host, time.Hour, "manual")
+	if a := decisionVhostAction(t, b, ip, host); a != "challenge" {
+		t.Fatalf("TTL 0: vhost_action=%q, want challenge", a)
+	}
+	if lines := got(); len(lines) != 1 || !strings.Contains(lines[0], "okstate mode=would ip="+ip+" host="+host+" scope=web") {
+		t.Fatalf("lines=%q, want one mode=would line from the verify's solve", lines)
+	}
+	panel := map[string]string{"X-CFM-Panel-Port": "2083", "X-Forwarded-Port": "2083"}
+	if resp := verifyPoster(t, base, ip, host, confirmUA, time.Now().UTC())(body, panel); resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("panel solve: status=%d, want 303", resp.StatusCode)
+	}
+	if _, ok := okProbeSolved.get(okProbeKey(ip, host, "panel:2083"), time.Now()); !ok {
+		t.Fatal("the panel solve was not recorded for the okstate probe")
+	}
+}

@@ -7,7 +7,8 @@ import (
 )
 
 // okstate_probe.go — measures the solved-ok grace (okState,
-// OPENRESTY_OK_IP_TTL) before it is retired.
+// OPENRESTY_OK_IP_TTL): what its default of 0 costs (mode=would) and what a
+// node that raises it lets through (mode=allow).
 //
 // okState lets a client through the vhost-wide AND the per-IP challenge for a
 // host once its IP solved there (or was cleared), without a clearance cookie
@@ -40,7 +41,8 @@ import (
 
 const (
 	// okProbeWindow is how long a solve is remembered for mode=would: the
-	// fleet's longest OPENRESTY_OK_IP_TTL (45m on six nodes).
+	// fleet's longest OPENRESTY_OK_IP_TTL before it went to 0 (45m on six
+	// nodes, until 2026-11-25), so a would line reads against what it was.
 	okProbeWindow   = 45 * time.Minute
 	okProbeLogEvery = 10 * time.Minute
 )

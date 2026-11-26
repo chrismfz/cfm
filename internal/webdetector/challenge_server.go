@@ -1266,6 +1266,13 @@ func (s *ChallengeServer) Start(ctx context.Context, httpAddr string) error {
 		// blocking call was leaving the clearance cookie below unset and looping
 		// the browser. The clearance cookie is set right after, unconditionally.
 		//
+		// The okstate probe (okstate_probe.go) remembers this solve under its
+		// host and scope, every scope: the release below goes through
+		// ClearIP, which carries no host, so the probe never saw a solve and
+		// its mode=would lines (what OPENRESTY_OK_IP_TTL = 0 costs) could not
+		// fire (0 lines fleet-wide in the 2026-11-26 read).
+		noteOKProbeSolved(ipStr, host, scope, time.Now())
+
 		// WEB scope only. The release deletes the IP's per-IP bridge decision
 		// (ipState, every host), which only the web edge serves: the panel ports
 		// enforce its block tier only, and their human-entry challenge rides the

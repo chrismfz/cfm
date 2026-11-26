@@ -102,7 +102,7 @@ type Config struct {
 	// always on (docs/edge-unification-plan.md Phase 1).
 	OpenRestySock        string        // OPENRESTY_SOCK  = /var/run/cfm_nginx.sock
 	OpenRestyToken       string        // OPENRESTY_TOKEN = sometoken
-	OpenRestyOkIPTTL     time.Duration // OPENRESTY_OK_IP_TTL = 1m (0 disables IP ok-state; cookie-only)
+	OpenRestyOkIPTTL     time.Duration // OPENRESTY_OK_IP_TTL, default 0 = cookie-only (no IP ok-state)
 	OpenRestyBridgeTrace bool          // OPENRESTY_BRIDGE_TRACE = 0|1
 
 	// How long the solved cookie (cfm_ok) should live (challenge server).

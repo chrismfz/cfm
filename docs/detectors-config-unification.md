@@ -139,7 +139,7 @@ line. Per-node values are as audited in 2026-08 and have not been re-read since.
 | Key | Stock now | Heavy-4 (earth / mars / orion / titan) | Proposed |
 |---|---|---|---|
 | `[webdetector] BLOCK` | 12h (`:1415`) | 1h ×4 | **1h** |
-| `[webdetector] OPENRESTY_OK_IP_TTL` | 10m (`:1527`) | 45m ×4 (+rigel, virgo) | **under review (2026-11-25): it opens a host to everyone behind a solved IP; the fleet runs 0 for a measured day (`okstate` lines) before a default is chosen** |
+| `[webdetector] OPENRESTY_OK_IP_TTL` | **0** (code + stock, 2026-11-26) | 0 on all 8 edge nodes since 2026-11-25 | **0**: it opened a host to everyone behind a solved IP (CGNAT, offices, proxies). The day at 0 cost about 1-2% of solving pairs a second solve within 45m and no loop |
 | `[webdetector] AGENT_LIST` | curl,wget,python-requests,Go-http-client,spider,FacebookExternalHit (`:1396`) | 3 of 4: python-requests,Go-http-client,spider | python-requests,Go-http-client,spider ⚠ (curl / wget / FacebookExternalHit are FP-prone: legit tooling and FB previews) |
 | `[webdetector] IP404_COUNT` | 250 (`:1388`) | 200 / 300 / 280 / 350 | **300** |
 | `[webdetector] IP40X_COMBO` | 120 (`:1422`) | 160 / 290 / 220 / 300 | **250** |

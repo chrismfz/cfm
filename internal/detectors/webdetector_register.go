@@ -653,7 +653,7 @@ func init() {
 			OpenRestyToken:       kvStrClean(kv, "OPENRESTY_TOKEN", ""),
 			OpenRestyBridgeTrace: kvBool(kv, "OPENRESTY_BRIDGE_TRACE", false),
 
-			OpenRestyOkIPTTL: kvDur(kv, "OPENRESTY_OK_IP_TTL", 1*time.Minute),
+			OpenRestyOkIPTTL: kvDur(kv, "OPENRESTY_OK_IP_TTL", 0),
 
 			// How long the solved cookie should live. If unset/0 => inherit CHALLENGE_COOLDOWN.
 			ChallengeCookieLife: 0,
