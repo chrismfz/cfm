@@ -857,6 +857,7 @@ main() {
 
     log "Detected OS family: $OS_FAMILY (${OS_ID:-unknown} ${OS_VERSION_ID:-unknown})"
     log "*** TESTBED INSTALLER — experimental. Does not touch OpenResty. ***"
+    warn "Angie is deprecated as a CFM edge: a new node uses cfm-edge (scripts/install-edge.sh, docs/node-setup.md); OpenResty is the fallback."
 
     # 1. Install packages
     if [ "$OS_FAMILY" = "debian" ]; then

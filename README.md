@@ -19,7 +19,7 @@
 
 CFM is one Go daemon that protects a hosting server from the HTTP edge down
 to the kernel: an nftables firewall, log-driven detectors with autoblock, an
-in-path WAF and challenge engine on an OpenResty or Angie edge, a BPF LSM that
+in-path WAF and challenge engine on its own nginx edge (cfm-edge), a BPF LSM that
 watches for post-exploit behaviour, and kernel-surface hardening. It is built
 for shared hosting (cPanel, DirectAdmin, CloudLinux, plain nginx/Apache) and
 runs with no iptables, no kernel module and no agent.
@@ -103,21 +103,28 @@ WAF, challenges, traffic rules and Site Cache are all managed there.
 
 ### The edge proxy
 
-The WAF, challenge and Site Cache need the in-path edge. Install one:
+The WAF, challenge and Site Cache need the in-path edge. **cfm-edge** is the
+edge: CFM's own package of nginx.org nginx plus the OpenResty Lua set
+(`chrismfz/cfm-edge`, EL 8/9/10), which every node in the fleet runs. Set a
+node up with [`docs/node-setup.md`](docs/node-setup.md):
 
 ```bash
-bash scripts/install-openresty.sh    # the original default
-bash scripts/install-angie.sh        # nginx fork tracking mainline; first-class EL10 / Debian 13 packages
-bash scripts/install-edge.sh         # cfm-edge: CFM's own nginx.org nginx + OpenResty Lua package (EL 8/9/10)
+dnf install cfm cfm-edge
+bash /usr/share/cfm/scripts/install-edge.sh     # prepares cfm-edge only: no start, no DNAT
 ```
+
+**OpenResty is the fallback**, for a node where cfm-edge cannot run (or a bad
+cfm-edge build): `cfm-edge.conf` is rendered from `openresty.conf`, so it runs
+the same config and Lua, built by someone else
+(`bash scripts/install-openresty.sh`). **Angie is deprecated**: no new
+installs; `install-angie.sh` stays only for a node that still runs it, until
+Angie support is removed.
 
 None of the installers starts, stops or swaps a running edge, nor touches the
 DNAT (`install-angie.sh` and `install-edge.sh` print the switch). All run the same CFM Lua
 modules (`configs/lua/`, delivered to `/var/lib/cfm/lua/`) and talk to the
 same daemon; they can all be installed, but only one may run (`:9080` /
-`:9043`). Pick Angie on EL10 / Debian 13 or for faster nginx CVE fixes; stay
-on OpenResty if it already works; cfm-edge is being adopted across the fleet
-(canary first). `cfm edge on` (or its older name `cfm dnat on`) then redirects
+`:9043`). `cfm edge on` (or its older name `cfm dnat on`) then redirects
 80/443 to the edge, and a bare `cfm edge` shows the whole picture ([`docs/cli.md`](docs/cli.md#cfm-edge)). Design: [`docs/edge-unification-plan.md`](docs/edge-unification-plan.md).
 
 ### From source
