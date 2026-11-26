@@ -4,6 +4,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"cfm/internal/detectors/core"
+	"cfm/internal/enrich"
 )
 
 func TestApplyBuiltinLeniency(t *testing.T) {
@@ -123,5 +126,76 @@ func TestSofterPolicy(t *testing.T) {
 		if got.Mode != c.wantMode || got.TTL != c.wantTTL {
 			t.Errorf("%s: %+v, want %s %s", c.name, got, c.wantMode, c.wantTTL)
 		}
+	}
+}
+
+// lenientSetFake is sinkSetFake that also takes lenient reports.
+type lenientSetFake struct {
+	*sinkSetFake
+	lenient []int // ReportLenient TTLs (seconds)
+}
+
+func (f *lenientSetFake) ReportLenient(_, _, _, _ string, ttl int) error {
+	f.lenient = append(f.lenient, ttl)
+	return nil
+}
+
+// Through the sink: a GR address under the built-in leniency is banned 15m
+// and reported to the lenient list only; a dryrun section stays dryrun; a
+// per-alert block_ttl does not lengthen the lenient ban.
+func TestSectionSinkBuiltinLeniency(t *testing.T) {
+	orig := leniencyGeo
+	leniencyGeo = func(_ *enrich.Enricher, ip string) enrich.Result {
+		if ip == "10.9.0.1" {
+			return enrich.Result{CountryISO: "GR", Country: "Greece"}
+		}
+		return enrich.Result{CountryISO: "US"}
+	}
+	defer func() { leniencyGeo = orig }()
+	lp := parseLeniencyPolicy(builtinLeniencyDefaults())
+	// No mmdb, and private addresses: no DNS (PTR is only asked for a
+	// routable one).
+	enr, err := enrich.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(pol blockPolicy, ip string, extra map[string]string) (*lenientSetFake, map[string]string) {
+		fw := &lenientSetFake{sinkSetFake: &sinkSetFake{left: map[string]time.Duration{}}}
+		in := &capturingSink{}
+		s := &sectionSink{section: "modsec", pol: pol, fw: fw, inner: in, enr: enr, leniency: lp, last: map[string]time.Time{}}
+		s.Publish(core.Alert{When: time.Now(), Kind: "MODSEC/403", Key: ip, Extra: extra})
+		if len(in.got) != 1 {
+			t.Fatalf("%d alerts out", len(in.got))
+		}
+		return fw, in.got[0].Extra
+	}
+
+	perm := blockPolicy{Mode: "permanent", Cooldown: 30 * time.Minute}
+	fw, ex := run(perm, "10.9.0.1", nil)
+	if got := fw.left["10.9.0.1"]; got != 15*time.Minute || ex["leniency"] != "yes" {
+		t.Errorf("GR under a permanent section: ban %s leniency=%q", got, ex["leniency"])
+	}
+	if len(fw.reports) != 0 || len(fw.lenient) != 1 || fw.lenient[0] != 900 {
+		t.Errorf("GR report: blacklist %v lenient %v", fw.reports, fw.lenient)
+	}
+
+	fw, _ = run(perm, "10.9.0.2", nil)
+	if got, ok := fw.left["10.9.0.2"]; !ok || got != 0 || len(fw.reports) != 1 || len(fw.lenient) != 0 {
+		t.Errorf("foreign under a permanent section: ban %s/%v, reports %v lenient %v", got, ok, fw.reports, fw.lenient)
+	}
+
+	fw, ex = run(blockPolicy{Mode: "dryrun"}, "10.9.0.1", nil)
+	if len(fw.left) != 0 || ex["blocked"] != "dryrun" {
+		t.Errorf("GR under a dryrun section: bans %v blocked=%q", fw.left, ex["blocked"])
+	}
+
+	fw, _ = run(blockPolicy{Mode: "ttl", TTL: 12 * time.Hour}, "10.9.0.1", map[string]string{"block_ttl": "12h"})
+	if got := fw.left["10.9.0.1"]; got != 15*time.Minute {
+		t.Errorf("GR with a 12h block_ttl: ban %s, want 15m", got)
+	}
+	fw, _ = run(blockPolicy{Mode: "ttl", TTL: 12 * time.Hour}, "10.9.0.1", map[string]string{"block_ttl": "5m"})
+	if got := fw.left["10.9.0.1"]; got != 5*time.Minute {
+		t.Errorf("GR with a 5m block_ttl: ban %s, want 5m", got)
 	}
 }

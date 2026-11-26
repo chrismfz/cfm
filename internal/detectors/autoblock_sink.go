@@ -612,12 +612,14 @@ func (s *sectionSink) Publish(a core.Alert) {
 	effectivePol := s.pol
 	sendToAPI := true
 	lenientReport := false // SEND_TO_BLOCKLIST=lenient: record centrally, never propagate
+	lenientMatch := false
 
 	if s.leniency != nil && ipStr != "" && s.enr != nil {
 		if matched, reason := s.leniency.matchesIP(ipStr, s.enr); matched {
 			// Never harsher than the section: a dryrun section keeps
 			// logging, a TTL section's ban is not lengthened.
 			effectivePol = softerPolicy(s.pol, s.leniency.Pol)
+			lenientMatch = true
 			sendToAPI = s.leniency.SendToAPI
 			lenientReport = s.leniency.SendToBlocklist == "lenient"
 			out.Extra["leniency"] = "yes"
@@ -707,7 +709,9 @@ func (s *sectionSink) Publish(a core.Alert) {
 		// Optional per-alert override (e.g. challenge server abuse wants its own TTL)
 		if a.Extra != nil {
 			if t := strings.TrimSpace(a.Extra["block_ttl"]); t != "" {
-				if d, err := time.ParseDuration(t); err == nil && d > 0 {
+				// A leniency match keeps its own TTL: the override may
+				// shorten it, never lengthen it.
+				if d, err := time.ParseDuration(t); err == nil && d > 0 && (!lenientMatch || d < ttl) {
 					ttl = d
 				}
 			}

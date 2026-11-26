@@ -44,7 +44,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   ModSecurity bans on Greek mobile / CGNAT addresses (Cosmote, Vodafone, Nova)
   that every node dropped for everyone behind them. A written companion is kept
   as written; `ENABLED = 0` in it turns leniency off. A lenient ban is never
-  harsher than the section's own (a dryrun section keeps logging).
+  harsher than the section's own (a dryrun section keeps logging), and a
+  detector's per-alert ban length (`block_ttl`) no longer lengthens it.
 - **`[modsec]` bans for 30 days instead of permanently** in the reference
   `detectors.conf` (new installs; an existing `/etc/cfm/detectors.conf` keeps
   its own `BLOCK`).

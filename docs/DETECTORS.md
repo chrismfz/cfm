@@ -988,7 +988,9 @@ keeps its own built-in companion, which also matches the Greek eyeball ASNs (§2
 cooldown and block switch. A match replaces the whole policy (`BLOCK` and
 `BLOCK_COOLDOWN`) and the report settings, but is never harsher than the
 section's own (`softerPolicy`): a `dryrun` section keeps logging, and a
-permanent or longer companion ban is cut to the section's TTL. It never applies when the section's
+permanent or longer companion ban is cut to the section's TTL. A per-alert
+`block_ttl` (the challenge server's abuse ban) may shorten a lenient ban, never
+lengthen it. It never applies when the section's
 own `BLOCK` is `no` (the sink returns earlier), when the alert has no IP, when
 enrichment is off (`[global] ENRICH = 0`) or has no record for the address,
 or when the companion has no `MATCH_COUNTRY` / `MATCH_ASN`. A per-alert dry

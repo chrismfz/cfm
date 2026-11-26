@@ -116,7 +116,13 @@ func (lp *leniencyPolicy) matchesIP(ipStr string, enr *enrich.Enricher) (bool, s
 	if lp == nil || enr == nil || ipStr == "" {
 		return false, ""
 	}
-	return lp.matchGeo(enr.LookupGeoFast(ipStr)) // Country/ASN only; avoid blocking PTR rDNS
+	return lp.matchGeo(leniencyGeo(enr, ipStr)) // Country/ASN only; avoid blocking PTR rDNS
+}
+
+// leniencyGeo is the geo read a leniency match uses (a var for the sink tests,
+// which have no mmdb).
+var leniencyGeo = func(enr *enrich.Enricher, ipStr string) enrich.Result {
+	return enr.LookupGeoFast(ipStr)
 }
 
 // matchGeo matches one resolved geo record against the policy.
