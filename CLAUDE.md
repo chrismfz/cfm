@@ -118,7 +118,11 @@ The history behind each rule below is in the code comments it names.
   deadline (12 s on mars; the wait for one of the 4 nft slots counts too) and
   the timeout read as "no table"; each re-run whose input-chain read failed
   added every base rule again (~268 copies of each on mars). Probe with `list
-  chains inet` (`probeTable`, `chainExists`, `cfmChains`), and read counters
+  chains inet` (`probeTable`, `chainExists`, `cfmChains`), find set names
+  with `-t list sets` (`ListSetsJSON`, `firewall.SetNamesInTable`), ask an
+  address's membership by kernel lookup (`LookupSetElems` / `HasElem`, both
+  engines), never `nft get element` (3–14 s per fleet feed set on orion's
+  nft 1.0.4, 2026-11-26: an unblock took 8–28 s), and read counters
   over netlink (`internal/firewall/nlcounters`: the per-tick flood dump's
   `list counters` took 2.8–18.5 s on EL8, the netlink dump 0.3–1.2 ms;
   `flood_counters_cost_test.go` pins it); the daemon's repairs
