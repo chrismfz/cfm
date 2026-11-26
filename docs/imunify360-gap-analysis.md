@@ -242,7 +242,8 @@ reached a client behind Cloudflare either (two scanners other nodes had
 fleet-banned for WAF hits got 200/301/404 from the origin through Cloudflare on
 earth). Built as `internal/proxyipfilter`: the lists in the daemon's memory,
 asked by the bridge decision for proxied requests; `[webdetector]
-PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` (default) | `enforce` | `off`.
+PROXIED_IPFILTER_FEED` / `_LOCAL` = `log` | `enforce` | `off` (FEED enforces
+by default since 2026-11-26, LOCAL logs).
 Design, precedence and log format: `docs/proxied-ipfilter.md`.
 
 Open:
@@ -301,7 +302,8 @@ mechanisms, and none is a measured gap.
 
 1. **Burn-in reads** (2026-11-20, 2026-11-24): rules 417, 415 by extension,
    530, and the proxied IP filter with its `cc=` / `asn=` fields. Promotions
-   and `PROXIED_IPFILTER_FEED = enforce` are decided there.
+   and `PROXIED_IPFILTER_FEED = enforce` are decided there (FEED: enforced
+   fleet-wide and made the default on 2026-11-26).
 2. **Meta's forward proxies** (`fwdproxy-*.fbsv.net`, AS32934) before
    `PROXIED_IPFILTER_LOCAL = enforce`: 59 of them were permanently banned on
    mars and titan by the SYN / port-flood detectors in May-June 2026, breaking

@@ -23,9 +23,10 @@
 // Sources: feeds (blocklists.Manager hands each applied feed over, BLOCK and
 // ALLOW) and the node's local sets, read from the kernel every minute
 // (StartLocalRefresh). Each block source belongs to a group with its own mode,
-// [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (the
-// default: a line per client says which lists it is on and what would happen,
-// nothing changes), enforce (the bridge answers ip_action=block), off.
+// [webdetector] PROXIED_IPFILTER_FEED and PROXIED_IPFILTER_LOCAL: log (a line
+// per client says which lists it is on and what would happen, nothing
+// changes; LOCAL's default), enforce (the bridge answers ip_action=block;
+// FEED's default since 2026-11-26), off.
 package proxyipfilter
 
 import (
@@ -92,8 +93,8 @@ var (
 )
 
 func init() {
-	modeFeed.Store(ModeLog)
-	modeLocal.Store(ModeLog)
+	modeFeed.Store(defaultModeFeed)
+	modeLocal.Store(defaultModeLocal)
 	cur.Store(&snapshot{})
 	setClock(time.Now)
 }
@@ -102,17 +103,26 @@ func now() time.Time { return (*clock.Load())() }
 
 func setClock(f func() time.Time) { clock.Store(&f) }
 
-// SetModes sets the mode of each group; an empty or unknown value is "log",
-// the safe default (logged, so a typo is visible).
+// The group defaults, taken by an empty (absent) value. FEED enforces since
+// 2026-11-26: a day's would_block lines on seven nodes were >98% MYBLOCK and
+// almost no Greek residential address. LOCAL (cfm.deny, TTL bans, which can
+// hold a customer's own address after an SSH or mail lockout) stays log.
+const (
+	defaultModeFeed  = ModeEnforce
+	defaultModeLocal = ModeLog
+)
+
+// SetModes sets the mode of each group; an empty value is the group's default,
+// an unknown one is "log", the safe answer (logged, so a typo is visible).
 func SetModes(feed, local string) {
-	modeFeed.Store(normMode("PROXIED_IPFILTER_FEED", feed))
-	modeLocal.Store(normMode("PROXIED_IPFILTER_LOCAL", local))
+	modeFeed.Store(normMode("PROXIED_IPFILTER_FEED", feed, defaultModeFeed))
+	modeLocal.Store(normMode("PROXIED_IPFILTER_LOCAL", local, defaultModeLocal))
 }
 
-func normMode(key, m string) string {
+func normMode(key, m, def string) string {
 	switch m = strings.ToLower(strings.TrimSpace(m)); m {
 	case "":
-		return ModeLog
+		return def
 	case ModeOff, ModeLog, ModeEnforce:
 		return m
 	case "0":
@@ -563,8 +573,8 @@ func ResetForTest() {
 	bansMu.Unlock()
 	logSeen.Range(func(k, _ any) bool { logSeen.Delete(k); return true })
 	nLogKeys.Store(0)
-	modeFeed.Store(ModeLog)
-	modeLocal.Store(ModeLog)
+	modeFeed.Store(defaultModeFeed)
+	modeLocal.Store(defaultModeLocal)
 	forgotten.Range(func(k, _ any) bool { forgotten.Delete(k); return true })
 	nForgotten.Store(0)
 	forgottenNets.Store(nil)

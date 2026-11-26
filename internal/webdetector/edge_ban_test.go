@@ -232,6 +232,7 @@ func TestDecisionProxiedIPFilter(t *testing.T) {
 	t.Cleanup(proxyipfilter.ResetForTest)
 	proxyipfilter.SetFeed("MYBLOCK", false, []string{"20.43.87.186", "45.138.12.0/24"}, nil)
 	proxyipfilter.SetFeed("MYALLOW", true, []string{"45.138.12.99"}, nil)
+	proxyipfilter.SetModes("log", "log") // FEED enforces by default
 	b := NewNginxBridge("/tmp/cfm-test.sock", "tok", time.Minute, time.Minute)
 
 	// Log mode: an allow, but marked so the edge does not cache it (every

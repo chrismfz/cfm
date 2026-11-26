@@ -87,9 +87,18 @@ the edge reports to the daemon), and 268 k there is the regression ruled out. So
 - `PROXIED_IPFILTER_FEED` — the block feeds;
 - `PROXIED_IPFILTER_LOCAL` — the node's own block sets.
 
-Each is `log` (default), `enforce` (the decision answers `ip_action=block`
-with header `X-CFM-Proxied-IPFilter: 1`), or `off` (`0` also means off). An
-empty value is `log`; an unknown one is `log` and logged as such. A source in
+Each is `log`, `enforce` (the decision answers `ip_action=block` with header
+`X-CFM-Proxied-IPFilter: 1`), or `off` (`0` also means off). An empty value
+is the default: **FEED `enforce`** (since 2026-11-26), **LOCAL `log`**. An
+unknown value is `log` and logged as such.
+
+Why FEED enforces: the would_block lines of 2026-11-26 (about 18 hours, seven
+nodes) held ~22 700 decisions for ~14 400 addresses, >98% of them MYBLOCK,
+mostly US / BD / UA / BR datacenter and residential proxies; Greek addresses
+were a handful (a few Medianet / Datacamp hosting ones, two Vodafone and one
+Nova on mars). LOCAL stays log: `cfm.deny` and TTL bans can hold a
+customer's own address after an SSH or mail lockout, and through Cloudflare
+that customer would lose their site too. A source in
 an `off` group is not consulted.
 
 ## Log and stats

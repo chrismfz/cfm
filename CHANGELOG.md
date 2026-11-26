@@ -32,6 +32,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   capped at `challenge_v2`), so it arms no autoblock.
 
 ### Changed
+- **`PROXIED_IPFILTER_FEED` defaults to `enforce`.** A client behind
+  Cloudflare that is on a fleet feed (cfm-web's MYBLOCK, and TOR once a node
+  enables it) is now refused at the edge, as nft refuses it when it comes
+  direct. One day's log-mode lines on seven nodes: ~22,700 decisions for
+  ~14,400 addresses, >98% of them MYBLOCK, almost no Greek residential
+  address. `PROXIED_IPFILTER_LOCAL` (cfm.deny, TTL bans) stays `log`: those
+  sets can hold a customer's own address after an SSH or mail lockout. Set
+  `PROXIED_IPFILTER_FEED = log` in `[webdetector]` to keep the old behaviour.
 - **The reference `cfm.blocklists` `TOR` line** (still commented out) points
   at the Tor Project's current exit list (`/torbulkexitlist`, refreshed
   hourly) instead of the old CGI URL, which now answers with a redirect.
