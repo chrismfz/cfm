@@ -40,7 +40,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the move to `challenge_v2`. The rule never blocks (a `block` setting is
   capped at `challenge_v2`), so it arms no autoblock.
 
-
 ### Changed
 - **`PROXIED_IPFILTER_FEED` defaults to `enforce`.** A client behind
   Cloudflare that is on a BLOCK feed (cfm-web's MYBLOCK; CHALLENGE lists such as

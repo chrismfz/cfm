@@ -26,8 +26,9 @@ var (
 	jsonlAppendsSincePrune = map[string]int{}
 )
 
-// pruneEveryAppends: appendJSONL prunes after this many rows when the 5
-// minute pruner has not run since (an alert storm).
+// pruneEveryAppends: every this many rows appended since the last prune,
+// appendJSONL asks pruneNeeded (a stat) whether to prune between the 5 minute
+// pruner's ticks (an alert storm).
 const pruneEveryAppends = 1000
 
 // A history at MAX_ENTRIES (mars and orion: 100 000 rows, 48 MB) was read,
@@ -37,7 +38,9 @@ const pruneEveryAppends = 1000
 // pruneSlack, or its oldest kept row has passed MAX_AGE, and then trims it
 // back to MAX_ENTRIES: the file holds up to MAX_ENTRIES + pruneSlack rows.
 // A file the daemon did not leave as it is (another inode, a smaller size: a
-// CLI prune, a hand edit) is pruned in full.
+// CLI prune, a hand edit) is pruned in full. Rows another process appended
+// without a rewrite (a one-shot CLI's prune that dropped nothing) are not
+// counted: the file can then pass the slack by those few rows.
 
 // pruneSlack is how far past MAX_ENTRIES the history may grow before a
 // prune: a tenth, and at least one row.
