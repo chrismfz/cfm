@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.27
+
 ### Added
 - **A Challenges tab on the Protection page.** What the edge did with the
   requests, for the whole server or one vhost (and for a cPanel user, on
