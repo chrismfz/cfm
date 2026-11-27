@@ -126,7 +126,18 @@ func parseEximFailure(line string) Event {
 }
 
 // parseEximReject handles an SMTP-time reject line (no message flag).
+//
+// The line holds text the remote side chose: the HELO name, the envelope
+// sender (F=<…>, a quoted local part may hold anything), and a reason that can
+// echo the addresses back ("Rejected relay attempt: … From: '…' To: '…'").
+// So a line with a second "rejected " is not counted at all (a forged one
+// can then only lower the counters, never write a row), the quota text must
+// follow the reject itself, and the authenticated check reads the line with
+// the sender field taken out.
 func parseEximReject(line string) Event {
+	if strings.Count(line, "rejected ") != 1 {
+		return Event{}
+	}
 	m := reEximReject.FindStringSubmatchIndex(line)
 	if m == nil {
 		return Event{}
@@ -137,11 +148,14 @@ func parseEximReject(line string) Event {
 	}
 	reason := line[m[1]:]
 	if m[2] >= 0 { // rejected RCPT <x>
-		if overQuotaRe.MatchString(reason) {
-			return Event{Kind: OverQuota, Addr: mailboxOf(line[m[2]:m[3]])}
+		if rcpt := line[m[2]:m[3]]; reEximQuotaReason.MatchString(reason) {
+			if strings.ContainsAny(rcpt, "\" \t") || strings.IndexByte(rcpt, '@') <= 0 {
+				return Event{}
+			}
+			return Event{Kind: OverQuota, Addr: mailboxOf(rcpt)}
 		}
 	}
-	if reEximAuthed.MatchString(pre) {
+	if reEximAuthed.MatchString(reEximSender.ReplaceAllString(pre, " ")) {
 		return Event{} // our own authenticated user's mail, not inbound
 	}
 	if m[2] < 0 && strings.Contains(reason, "detected OUTGOING") {
@@ -220,10 +234,18 @@ var (
 	reEximLMTPAccepted = regexp.MustCompile(`\sC="250 [0-9.]+ <([^>\s]+@[^>\s]+)>`)
 	// Fallback: the original recipient shown before the router, `<addr> R=`.
 	reEximOrigRcpt = regexp.MustCompile(`\s<([^>\s]+@[^>\s]+)> R=`)
-	// The mailbox in an LMTP refusal: `LMTP error after …: 552 5.2.2 <addr> …`.
-	reEximLMTPReject = regexp.MustCompile(`LMTP error after [^:]+(?::<[^>]*>)?: 5\d\d [0-9.]+ <([^>\s]+)>`)
+	// The mailbox in an LMTP over-quota refusal: `LMTP error after …: 552
+	// 5.2.2 <addr> Mailbox is full …` (the quota text right after it).
+	reEximLMTPReject = regexp.MustCompile(`LMTP error after [^:]+(?::<[^>]*>)?: 5\d\d [0-9.]+ <([^>\s"]+@[^>\s"]+)> (?i:mailbox is full|over quota|quota exceeded)`)
+	// A RCPT reject whose reason IS the quota (it starts the reason).
+	reEximQuotaReason = regexp.MustCompile(`^:\s*(?i:mailbox is full|over quota|quota exceeded)`)
+	// The envelope sender field, a quoted local part included: taken out
+	// before looking for A=, which the sender could otherwise forge.
+	reEximSender = regexp.MustCompile(`\sF=<(?:"[^"]*"|[^>"])*>`)
 	// cPanel's per-domain hourly limits (enforce_mail_permissions router).
-	reEximDomainLimit = regexp.MustCompile(`Domain (\S+) has exceeded the max (?:emails|defers and failures) per hour`)
+	// One `**` line per recipient: a message to 100 addresses counts 100
+	// (Postfix's rspamd reject counts once per attempt).
+	reEximDomainLimit = regexp.MustCompile(`Domain ([^\s"]+) has exceeded the max (?:emails|defers and failures) per hour`)
 	// An SMTP-time reject; group 1 = the RCPT address when it is a RCPT reject.
 	reEximReject = regexp.MustCompile(`\brejected (?:RCPT <([^>]*)>|after DATA)`)
 	// An authenticated SMTP session (A=<authenticator>:<user>) before the reject.

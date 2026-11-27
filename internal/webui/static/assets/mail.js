@@ -27,6 +27,7 @@ import {
   WINDOWS, SHOWN, tabsFor, pickTab, pickHours, ageBuckets, tablesFor, tableHint, tableView,
   anomalies, tiles, sourceNote, hasData, queueHeadline, trafficHeadline,
   alertEpisodes, openAlerts, recentEpisodes, alertCount, alertsHeadline, sevPill, fmtWhen,
+  episodeState, openKeysOf, historyCovers,
   ALERT_KINDS, ALERT_DAYS, ALERTS_OFF,
 } from "./mail-model.js";
 
@@ -125,6 +126,14 @@ import {
     return sev ? `<span class="pill ${sevPill(sev)}">${escapeHTML(sev)}</span>` : '';
   }
 
+  function closedCell(ep, openKeys) {
+    switch (episodeState(ep, openKeys)) {
+      case 'closed': return escapeHTML(fmtWhen(ep.closed));
+      case 'open': return '<span class="pill warn">open</span>';
+      default: return '<span class="muted" title="no recovery was written, and the last check no longer has it (the check switched off, or its state lost)">not closed</span>';
+    }
+  }
+
   // The Alerts tab: what is open now, then the last days' episodes.
   function alertsHTML() {
     const t = hasData(st.traffic) ? st.traffic.data : null;
@@ -137,13 +146,14 @@ import {
           `<td>${escapeHTML(a.message)}${a.stillOpen ? ' <span class="pill info" title="no longer a finding at the last check, not closed yet">quieter</span>' : ''}</td>` +
           `<td class="pt-r">${escapeHTML(fmtWhen(a.since)) || `<span class="muted">${loading ? '…' : '—'}</span>`}</td></tr>`).join('')
       : '<tr><td colspan="5" class="muted">(none)</td></tr>';
-    const recent = recentEpisodes(eps, Date.now() / 1000, ALERT_DAYS);
+    const openKeys = t ? openKeysOf(t.abuse) : null;
+    const recent = recentEpisodes(eps, Date.now() / 1000, ALERT_DAYS, openKeys);
     let histNote = '';
     if (st.alerts.state === 'error') histNote = `<p class="ml-note bad">Could not read the history (${escapeHTML(st.alerts.error || 'request failed')}).</p>`;
     const histRows = recent.length
       ? recent.map((ep) => '<tr>' +
           `<td class="pt-r">${escapeHTML(fmtWhen(ep.opened)) || '<span class="muted">earlier</span>'}</td>` +
-          `<td class="pt-r">${ep.closed ? escapeHTML(fmtWhen(ep.closed)) : '<span class="pill warn">open</span>'}</td>` +
+          `<td class="pt-r">${closedCell(ep, openKeys)}</td>` +
           `<td>${sevHTML(ep.severity)}</td><td>${escapeHTML((ALERT_KINDS[ep.kind] || {}).label || ep.kind)}</td>` +
           `<td>${subjectHTML(ep.kind, ep.subject)}</td>` +
           `<td>${escapeHTML(ep.message || '')}${ep.closeMessage ? `<div class="muted">${escapeHTML(ep.closeMessage)}</div>` : ''}</td></tr>`).join('')
@@ -278,8 +288,18 @@ import {
     const seq = st.seq;
     let next;
     try {
-      const reply = await api('/v1/webdet/history/events?type_prefix=mail_&limit=500');
-      const rows = reply && Array.isArray(reply.rows) ? reply.rows : (Array.isArray(reply) ? reply : []);
+      // Newest first, a page at a time, until the rows reach back past the
+      // window (a flapping finding can fill one page), at most 5 pages.
+      const rows = [];
+      let cursor = '';
+      for (let page = 0; page < 5; page++) {
+        const reply = await api('/v1/webdet/history/events?type_prefix=mail_&limit=500' + cursor);
+        const got = reply && Array.isArray(reply.rows) ? reply.rows : (Array.isArray(reply) ? reply : []);
+        rows.push(...got);
+        const nx = reply && reply.next;
+        if (!nx || historyCovers(got, Date.now() / 1000, ALERT_DAYS)) break;
+        cursor = `&before_ts=${encodeURIComponent(nx.before_ts)}&before_id=${encodeURIComponent(nx.before_id)}`;
+      }
       next = { state: 'ok', data: rows, at: Date.now() };
     } catch (err) {
       const prev = st.alerts;

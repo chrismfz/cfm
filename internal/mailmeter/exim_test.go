@@ -214,6 +214,33 @@ func TestParseEximLine_FleetShapes(t *testing.T) {
 			`2026-11-27 12:00:08 1xWvAG-0000000AAAG-1AAG ** x@remote.example R=dkim_lookuphost T=dkim_remote_smtp H=mx.remote.example [192.0.2.1]: SMTP error from remote mail server after RCPT TO:<x@remote.example>: 550 rejected RCPT <x@remote.example>: no such user`,
 			Event{},
 		},
+
+		// ---- text the remote side chose (sender, HELO, echoed addresses) ----
+		{
+			"quota words in the forged sender, echoed by a relay reject: a reject, not over quota",
+			`2026-11-27 12:00:09 H=(x) [192.0.2.5]:5 F=<"over quota"@evil.example> rejected RCPT <a@remote.example>: Rejected relay attempt: '192.0.2.5' From: '"over quota"@evil.example' To: 'a@remote.example'`,
+			Event{Kind: Rejected},
+		},
+		{
+			"a forged reject inside the sender cannot write an over-quota row for a tenant",
+			`2026-11-27 12:00:10 H=(x) [192.0.2.5]:5 F=<"rejected RCPT <victim@tenant.example>: Mailbox is full"@evil.example> rejected RCPT <nobody@tenant.example>: No Such User Here`,
+			Event{},
+		},
+		{
+			"a forged A= inside the sender does not make the reject look authenticated",
+			`2026-11-27 12:00:11 H=(x) [192.0.2.5]:5 F=<"a A=b:c"@evil.example> rejected RCPT <nobody@tenant.example>: No Such User Here`,
+			Event{Kind: Rejected},
+		},
+		{
+			"an over-quota reject for a quoted local part is not attributed",
+			`2026-11-27 12:00:12 H=(x) [192.0.2.5]:5 F=<a@remote.example> rejected RCPT <"x y"@example.gr>: Mailbox is full / Blocks limit exceeded / Inode limit exceeded`,
+			Event{},
+		},
+		{
+			"=> into a mailbox with no C= falls back to the recipient before R=",
+			`2026-11-27 12:00:13 1xWvAH-0000000AAAH-1AAH => info <Info@Example.gr> R=virtual_user T=dovecot_virtual_delivery`,
+			Event{Kind: InboundLocal, ID: "1xWvAH-0000000AAAH-1AAH", Addr: "info@example.gr"},
+		},
 	}
 	for _, c := range cases {
 		if got := ParseEximLine(c.line); got != c.want {

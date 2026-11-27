@@ -407,11 +407,37 @@ export function openAlerts(views, episodes) {
     .sort((a, b) => sevRank(b.severity) - sevRank(a.severity) || b.since - a.since || a.subject.localeCompare(b.subject));
 }
 
-// recentEpisodes: the episodes of the last `days` (still open, or with a row
-// in the window), as the history table shows them.
-export function recentEpisodes(episodes, nowSec, days) {
+// episodeState: "closed" (a recovery row ended it), "open" (no recovery and
+// the last check still has it), or "unclosed" (no recovery, yet the last check
+// does not have it: the check was switched off, or the node lost the state of
+// what it had published; it would otherwise read as open forever). Without
+// the current findings (openKeys null) an episode with no recovery is "open".
+export function episodeState(ep, openKeys) {
+  if (ep.closed) return "closed";
+  if (!openKeys || openKeys.has(ep.key)) return "open";
+  return "unclosed";
+}
+
+// openKeysOf: the keys of the findings the last check has, or null when the
+// report carries none (the check off, or not run yet).
+export function openKeysOf(views) {
+  return Array.isArray(views) ? new Set(views.filter((v) => v && v.key).map((v) => String(v.key))) : null;
+}
+
+// recentEpisodes: the episodes of the last `days`: open ones whatever their
+// age, the others when they have a row in the window.
+export function recentEpisodes(episodes, nowSec, days, openKeys) {
   const from = num(nowSec) - (days || ALERT_DAYS) * 86400;
-  return (Array.isArray(episodes) ? episodes : []).filter((ep) => !ep.closed || ep.last >= from);
+  return (Array.isArray(episodes) ? episodes : [])
+    .filter((ep) => episodeState(ep, openKeys) === "open" || ep.last >= from);
+}
+
+// historyCovers: whether a page of history rows (newest first) already
+// reaches back past `days`, so no older page is needed.
+export function historyCovers(rows, nowSec, days) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return true;
+  return num(list[list.length - 1].ts_unix) < num(nowSec) - (days || ALERT_DAYS) * 86400;
 }
 
 // alertCount: the number on the Alerts tab (warnings and worse; an "info"

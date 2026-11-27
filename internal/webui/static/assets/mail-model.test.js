@@ -4,6 +4,7 @@ import {
   TABS, TABLES, tabsFor, pickTab, pickHours, fmtAge, fmtSize, fmtNum, ageBuckets, tablesFor, tableHint,
   tableView, cell, anomalies, tiles, sourceNote, hasData, queueHeadline, trafficHeadline, SHOWN,
   alertKey, alertEpisodes, openAlerts, recentEpisodes, alertCount, alertsHeadline, sevPill, ALERT_KINDS,
+  episodeState, openKeysOf, historyCovers,
 } from "./mail-model.js";
 
 test("a scoped viewer has no queue or alerts tab, and a link to them opens their first tab", () => {
@@ -222,8 +223,24 @@ test("recent episodes keep the open ones and those with a row in the window", ()
     { key: "a", closed: 0, last: 1 },
     { key: "b", closed: 2 * 86400, last: 2 * 86400 },
     { key: "c", closed: 9 * 86400, last: 9 * 86400 },
+    { key: "d", closed: 0, last: 9 * 86400 },
   ];
-  assert.deepEqual(recentEpisodes(eps, now, 7).map((e) => e.key), ["a", "c"]);
+  assert.deepEqual(recentEpisodes(eps, now, 7).map((e) => e.key), ["a", "c", "d"], "no current findings known: unrecovered = open");
+  // the last check has only "d": "a" was never recovered and is no longer a
+  // finding (the check switched off, its state lost): not open forever
+  const keys = openKeysOf([{ key: "d" }]);
+  assert.deepEqual(recentEpisodes(eps, now, 7, keys).map((e) => e.key), ["c", "d"]);
+  assert.equal(episodeState(eps[0], keys), "unclosed");
+  assert.equal(episodeState(eps[3], keys), "open");
+  assert.equal(episodeState(eps[1], keys), "closed");
+  assert.equal(openKeysOf(undefined), null);
+});
+
+test("the history is paged back only until it covers the window", () => {
+  const now = 30 * 86400;
+  assert.equal(historyCovers([], now, 7), true);
+  assert.equal(historyCovers([{ ts_unix: now - 3600 }, { ts_unix: now - 2 * 86400 }], now, 7), false);
+  assert.equal(historyCovers([{ ts_unix: now - 3600 }, { ts_unix: now - 8 * 86400 }], now, 7), true);
 });
 
 test("the alerts headline counts warnings and worse, and says when nothing ran", () => {
