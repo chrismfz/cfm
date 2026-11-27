@@ -3,15 +3,17 @@ import assert from "node:assert/strict";
 import {
   TABS, TABLES, tabsFor, pickTab, pickHours, fmtAge, fmtSize, fmtNum, ageBuckets, tablesFor, tableHint,
   tableView, cell, anomalies, tiles, sourceNote, hasData, queueHeadline, trafficHeadline, SHOWN,
+  alertKey, alertEpisodes, openAlerts, recentEpisodes, alertCount, alertsHeadline, sevPill, ALERT_KINDS,
 } from "./mail-model.js";
 
-test("a scoped viewer has no queue tab, and a link to it opens their first tab", () => {
-  assert.deepEqual(tabsFor(false).map((t) => t.key), ["queue", "outbound", "inbound"]);
+test("a scoped viewer has no queue or alerts tab, and a link to them opens their first tab", () => {
+  assert.deepEqual(tabsFor(false).map((t) => t.key), ["alerts", "queue", "outbound", "inbound"]);
   assert.deepEqual(tabsFor(true).map((t) => t.key), ["outbound", "inbound"]);
   assert.equal(pickTab("queue", true), "outbound");
   assert.equal(pickTab("queue", false), "queue");
   assert.equal(pickTab("INBOUND", true), "inbound");
-  assert.equal(pickTab("", false), "queue");
+  assert.equal(pickTab("", false), "alerts");
+  assert.equal(pickTab("alerts", true), "outbound");
   assert.equal(pickTab("nonsense", true), "outbound");
 });
 
@@ -146,4 +148,87 @@ test("headlines", () => {
   assert.equal(trafficHeadline(dl, false, "outbound"), "last 24h · whole server · delivered 14,000 · deferred 900 · bounced 330");
   assert.equal(trafficHeadline(dl, false, "inbound"), "last 24h · whole server");
   assert.equal(trafficHeadline({ window: "24h" }, true, "outbound"), "last 24h · your domains");
+});
+
+// ---- Alerts tab ----
+
+const row = (id, ts, type, key, severity, reason) => ({ id, ts_unix: ts, event_type: type, reason, payload: severity ? { key, severity } : { key, severity: "info" } });
+
+test("a finding key gives its kind and subject; a bounce key drops whose bounces", () => {
+  assert.deepEqual(alertKey("mail:hijack:info@x.gr"), { kind: "hijack", subject: "info@x.gr" });
+  assert.deepEqual(alertKey("mail:bounce:local:acct"), { kind: "bounce", subject: "acct" });
+  assert.deepEqual(alertKey("mail:bounce:auth:a@b.gr"), { kind: "bounce", subject: "a@b.gr" });
+  assert.deepEqual(alertKey("mail:rbl:2001:db8::1"), { kind: "rbl", subject: "2001:db8::1" });
+  assert.deepEqual(alertKey("weird"), { kind: "", subject: "weird" });
+  for (const k of Object.values(ALERT_KINDS)) assert.ok(k.label);
+});
+
+test("history rows fold into episodes: opened, raised, recovered; a recovery older than its opening still shows", () => {
+  const rows = [
+    row(5, 500, "mail_recovered", "mail:hijack:a@x.gr", "", "no more logins from many places (was: …)"),
+    row(1, 100, "mail_hijack", "mail:hijack:a@x.gr", "warning", "logged in from 3 countries"),
+    row(3, 300, "mail_hijack", "mail:hijack:a@x.gr", "critical", "logged in from 4 countries, sending"),
+    row(4, 400, "mail_bounce_spike", "mail:bounce:auth:b@y.gr", "warning", "20 of 24 bounced"),
+    row(2, 200, "mail_recovered", "mail:script:acct", "", "back to normal"),
+  ];
+  const eps = alertEpisodes(rows);
+  assert.equal(eps.length, 3);
+  const [hij, bnc, scr] = eps; // newest last row first
+  assert.equal(hij.subject, "a@x.gr");
+  assert.equal(hij.opened, 100);
+  assert.equal(hij.severity, "critical", "the worst severity of the episode");
+  assert.equal(hij.message, "logged in from 4 countries, sending", "the latest message");
+  assert.equal(hij.closed, 500);
+  assert.equal(bnc.subject, "b@y.gr");
+  assert.equal(bnc.closed, 0);
+  assert.equal(scr.opened, 0, "opened before the rows read");
+  assert.equal(scr.closed, 200);
+  // a second episode of the same key after a recovery is a new one
+  const again = alertEpisodes(rows.concat([row(6, 600, "mail_hijack", "mail:hijack:a@x.gr", "warning", "again")]));
+  assert.equal(again.filter((e) => e.key === "mail:hijack:a@x.gr").length, 2);
+  assert.equal(alertEpisodes(null).length, 0);
+  assert.equal(alertEpisodes([{ id: 1 }, null, "x"]).length, 0);
+});
+
+test("open alerts: worst first, with when they opened, the bounce subject cleaned", () => {
+  const eps = alertEpisodes([
+    row(1, 100, "mail_bounce_spike", "mail:bounce:local:acct", "warning", "bounces"),
+    row(2, 200, "mail_hijack", "mail:hijack:a@x.gr", "warning", "logins"),
+  ]);
+  const views = [
+    { type: "mail_bounce_spike", severity: "warning", key: "mail:bounce:local:acct", subject: "local:acct", message: "bounces" },
+    { type: "mail_rbl_listed", severity: "critical", key: "mail:rbl:192.0.2.1", subject: "192.0.2.1", message: "listed" },
+    { type: "mail_outbound_spike", severity: "info", key: "mail:out:c@x.gr", subject: "c@x.gr", message: "volume only" },
+    { type: "mail_hijack", severity: "warning", key: "mail:hijack:a@x.gr", subject: "a@x.gr", message: "logins", countries: ["DE", "GB"], still_open: true },
+  ];
+  const open = openAlerts(views, eps);
+  assert.deepEqual(open.map((a) => a.key), ["mail:rbl:192.0.2.1", "mail:hijack:a@x.gr", "mail:bounce:local:acct", "mail:out:c@x.gr"]);
+  assert.equal(open[0].since, 0, "no episode read: no time");
+  assert.equal(open[1].since, 200);
+  assert.equal(open[1].stillOpen, true);
+  assert.deepEqual(open[1].countries, ["DE", "GB"]);
+  assert.equal(open[2].subject, "acct");
+  assert.equal(open[2].label, "bounce spike");
+  assert.equal(alertCount(views), 3, "an info finding is listed, not counted");
+  assert.equal(sevPill("critical"), "danger");
+  assert.equal(sevPill("warning"), "warn");
+  assert.equal(sevPill("info"), "info");
+  assert.deepEqual(openAlerts(undefined, undefined), []);
+});
+
+test("recent episodes keep the open ones and those with a row in the window", () => {
+  const now = 10 * 86400;
+  const eps = [
+    { key: "a", closed: 0, last: 1 },
+    { key: "b", closed: 2 * 86400, last: 2 * 86400 },
+    { key: "c", closed: 9 * 86400, last: 9 * 86400 },
+  ];
+  assert.deepEqual(recentEpisodes(eps, now, 7).map((e) => e.key), ["a", "c"]);
+});
+
+test("the alerts headline counts warnings and worse, and says when nothing ran", () => {
+  assert.equal(alertsHeadline({ state: "ok", data: { window: "24h" } }), "");
+  const h = alertsHeadline({ state: "ok", data: { abuse: [{ severity: "warning" }, { severity: "info" }], abuse_checked_at: "2026-11-27T10:00:00Z" } });
+  assert.match(h, /^1 open alert · checked /);
+  assert.match(alertsHeadline({ state: "ok", data: { abuse: [], abuse_checked_at: "2026-11-27T10:00:00Z" } }), /^no open alert/);
 });

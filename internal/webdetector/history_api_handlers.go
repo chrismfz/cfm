@@ -269,7 +269,9 @@ func (e *Engine) handleHistoryEvents(w http.ResponseWriter, r *http.Request) {
 	// the next, older page; without a positive before_id it is the first page.
 	beforeTS, _ := strconv.ParseInt(q.Get("before_ts"), 10, 64)
 	beforeID, _ := strconv.ParseInt(q.Get("before_id"), 10, 64)
-	rows, err := e.history.QueryEventsBefore(host, q.Get("ip"), q.Get("type"), limit, beforeTS, beforeID)
+	// type_prefix: every type starting with it (e.g. "mail_" for the Mail
+	// page's findings and their recoveries), with or without type.
+	rows, err := e.history.QueryEventsFiltered(HistoryFilter{Host: host, IP: q.Get("ip"), Type: q.Get("type"), TypePrefix: q.Get("type_prefix")}, limit, beforeTS, beforeID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

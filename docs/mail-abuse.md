@@ -164,6 +164,15 @@ is held for 2 h and an open hijack for 1 h, until the window has filled again:
 neither "back to normal" nor re-paged. Delivery is the same
 `detection_history` node-fault path as the backup check; cfm-web ingests it.
 
+**On the node's own page.** cfm-admin's Mail page opens on an **Alerts** tab
+(admin only): the findings open now, worst first, from the `abuse` block of
+`/api/v1/mail/traffic` (an `info` finding is listed, not counted on the tab),
+and the last 7 days as episodes — opened, its worst severity and latest
+message, and the `mail_recovered` message it closed with — from
+`/api/v1/webdet/history/events?type_prefix=mail_`. The kind is read from the
+key (`mail:<kind>:<subject>`), so a recovery lands on its finding. One that
+closed before anyone looked at cfm-web or Mattermost is still there.
+
 ## Hijack sources
 
 A login's address is first normalised, because several sources are one

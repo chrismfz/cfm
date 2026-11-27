@@ -20,6 +20,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+### Added
+- **An Alerts tab on the Mail page.** The mail-abuse findings the team is
+  paged with (hijacked mailbox, bounce / mailbox / script spike, queue hog,
+  an IP on a blocklist) are now on the node's own page too: what is open
+  now, worst first and since when, and the last 7 days, each from when it
+  opened to the message it closed with, so one that closed before anyone
+  looked is not lost. Admin only; a cPanel user never sees it. The history
+  is read through a new `type_prefix` filter of
+  `/api/v1/webdet/history/events`.
+
 ### Fixed
 - **Mail page on cPanel (Exim) nodes: Received, Rejected, Rate-limited and
   Over quota are counted.** Until now the Exim parser read only the arrival

@@ -378,6 +378,34 @@ func (s *HistoryStore) QueryEvents(host, ip, typ string, limit int) ([]HistoryEv
 // newest-first order (ts_unix DESC, id DESC), which is how a page asks for
 // the next, older page. beforeID <= 0 is the first page.
 func (s *HistoryStore) QueryEventsBefore(host, ip, typ string, limit int, beforeTS, beforeID int64) ([]HistoryEvent, error) {
+	return s.QueryEventsFiltered(HistoryFilter{Host: host, IP: ip, Type: typ}, limit, beforeTS, beforeID)
+}
+
+// HistoryFilter narrows an events query; an empty field does not narrow.
+// TypePrefix asks for every event type that starts with it (the Mail page's
+// "mail_" findings): lowercase letters and "_" only, else it matches nothing.
+type HistoryFilter struct {
+	Host, IP, Type, TypePrefix string
+}
+
+// typePrefixRange turns a type prefix into the [lo, hi) range of event types
+// it covers, so the query seeks the (event_type, ts) index instead of a LIKE
+// scan. ok=false for a prefix outside [a-z_]+.
+func typePrefixRange(prefix string) (lo, hi string, ok bool) {
+	if prefix == "" {
+		return "", "", false
+	}
+	for i := 0; i < len(prefix); i++ {
+		if c := prefix[i]; !(c >= 'a' && c <= 'z' || c == '_') {
+			return "", "", false
+		}
+	}
+	return prefix, prefix[:len(prefix)-1] + string(prefix[len(prefix)-1]+1), true
+}
+
+// QueryEventsFiltered is QueryEventsBefore with a HistoryFilter.
+func (s *HistoryStore) QueryEventsFiltered(f HistoryFilter, limit int, beforeTS, beforeID int64) ([]HistoryEvent, error) {
+	host, ip, typ := f.Host, f.IP, f.Type
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	limit = clampHistoryQueryLimit(limit)
@@ -401,6 +429,14 @@ func (s *HistoryStore) QueryEventsBefore(host, ip, typ string, limit int, before
 	if typ != "" {
 		clauses = append(clauses, "event_type = ?")
 		args = append(args, typ)
+	}
+	if f.TypePrefix != "" {
+		lo, hi, ok := typePrefixRange(f.TypePrefix)
+		if !ok {
+			return []HistoryEvent{}, nil
+		}
+		clauses = append(clauses, "event_type >= ? AND event_type < ?")
+		args = append(args, lo, hi)
 	}
 
 	q := `SELECT id, ts_unix, event_type, host, ip, mode, reason, score, uniq_ip, rps, status_code, ttl_sec, payload_json FROM history_events`
