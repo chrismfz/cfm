@@ -38,6 +38,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the 24 hours before the upgrade the page count is missing and the tab says
   so.
 
+### Fixed
+- **No detector bans a trusted proxy's own address any more** (a Cloudflare
+  edge, `trusted_proxies.conf`). Such an address stands for every visitor
+  behind that edge; a detector saw it when its source did not name the client
+  (earth's Apache ModSecurity log while the edge proxy was bypassed), and the
+  fleet blacklist held 345 permanent Cloudflare edge bans from June to
+  November (cleared 2026-11-27). The alert is logged (`reason=ignored_trusted_proxy`);
+  no block, challenge or report. The flood / port-scan autoblock spares such an
+  address too, whatever `THROTTLE_GOODBOT_EXEMPT` says (ten Cloudflare
+  portscan bans were in the same list).
+
 ## 2026.11.26
 
 ### Changed

@@ -231,6 +231,25 @@ func (s *sectionSink) Publish(a core.Alert) {
 		return
 	}
 
+	// --- never a trusted proxy's own address (trusted_proxies.conf) ---
+	// Such an address stands for every visitor who arrives through that
+	// proxy edge. A detector sees it when its log did not get the visitor's
+	// address: on earth, Apache's ModSecurity log while the edge was bypassed
+	// (i360.remoteip.conf's RemoteIPHeader X-Forwarded-For overrides the
+	// CF-Connecting-IP one), which put 345 permanent Cloudflare edge bans
+	// into the fleet blacklist (June-November 2026; cleared 2026-11-27). No
+	// block, no challenge, no report: the alert is only logged.
+	if edgeban.IsTrustedProxy(ip) {
+		out.Extra["blocked"] = "no"
+		out.Extra["reason"] = "ignored_trusted_proxy"
+		logging.LogfDETECTOR("[autoblock] not banning %s (section=%s kind=%s): a trusted proxy's address (trusted_proxies.conf); the detector's source did not name the client",
+			ipStr, s.section, a.Kind)
+		if s.inner != nil {
+			s.inner.Publish(out)
+		}
+		return
+	}
+
 	// --- CHALLENGE branch ---
 	// Triggered when detector emits Extra["action"]="challenge"
 	if out.Extra != nil && out.Extra["action"] == "challenge" {
