@@ -22,10 +22,11 @@ func TestChallengeFeed(t *testing.T) {
 		t.Fatalf("a challenge list blocks: %+v", v)
 	}
 
-	// Log mode (the default): listed, not enforced.
-	if ChallengeMode() != ModeLog {
+	// Enforce is the default; log mode: listed, not enforced.
+	if ChallengeMode() != ModeEnforce || DefaultModeChallenge != ModeEnforce {
 		t.Fatalf("default mode %q", ChallengeMode())
 	}
+	SetChallengeMode("log")
 	if enforce, listed := DecideChallenge("185.220.101.1", "example.gr"); enforce || !listed {
 		t.Fatalf("log mode: enforce=%v listed=%v", enforce, listed)
 	}
@@ -67,7 +68,7 @@ func TestChallengeFeed(t *testing.T) {
 	}
 
 	st := Stats()
-	if st["mode_challenge"] != ModeLog || st["challenged"].(int64) != 4 || st["challenge_allow"].(int64) != 1 || st["would_challenge"].(int64) != 1 {
+	if st["mode_challenge"] != DefaultModeChallenge || st["challenged"].(int64) != 4 || st["challenge_allow"].(int64) != 1 || st["would_challenge"].(int64) != 1 {
 		t.Errorf("stats %v", st)
 	}
 	if _, ok := st["sources"].(map[string]any)["feed:TOR"]; !ok {

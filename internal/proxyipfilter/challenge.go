@@ -17,11 +17,15 @@ import (
 // machine-to-machine endpoints) still lift it. Every allow source (the fleet
 // whitelist, the node's allow sets) cancels it, as it cancels a block.
 //
-// [webdetector] LIST_CHALLENGE = log (default: a line per client and outcome
-// every 10 minutes, nothing changes) | enforce | off.
+// [webdetector] LIST_CHALLENGE = enforce (default since 2026-11-28) | log (a
+// line per client and outcome every 10 minutes, nothing changes) | off.
 
-// DefaultModeChallenge is LIST_CHALLENGE's default: log, for a burn-in.
-const DefaultModeChallenge = ModeLog
+// DefaultModeChallenge is LIST_CHALLENGE's default: enforce since 2026-11-28.
+// A day of log on eight nodes (TOR, blocklist.de, CINS): on orion 651
+// listed addresses, none in Greece or Cyprus, while Tor exits registered
+// bot accounts on clients.nixpal.com (they solved its ALTCHA) past the
+// log-only list.
+const DefaultModeChallenge = ModeEnforce
 
 var (
 	modeChallenge atomic.Value // string

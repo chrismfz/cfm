@@ -40,7 +40,8 @@ func TestListChallengeFloor(t *testing.T) {
 	b := NewNginxBridge("/tmp/cfm-test-listchal.sock", "tok", time.Minute, time.Minute)
 
 	const tor = "ip=185.220.101.1&host=example.com&method=GET&ua=Mozilla"
-	// Log mode (default): allow, not cacheable.
+	// Log mode: allow, not cacheable.
+	proxyipfilter.SetChallengeMode("log")
 	if p := listChallengeDecision(t, b, tor+"&uri=%2Fshop"); p["ip_action"] != "allow" || p["rule_action"] != ruleActionObserve {
 		t.Fatalf("log mode: %v", p)
 	}

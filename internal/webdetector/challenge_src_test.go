@@ -611,6 +611,7 @@ func TestChallengeSourcesList(t *testing.T) {
 	proxyipfilter.ResetForTest()
 	t.Cleanup(proxyipfilter.ResetForTest)
 	proxyipfilter.PrepareChallengeFeed("TOR", []string{"185.220.101.1"}, nil).Publish()
+	proxyipfilter.SetChallengeMode("log")
 	b := NewNginxBridge("/tmp/cfm-test-src-list.sock", "tok", time.Minute, time.Minute)
 	if got := b.challengeSources("", "185.220.101.1", "example.com", "", 0); len(got) != 0 {
 		t.Fatalf("log mode: %v", got)
