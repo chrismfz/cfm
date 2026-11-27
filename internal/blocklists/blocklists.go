@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"cfm/internal/logging"
 )
 
 type ListType int
@@ -25,7 +27,6 @@ type ListType int
 const (
 	TypeBlock ListType = iota
 	TypeAllow
-	TypeIgnore
 	// TypeChallenge: never written to nft. The daemon keeps the list in
 	// memory (internal/proxyipfilter) and the nginx bridge's decision raises
 	// an uncleared listed client to a challenge ([webdetector] LIST_CHALLENGE,
@@ -38,8 +39,6 @@ func (t ListType) String() string {
         switch t {
         case TypeAllow:
                 return "ALLOW"
-        case TypeIgnore:
-                return "IGNORE"
         case TypeChallenge:
                 return "CHALLENGE"
         default:
@@ -49,7 +48,7 @@ func (t ListType) String() string {
 
 type Feed struct {
 	Name     string         // e.g. SPAMDROP
-	Type     ListType       // BLOCK, ALLOW, IGNORE or CHALLENGE
+	Type     ListType       // BLOCK, ALLOW or CHALLENGE
 	Interval time.Duration  // refresh interval
 	Max      int            // 0 = all
 	URL      string         // source URL
@@ -84,13 +83,18 @@ func ParseConfig(r io.Reader) ([]Feed, error) {
 			typ = TypeBlock
 		case "ALLOW":
 			typ = TypeAllow
-                case "IGNORE":
-                        typ = TypeIgnore
 		case "CHALLENGE":
 			typ = TypeChallenge
+		case "IGNORE":
+			// Parsed once as its own type, then applied by every consumer as
+			// a BLOCK (the nft appliers and the proxied filter knew only
+			// ALLOW), so an IGNORE feed dropped the addresses it was meant to
+			// spare. Never-block addresses go in cfm.ignore or [global]
+			// IGNORE_IPS / IGNORE_NETS; a feed that cancels a block is ALLOW.
+			logging.Logf("[blocklists] line %d (%s): type IGNORE is not supported, the feed is skipped (never-block: cfm.ignore or IGNORE_IPS; cancel a block: ALLOW)", ln, name)
+			continue
 		default:
-			// συμβατότητα με την παλιά μορφή χωρίς TYPE: αν δίνεται μόνο 4 πεδία και λείπει TYPE,
-			// μπορείς να προσαρμόσεις εδώ. Προς το παρόν απαιτούμε 5 πεδία.
+			logging.Logf("[blocklists] line %d (%s): type %q is none of BLOCK, ALLOW, CHALLENGE: the feed is skipped", ln, name, typS)
 			continue
 		}
 		ivalS := strings.TrimSpace(parts[2])

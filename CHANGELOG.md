@@ -39,6 +39,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   so.
 
 ### Fixed
+- **A `cfm.blocklists` feed of type `IGNORE` no longer blocks.** The type was
+  parsed, then applied by every consumer as a `BLOCK`, so such a feed dropped
+  the addresses it was meant to spare (no node used one). It is now skipped,
+  with a line in cfm.log, as is any unknown type (before, silently). Never-block
+  addresses go in `cfm.ignore` or `[global] IGNORE_IPS`; a feed that cancels a
+  block is `ALLOW`.
 - **No detector bans a trusted proxy's own address any more** (a Cloudflare
   edge, `trusted_proxies.conf`). Such an address stands for every visitor
   behind that edge; a detector saw it when its source did not name the client
