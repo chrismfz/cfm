@@ -408,6 +408,36 @@ func TestCPanelLimitDiscardsAreNotBounces(t *testing.T) {
 	}
 }
 
+// A form writing to made-up addresses mostly DEFERS (dead domains, refused
+// connections), which never count as bounces; cPanel then trips its "max
+// defers and failures" limit and discards the rest. Those discards are what
+// that sender's mail became: still a bounce spike.
+func TestCPanelFailureLimitDiscardsStillABounceSpike(t *testing.T) {
+	T := time.Unix(1_700_000_000, 0)
+	ts := T.Add(-20 * time.Minute).Format("2006-01-02 15:04:05")
+	tr := newTracker()
+	for i := 0; i < 45; i++ {
+		id := fmt.Sprintf("1tXyZg-%06d-AB", i)
+		tr.observeExim(eximArrival(ts, id, "bob", "info@bob.gr"), T)
+		tr.observeExim(ts+" "+id+" == made"+fmt.Sprint(i)+"@dead.example R=dkim_lookuphost T=dkim_remote_smtp defer (Connection refused)", T)
+	}
+	for i := 45; i < 75; i++ {
+		id := fmt.Sprintf("1tXyZg-%06d-AB", i)
+		tr.observeExim(eximArrival(ts, id, "bob", "info@bob.gr"), T)
+		tr.observeExim(ts+" "+id+" ** made"+fmt.Sprint(i)+"@dead.example <info@bob.gr> R=enforce_mail_permissions : Domain bob.gr has exceeded the max defers and failures per hour (50/50 (100%)) allowed. Message discarded.", T)
+	}
+	fs, _, _ := tr.evaluate(openTemp(t), T)
+	found := false
+	for _, f := range fs {
+		if f.Type == TypeBounceSpike {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a sender over cPanel's failure limit must still be a bounce spike: %+v", fs)
+	}
+}
+
 func TestMappedIPv4IsTheSameSource(t *testing.T) {
 	orig := geoOf
 	geoOf = func(string) (string, uint) { return "GR", 1 }

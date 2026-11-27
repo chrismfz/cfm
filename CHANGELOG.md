@@ -38,9 +38,12 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   (a full or deleted local mailbox) and messages the host refused to send
   itself (cPanel's hourly limits and holds, an alias `:fail:`, a forward
   refused as spam) were counted as remote bounces. All three are left out,
-  of the bounce-spike alert too. A failure no host answered (a refused
+  of the bounce-spike alert too, except cPanel's "max defers and failures
+  per hour" discards, which that alert still counts (they are what a form
+  writing to dead addresses ends in). A failure no host answered (a refused
   connection, a give-up after the retry timeout) is now grouped under the
-  recipient's domain instead of "(unknown)", and a give-up reads
+  recipient's domain instead of "(unknown)" (a best guess: a domain hosted
+  at Microsoft shows under its own name there), and a give-up reads
   `gave-up-after-retries` instead of `connection-timeout`.
 - **Mail page on cPanel (Exim) nodes: Received, Rejected, Rate-limited and
   Over quota are counted.** Until now the Exim parser read only the arrival

@@ -87,7 +87,7 @@ func ParseEximDelivery(line string) (Delivery, bool) {
 	if h := reEximHost.FindStringSubmatch(line); h != nil {
 		host = strings.Trim(h[1], "()")
 	}
-	remote := strings.Contains(transport, "remote_smtp") || host != ""
+	remote := RemoteTransport(transport) || host != ""
 
 	var d Delivery
 	delivered := false
@@ -101,7 +101,7 @@ func ParseEximDelivery(line string) (Delivery, bool) {
 	case "**", "==":
 		// Measured on the fleet's cPanel mainlogs (2026-11-27): most failure
 		// lines with no remote host are not a provider's answer at all.
-		if !remote && (transport != "" || localRouterOnly(line)) {
+		if !remote && (transport != "" || localPolicyRouter(line)) {
 			// A local transport (an over-quota or unknown local mailbox, a
 			// pipe), or a local router's own decision with no transport
 			// (cPanel's hourly limits and holds, an alias :fail:, a forward
@@ -135,13 +135,55 @@ func ParseEximDelivery(line string) (Delivery, bool) {
 	return d, true
 }
 
-// localRouterOnly: the line names a router but no transport, and the router
-// is not one that routes to remote hosts (*lookuphost): a decision made here.
-// A remote router's failure with no transport ("Unrouteable address" for a
-// typo'd domain) stays an outbound failure.
-func localRouterOnly(line string) bool {
+// RemoteTransport reports whether an Exim transport name (T=…) sends to
+// another host: any *smtp transport (remote_smtp, dkim_remote_smtp,
+// dkim_remote_forwarded_smtp, a smarthost's). Everything else (dovecot LMTP
+// deliveries, appendfile, pipes, autoreplies) is local. The one test for it:
+// the deliverability view here and the bounce-spike alert (mailtraffic).
+func RemoteTransport(t string) bool {
+	return strings.Contains(strings.ToLower(t), "smtp")
+}
+
+// localPolicyRouters are the routers whose failure with no transport is a
+// decision made on this host, not a delivery: measured on the fleet's cPanel
+// mainlogs (2026-11-27). A router not named here (dkim_lookuphost, Debian's
+// dnslookup, a smarthost) keeps its failure as an outbound one ("Unrouteable
+// address" for a typo'd domain): an unknown router counts, the safer side for
+// the bounce-spike alert that reads the same outcomes.
+var localPolicyRouters = []string{
+	"enforce_mail_permissions",             // cPanel's hourly limits and holds
+	"reject_forwarded_mail_marked_as_spam", // a forward refused as spam
+	"virtual_aliases",                      // an alias :fail: (and _nostar)
+	"virtual_user",                         // a local mailbox (and _filter)
+	"localuser",                            // an account's own mailbox
+	"central_filter",                       // the system filter
+	"suspendedcheck",                       // a suspended account
+	"fail_remote_domains",                  // a domain set to fail remotely
+}
+
+func localPolicyRouter(line string) bool {
 	m := reEximRouter.FindStringSubmatch(line)
-	return m != nil && !strings.HasSuffix(strings.ToLower(strings.TrimRight(m[1], ":")), "lookuphost")
+	if m == nil {
+		return false
+	}
+	r := strings.ToLower(strings.TrimRight(m[1], ":"))
+	for _, p := range localPolicyRouters {
+		if r == p || strings.HasPrefix(r, p+"_") {
+			return true
+		}
+	}
+	return false
+}
+
+// CPanelFailureLimit reports a message cPanel discarded because its domain
+// passed "the max defers and failures per hour": not a delivery (the
+// deliverability view leaves it out), but the sign of a sender writing to
+// addresses that fail, which the bounce-spike alert must still see (the
+// defers that tripped the limit never count as bounces there).
+func CPanelFailureLimit(line string) bool {
+	m := reEximFlag.FindStringSubmatch(line)
+	return m != nil && m[1] == "**" && strings.Contains(line, " R=enforce_mail_permissions") &&
+		strings.Contains(line, "exceeded the max defers and failures per hour")
 }
 
 // eximRecipientDomain returns the domain of the address right after the flag
@@ -155,7 +197,7 @@ func eximRecipientDomain(line string, flag []string) string {
 	if len(f) == 0 {
 		return ""
 	}
-	addr := strings.TrimRight(strings.Trim(f[0], "<>"), ":")
+	addr := strings.Trim(strings.TrimRight(f[0], ":"), "<>")
 	at := strings.LastIndexByte(addr, '@')
 	if at <= 0 || at == len(addr)-1 {
 		return ""
