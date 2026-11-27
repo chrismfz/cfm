@@ -44,9 +44,89 @@ func TestParseEximDelivery(t *testing.T) {
 			true, Deferred, "google", "421", "unsolicited-rate-limited",
 		},
 		{
-			"defer (==) with no host — retry backoff, no provider/code",
+			"defer (==) 'retry time not reached' is the queue run waiting, not an attempt",
 			`2026-08-11 00:30:50 1wtLQP-00000001GcB-3Fx5 == info5@mk.xyrike.top R=dkim_lookuphost T=dkim_remote_smtp defer (-54): retry time not reached for any host for 'mk.xyrike.top'`,
-			true, Deferred, "", "", "retry-backoff",
+			false, OutcomeNone, "", "", "",
+		},
+		{
+			"routing defer with no router/transport, retry time not reached: not an attempt",
+			`2026-11-27 16:00:00 1xWwab-0000000Cabc-1abc == someone@example.com routing defer (-51): retry time not reached`,
+			false, OutcomeNone, "", "", "",
+		},
+		{
+			"** 'retry time not reached … after a long failure period' is the final give-up: a bounce",
+			`2026-11-27 16:00:01 1xWwac-0000000Cabd-1abd ** x@gmail.com R=dkim_lookuphost T=dkim_remote_smtp: retry time not reached for any host after a long failure period`,
+			true, Bounced, "google", "", "gave-up-after-retries",
+		},
+		{
+			"** retry timeout exceeded, no host: a bounce, provider from the recipient's domain",
+			`2026-11-27 16:46:27 1xWxDQ-0000000EFG1-3ykS ** someone@gmail.com <all@example.gr>: retry timeout exceeded`,
+			true, Bounced, "google", "", "gave-up-after-retries",
+		},
+		{
+			"== connection refused with no host: a deferral to the recipient's domain",
+			`2026-11-27 16:00:02 1xWwad-0000000Cabe-1abe == login@mx.spam.example R=dkim_lookuphost T=dkim_remote_smtp defer (Connection refused)`,
+			true, Deferred, "spam.example", "", "connection-refused",
+		},
+		{
+			"cPanel's hourly limit (router only) is not a delivery",
+			`2026-11-27 15:59:49 1xWwUR-0000000CMKj-0Cd0 ** a@yahoo.com (all@example.gr) <info@example.gr> R=enforce_mail_permissions : Domain example.gr has exceeded the max defers and failures per hour (50/50 (100%)) allowed. Message discarded.`,
+			false, OutcomeNone, "", "", "",
+		},
+		{
+			"an outgoing mail hold (router only) is not a delivery",
+			`2026-11-27 12:00:05 1xWvAE-0000000AAAE-1AAE == d@gmail.com R=enforce_mail_permissions defer: "Sender wordpress@example.gr has an outgoing mail hold.  Message will be reattempted later"`,
+			false, OutcomeNone, "", "", "",
+		},
+		{
+			"a forward refused as spam (router only) is not a delivery",
+			`2026-11-26 10:52:15 1xWVDB-00000004gDs-0BJ4 ** n@gmail.com (info@example.gr) <info@example.gr> R=reject_forwarded_mail_marked_as_spam : This mail cannot be forwarded because it was detected as spam.`,
+			false, OutcomeNone, "", "", "",
+		},
+		{
+			"a local mailbox over quota (** on a dovecot transport) is not a remote bounce",
+			`2026-11-27 12:00:00 1xWvAA-0000000AAAA-1AAA ** info@example.gr R=virtual_user T=dovecot_virtual_delivery: LMTP error after RCPT TO:<info@example.gr>: 552 5.2.2 <info@example.gr> Mailbox is full / Blocks limit exceeded / Inode limit exceeded`,
+			false, OutcomeNone, "", "", "",
+		},
+		{
+			"an alias :fail: (router only) is not a delivery",
+			`2026-11-27 12:00:06 1xWvAF-0000000AAAF-1AAF ** old@example.gr R=virtual_aliases: No Such User Here`,
+			false, OutcomeNone, "", "", "",
+		},
+		{
+			"a remote router's failure with no transport (typo'd domain) stays an outbound bounce",
+			`2026-11-27 12:00:07 1xWvAG-0000000AAAG-1AAG ** someone@gmail.cim R=dkim_lookuphost: Unrouteable address`,
+			true, Bounced, "gmail.cim", "", "other",
+		},
+		{
+			"a give-up through cPanel's forwarding transport (no host) is still a bounce",
+			`2026-11-27 12:00:08 1xWvAI-0000000AAAI-1AAI ** x@gmail.com (info@example.gr) <info@example.gr> R=dkim_lookuphost T=dkim_remote_forwarded_smtp: retry time not reached for any host after a long failure period`,
+			true, Bounced, "google", "", "gave-up-after-retries",
+		},
+		{
+			"a refused connection through the forwarding transport is still a deferral",
+			`2026-11-27 12:00:09 1xWvAJ-0000000AAAJ-1AAJ == x@remote.example (info@example.gr) <info@example.gr> R=dkim_lookuphost T=dkim_remote_forwarded_smtp defer (Connection refused)`,
+			true, Deferred, "remote.example", "", "connection-refused",
+		},
+		{
+			"Debian's dnslookup router failing with no transport stays an outbound bounce",
+			`2026-11-27 12:00:10 1xWvAK-0000000AAAK-1AAK ** x@gmail.cim R=dnslookup: Unrouteable address`,
+			true, Bounced, "gmail.cim", "", "other",
+		},
+		{
+			"an unknown router (a smarthost) defers: kept",
+			`2026-11-27 12:00:11 1xWvAL-0000000AAAL-1AAL == x@example.com R=smarthost defer (-1): host lookup did not complete`,
+			true, Deferred, "example.com", "", "other",
+		},
+		{
+			"an angle-bracketed recipient with a trailing colon gives a clean domain",
+			`2026-11-27 12:00:12 1xWvAM-0000000AAAM-1AAM ** <x@gmail.com>: retry timeout exceeded`,
+			true, Bounced, "google", "", "gave-up-after-retries",
+		},
+		{
+			"an alias router variant (_nostar) is local policy",
+			`2026-11-27 12:00:13 1xWvAN-0000000AAAN-1AAN ** old@example.gr R=virtual_aliases_nostar: No Such User Here`,
+			false, OutcomeNone, "", "", "",
 		},
 		{
 			"an arrival (<=) line is not a delivery",
@@ -173,6 +253,23 @@ func TestNormalizeDeliveryReason(t *testing.T) {
 	for raw, want := range cases {
 		if got := normalizeDeliveryReason(raw); got != want {
 			t.Errorf("normalizeDeliveryReason(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestCPanelFailureLimit(t *testing.T) {
+	for line, want := range map[string]bool{
+		`2026-11-27 15:59:49 1xWwUR-0000000CMKj-0Cd0 ** a@yahoo.com R=enforce_mail_permissions : Domain example.gr has exceeded the max defers and failures per hour (50/50 (100%)) allowed. Message discarded.`:                       true,
+		`2026-11-25 03:56:44 1xW2FV-0000000Dnbe-3gxC ** b@gmail.com R=enforce_mail_permissions : Domain example.gr has exceeded the max emails per hour (125/100 (125%)) allowed.  Message discarded.`:                                 false,
+		`2026-11-27 15:59:49 1xWwUR-0000000CMKj-0Cd0 == a@yahoo.com R=enforce_mail_permissions defer: "Domain example.gr has exceeded the max defers and failures per hour (50/50 (100%)) allowed. Message will be reattempted later"`: false,
+	} {
+		if got := CPanelFailureLimit(line); got != want {
+			t.Errorf("CPanelFailureLimit(%.80q…) = %v, want %v", line, got, want)
+		}
+	}
+	for tr, want := range map[string]bool{"dkim_remote_smtp": true, "dkim_remote_forwarded_smtp": true, "remote_smtp": true, "dovecot_virtual_delivery": false, "cagefs_virtual_address_pipe": false, "address_directory": false} {
+		if RemoteTransport(tr) != want {
+			t.Errorf("RemoteTransport(%q) != %v", tr, want)
 		}
 	}
 }

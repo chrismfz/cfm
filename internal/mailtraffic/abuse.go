@@ -402,6 +402,10 @@ func (t *tracker) observeExim(line string, now time.Time) {
 	if id != nil && id[2] != "<=" {
 		if d, ok := mailmeter.ParseEximDelivery(line); ok && !localTransport(line) {
 			t.addOutcome(id[1], d, logTime(line, now))
+		} else if mailmeter.CPanelFailureLimit(line) {
+			// not a delivery, but what a sender whose mail keeps failing
+			// gets: count it as the bounce it stands for
+			t.addOutcome(id[1], mailmeter.Delivery{Outcome: mailmeter.Bounced, Reason: "over-failure-limit"}, logTime(line, now))
 		}
 		return
 	}
@@ -495,7 +499,7 @@ var reEximTransport = regexp.MustCompile(`\sT=(\S+)`)
 // with no transport at all ("retry timeout exceeded") is a remote give-up.
 func localTransport(line string) bool {
 	m := reEximTransport.FindStringSubmatch(line)
-	return m != nil && !strings.Contains(strings.ToLower(m[1]), "smtp")
+	return m != nil && !mailmeter.RemoteTransport(m[1])
 }
 
 var (
