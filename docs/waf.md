@@ -459,6 +459,13 @@ upload would skip every body-PHP and upload rule. A matching rule was built
 and removed in review (2026-11-24). Such a site gets a rule-scoped exclude
 (`--type path --rule <id> --scope host`).
 
+**Withdrawn for String Locator (2026-11-27).** Measured on six nodes (the
+edge access logs of ~3 days): no save through `/wp-json/string-locator/`
+anywhere, only scanners' `GET /v1/users` (404); Code Snippets saves (POST 200)
+on five sites. String Locator's entry was removed, which halves the residual
+below; a site that uses it gets the rule-scoped exclude (`--type path --rule
+402 --scope host`, and 417 / 415 the same way). Code Snippets stays.
+
 **Residual of the path form.** An app that rewrites unknown paths to
 `index.php` (Joomla with SEF URLs, Laravel, OpenCart with SEO URLs) answers
 `/wp-json/string-locator/...` too, and can route that request on its own
@@ -1137,8 +1144,8 @@ editor still scores (a global `exec(` / `system(` plus a superglobal reaches
 rule-scoped exclude on the editor path (`cfm webtop waf exclude add <path>
 --type path --rule 417 --scope host`). `RULE_417 = 1` arms the ban. The code-editor and installer
 endpoints the other body-PHP rules stand down for
-(`is_known_legit_php_upload_endpoint`: Code Snippets and String Locator saves,
-the plugin / theme installer) are exempt.
+(`is_known_legit_php_upload_endpoint`: Code Snippets saves, the plugin / theme
+installer) are exempt.
 
 **Why straight to block, not challenge first** (the ladder is logonly →
 challenge → block; 416, 332 and 10029 took the same exception on the same

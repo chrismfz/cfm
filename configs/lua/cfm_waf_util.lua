@@ -100,7 +100,7 @@ end
 -- malware / webshell-content scanners (which would otherwise flag the PHP
 -- that is the upload's whole point) must stand down. Takes args because the
 -- WordPress plugin/theme installer is keyed on the query action; the REST
--- code-editor endpoints (Code Snippets, String Locator) are keyed on a fixed
+-- code-editor endpoint (Code Snippets) is keyed on a fixed
 -- request path instead — the property that makes them safe to allowlist in
 -- code, unlike a body-overridable admin-ajax action (see docs/waf.md FP 6/7).
 local function is_known_legit_php_upload_endpoint(uri, args)
@@ -112,23 +112,12 @@ local function is_known_legit_php_upload_endpoint(uri, args)
     return true
   end
 
-  -- String Locator plugin REST API — an in-browser theme/plugin FILE EDITOR.
-  -- Its search + save flow POSTs the raw PHP file being edited (and lets you
-  -- search *for* PHP tokens like `<?php` / `$_POST`), so rule 402's byte scan
-  -- fires on exactly the content that is the tool's purpose. Same "code editor"
-  -- class as Code Snippets above and safe to allowlist for the SAME reason:
-  -- keyed on a fixed REST *path* (not a body-overridable admin-ajax action),
-  -- and the endpoint carries its own capability check downstream. Like every
-  -- entry here, returning true stands down the whole body-PHP scanner set
-  -- (401/402/403 upload + the 431-436/439 WAF_BACKDOOR body detectors) — the
-  -- right call for a code editor, whose saved file is arbitrary PHP that trips
-  -- more than a bare `<?php`; all URI-based rules (traversal, XSS, SQLi, CVE …)
-  -- still run. See docs/waf.md FP case 7 (and case 6 for why the WMW migration
-  -- endpoint, which IS action-keyed + pre-auth-reachable, stays
-  -- operator-exclude-only).
-  if u:match("^/wp%-json/string%-locator/") then
-    return true
-  end
+  -- String Locator (/wp-json/string-locator/) was exempt here too until
+  -- 2026-11-27: no node had a save through it in 3 days of logs (only scanners'
+  -- `GET /v1/users` 404s), and a fixed /wp-json/ path is answered by any app
+  -- that rewrites unknown paths to index.php, which can route the request on
+  -- its own fields with these rules off (docs/waf.md FP case 7). A site that
+  -- uses it gets a rule-scoped exclude.
   -- Not the `?rest_route=` form a site without pretty permalinks uses
   -- (`/index.php?rest_route=/code-snippets/...`): WP's front controller is
   -- also any other app's (`/index.php`), which can route on its own query or
