@@ -18,8 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"cfm/internal/logging"
 )
 
 type ListType int
@@ -58,7 +56,17 @@ type Feed struct {
 // ParseConfig διαβάζει ένα αρχείο blocklists (NAME|TYPE|INTERVAL|MAX|URL[|TTL=1h])
 // Αγνοεί κενές γραμμές και σχόλια (#...).
 func ParseConfig(r io.Reader) ([]Feed, error) {
+	feeds, _, err := ParseConfigReport(r)
+	return feeds, err
+}
+
+// ParseConfigReport is ParseConfig plus one warning per line it skipped for
+// its type (IGNORE, or an unknown one), for the daemon to log. It logs
+// nothing itself: the one-shot CLI parses the same file, and the logger
+// writes to stdout there (cfm firewall status --json).
+func ParseConfigReport(r io.Reader) ([]Feed, []string, error) {
 	var feeds []Feed
+	var warnings []string
 	sc := bufio.NewScanner(r)
 	ln := 0
 	for sc.Scan() {
@@ -91,10 +99,10 @@ func ParseConfig(r io.Reader) ([]Feed, error) {
 			// ALLOW), so an IGNORE feed dropped the addresses it was meant to
 			// spare. Never-block addresses go in cfm.ignore or [global]
 			// IGNORE_IPS / IGNORE_NETS; a feed that cancels a block is ALLOW.
-			logging.Logf("[blocklists] line %d (%s): type IGNORE is not supported, the feed is skipped (never-block: cfm.ignore or IGNORE_IPS; cancel a block: ALLOW)", ln, name)
+			warnings = append(warnings, fmt.Sprintf("line %d (%s): type IGNORE is not supported, the feed is skipped (never-block: cfm.ignore or IGNORE_IPS; cancel a block: ALLOW)", ln, name))
 			continue
 		default:
-			logging.Logf("[blocklists] line %d (%s): type %q is none of BLOCK, ALLOW, CHALLENGE: the feed is skipped", ln, name, typS)
+			warnings = append(warnings, fmt.Sprintf("line %d (%s): type %q is none of BLOCK, ALLOW, CHALLENGE: the feed is skipped", ln, name, typS))
 			continue
 		}
 		ivalS := strings.TrimSpace(parts[2])
@@ -133,9 +141,9 @@ func ParseConfig(r io.Reader) ([]Feed, error) {
 		})
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return nil, warnings, err
 	}
-	return feeds, nil
+	return feeds, warnings, nil
 }
 
 // ---------- Fetch & Decode ----------

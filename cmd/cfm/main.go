@@ -1184,7 +1184,10 @@ func runDaemon(args []string) {
 		if !changed {
 			return
 		}
-		feeds, err := blocklists.ParseConfig(bytes.NewReader(b))
+		feeds, warnings, err := blocklists.ParseConfigReport(bytes.NewReader(b))
+		for _, w := range warnings {
+			logging.Logf("[blocklists] %s", w)
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "blocklists parse error:", err)
 			return
