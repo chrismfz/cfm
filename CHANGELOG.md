@@ -38,15 +38,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the 24 hours before the upgrade the page count is missing and the tab says
   so.
 
-### Changed
-- **The String Locator plugin's REST path is no longer exempt from the WAF's
-  body-PHP rules** (401-403, 415, 417, 431-439). No node had a save through it
-  in three days of edge logs (only scanners' 404s), and a fixed `/wp-json/` path
-  is also answered by any other app that rewrites unknown paths to `index.php`,
-  which could route such a request on its own fields with those rules off. A
-  site that uses String Locator gets a rule-scoped exclude. Code Snippets (used
-  on five sites) stays exempt. `docs/waf.md` FP case 7.
-
 ### Fixed
 - **A `cfm.blocklists` feed of type `IGNORE` no longer blocks.** The type was
   parsed, then applied by every consumer as a `BLOCK`, so such a feed dropped

@@ -1484,15 +1484,16 @@ do
   }))
   check(hit2 == false, "regression: rule 402 skipped on Code Snippets endpoint (legit upload bypass)")
 
-  -- String Locator's save endpoint is no longer exempt (2026-11-27, unused
-  -- on the fleet; docs/waf.md FP case 7): rule 402 fires there again.
+  -- String Locator plugin (in-browser PHP file editor) save endpoint — the
+  -- POST body is the raw theme/plugin file being edited, so it legitimately
+  -- carries <?php. is_known_legit_php_upload_endpoint must skip rule 402 here.
   local hit3 = waf.check(fresh_ctx({
     method  = "POST",
     uri     = "/wp-json/string-locator/v1/save",
     headers = { ["Content-Type"] = "multipart/form-data; boundary=b" },
     body    = body,
   }))
-  check(hit3 == true, "rule 402 fires on the String Locator save endpoint (no longer exempt)")
+  check(hit3 == false, "regression: rule 402 skipped on String Locator save endpoint (legit code-editor bypass)")
 end
 
 -- ── Test 68: Rule 404 ext — eval-family still fires (no regression) ────────

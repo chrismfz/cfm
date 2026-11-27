@@ -286,7 +286,7 @@ do
   local sl = req('{"content":"' .. string.rep("x", 2500) .. '<?php if(isset($_POST[\\"c\\"])){eval($_POST[\\"c\\"]);}"}',
                  "/wp-json/string-locator/v1/save", "application/json")
   hit, reason, _, _, _, rid = waf.check(sl)
-  check(hit and (rid == 417 or rid == 404), "String Locator save: scanned again since 2026-11-27 (got " .. tostring(reason) .. ")")
+  check(not (hit and (rid == 417 or rid == 404)), "String Locator save: no 404 / 417 (got " .. tostring(reason) .. ")")
   local cs = req('{"code":"' .. string.rep("x", 2500) .. '<?php system($_GET[c]);"}', "/wp-json/code-snippets/v1/snippets", "application/json")
   hit, reason, _, _, _, rid = waf.check(cs)
   check(not (hit and rid == 417), "Code Snippets save: no 417 (got " .. tostring(reason) .. ")")

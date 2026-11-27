@@ -3026,8 +3026,8 @@ local function check_impl(ctx, st)
   do
     local dmode = rule_mode(CFG.rule_php_webshell_body_deep, "logonly")
     -- Not on the code-editor / installer endpoints the other body-PHP rules
-    -- stand down for (is_known_legit_php_upload_endpoint: Code Snippets
-    -- saves, the plugin / theme installer): there a whole PHP
+    -- stand down for (is_known_legit_php_upload_endpoint: Code Snippets and
+    -- String Locator saves, the plugin / theme installer): there a whole PHP
     -- file is the request's purpose, and at block it would be a 403.
     if dmode ~= "disabled" and body_inspect_ok and not st.php_body_head_hit
        and not legit_archive_upload then
