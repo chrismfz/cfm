@@ -60,6 +60,12 @@ var (
 	reEximT    = regexp.MustCompile(`\sT=(\S+)`)
 	reEximHost = regexp.MustCompile(`\sH=(\S+)`)
 	reEximC    = regexp.MustCompile(`\sC="([^"]*)"`) // completion response on a delivered line
+	// A router named on a failure line (R=enforce_mail_permissions, …).
+	reEximRouter = regexp.MustCompile(`\sR=(\S+)`)
+	// A defer that is only the retry rules waiting (no attempt was made). A
+	// `**` "retry time not reached … after a long failure period" is the
+	// final give-up and is still counted.
+	reEximRetryWait = regexp.MustCompile(`(?i)retry time not (?:yet )?reached`)
 )
 
 // ParseEximDelivery extracts a remote delivery outcome from one exim mainlog
@@ -92,10 +98,25 @@ func ParseEximDelivery(line string) (Delivery, bool) {
 		}
 		d.Outcome = Delivered
 		delivered = true
-	case "**":
+	case "**", "==":
+		// Measured on the fleet's cPanel mainlogs (2026-11-27): most failure
+		// lines with no remote host are not a provider's answer at all.
+		if !remote && (transport != "" || localRouterOnly(line)) {
+			// A local transport (an over-quota or unknown local mailbox, a
+			// pipe), or a local router's own decision with no transport
+			// (cPanel's hourly limits and holds, an alias :fail:, a forward
+			// refused as spam): inbound or local policy, never sent anyone.
+			return Delivery{}, false
+		}
+		if m[1] == "==" && reEximRetryWait.MatchString(line) {
+			// A queue run that found the retry time not reached logs a defer
+			// without trying (titan: ~39k a week, most of the "deferred").
+			return Delivery{}, false
+		}
 		d.Outcome = Bounced
-	case "==":
-		d.Outcome = Deferred
+		if m[1] == "==" {
+			d.Outcome = Deferred
+		}
 	default:
 		// "<=" (arrival), ">>" (cutthrough), "*>" (delivery suppressed), "<>"
 		// (address ignored) — not a remote delivery outcome.
@@ -103,11 +124,43 @@ func ParseEximDelivery(line string) (Delivery, bool) {
 	}
 	if host != "" {
 		d.Provider = classifyProvider(host)
+	} else if dom := eximRecipientDomain(line, m); dom != "" {
+		// No host answered (a refused connection, a give-up after the retry
+		// timeout): the recipient's domain is the best guess at the provider.
+		d.Provider = classifyProvider(dom)
 	}
 	reason := eximDeliveryReason(line, delivered)
 	d.Code = leadingSMTPCode(reason)
 	d.Reason = normalizeDeliveryReason(reason)
 	return d, true
+}
+
+// localRouterOnly: the line names a router but no transport, and the router
+// is not one that routes to remote hosts (*lookuphost): a decision made here.
+// A remote router's failure with no transport ("Unrouteable address" for a
+// typo'd domain) stays an outbound failure.
+func localRouterOnly(line string) bool {
+	m := reEximRouter.FindStringSubmatch(line)
+	return m != nil && !strings.HasSuffix(strings.ToLower(strings.TrimRight(m[1], ":")), "lookuphost")
+}
+
+// eximRecipientDomain returns the domain of the address right after the flag
+// (`** user@dom: …`, `== user@dom R=…`), or "".
+func eximRecipientDomain(line string, flag []string) string {
+	i := strings.Index(line, " "+flag[1]+" ")
+	if i < 0 {
+		return ""
+	}
+	f := strings.Fields(line[i+len(flag[1])+2:])
+	if len(f) == 0 {
+		return ""
+	}
+	addr := strings.TrimRight(strings.Trim(f[0], "<>"), ":")
+	at := strings.LastIndexByte(addr, '@')
+	if at <= 0 || at == len(addr)-1 {
+		return ""
+	}
+	return strings.ToLower(addr[at+1:])
 }
 
 // eximDeliveryReason returns the response text a reason can be classified from.
@@ -123,6 +176,10 @@ func eximDeliveryReason(line string, delivered bool) string {
 	}
 	if i := strings.Index(line, ": "); i >= 0 {
 		return strings.TrimSpace(line[i+2:])
+	}
+	// `defer (Connection refused)`: the reason is the defer's note itself.
+	if i := strings.Index(line, " defer "); i >= 0 {
+		return strings.TrimSpace(line[i+7:])
 	}
 	return ""
 }
@@ -336,6 +393,8 @@ func normalizeDeliveryReason(reason string) string {
 		return "unsolicited-blocked"
 	case strings.Contains(l, "rate limit") || strings.Contains(l, "ratelimit") || strings.Contains(l, "too many"):
 		return "rate-limited"
+	case strings.Contains(l, "retry timeout exceeded") || strings.Contains(l, "after a long failure period"):
+		return "gave-up-after-retries"
 	case strings.Contains(l, "retry time not reached") || strings.Contains(l, "retry time not yet reached"):
 		return "retry-backoff"
 	case strings.Contains(l, "connection refused"):

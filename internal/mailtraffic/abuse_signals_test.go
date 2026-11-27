@@ -391,6 +391,23 @@ func TestLocalMailboxFailuresAreNotBounces(t *testing.T) {
 	}
 }
 
+// Messages cPanel itself refused to send (its per-domain hourly limits) are
+// not bounces either: nothing was sent, and the failures that tripped the
+// limit were already counted.
+func TestCPanelLimitDiscardsAreNotBounces(t *testing.T) {
+	T := time.Unix(1_700_000_000, 0)
+	ts := T.Add(-20 * time.Minute).Format("2006-01-02 15:04:05")
+	tr := newTracker()
+	for i := 0; i < 30; i++ {
+		id := fmt.Sprintf("1tXyZf-%06d-AB", i)
+		tr.observeExim(eximArrival(ts, id, "bob", "info@bob.gr"), T)
+		tr.observeExim(ts+" "+id+" ** x@gmail.com <info@bob.gr> R=enforce_mail_permissions : Domain bob.gr has exceeded the max emails per hour (125/100 (125%)) allowed.  Message discarded.", T)
+	}
+	if fs, _, _ := tr.evaluate(openTemp(t), T); len(fs) != 0 {
+		t.Fatalf("cPanel's discards are not bounces: %+v", fs)
+	}
+}
+
 func TestMappedIPv4IsTheSameSource(t *testing.T) {
 	orig := geoOf
 	geoOf = func(string) (string, uint) { return "GR", 1 }

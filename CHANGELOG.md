@@ -31,6 +31,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `/api/v1/webdet/history/events`.
 
 ### Fixed
+- **Mail page, Outbound on cPanel (Exim) nodes: Deferred and Bounced count
+  real delivery attempts.** Exim logs a defer on every queue run that finds a
+  message's retry time not reached, without trying; those were counted as
+  deferrals (titan: 6,653 of the day's "deferred", 541 real). Local failures
+  (a full or deleted local mailbox) and messages the host refused to send
+  itself (cPanel's hourly limits and holds, an alias `:fail:`, a forward
+  refused as spam) were counted as remote bounces. All three are left out,
+  of the bounce-spike alert too. A failure no host answered (a refused
+  connection, a give-up after the retry timeout) is now grouped under the
+  recipient's domain instead of "(unknown)", and a give-up reads
+  `gave-up-after-retries` instead of `connection-timeout`.
 - **Mail page on cPanel (Exim) nodes: Received, Rejected, Rate-limited and
   Over quota are counted.** Until now the Exim parser read only the arrival
   lines, so these four always read 0 on every cPanel node (Failed logins
