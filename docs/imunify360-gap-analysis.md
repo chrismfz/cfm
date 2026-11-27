@@ -28,7 +28,7 @@ kept where they size a gap or justify a decision.
 | W1 IP lists for clients behind Cloudflare | **built; local sets and fleet feeds enforced since 2026-11-26** | `internal/proxyipfilter` (`Decide`; bridge `writeEdgeBan` in `internal/webdetector/nginx_bridge.go`); modes `PROXIED_IPFILTER_*` in `internal/detectors/webdetector_register.go`. Open: clear permanent fleet bans on shared mobile / CGNAT addresses |
 | W2 Imunify's splash list as a challenge source | open, measure first | |
 | W3 graylisted direct visitors dropped | **decided: no CFM code** | warned in check H's fix text (`edge_health_webshield.go:175-181`) |
-| W4 never ban a CDN node as a client | open | |
+| W4 never ban a CDN node as a client | **measured 2026-11-27: no gap today** (no non-Cloudflare CDN on the fleet; Zscaler the one shared proxy) | |
 
 ## What runs, and what it caught (earth, 2026-11-17)
 
@@ -284,7 +284,22 @@ CFM first all along have. It rarely bites (earth: 0 drops in 4 h, 37
 graylisted IPs). Check H's fix text says so; track the `imunify360_log_gl`
 drop counter on the fleet if it ever matters.
 
-### W4. Never ban a CDN node as a client (open)
+### W4. Never ban a CDN node as a client (measured: no gap today)
+
+**Measured 2026-11-27.** The edge access logs of six nodes (2-16 h each,
+~7.6 M direct requests) against each CDN's own published list (Fastly
+`api.fastly.com/public-ip-list`, CloudFront `ip-ranges.json`
+`service=CLOUDFRONT`, Bunny `edgeserverlist`, G-Core `public-ip-list`,
+Imperva, Sucuri): **no request from any non-Cloudflare CDN node**, and the
+fleet list holds none (its 55 Akamai AS20940 entries are Linode VMs). No site
+of the fleet sits behind another CDN today. The one shared proxy seen is
+**Zscaler** (corporate egress, many employees per address): 56 addresses, ~1 200
+requests in a day, and one permanent fleet ban (`exim_security` AUTHFAIL,
+165.225.80.235, to be lifted). Not a `trusted_proxies.conf` case (it names no client).
+If another CDN appears, its published list goes through the same
+`trusted-proxies` refresh as Cloudflare's; if Zscaler bans recur, a "shared
+proxy" leniency from its published ranges (`config.zscaler.com`): a short
+local ban, never reported.
 
 The edge trusts Cloudflare only. Another CDN's node (BunnyCDN, Gcore,
 CloudFront, Fastly, ...) reaching the edge looks like one client carrying many
