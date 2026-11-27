@@ -7,9 +7,12 @@ MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 # Opt-in per node, not provisioned by cfm-web: uncomment to enforce it here.
 # Keep the name MYBLOCK, which the docs and the proxied-ipfilter log use.
 #MYBLOCK|BLOCK|3600|0|https://cfm.myip.gr/blacklist.txt
+# Spamhaus DROP: hijacked / spammer-run networks, no legitimate traffic
+# ("drop all traffic"). 1 737 v4 networks + 90 v6 on 2026-11-27, none in
+# Greece or Cyprus (GeoLite2 on earth). BLOCK: every port, mail included.
+# EDROP is merged into DROP (edrop.txt is empty since).
 #SPAMDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/drop.txt
 #SPAMDROPV6|BLOCK|14400|0|https://www.spamhaus.org/drop/dropv6.txt
-#SPAMEDROP|BLOCK|14400|0|https://www.spamhaus.org/drop/edrop.txt
 #DSHIELD|BLOCK|14400|0|https://www.dshield.org/block.txt
 # Tor exits (the Tor Project's own list, ~1.2k addresses, one per line; exits
 # change daily, hence 1h). Exits only: a relay that is not an exit never sends
@@ -23,12 +26,18 @@ MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 # Mail and panel ports are untouched. BLOCK instead drops every Tor user on
 # every port of this node.
 #TOR|CHALLENGE|3600|0|https://check.torproject.org/torbulkexitlist
+# fail2ban-fed lists (blocklist.de: reporters' bans of the last 48 h; CINS
+# Army: its sensors' "bad guys"). They carry residential addresses too: on
+# 2026-11-27 blocklist.de held 25 229 v4 + 607 v6, 11 in Greece (6 OTE, 2
+# Nova) and 5 in Cyprus; CINS 15 000, 6 in Greece (Vodafone, OTE) and 2 in
+# Cyprus (Primetel, Cyta). CHALLENGE, not BLOCK: a person on such an address
+# solves the challenge; web only, mail and panels are untouched.
+#BDEALL|CHALLENGE|14400|0|https://lists.blocklist.de/lists/all.txt
+#CINS|CHALLENGE|14400|0|https://cinsscore.com/list/ci-badguys.txt
 #BOGON|BLOCK|14400|0|http://www.cymru.com/Documents/bogon-bn-agg.txt
 #HONEYPOT|BLOCK|14400|0|https://www.projecthoneypot.org/list_of_ips.php?t=d&rss=1
-#CIARMY|BLOCK|14400|0|http://www.ciarmy.com/list/ci-badguys.txt
 #BFB|BLOCK|14400|0|http://danger.rulez.sk/projects/bruteforceblocker/blist.php
 #BDE|BLOCK|3600|0|https://api.blocklist.de/getlast.php?time=3600
-#BDEALL|BLOCK|14400|0|http://lists.blocklist.de/lists/all.txt
 #STOPFORUMSPAM|BLOCK|14400|0|http://www.stopforumspam.com/downloads/listed_ip_1.zip
 #STOPFORUMSPAMV6|BLOCK|14400|0|http://www.stopforumspam.com/downloads/listed_ip_1_ipv6.zip
 #GREENSNOW|BLOCK|14400|0|https://blocklist.greensnow.co/greensnow.txt
