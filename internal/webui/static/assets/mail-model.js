@@ -7,12 +7,18 @@
 //   GET /api/v1/mail/traffic?hours=&limit= counters over a window (scope-aware:
 //                                          a cPanel user gets its own domains)
 //
+//   GET /api/v1/webdet/history/events?type_prefix=mail_
+//                                          the mail-abuse findings as they were
+//                                          published (opened / raised /
+//                                          recovered), newest first (admin only)
+//
 // The page was two pages (Mail queue, Mail Monitor). What a scoped viewer may
 // see is decided by the daemon; this model only keeps the page from asking
 // for, or drawing a place for, what the daemon will not give them (the queue,
 // the per-unix-user and per-provider tables). Tested in mail-model.test.js.
 
 export const TABS = [
+  { key: "alerts", label: "Alerts", adminOnly: true },
   { key: "queue", label: "Queue", adminOnly: true },
   { key: "outbound", label: "Outbound" },
   { key: "inbound", label: "Inbound & logins" },
@@ -119,7 +125,7 @@ export const TABLES = [
     title: "Sent by scripts", hint: "PHP / cron through sendmail, by unix user",
     cols: [{ h: "Unix user", k: "addr" }, { h: "Submitted", k: "count", t: "num" }] },
   { key: "t_throttled", tab: "outbound", src: "traffic", path: "top_throttled",
-    title: "Rate-limited senders",
+    title: "Rate-limited senders", hint: "mail the server's sending limits held back; *@domain = cPanel's hourly limit for the whole domain",
     cols: [{ h: "Sender", k: "addr" }, { h: "Throttled", k: "count", t: "num" }] },
   { key: "t_prov", tab: "outbound", src: "traffic", path: "deliverability.by_provider", adminOnly: true, mid: true,
     title: "Delivery by provider", hint: "how the big providers treat this server's mail; deferred counts include retries",
@@ -290,3 +296,179 @@ export function trafficHeadline(data, scoped, tab) {
   }
   return s;
 }
+
+// ---- Alerts tab: the mail-abuse findings (docs/mail-abuse.md) ----
+//
+// The same findings cfm-web is sent (and pages Mattermost with), kept here so
+// one that closed before anyone looked is still on the node's own page. The
+// open ones come from the counters report (`abuse`, what the last check
+// found plus what is still open); the last days from the history rows each
+// finding wrote when it opened, rose and recovered (`mail_recovered`, same
+// key). The kind is read from the key (mail:<kind>:<subject>), so a recovery
+// row, which carries no kind of its own, lands on its finding.
+
+export const ALERT_KINDS = {
+  script: { label: "script spike", tab: "outbound" },
+  out: { label: "mailbox spike", tab: "outbound" },
+  hijack: { label: "hijacked mailbox?", tab: "inbound" },
+  bounce: { label: "bounce spike", tab: "outbound" },
+  queue: { label: "queue hog", tab: "queue" },
+  rbl: { label: "IP on a blocklist", tab: "" },
+};
+
+export const ALERT_DAYS = 7;
+
+const SEV_RANK = { info: 0, warning: 1, critical: 2 };
+export function sevRank(s) {
+  return SEV_RANK[String(s || "").toLowerCase()] ?? 0;
+}
+
+// alertKey splits a finding key into its kind and subject. A bounce key holds
+// whose bounces they are (mail:bounce:local:<user> / mail:bounce:auth:<addr>);
+// the subject is the user or mailbox alone.
+export function alertKey(key) {
+  const k = String(key || "");
+  const parts = k.split(":");
+  if (parts.length < 3 || parts[0] !== "mail") return { kind: "", subject: k };
+  const kind = parts[1];
+  let subject = parts.slice(2).join(":");
+  if (kind === "bounce") subject = subject.replace(/^(local|auth):/, "");
+  return { kind, subject };
+}
+
+export function alertKindLabel(kind, type) {
+  const k = ALERT_KINDS[kind];
+  if (k) return k.label;
+  return String(type || kind || "").replace(/^mail_/, "").replace(/_/g, " ");
+}
+
+// alertEpisodes folds the history rows (any order) into one episode per
+// finding: opened (its first row), its worst severity and latest message
+// (a rise says more than the opening), and when and how it closed. A recovery
+// whose opening is older than the rows read is still an episode, with no
+// opening time. Newest first (by its last row).
+export function alertEpisodes(rows) {
+  const list = (Array.isArray(rows) ? rows : [])
+    .filter((r) => r && typeof r === "object" && r.payload && r.payload.key)
+    .slice()
+    .sort((a, b) => num(a.ts_unix) - num(b.ts_unix) || num(a.id) - num(b.id));
+  const open = new Map();
+  const out = [];
+  for (const r of list) {
+    const key = String(r.payload.key);
+    const { kind, subject } = alertKey(key);
+    if (r.event_type === "mail_recovered") {
+      let ep = open.get(key);
+      if (!ep) {
+        ep = { key, kind, subject, type: "", severity: "", message: "", opened: 0 };
+        out.push(ep);
+      }
+      ep.closed = num(r.ts_unix);
+      ep.closeMessage = r.reason || "";
+      ep.last = ep.closed;
+      open.delete(key);
+      continue;
+    }
+    let ep = open.get(key);
+    const sev = String(r.payload.severity || "");
+    if (!ep) {
+      ep = { key, kind, subject, type: r.event_type, severity: sev, message: r.reason || "", opened: num(r.ts_unix), closed: 0, closeMessage: "" };
+      open.set(key, ep);
+      out.push(ep);
+    } else {
+      if (sevRank(sev) >= sevRank(ep.severity)) ep.severity = sev;
+      ep.message = r.reason || ep.message;
+      ep.type = ep.type || r.event_type;
+    }
+    ep.last = num(r.ts_unix);
+  }
+  return out.sort((a, b) => b.last - a.last);
+}
+
+// openAlerts: the findings open now, worst first, each with when it opened
+// (from its episode in the history; 0 when that is older than the rows read).
+export function openAlerts(views, episodes) {
+  const since = new Map();
+  for (const ep of Array.isArray(episodes) ? episodes : []) {
+    if (!ep.closed && ep.opened) since.set(ep.key, ep.opened);
+  }
+  return (Array.isArray(views) ? views : [])
+    .filter((v) => v && typeof v === "object")
+    .map((v) => {
+      const { kind, subject } = alertKey(v.key);
+      return {
+        key: String(v.key || ""), kind, subject: v.subject ? String(v.subject).replace(/^(local|auth):/, "") : subject,
+        label: alertKindLabel(kind, v.type), severity: String(v.severity || "info"),
+        message: String(v.message || ""), stillOpen: !!v.still_open,
+        countries: Array.isArray(v.countries) ? v.countries.map(String) : [],
+        since: since.get(String(v.key || "")) || 0,
+      };
+    })
+    .sort((a, b) => sevRank(b.severity) - sevRank(a.severity) || b.since - a.since || a.subject.localeCompare(b.subject));
+}
+
+// episodeState: "closed" (a recovery row ended it), "open" (no recovery and
+// the last check still has it), or "unclosed" (no recovery, yet the last check
+// does not have it: the check was switched off, or the node lost the state of
+// what it had published; it would otherwise read as open forever). Without
+// the current findings (openKeys null) an episode with no recovery is "open".
+export function episodeState(ep, openKeys) {
+  if (ep.closed) return "closed";
+  if (!openKeys || openKeys.has(ep.key)) return "open";
+  return "unclosed";
+}
+
+// openKeysOf: the keys of the findings the last check has, or null when the
+// report carries none (the check off, or not run yet).
+export function openKeysOf(views) {
+  return Array.isArray(views) ? new Set(views.filter((v) => v && v.key).map((v) => String(v.key))) : null;
+}
+
+// recentEpisodes: the episodes of the last `days`: open ones whatever their
+// age, the others when they have a row in the window.
+export function recentEpisodes(episodes, nowSec, days, openKeys) {
+  const from = num(nowSec) - (days || ALERT_DAYS) * 86400;
+  return (Array.isArray(episodes) ? episodes : [])
+    .filter((ep) => episodeState(ep, openKeys) === "open" || ep.last >= from);
+}
+
+// historyCovers: whether a page of history rows (newest first) already
+// reaches back past `days`, so no older page is needed.
+export function historyCovers(rows, nowSec, days) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return true;
+  return num(list[list.length - 1].ts_unix) < num(nowSec) - (days || ALERT_DAYS) * 86400;
+}
+
+// alertCount: the number on the Alerts tab (warnings and worse; an "info"
+// finding is listed, never paged).
+export function alertCount(views) {
+  return (Array.isArray(views) ? views : []).filter((v) => v && sevRank(v.severity) >= 1).length;
+}
+
+export function sevPill(sev) {
+  const r = sevRank(sev);
+  return r >= 2 ? "danger" : r === 1 ? "warn" : "info";
+}
+
+// fmtWhen: a unix time as a short local date and time; "" for none.
+export function fmtWhen(sec) {
+  const n = num(sec);
+  if (n <= 0) return "";
+  const d = new Date(n * 1000);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// alertsHeadline: the line above the Alerts tab.
+export function alertsHeadline(traffic) {
+  const d = hasData(traffic) ? traffic.data : null;
+  if (!d) return "";
+  if (!Array.isArray(d.abuse) && !d.abuse_checked_at) return "";
+  const n = alertCount(d.abuse);
+  let s = n === 0 ? "no open alert" : n === 1 ? "1 open alert" : n + " open alerts";
+  const when = clock(d.abuse_checked_at);
+  if (when) s += " · checked " + when;
+  return s + " · the same findings cfm-web is sent";
+}
+
+export const ALERTS_OFF = "No mail-abuse check yet: it is off (cfm.conf MAIL_ABUSE_ALERT), the mail-traffic collector is not on, or its first check (every 5 minutes) has not run.";

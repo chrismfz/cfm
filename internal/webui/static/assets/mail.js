@@ -9,7 +9,13 @@
 //                                           Admin only.
 //   GET /api/v1/mail/traffic?hours=&limit=  per-hour counters from the mail
 //                                           logs. Scope-aware: a cPanel user
-//                                           gets its own domains.
+//                                           gets its own domains. For an
+//                                           admin it also carries the open
+//                                           mail-abuse findings (`abuse`).
+//   GET /api/v1/webdet/history/events?type_prefix=mail_
+//                                           the findings' history (opened /
+//                                           raised / recovered), for the
+//                                           Alerts tab. Admin only.
 //
 // A scoped viewer gets the counters only: the queue is never asked for, and
 // the server-wide tables are not drawn (mail-model.js; the daemon is what
@@ -20,6 +26,9 @@
 import {
   WINDOWS, SHOWN, tabsFor, pickTab, pickHours, ageBuckets, tablesFor, tableHint, tableView,
   anomalies, tiles, sourceNote, hasData, queueHeadline, trafficHeadline,
+  alertEpisodes, openAlerts, recentEpisodes, alertCount, alertsHeadline, sevPill, fmtWhen,
+  episodeState, openKeysOf, historyCovers,
+  ALERT_KINDS, ALERT_DAYS, ALERTS_OFF,
 } from "./mail-model.js";
 
 (() => {
@@ -46,6 +55,7 @@ import {
     expanded: new Set(),
     queue: { state: 'loading' },
     traffic: { state: 'loading' },
+    alerts: { state: 'loading' },
     seq: 0,
   };
 
@@ -97,9 +107,63 @@ import {
   }
 
   function renderTabs() {
-    el.tabs.innerHTML = tabsFor(st.isScopedMode).map((t) =>
-      `<button type="button" role="tab" class="vp-tab${t.key === st.tab ? ' on' : ''}" ` +
-      `aria-selected="${t.key === st.tab ? 'true' : 'false'}" data-tab="${escapeHTML(t.key)}">${escapeHTML(t.label)}</button>`).join('');
+    const open = hasData(st.traffic) ? alertCount(st.traffic.data.abuse) : 0;
+    el.tabs.innerHTML = tabsFor(st.isScopedMode).map((t) => {
+      const badge = t.key === 'alerts' && open > 0 ? ` <span class="pill warn">${open}</span>` : '';
+      return `<button type="button" role="tab" class="vp-tab${t.key === st.tab ? ' on' : ''}" ` +
+        `aria-selected="${t.key === st.tab ? 'true' : 'false'}" data-tab="${escapeHTML(t.key)}">${escapeHTML(t.label)}${badge}</button>`;
+    }).join('');
+  }
+
+  // The subject of an alert opens the tab its counters are on.
+  function subjectHTML(kind, subject) {
+    const tab = (ALERT_KINDS[kind] || {}).tab;
+    if (!tab || !subject) return escapeHTML(subject);
+    return `<button type="button" class="pt-link" data-tab="${escapeHTML(tab)}" title="Open the ${escapeHTML(tab)} tab">${escapeHTML(subject)}</button>`;
+  }
+
+  function sevHTML(sev) {
+    return sev ? `<span class="pill ${sevPill(sev)}">${escapeHTML(sev)}</span>` : '';
+  }
+
+  function closedCell(ep, openKeys) {
+    switch (episodeState(ep, openKeys)) {
+      case 'closed': return escapeHTML(fmtWhen(ep.closed));
+      case 'open': return '<span class="pill warn">open</span>';
+      default: return '<span class="muted" title="no recovery was written, and the last check no longer has it (the check switched off, or its state lost)">not closed</span>';
+    }
+  }
+
+  // The Alerts tab: what is open now, then the last days' episodes.
+  function alertsHTML() {
+    const t = hasData(st.traffic) ? st.traffic.data : null;
+    const eps = hasData(st.alerts) ? alertEpisodes(st.alerts.data) : [];
+    const loading = st.alerts.state === 'loading';
+    const open = t ? openAlerts(t.abuse, eps) : [];
+    const openRows = open.length
+      ? open.map((a) => '<tr>' +
+          `<td>${sevHTML(a.severity)}</td><td>${escapeHTML(a.label)}</td><td>${subjectHTML(a.kind, a.subject)}</td>` +
+          `<td>${escapeHTML(a.message)}${a.stillOpen ? ' <span class="pill info" title="no longer a finding at the last check, not closed yet">quieter</span>' : ''}</td>` +
+          `<td class="pt-r">${escapeHTML(fmtWhen(a.since)) || `<span class="muted">${loading ? '…' : '—'}</span>`}</td></tr>`).join('')
+      : '<tr><td colspan="5" class="muted">(none)</td></tr>';
+    const openKeys = t ? openKeysOf(t.abuse) : null;
+    const recent = recentEpisodes(eps, Date.now() / 1000, ALERT_DAYS, openKeys);
+    let histNote = '';
+    if (st.alerts.state === 'error') histNote = `<p class="ml-note bad">Could not read the history (${escapeHTML(st.alerts.error || 'request failed')}).</p>`;
+    const histRows = recent.length
+      ? recent.map((ep) => '<tr>' +
+          `<td class="pt-r">${escapeHTML(fmtWhen(ep.opened)) || '<span class="muted">earlier</span>'}</td>` +
+          `<td class="pt-r">${closedCell(ep, openKeys)}</td>` +
+          `<td>${sevHTML(ep.severity)}</td><td>${escapeHTML((ALERT_KINDS[ep.kind] || {}).label || ep.kind)}</td>` +
+          `<td>${subjectHTML(ep.kind, ep.subject)}</td>` +
+          `<td>${escapeHTML(ep.message || '')}${ep.closeMessage ? `<div class="muted">${escapeHTML(ep.closeMessage)}</div>` : ''}</td></tr>`).join('')
+      : `<tr><td colspan="6" class="muted">${loading ? 'Loading…' : `(none in the last ${ALERT_DAYS} days)`}</td></tr>`;
+    return '<div class="mini-card ml-wide"><h3>Open now <span class="top-hint">what the last check found, worst first; the same findings cfm-web pages the team with</span></h3>' +
+      '<div class="table-wrap"><table class="mini-table"><thead><tr><th>Severity</th><th>Alert</th><th>Mailbox / user</th><th>What was seen</th><th class="pt-r">Since</th></tr></thead>' +
+      `<tbody>${openRows}</tbody></table></div></div>` +
+      `<div class="mini-card ml-wide"><h3>Last ${ALERT_DAYS} days <span class="top-hint">each alert from when it opened to how it ended; under it, the message it closed with</span></h3>${histNote}` +
+      '<div class="table-wrap"><table class="mini-table"><thead><tr><th class="pt-r">Opened</th><th class="pt-r">Closed</th><th>Severity</th><th>Alert</th><th>Mailbox / user</th><th>What was seen</th></tr></thead>' +
+      `<tbody>${histRows}</tbody></table></div></div>`;
   }
 
   function renderAnomalies() {
@@ -127,6 +191,19 @@ import {
   }
 
   function renderPanel() {
+    if (st.tab === 'alerts') {
+      const t = hasData(st.traffic) ? st.traffic.data : null;
+      el.panelHead.textContent = alertsHeadline(st.traffic);
+      const ran = t && (Array.isArray(t.abuse) || t.abuse_checked_at);
+      const note = t && !ran ? { text: ALERTS_OFF, bad: false } : sourceNote('traffic', st.traffic);
+      el.panelNote.hidden = !note.text;
+      el.panelNote.textContent = note.text;
+      el.panelNote.className = 'ml-note' + (note.bad ? ' bad' : ' muted');
+      el.ageBar.hidden = true;
+      const html = t ? alertsHTML() : '';
+      if (html !== st.tablesHTML) { el.tables.innerHTML = html; st.tablesHTML = html; }
+      return;
+    }
     const kind = st.tab === 'queue' ? 'queue' : 'traffic';
     const src = st[kind];
     const data = hasData(src) ? src.data : null;
@@ -171,6 +248,7 @@ import {
     st.tab = pickTab(key, st.isScopedMode);
     syncURL();
     render();
+    if (st.tab === 'alerts' && st.modeKnown && !st.isScopedMode) loadAlertHistory();
   }
 
   // load one report into its source. A reply from before the mode or the
@@ -189,7 +267,7 @@ import {
       next = { state: 'error', error: err && err.message ? err.message : 'request failed', data: hasData(prev) ? prev.data : null, at: prev.at };
     }
     if (seq !== st.seq) return;
-    if (kind === 'queue' && st.isScopedMode) return;
+    if ((kind === 'queue' || kind === 'alerts') && st.isScopedMode) return;
     st[kind] = next;
     // The daemon has the last word on who the viewer is: counters it scoped
     // mean a scoped viewer, even when the identity lookup could not say so.
@@ -204,11 +282,48 @@ import {
     render();
   }
 
+  // The findings' history: every mail_* row (opened, raised, recovered). A
+  // plain list, not a report with `available`; a failure keeps the last read.
+  async function loadAlertHistory() {
+    const seq = st.seq;
+    let next;
+    try {
+      // Newest first, a page at a time, until the rows reach back past the
+      // window (a flapping finding can fill one page), at most 5 pages.
+      const rows = [];
+      let cursor = '';
+      for (let page = 0; page < 5; page++) {
+        const reply = await api('/v1/webdet/history/events?type_prefix=mail_&limit=500' + cursor);
+        const got = reply && Array.isArray(reply.rows) ? reply.rows : (Array.isArray(reply) ? reply : []);
+        rows.push(...got);
+        const nx = reply && reply.next;
+        if (!nx || historyCovers(got, Date.now() / 1000, ALERT_DAYS)) break;
+        cursor = `&before_ts=${encodeURIComponent(nx.before_ts)}&before_id=${encodeURIComponent(nx.before_id)}`;
+      }
+      next = { state: 'ok', data: rows, at: Date.now() };
+    } catch (err) {
+      const prev = st.alerts;
+      next = { state: 'error', error: err && err.message ? err.message : 'request failed', data: hasData(prev) ? prev.data : null, at: prev.at };
+    }
+    if (seq !== st.seq || st.isScopedMode) return;
+    st.alerts = next;
+    render();
+  }
+
   async function refresh() {
     if (!st.modeKnown) return;
-    const jobs = [load('traffic', `/v1/mail/traffic?hours=${st.hours}&limit=25`, (r) => r.traffic)];
+    // The open mail-abuse findings sit beside the counters in the reply
+    // (admin only); they are kept with them, as one report.
+    const jobs = [load('traffic', `/v1/mail/traffic?hours=${st.hours}&limit=25`, (r) => (r.traffic && typeof r.traffic === 'object'
+      ? { ...r.traffic, abuse: r.abuse, abuse_checked_at: r.abuse_checked_at }
+      : r.traffic))];
     // basePath '/cfm-admin/api' → the call path omits the leading /api.
-    if (!st.isScopedMode) jobs.push(load('queue', '/v1/system/mail-queue', (r) => r.report));
+    if (!st.isScopedMode) {
+      jobs.push(load('queue', '/v1/system/mail-queue', (r) => r.report));
+      // The history is read only while the Alerts tab is shown: it holds
+      // the history store's lock, for nothing the other tabs draw.
+      if (st.tab === 'alerts') jobs.push(loadAlertHistory());
+    }
     await Promise.all(jobs);
   }
 
@@ -234,6 +349,7 @@ import {
       st.seq++;
       st.queue = { state: 'loading' };
       st.traffic = { state: 'loading' };
+      st.alerts = { state: 'loading' };
     }
     st.isScopedMode = scoped;
     st.modeKnown = true;
@@ -262,6 +378,8 @@ import {
     if (b) setTab(b.dataset.tab);
   });
   el.tables.addEventListener('click', (ev) => {
+    const t = ev.target.closest('[data-tab]');
+    if (t) { setTab(t.dataset.tab); return; }
     const b = ev.target.closest('[data-expand]');
     if (!b) return;
     const k = b.dataset.expand;
