@@ -22,7 +22,7 @@ MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 # the traffic, 62% of it the quoted-UA form-spam tool rule 202 flags. A
 # CHALLENGE list is never written to nft: the web decision raises an
 # uncleared listed client to a challenge, direct or behind Cloudflare alike
-# ([webdetector] LIST_CHALLENGE, default log; docs/proxied-ipfilter.md).
+# ([webdetector] LIST_CHALLENGE, default enforce; docs/proxied-ipfilter.md).
 # Mail and panel ports are untouched. BLOCK instead drops every Tor user on
 # every port of this node.
 #TOR|CHALLENGE|3600|0|https://check.torproject.org/torbulkexitlist

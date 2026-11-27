@@ -140,7 +140,10 @@ source (MYALLOW, cfm.allow, dyndns) cancels it. A solve it caused carries
 `src=list`. Panel scope (`cfm_panel.lua`) is never challenged by it, and mail
 ports never see it.
 
-`[webdetector] LIST_CHALLENGE` = `log` (default) | `enforce` | `off`. In log
+`[webdetector] LIST_CHALLENGE` = `enforce` (default since 2026-11-28) | `log` |
+`off`. A day of log on eight nodes (TOR, blocklist.de, CINS) found no Greek or
+Cypriot address on the lists (orion: 651 listed addresses), while Tor exits
+registered bot accounts on clients.nixpal.com past the log-only list. In log
 mode the decision's allow carries `rule_action=observe` (not cached), and one
 line per client and outcome every 10 minutes goes to `cfm.log`:
 

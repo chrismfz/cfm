@@ -70,7 +70,8 @@ only, and only addresses that try an Imunify node.
 among them (OTE, Nova, Vodafone, Cyta, Primetel). So DROP / DROPv6 run as
 `BLOCK` (every port, mail included; through `proxyipfilter` for Cloudflare
 visitors too), and blocklist.de / CINS as `CHALLENGE` feeds (web only, a
-challenge floor; `LIST_CHALLENGE`, log first), on the eight web nodes. EDROP is
+challenge floor; `LIST_CHALLENGE`, enforce since 2026-11-28 after a day of
+log), on the eight web nodes. EDROP is
 merged into DROP. Open: how many PAM-RBL-locked addresses the feeds hold (the
 mail half of the gap), which the CHALLENGE feeds do not cover.
 
@@ -341,8 +342,8 @@ mechanisms, and none is a measured gap.
    seven nodes: four Greek residential addresses, one a permanent ban). Next:
    clear the fleet list's permanent bans on shared mobile / CGNAT addresses.
 3. **G1 public feeds:** loaded 2026-11-27 (DROP / DROPv6 BLOCK; blocklist.de
-   and CINS CHALLENGE, `LIST_CHALLENGE = log`). Next: a week of
-   `[list_challenge]` lines per list (`cc=`), then enforce; the mail half
+   and CINS CHALLENGE; `LIST_CHALLENGE = enforce` since 2026-11-28, after a
+   day of log with no GR/CY address on the lists). The mail half
    (PAM RBL locks) still needs its own measure.
 4. ~~G4 collector~~: decided against (2026-11-27, `docs/ROADMAP.md` §12).
 5. **W4**, then W2.

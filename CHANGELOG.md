@@ -30,6 +30,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   is read through a new `type_prefix` filter of
   `/api/v1/webdet/history/events`.
 
+### Changed
+- **`LIST_CHALLENGE` defaults to `enforce`**: an uncleared client on a
+  `cfm.blocklists` CHALLENGE list (Tor exits, blocklist.de, CINS on the web
+  nodes) now gets the challenge, direct or behind Cloudflare. A day of log on
+  eight nodes found no Greek or Cypriot address on those lists (orion: 651
+  listed addresses), while Tor exits registered bot accounts on a client-area
+  signup past the log-only list. `LIST_CHALLENGE = log` keeps the old
+  behaviour.
+
 ### Fixed
 - **Mail page, Outbound on cPanel (Exim) nodes: Deferred and Bounced count
   real delivery attempts.** Exim logs a defer on every queue run that finds a

@@ -55,8 +55,8 @@ func TestManagerChallengeFeedSkipsNFT(t *testing.T) {
 		t.Fatalf("a CHALLENGE feed is a block source: %+v", v)
 	}
 	for _, ip := range []string{"185.220.101.1", "2001:db8::5"} {
-		if v := proxyipfilter.CheckChallenge(ip); len(v.Lists) != 1 || v.Lists[0] != "feed:TOR" || v.Enforce {
-			t.Errorf("%s: %+v (log mode by default)", ip, v)
+		if v := proxyipfilter.CheckChallenge(ip); len(v.Lists) != 1 || v.Lists[0] != "feed:TOR" || !v.Enforce {
+			t.Errorf("%s: %+v (enforce by default)", ip, v)
 		}
 	}
 	if r.lastErr != nil || r.lastAppliedAt.IsZero() {
