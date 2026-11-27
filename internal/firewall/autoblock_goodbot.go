@@ -1,6 +1,7 @@
 package firewall
 
 import (
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -112,7 +113,23 @@ var (
 // forward-confirm did not complete (at most autoblockGoodBotMaxInconclusive-1
 // crossings in a row). off is THROTTLE_GOODBOT_EXEMPT = 0.
 func AutoblockGoodBot(enr *enrichpkg.Enricher, ip string, off bool) (skip bool, why string) {
-	if off || ip == "" {
+	if ip == "" {
+		return false, ""
+	}
+	// A trusted proxy's own address (a Cloudflare edge, trusted_proxies.conf,
+	// registered by the edge ban store) is never banned, whatever
+	// THROTTLE_GOODBOT_EXEMPT says: it stands for every visitor behind that
+	// edge, and an edge that opens many connections to this node's addresses
+	// reads as a port scan (ten permanent Cloudflare portscan bans in the
+	// fleet blacklist, cleared 2026-11-27). nft's allow sets (MYALLOW) kept
+	// accepting it, but the ban was reported fleet-wide.
+	if a, err := netip.ParseAddr(ip); err == nil && clientNetExemptRegistered("trusted_proxies") {
+		a = a.Unmap()
+		if f := (*clientNetExempt.Load())["trusted_proxies"]; f != nil && f(netip.PrefixFrom(a, a.BitLen())) {
+			return true, "a trusted proxy's address (trusted_proxies.conf)"
+		}
+	}
+	if off {
 		return false, ""
 	}
 	now := autoblockGoodBotNow()

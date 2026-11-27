@@ -2,6 +2,7 @@ package firewall
 
 import (
 	"fmt"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -316,5 +317,23 @@ func TestAutoblockGoodBotCacheKeepsPositives(t *testing.T) {
 	autoblockGoodBotMu.Unlock()
 	if n > autoblockGoodBotCap {
 		t.Errorf("cache holds %d verdicts, cap %d", n, autoblockGoodBotCap)
+	}
+}
+
+// A trusted proxy's own address is never banned by the flood / portscan
+// autoblock, even with THROTTLE_GOODBOT_EXEMPT = 0 and no PTR at all.
+func TestAutoblockSparesATrustedProxy(t *testing.T) {
+	restore := SetAutoblockGoodBotForTest(func(string) string { return "" }, func(string, string) (string, bool) { return "", false })
+	defer restore()
+	cf := netip.MustParsePrefix("172.64.0.0/13")
+	SetClientNetExempt("trusted_proxies", func(p netip.Prefix) bool { return cf.Overlaps(p) })
+	t.Cleanup(func() { SetClientNetExempt("trusted_proxies", nil) })
+	for _, off := range []bool{false, true} {
+		if skip, why := AutoblockGoodBot(nil, "172.71.172.97", off); !skip || why == "" {
+			t.Errorf("off=%v: skip=%v why=%q", off, skip, why)
+		}
+		if skip, _ := AutoblockGoodBot(nil, "198.51.100.9", off); skip {
+			t.Errorf("off=%v: an ordinary address was spared", off)
+		}
 	}
 }

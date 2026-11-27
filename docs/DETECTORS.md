@@ -183,6 +183,12 @@ BLOCK = no          ; aliases: off, 0, empty
 BLOCK_COOLDOWN = 20m
 ```
 
+Before any of it, the sink drops a source address that is not a client's:
+the node's own (`ignored_self_ip`), loopback, the `[global]` IGNORE lists,
+and a trusted proxy's own address (`ignored_trusted_proxy`: the ranges of
+`trusted_proxies.conf`, a Cloudflare edge, which stands for every visitor
+behind it; it is logged, never banned, challenged or reported).
+
 - `no`: alert only, no firewall write and no report.
 - `dryrun`: runs the policy and logs "would block" without enforcement.
 - `permanent`: non-expiring nft block.
