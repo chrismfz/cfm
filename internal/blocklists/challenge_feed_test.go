@@ -109,3 +109,22 @@ func waitFor(t *testing.T, ok func() bool) {
 	}
 	t.Fatal("timed out")
 }
+
+// IGNORE was parsed as its own type and then applied as a BLOCK everywhere
+// (it dropped the addresses it meant to spare): it is now skipped at parse
+// time, like any unknown type, never turned into a block.
+func TestParseConfigSkipsIgnoreAndUnknownTypes(t *testing.T) {
+	feeds, warnings, err := ParseConfigReport(strings.NewReader(
+		"SPARE|IGNORE|3600|0|https://example.org/spare.txt\n" +
+			"ODD|DENY|3600|0|https://example.org/odd.txt\n" +
+			"MYALLOW|ALLOW|3600|0|https://example.org/allow.txt\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 2 || !strings.Contains(warnings[0], "line 1 (SPARE): type IGNORE") || !strings.Contains(warnings[1], `line 2 (ODD): type "DENY"`) {
+		t.Fatalf("warnings %q", warnings)
+	}
+	if len(feeds) != 1 || feeds[0].Name != "MYALLOW" || feeds[0].Type != TypeAllow {
+		t.Fatalf("feeds %+v", feeds)
+	}
+}

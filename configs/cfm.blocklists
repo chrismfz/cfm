@@ -1,3 +1,7 @@
+# NAME|TYPE|INTERVAL_SECONDS|MAX|URL[|TTL=<duration>]
+# TYPE: BLOCK (nft drops it), ALLOW (cancels a block), CHALLENGE (no nft:
+# a challenge floor for web clients, [webdetector] LIST_CHALLENGE). There is
+# no IGNORE type: never-block addresses go in cfm.ignore or IGNORE_IPS.
 MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 # The fleet blacklist (cfm-web: every node's reported bans, ~270k entries).
 # Opt-in per node, not provisioned by cfm-web: uncomment to enforce it here.
