@@ -20,7 +20,7 @@ kept where they size a gap or justify a decision.
 | G2 WooCommerce `add-to-cart` crawling | **built, logonly** | rule 530 `WAF_CART_CRAWL` (`configs/lua/cfm_waf.lua:125`, `internal/webdetector/waf_rule_ids.go:215`). Open: promotion, and whether the `CRAWLER` tag gets a 301 to the product page |
 | G3 attacks Imunify's ModSec saw past CFM | **re-scoped**, see G3b | webshell-path GET probes not built, by decision; headless-UA rule rejected; `?author=N` skipped |
 | G3b PHP uploaded past rule 404's 2 KB window | **built; 417 and 415 block since 2026-11-24 (bans held)** | rules 417 and 415 (`rule_php_webshell_body_deep`, `rule_upload_content_deep` in `cfm_waf.lua` and `waf_rule_ids.go`); rule 10029 at block, `WAF_CVE` armed (`rule_cve_fabrik_listfilter_eval`); rule 415's tag carries the file extension (`configs/lua/cfm_waf_detectors.lua:5870`); multipart media type read as PHP does (`cfm_waf_detectors.lua:734`) |
-| G4 vulnerable code on disk | open | no `vulnerability_hits` collector in the tree |
+| G4 vulnerable code on disk | **decided: no collector** (2026-11-27) | `docs/ROADMAP.md` §12 |
 | G5 PHP runtime | open | design only: `docs/roadmaps/php-runtime-defense.md`, `docs/lsm-php-drop-detection.md` (FS-009) |
 | G6 malware at rest | open | ClamAV-vs-Imunify signature comparison not done |
 | G7 smaller items | open, unmeasured | |
@@ -28,7 +28,7 @@ kept where they size a gap or justify a decision.
 | W1 IP lists for clients behind Cloudflare | **built; local sets and fleet feeds enforced since 2026-11-26** | `internal/proxyipfilter` (`Decide`; bridge `writeEdgeBan` in `internal/webdetector/nginx_bridge.go`); modes `PROXIED_IPFILTER_*` in `internal/detectors/webdetector_register.go`. Open: clear permanent fleet bans on shared mobile / CGNAT addresses |
 | W2 Imunify's splash list as a challenge source | open, measure first | |
 | W3 graylisted direct visitors dropped | **decided: no CFM code** | warned in check H's fix text (`edge_health_webshield.go:175-181`) |
-| W4 never ban a CDN node as a client | open | |
+| W4 never ban a CDN node as a client | **measured 2026-11-27: no gap today** (no non-Cloudflare CDN on the fleet; Zscaler the one shared proxy) | |
 
 ## What runs, and what it caught (earth, 2026-11-17)
 
@@ -149,8 +149,14 @@ Promotions of 417 and 415 are the burn-in's decision.
 list says which plugins and versions the fleet runs, which is what should
 decide the next `WAF_CVE` rules (`WAF_CVE.md`, "CVE hunting").
 
-**Open:** a read-only collector of `vulnerability_hits` (type, count, users)
-per node, published to cfm-web, to rank the CVE backlog by exposure.
+**Decided (2026-11-27): no collector.** The table names no CVE, only
+Imunify's own ids (`VULN-ESUS-<n>`; 1 506 of them on earth, 41 204 files, 395
+users), and exists only on Imunify nodes. By file path the exposure on earth
+is WordPress core (~8 350 files), WooCommerce (3 537), Joomla components
+(~6 000: old installs to tell their owners about), Elementor (1 673), Yoast,
+Jetpack, Contact Form 7, Rank Math, UpdraftPlus. A plugin / version inventory
+matched against a public feed would name CVEs, but at a maintenance cost not
+worth it for the WAF; `docs/ROADMAP.md` §12.
 
 ### G5. PHP runtime defense
 
@@ -278,7 +284,22 @@ CFM first all along have. It rarely bites (earth: 0 drops in 4 h, 37
 graylisted IPs). Check H's fix text says so; track the `imunify360_log_gl`
 drop counter on the fleet if it ever matters.
 
-### W4. Never ban a CDN node as a client (open)
+### W4. Never ban a CDN node as a client (measured: no gap today)
+
+**Measured 2026-11-27.** The edge access logs of six nodes (2-16 h each,
+~7.6 M direct requests) against each CDN's own published list (Fastly
+`api.fastly.com/public-ip-list`, CloudFront `ip-ranges.json`
+`service=CLOUDFRONT`, Bunny `edgeserverlist`, G-Core `public-ip-list`,
+Imperva, Sucuri): **no request from any non-Cloudflare CDN node**, and the
+fleet list holds none (its 55 Akamai AS20940 entries are Linode VMs). No site
+of the fleet sits behind another CDN today. The one shared proxy seen is
+**Zscaler** (corporate egress, many employees per address): 56 addresses, ~1 200
+requests in a day, and one permanent fleet ban (`exim_security` AUTHFAIL,
+165.225.80.235, to be lifted). Not a `trusted_proxies.conf` case (it names no client).
+If another CDN appears, its published list goes through the same
+`trusted-proxies` refresh as Cloudflare's; if Zscaler bans recur, a "shared
+proxy" leniency from its published ranges (`config.zscaler.com`): a short
+local ban, never reported.
 
 The edge trusts Cloudflare only. Another CDN's node (BunnyCDN, Gcore,
 CloudFront, Fastly, ...) reaching the edge looks like one client carrying many
@@ -323,6 +344,6 @@ mechanisms, and none is a measured gap.
    and CINS CHALLENGE, `LIST_CHALLENGE = log`). Next: a week of
    `[list_challenge]` lines per list (`cc=`), then enforce; the mail half
    (PAM RBL locks) still needs its own measure.
-4. **G4 collector** (`vulnerability_hits` → cfm-web).
+4. ~~G4 collector~~: decided against (2026-11-27, `docs/ROADMAP.md` §12).
 5. **W4**, then W2.
 6. G5 / G6 as planned (FS-009, the ClamAV comparison); G7 unmeasured.

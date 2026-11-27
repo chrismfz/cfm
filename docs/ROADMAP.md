@@ -366,6 +366,16 @@ Proposal: `docs/roadmaps/security_headers.md`.
 
 ## 12. Other decided items
 
+- **No vulnerable-code collector (Imunify `vulnerability_hits`, plugin
+  inventory)** — [decided 2026-11-27]. Imunify's table (earth: 41 204 files,
+  395 users, 1 506 types) names no CVE, only its own `VULN-ESUS-<n>` ids, so
+  it cannot pick a `WAF_CVE` rule, and it exists only on Imunify nodes. A
+  plugin / version inventory matched against a public vulnerability feed
+  would, but it is a collector, a cfm-web endpoint and a feed import to keep
+  up for good. Read the table by hand when needed (`sqlite3 -readonly
+  /var/imunify360/imunify360.db`); `WAF_CVE` rules keep coming from PoCs,
+  vendor patches and operator logs.
+
 - **cfm-edge is the edge, OpenResty the one fallback, Angie deprecated** —
   [decided 2026-11-26]. Every node with an edge runs cfm-edge (8 of 8 on
   2026-11-26; none runs OpenResty or Angie). OpenResty costs almost nothing to
