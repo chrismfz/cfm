@@ -129,12 +129,13 @@ import {
   function alertsHTML() {
     const t = hasData(st.traffic) ? st.traffic.data : null;
     const eps = hasData(st.alerts) ? alertEpisodes(st.alerts.data) : [];
+    const loading = st.alerts.state === 'loading';
     const open = t ? openAlerts(t.abuse, eps) : [];
     const openRows = open.length
       ? open.map((a) => '<tr>' +
           `<td>${sevHTML(a.severity)}</td><td>${escapeHTML(a.label)}</td><td>${subjectHTML(a.kind, a.subject)}</td>` +
           `<td>${escapeHTML(a.message)}${a.stillOpen ? ' <span class="pill info" title="no longer a finding at the last check, not closed yet">quieter</span>' : ''}</td>` +
-          `<td class="pt-r">${escapeHTML(fmtWhen(a.since)) || '<span class="muted">—</span>'}</td></tr>`).join('')
+          `<td class="pt-r">${escapeHTML(fmtWhen(a.since)) || `<span class="muted">${loading ? '…' : '—'}</span>`}</td></tr>`).join('')
       : '<tr><td colspan="5" class="muted">(none)</td></tr>';
     const recent = recentEpisodes(eps, Date.now() / 1000, ALERT_DAYS);
     let histNote = '';
@@ -146,7 +147,7 @@ import {
           `<td>${sevHTML(ep.severity)}</td><td>${escapeHTML((ALERT_KINDS[ep.kind] || {}).label || ep.kind)}</td>` +
           `<td>${subjectHTML(ep.kind, ep.subject)}</td>` +
           `<td>${escapeHTML(ep.message || '')}${ep.closeMessage ? `<div class="muted">${escapeHTML(ep.closeMessage)}</div>` : ''}</td></tr>`).join('')
-      : `<tr><td colspan="6" class="muted">(none in the last ${ALERT_DAYS} days)</td></tr>`;
+      : `<tr><td colspan="6" class="muted">${loading ? 'Loading…' : `(none in the last ${ALERT_DAYS} days)`}</td></tr>`;
     return '<div class="mini-card ml-wide"><h3>Open now <span class="top-hint">what the last check found, worst first; the same findings cfm-web pages the team with</span></h3>' +
       '<div class="table-wrap"><table class="mini-table"><thead><tr><th>Severity</th><th>Alert</th><th>Mailbox / user</th><th>What was seen</th><th class="pt-r">Since</th></tr></thead>' +
       `<tbody>${openRows}</tbody></table></div></div>` +
@@ -237,6 +238,7 @@ import {
     st.tab = pickTab(key, st.isScopedMode);
     syncURL();
     render();
+    if (st.tab === 'alerts' && st.modeKnown && !st.isScopedMode) loadAlertHistory();
   }
 
   // load one report into its source. A reply from before the mode or the
@@ -298,7 +300,9 @@ import {
     // basePath '/cfm-admin/api' → the call path omits the leading /api.
     if (!st.isScopedMode) {
       jobs.push(load('queue', '/v1/system/mail-queue', (r) => r.report));
-      jobs.push(loadAlertHistory());
+      // The history is read only while the Alerts tab is shown: it holds
+      // the history store's lock, for nothing the other tabs draw.
+      if (st.tab === 'alerts') jobs.push(loadAlertHistory());
     }
     await Promise.all(jobs);
   }
