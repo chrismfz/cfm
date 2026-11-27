@@ -26,18 +26,19 @@ MYALLOW|ALLOW|3600|0|https://cfm.myip.gr/whitelist.txt
 # Mail and panel ports are untouched. BLOCK instead drops every Tor user on
 # every port of this node.
 #TOR|CHALLENGE|3600|0|https://check.torproject.org/torbulkexitlist
-# fail2ban-fed lists (blocklist.de: reporters' bans of the last 48 h; CINS
-# Army: its sensors' "bad guys"). They carry residential addresses too: on
-# 2026-11-27 blocklist.de held 25 229 v4 + 607 v6, 11 in Greece (6 OTE, 2
-# Nova) and 5 in Cyprus; CINS 15 000, 6 in Greece (Vodafone, OTE) and 2 in
-# Cyprus (Primetel, Cyta). CHALLENGE, not BLOCK: a person on such an address
-# solves the challenge; web only, mail and panels are untouched.
-#BDEALL|CHALLENGE|14400|0|https://lists.blocklist.de/lists/all.txt
+# CINS Army (its sensors' "bad guys"): residential addresses too (on
+# 2026-11-27, 15 000 entries, 6 in Greece: Vodafone, OTE; 2 in Cyprus:
+# Primetel, Cyta). CHALLENGE, not BLOCK: a person on such an address solves
+# the challenge; web only, mail and panels are untouched.
 #CINS|CHALLENGE|14400|0|https://cinsscore.com/list/ci-badguys.txt
+# Not blocklist.de, in any type (removed 2026-11-28): its fail2ban reporters
+# list Meta's link-preview proxies (fwdproxy, 157.240.x / 2a03:2880::), so as a
+# CHALLENGE feed in enforce it broke Facebook / Instagram link previews (an
+# IPv6 fwdproxy often makes one request, challenged before the good-bot check
+# could verify it).
 #BOGON|BLOCK|14400|0|http://www.cymru.com/Documents/bogon-bn-agg.txt
 #HONEYPOT|BLOCK|14400|0|https://www.projecthoneypot.org/list_of_ips.php?t=d&rss=1
 #BFB|BLOCK|14400|0|http://danger.rulez.sk/projects/bruteforceblocker/blist.php
-#BDE|BLOCK|3600|0|https://api.blocklist.de/getlast.php?time=3600
 #STOPFORUMSPAM|BLOCK|14400|0|http://www.stopforumspam.com/downloads/listed_ip_1.zip
 #STOPFORUMSPAMV6|BLOCK|14400|0|http://www.stopforumspam.com/downloads/listed_ip_1_ipv6.zip
 #GREENSNOW|BLOCK|14400|0|https://blocklist.greensnow.co/greensnow.txt

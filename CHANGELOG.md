@@ -32,12 +32,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ### Changed
 - **`LIST_CHALLENGE` defaults to `enforce`**: an uncleared client on a
-  `cfm.blocklists` CHALLENGE list (Tor exits, blocklist.de, CINS on the web
-  nodes) now gets the challenge, direct or behind Cloudflare. A day of log on
+  `cfm.blocklists` CHALLENGE list (Tor exits and CINS on the web nodes) now
+  gets the challenge, direct or behind Cloudflare. A day of log on
   eight nodes found no Greek or Cypriot address on those lists (orion: 651
   listed addresses), while Tor exits registered bot accounts on a client-area
   signup past the log-only list. `LIST_CHALLENGE = log` keeps the old
   behaviour.
+- **blocklist.de is out of the reference `cfm.blocklists`** (and off the web
+  nodes): its reporters list Meta's link-preview proxies, so as a CHALLENGE
+  feed in enforce it challenged ~3% of Facebook / Instagram preview fetches.
+  The old commented `BDE` line goes too.
 
 ### Fixed
 - **Mail page, Outbound on cPanel (Exim) nodes: Deferred and Bounced count

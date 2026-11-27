@@ -16,7 +16,7 @@ kept where they size a gap or justify a decision.
 
 | Gap | Status | Where / what is open |
 |---|---|---|
-| G1 global IP reputation | **mail part built**; public feeds loaded 2026-11-27 (DROP block, blocklist.de / CINS challenge, log) | dovecot `user_disabled` counting (`internal/detectors/dovecot/auth.go:151`, ban cap `:407`, defaults `internal/detectors/dovecot_register.go:70-73`). Spamhaus DROP as BLOCK, blocklist.de / CINS as CHALLENGE on the web nodes since 2026-11-27 (`configs/cfm.blocklists`) |
+| G1 global IP reputation | **mail part built**; public feeds loaded 2026-11-27 (DROP block, CINS challenge; blocklist.de removed 2026-11-28) | dovecot `user_disabled` counting (`internal/detectors/dovecot/auth.go:151`, ban cap `:407`, defaults `internal/detectors/dovecot_register.go:70-73`). Spamhaus DROP as BLOCK, blocklist.de / CINS as CHALLENGE on the web nodes since 2026-11-27 (`configs/cfm.blocklists`) |
 | G2 WooCommerce `add-to-cart` crawling | **built, logonly** | rule 530 `WAF_CART_CRAWL` (`configs/lua/cfm_waf.lua:125`, `internal/webdetector/waf_rule_ids.go:215`). Open: promotion, and whether the `CRAWLER` tag gets a 301 to the product page |
 | G3 attacks Imunify's ModSec saw past CFM | **re-scoped**, see G3b | webshell-path GET probes not built, by decision; headless-UA rule rejected; `?author=N` skipped |
 | G3b PHP uploaded past rule 404's 2 KB window | **built; 417 and 415 block since 2026-11-24 (bans held)** | rules 417 and 415 (`rule_php_webshell_body_deep`, `rule_upload_content_deep` in `cfm_waf.lua` and `waf_rule_ids.go`); rule 10029 at block, `WAF_CVE` armed (`rule_cve_fabrik_listfilter_eval`); rule 415's tag carries the file extension (`configs/lua/cfm_waf_detectors.lua:5870`); multipart media type read as PHP does (`cfm_waf_detectors.lua:734`) |
@@ -69,9 +69,12 @@ only, and only addresses that try an Imunify node.
 `all` (25 229 v4, 607 v6) holds 16 and CINS Army (15 000) 8, residential ones
 among them (OTE, Nova, Vodafone, Cyta, Primetel). So DROP / DROPv6 run as
 `BLOCK` (every port, mail included; through `proxyipfilter` for Cloudflare
-visitors too), and blocklist.de / CINS as `CHALLENGE` feeds (web only, a
-challenge floor; `LIST_CHALLENGE`, enforce since 2026-11-28 after a day of
-log), on the eight web nodes. EDROP is
+visitors too), and CINS as a `CHALLENGE` feed (web only, a challenge floor;
+`LIST_CHALLENGE`, enforce since 2026-11-28 after a day of log), on the eight
+web nodes. blocklist.de ran as a CHALLENGE feed for a day and was removed on
+2026-11-28: it lists Meta's link-preview proxies (fwdproxy), and in enforce
+~3% of `facebookexternalhit` requests got the challenge (an IPv6 fwdproxy
+often makes one request, before the good-bot check verifies it). EDROP is
 merged into DROP. Open: how many PAM-RBL-locked addresses the feeds hold (the
 mail half of the gap), which the CHALLENGE feeds do not cover.
 
@@ -341,9 +344,10 @@ mechanisms, and none is a measured gap.
    ban. `PROXIED_IPFILTER_FEED` enforces too since 2026-11-26 (a day of log on
    seven nodes: four Greek residential addresses, one a permanent ban). Next:
    clear the fleet list's permanent bans on shared mobile / CGNAT addresses.
-3. **G1 public feeds:** loaded 2026-11-27 (DROP / DROPv6 BLOCK; blocklist.de
-   and CINS CHALLENGE; `LIST_CHALLENGE = enforce` since 2026-11-28, after a
-   day of log with no GR/CY address on the lists). The mail half
+3. **G1 public feeds:** loaded 2026-11-27 (DROP / DROPv6 BLOCK; CINS
+   CHALLENGE; `LIST_CHALLENGE = enforce` since 2026-11-28, after a day of log
+   with no GR/CY address on the lists; blocklist.de removed, it lists Meta's
+   link-preview proxies). The mail half
    (PAM RBL locks) still needs its own measure.
 4. ~~G4 collector~~: decided against (2026-11-27, `docs/ROADMAP.md` §12).
 5. **W4**, then W2.
