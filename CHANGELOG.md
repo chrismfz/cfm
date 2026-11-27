@@ -20,7 +20,20 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Mail page on cPanel (Exim) nodes: Received, Rejected, Rate-limited and
+  Over quota are counted.** Until now the Exim parser read only the arrival
+  lines, so these four always read 0 on every cPanel node (Failed logins
+  were right: they come from Dovecot). The rules were measured on the
+  fleet's mainlogs: Received is each delivery into a local mailbox (by the
+  mailbox Dovecot saved into, `+spam` folded); Rejected is a permanent,
+  unauthenticated `rejected RCPT` / `rejected after DATA` (not a 4xx, not
+  our own users' mail to a bad address, not cPanel's outgoing spam verdict);
+  Over quota is a 552 "Mailbox is full" bounce or RCPT reject; Rate-limited
+  is each recipient of a message cPanel discarded for its per-domain hourly limits ("max
+  emails per hour", "max defers and failures per hour"), shown as
+  `*@domain`. A retried defer is not counted. On titan over the last day:
+  5.5k received, 363 rejected, 246 rate-limited, 9 over quota.
 
 ## 2026.11.27
 

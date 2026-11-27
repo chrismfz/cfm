@@ -10,9 +10,10 @@
 //     and Dovecot share (DA / plain-Postfix hosts, and Dovecot's own auth lines
 //     on any host). Its Postfix branch is a straight port of NGM's parser, which
 //     is validated against real Postfix 3.8.5 (AlmaLinux) log lines.
-//   - ParseEximLine parses Exim's mainlog (cPanel hosts). Its regexes are lifted
-//     verbatim from CFM's production exim/relays detector, which parses the same
-//     `<=` message-arrival lines in the field.
+//   - ParseEximLine parses Exim's mainlog (cPanel hosts): the `<=` arrival
+//     lines (regexes lifted from CFM's production exim/relays detector), local
+//     mailbox deliveries, permanent failures and SMTP-time rejects (shapes
+//     measured on the fleet's mainlogs; see ParseEximLine).
 //
 // Both parsers emit the SAME Event stream, so Aggregate is MTA-agnostic. Events
 // are correlated by the mail server's queue/message id (Postfix QID, Exim
@@ -44,9 +45,9 @@ const (
 	OutboundSent      // a message left the server for a local sender. Addr set (Exim) or resolved via ID (Postfix).
 	LocalSubmit       // a local script/cron submission (Exim `U=user P=local`); Addr = the submitting local user.
 	InboundLocal      // a message delivered into local mailbox Addr.
-	Rejected          // an inbound recipient permanently (5xx) rejected — host-wide, no Addr.
+	Rejected          // an inbound recipient/message permanently rejected — host-wide, no Addr.
 	OverQuota         // a message rejected/bounced because recipient Addr is over quota.
-	Throttled         // an authenticated sender Addr was rate-limited (rspamd).
+	Throttled         // a sender was rate-limited: Addr = the SASL user (Postfix, rspamd) or "*@domain" (cPanel's per-domain limits).
 	AuthFailed        // a failed mailbox login; Addr = targeted mailbox, "" when host-wide/unknown.
 	QueueDone         // Postfix qmgr freed a QID — drop its correlation entry.
 )

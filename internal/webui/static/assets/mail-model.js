@@ -119,7 +119,7 @@ export const TABLES = [
     title: "Sent by scripts", hint: "PHP / cron through sendmail, by unix user",
     cols: [{ h: "Unix user", k: "addr" }, { h: "Submitted", k: "count", t: "num" }] },
   { key: "t_throttled", tab: "outbound", src: "traffic", path: "top_throttled",
-    title: "Rate-limited senders",
+    title: "Rate-limited senders", hint: "mail the server's sending limits held back; *@domain = cPanel's hourly limit for the whole domain",
     cols: [{ h: "Sender", k: "addr" }, { h: "Throttled", k: "count", t: "num" }] },
   { key: "t_prov", tab: "outbound", src: "traffic", path: "deliverability.by_provider", adminOnly: true, mid: true,
     title: "Delivery by provider", hint: "how the big providers treat this server's mail; deferred counts include retries",
