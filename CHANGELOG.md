@@ -29,8 +29,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `wp-content/cache/background-css/` on WP Rocket < 3.24.2. The rule fires whether or not a site has the
   vulnerable features on. The IP is not banned yet (`RULE_10034 = 0` in
   `[waf_security]`): watch the hits for a few days, then set
-  `RULE_10034 = 1`. A beacon padded past the 32 KB the edge reads (an
-  extra field, a second `results`) is refused too. Rule 10035 (logonly)
+  `RULE_10034 = 1`. A beacon padded past the 32 KB the edge reads is
+  refused too, unless the padding sits before `action` or inside
+  `results` itself (the edge cannot see past its read). Rule 10035 (logonly)
   logs a beacon whose JSON the edge could not decode, and a large beacon
   cut inside its `results`, which is what a gallery page's real beacon
   looks like.

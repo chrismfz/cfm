@@ -209,6 +209,37 @@ do
   local longurl = post(AJAX, "", "action=rocket_beacon&url=" .. string.rep("A", 5000) .. "&results=x")
   longurl.headers["Content-Length"] = "40000"
   fires(longurl, "padding in url", OVERSIZE, 10034)
+  -- multipart padding the field reader does not report as a field (review 3,
+  -- each checked against PHP 8.3.6: $_POST['results'] is the payload, past
+  -- the cut): every one leaves results out of the held body -> 10034
+  local BND = "----WebKitFormBoundaryR"
+  local EVIL = '{"preconnect_external_domain":["http://203.0.113.5/shell.php"]}'
+  local function part(hdrs, value) return "--" .. BND .. "\r\n" .. hdrs .. "\r\n\r\n" .. value .. "\r\n" end
+  local function cut_mp(label, pad_part, results_hdrs)
+    local b = part('Content-Disposition: form-data; name="action"', "rocket_beacon")
+      .. part('Content-Disposition: form-data; name="rocket_beacon_nonce"', "4f1c2e9ab0")
+      .. pad_part
+      .. part(results_hdrs or 'Content-Disposition: form-data; name="results"', EVIL)
+      .. "--" .. BND .. "--\r\n"
+    local c = post(AJAX, "", b:sub(1, 32768), "multipart/form-data; boundary=" .. BND)
+    c.headers["Content-Length"] = tostring(#b)
+    fires(c, label, OVERSIZE, 10034)
+  end
+  local A40 = string.rep("A", 40000)
+  cut_mp("padding in a file part", part('Content-Disposition: form-data; name="f"; filename="a.txt"\r\nContent-Type: text/plain', A40))
+  cut_mp("padding in a file part with an empty filename", part('Content-Disposition: form-data; name="f"; filename=""', A40))
+  cut_mp("padding in a part with an empty name", part('Content-Disposition: form-data; name=""', A40))
+  cut_mp("padding in a part with no Content-Disposition", part('Content-Type: text/plain', A40))
+  cut_mp("padding in one long header line of a beacon part",
+         part('Content-Disposition: form-data; name="status"\r\nX-P: ' .. A40, "success"))
+  do
+    local lines = {}
+    for i = 1, 15 do lines[i] = "X-P" .. i .. ": " .. string.rep("A", 2600) end
+    cut_mp("padding in 15 header lines of a beacon part",
+           part('Content-Disposition: form-data; name="status"\r\n' .. table.concat(lines, "\r\n"), "success"))
+  end
+  cut_mp("padding in the results part's own headers", "",
+         'Content-Disposition: form-data; name="results"\r\nX-P: ' .. A40)
   -- cfm.lua's burn-in first pass holds the body back for the second: no hit
   local c4 = post(AJAX, "action=rocket_beacon", "")
   c4.headers["Content-Length"] = "900"

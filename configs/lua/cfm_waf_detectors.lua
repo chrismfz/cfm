@@ -6610,26 +6610,50 @@ do
   -- every visible candidate with srcset / sources, data: URIs included), so a
   -- legitimate beacon over waf_body_max_len is cut inside results: that shape
   -- is logged (10035 OVERSIZE_RESULTS), never refused. A cut body that is not
-  -- that shape is 10034 OVERSIZE (a 403): a field the beacon never sends
-  -- (padding), a second results (PHP keeps the last), a short field over
+  -- that shape is 10034 OVERSIZE (a 403): no results, or one that does not
+  -- run to the end of the held body, a second results (PHP keeps the last),
+  -- a field the beacon never sends (padding), a short field over
   -- ROCKET_SHORT_MAX, or no body at all (the action came from the query,
   -- where the beacon never puts it).
   local ROCKET_FIELDS = { action = true, rocket_beacon_nonce = true, url = true,
                           is_mobile = true, status = true, results = true }
   local ROCKET_SHORT_MAX = 4096
+  -- The one results value must run to the END of the held body: only then
+  -- is the cut inside it. The reader does not report every part (a file
+  -- part, a part with an empty name or no Content-Disposition, a part whose
+  -- header block the cut ends), so padding hidden in one of those would
+  -- otherwise read as "only beacon fields"; with results past the cut, it
+  -- is not reported at all (review 3, checked against PHP 8.3.6's rfc1867).
+  local function results_runs_to_end(body, headers, v)
+    if php_media_type(php_content_type(headers)) == "multipart/form-data" then
+      if v == "" then return body:find("\r?\n\r?\n$") ~= nil end
+      return body:sub(-#v) == v
+    end
+    -- urlencoded: the last raw pair is results=… (its key decoded)
+    local last = body:match("([^&]*)$") or ""
+    local key = last:match("^([^=]*)=") or ""
+    if key:find("[%%+]") then key = _form_unescape(key) end
+    if key:find("[%z %.%[]") then key = php_var_name(key) end
+    return key == "results"
+  end
   local function rocket_cut_tag(method, body, headers)
     if body == "" then return "OVERSIZE", "exploit" end
     local all = _M.php_request_fields(method, "", body, headers)
+    local res = all.results
+    if not res or #res ~= 1 then return "OVERSIZE", "exploit" end
     for name, t in pairs(all) do
       if not ROCKET_FIELDS[name] then return "OVERSIZE", "exploit" end
-      if name == "results" then
-        if #t > 1 then return "OVERSIZE", "exploit" end
-      else
+      if name ~= "results" then
         for _, v in ipairs(t) do
           if #v > ROCKET_SHORT_MAX then return "OVERSIZE", "exploit" end
         end
       end
     end
+    -- JSON.stringify of an object: `{"` first. A results "value" that is the
+    -- tail of a header line rfc1867 cut at 5120 bytes (padding in the
+    -- results part's own headers) is not.
+    if not res[1]:find('^{"') then return "OVERSIZE", "exploit" end
+    if not results_runs_to_end(body, headers, res[1]) then return "OVERSIZE", "exploit" end
     return "OVERSIZE_RESULTS", "unseen"
   end
 

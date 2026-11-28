@@ -105,8 +105,8 @@ are enforced: today **10021, 10024, 10027, 10028, 10030, 10034**. A rule whose
 exploit arrives that way must be in that list and must run before any other
 block rule that the same request can trip (the pass ends at the first block,
 enforced or not). That is why 10021, 10024, 10027 and 10030 run first in
-`check()`, and why 10028 (then 10034) runs right after 10027 in the burn-in
-second pass (`ctx.burnin_pass`) but late otherwise.
+`check()`, and why 10028 and then 10034 run early in the burn-in second pass
+(`ctx.burnin_pass`, after 10027 and 10030) but late otherwise.
 
 ---
 
@@ -389,9 +389,12 @@ tested in the `php_upload_progress` files, 10029 in
   has six fields with `results` last, and `results` is unbounded (every LCP
   candidate with srcset / sources, `data:` URIs included), so a large real
   beacon is cut inside `results`; that shape is 10035 `OVERSIZE_RESULTS`
-  (logged). Any other cut body is 10034 `OVERSIZE` (403): a field the beacon
-  never sends (padding), a second `results` (PHP keeps the last), a short
-  field over 4 KB, or no body at all. Residuals, both seen in review:
+  (logged): a single `results` that starts `{"` and runs to the end of the
+  held body. Any other cut body is 10034 `OVERSIZE` (403): no `results` in
+  view (padding in a file part, a nameless part or a part's headers hides
+  the parts after it from the field reader), a second `results` (PHP keeps
+  the last), a field the beacon never sends, a short field over 4 KB, or no
+  body at all. Residuals, both seen in review:
   padding sent BEFORE `action` hides the action (nothing to key on), and
   padding inside `results` looks like the real large beacon. Edge 403, autoblock held
   per rule (`RULE_10034 = 0`) for a 2–3 day watch; `RULE_10034 = 1` in a
