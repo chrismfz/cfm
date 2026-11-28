@@ -120,20 +120,51 @@ require_supported_os() {
             command_exists rpm || die "rpm not found" ;;
         *" debian "*|*" ubuntu "*)
             PKG_FAMILY=deb
-            command_exists dpkg-query || die "dpkg-query not found" ;;
+            command_exists dpkg-query || die "dpkg-query not found"
+            require_deb_release ;;
         *) die "cfm-edge is packaged for EL (AlmaLinux / Rocky / RHEL / CloudLinux 8, 9, 10) and Debian 12+ / Ubuntu 22.04+; this is ${ID:-unknown}" ;;
     esac
 }
 
-# The installed cfm-edge (name-version), or nothing when it is not installed.
+# The .deb's floor: Debian 12 / Ubuntu 22.04. Older releases would install it
+# (its Depends are met), but their systemd predates the unit's ProtectProc=
+# (systemd 247) and runs the edge with that part of the sandbox silently
+# ignored. Derivatives (ID_LIKE=debian / ubuntu) are judged by
+# the Debian or Ubuntu release they name; an unknown one is refused.
+require_deb_release() {
+    local base ver major
+    case " ${ID:-} " in
+        " ubuntu ") base=ubuntu; ver="${VERSION_ID:-}" ;;
+        " debian ") base=debian; ver="${VERSION_ID:-}" ;;
+        *)
+            case " ${ID_LIKE:-} " in
+                *" ubuntu "*) base=ubuntu; ver="${UBUNTU_VERSION_ID:-}" ;;
+                *) base=debian; ver="$(cut -d. -f1 /etc/debian_version 2>/dev/null || true)" ;;
+            esac ;;
+    esac
+    major="${ver%%.*}"
+    case "$major" in ''|*[!0-9]*)
+        die "cannot tell which ${base} release this is (${ID:-?} ${VERSION_ID:-?}): the cfm-edge .deb needs Debian 12+ / Ubuntu 22.04+" ;;
+    esac
+    if [ "$base" = ubuntu ] && [ "$major" -lt 22 ]; then
+        die "the cfm-edge .deb needs Ubuntu 22.04+ (its unit's sandbox needs systemd 247+); this is Ubuntu ${ver}"
+    fi
+    if [ "$base" = debian ] && [ "$major" -lt 12 ]; then
+        die "the cfm-edge .deb needs Debian 12+ (its unit's sandbox needs systemd 247+); this is Debian ${ver}"
+    fi
+}
+
+# The installed cfm-edge (name and version), or nothing when it is not
+# installed. Decided by the package manager's own answer, never its text:
+# rpm translates "is not installed".
 installed_cfm_edge() {
     if [ "$PKG_FAMILY" = deb ]; then
         # dpkg-query exits 1 for a package it does not know: under set -e and
         # pipefail that would end the script, silently, inside $(...).
         dpkg-query -W -f='${Status} ${Version}\n' cfm-edge 2>/dev/null \
             | awk '$1 == "install" && $3 == "installed" { print "cfm-edge " $4 }' || true
-    else
-        rpm -q cfm-edge 2>/dev/null | grep -v 'not installed' || true
+    elif rpm -q cfm-edge >/dev/null 2>&1; then
+        rpm -q --qf 'cfm-edge %{VERSION}-%{RELEASE}\n' cfm-edge 2>/dev/null || true
     fi
 }
 
@@ -161,15 +192,15 @@ install_cfm_edge_package() {
         # cfm-edge: refresh them once when the first try cannot find it.
         if ! DEBIAN_FRONTEND=noninteractive apt-get -y install cfm-edge; then
             log "Refreshing the apt lists and trying again"
-            apt-get update || die "apt-get update failed"
+            apt-get update || die "apt-get update failed (its error is above)"
             DEBIAN_FRONTEND=noninteractive apt-get -y install cfm-edge \
-                || die "could not install cfm-edge: is the nixpal repo (the one cfm is installed from) configured on this node?"
+                || die "could not install cfm-edge: apt's error is above. Usual causes: the nixpal repo (the one cfm comes from) is not configured, another apt/dpkg run holds the lock (unattended-upgrades), or a dependency cannot be met"
         fi
     else
         local pm
         if command_exists dnf; then pm=dnf; elif command_exists yum; then pm=yum; else die "neither dnf nor yum found"; fi
         log "Installing cfm-edge ($pm, from the repo cfm comes from)"
-        "$pm" -y install cfm-edge || die "could not install cfm-edge: is the nixpal repo (the one cfm is installed from) configured on this node?"
+        "$pm" -y install cfm-edge || die "could not install cfm-edge: $pm's error is above. Usual causes: the nixpal repo (the one cfm comes from) is not configured, or a dependency cannot be met"
     fi
     have="$(installed_cfm_edge)"
     [ -n "$have" ] || die "the install reported success but cfm-edge is not installed"

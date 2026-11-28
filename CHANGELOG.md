@@ -26,7 +26,11 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   installs it with apt there (`apt-get install cfm-edge`, refreshing the lists
   once when the first try cannot find it) and with dnf/yum on EL as before;
   everything after the install (adoption, `-t`, the printed switch) is the
-  same. It still refuses any other OS. README, `docs/node-setup.md` and
+  same. It refuses Debian before 12 and Ubuntu before 22.04 (their systemd
+  predates the unit's `ProtectProc=`, which they would silently ignore) and
+  any other OS. When apt or dnf fails it points at their error and the usual
+  causes (the repo, a held dpkg lock, a dependency), not at the repo alone.
+  README, `docs/node-setup.md` and
   `CLAUDE.md` drop "Debian uses OpenResty until the .deb";
   `install-angie.sh`'s deprecation line no longer sends Debian to OpenResty.
 - **An Alerts tab on the Mail page.** The mail-abuse findings the team is
