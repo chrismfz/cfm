@@ -72,6 +72,14 @@ func (b *Backend) inputChainTextCLI() (string, error) {
 	return nftReadCLITimeout(firewall.BaseInputReadTimeout, "-a", "list", "chain", "inet", cfmTableName, "input")
 }
 
+// inputAcceptsChainTextCLI is the DNAT accepts' read of the input chain
+// (inputAcceptOps, cleanupScopedDNATAccepts), with firewall.
+// InputAcceptsNFTTimeout: the 5 s of ListChainText, a diagnostic listing,
+// ran past EL8's 4–12 s `list chain`.
+func (b *Backend) inputAcceptsChainTextCLI() (string, error) {
+	return nftReadCLITimeout(firewall.InputAcceptsNFTTimeout, "-a", "list", "chain", "inet", cfmTableName, "input")
+}
+
 // nftReadCLI runs a read-only nft command (firewall.NFTRead). It gets the CLI
 // write timeout: on a node with large feed sets one nft process takes seconds.
 // An error carries nft's stderr.

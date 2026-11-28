@@ -101,7 +101,7 @@ func dnatAcceptRuleBody(spec dnatAcceptRuleSpec) string {
 // re-insert them one nft run at a time on each reload, a window in which
 // DNAT'd web connections hit the default drop.
 //
-// The listing is argv mode (ListChainText): nftOut feeds its argument to
+// The listing is argv mode (inputAcceptsChainText): nftOut feeds its argument to
 // `nft -f -` (script mode), where the `-a` handle flag is a syntax error. That
 // once made the listing fail silently, so FirstInputDefaultDropHandle saw an
 // error string, returned "", and the accepts were APPENDED after the default
@@ -120,7 +120,7 @@ func (b *Backend) ensureScopedDNATAccepts(httpPort, httpsPort int, prune bool) e
 func (b *Backend) cleanupScopedDNATAccepts() error {
 	// argv-mode listing (see ensureScopedDNATAccepts): a script-mode `-a` list
 	// errors out, which would leave stale accepts undeleted and duplicated.
-	out, err := b.ListChainText(family, tableName, "input")
+	out, err := b.inputAcceptsChainText()
 	if err != nil {
 		return nil
 	}

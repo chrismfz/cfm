@@ -533,7 +533,7 @@ func scopedDNATAcceptHandles(out, namespace string) []string {
 }
 
 func (b *Backend) cleanupScopedDNATAccepts(namespace string) error {
-	out, err := b.ListChainText("inet", "cfm", "input")
+	out, err := b.inputAcceptsChainTextCLI()
 	if err != nil {
 		return nil
 	}

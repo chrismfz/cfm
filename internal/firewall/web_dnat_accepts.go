@@ -13,6 +13,18 @@ func IsWebDNATAccept(line string) bool {
 	return strings.Contains(norm, WebDNATAcceptTagNFT+":") || strings.Contains(norm, WebDNATAcceptTagNFTLib+":")
 }
 
+// InputAcceptsNFTTimeout bounds the DNAT accepts' read of the input chain
+// (`nft -a list chain inet cfm input`, the NFTTextOps.ListInput of both
+// engines: EnsureInputAccepts for the web accepts, EnsurePanelDNATAccepts &
+// co for the panel ones, and the cleanup on `dnat off`). It is EnsureBase's
+// budget: EL8's nft 1.0.4 loads every set element before any `list chain`
+// (3.9 s idle on virgo, more right after a daemon restart), and the deadline
+// also covers the wait for an nft slot. At 5 s, `cfm edge on` failed during
+// an upgrade on virgo (2026-11-28: two timed-out reads, 10.1 s), and the web
+// DNAT stayed off, the sites served without the WAF, until a retry. A var
+// only so the engines' fake-nft tests can shorten it.
+var InputAcceptsNFTTimeout = BaseInputReadTimeout
+
 // EnsureInputAccepts makes `inet cfm input` hold the rules in want (rule
 // bodies, written as for `add rule inet cfm input <body>`), each once and
 // above the ports policy's default drop, among the rules managed reports as

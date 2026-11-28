@@ -2222,6 +2222,20 @@ func (b *Backend) ListChainText(fam, table, chain string) (string, error) {
 	return string(out), nil
 }
 
+// inputAcceptsChainText is the DNAT accepts' read of the input chain (with
+// handles): ListChainText with firewall.InputAcceptsNFTTimeout instead of the
+// 5 s diagnostic deadline, which EL8's 4-12 s listing ran past.
+func (b *Backend) inputAcceptsChainText() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), firewall.InputAcceptsNFTTimeout)
+	defer cancel()
+	res, err := runNFTCommand(ctx, "-a", "list", "chain", family, tableName, "input")
+	out := []byte(res.Stdout + res.Stderr)
+	if err != nil {
+		return "", fmt.Errorf("nft list chain %s %s input: %v: %s", family, tableName, err, string(out))
+	}
+	return string(out), nil
+}
+
 func (b *Backend) FlushSet(fam, table, set string) error {
 	b.forgetApplied(set)
 	res, err := runNFTCommand(context.Background(), "-n", "flush", "set", fam, table, set)
