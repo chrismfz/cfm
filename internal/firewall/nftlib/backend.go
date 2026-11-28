@@ -66,6 +66,15 @@ type Backend struct {
 	mu   sync.Mutex
 	nl   nlStats // every netlink round-trip, for firewall_selftest
 
+	// dnatMu serialises the web DNAT operations (installDNATRules,
+	// EnsureDNATAccepts, DNATOff) end to end, so one's accepts prune can't
+	// delete the accepts of another's new redirect. It is taken BEFORE mu,
+	// never under it, and the DNAT accepts' nft CLI reads (up to
+	// firewall.InputAcceptsNFTTimeout each, 30 s) run under dnatMu only: held
+	// under mu, a hung EL8 `list chain` stalled every ban and set write behind
+	// DNATOn for up to four reads.
+	dnatMu sync.Mutex
+
 	// hostProbe answers a small block / allow batch's read with per-address
 	// gets instead of a dump of the set (firewall.ReadHostElems). New sets it;
 	// a Backend a unit test builds over a fake conn has none and dumps.

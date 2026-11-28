@@ -7,6 +7,7 @@ package nftlib
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -72,6 +73,14 @@ func (b *Backend) inputChainTextCLI() (string, error) {
 	return nftReadCLITimeout(firewall.BaseInputReadTimeout, "-a", "list", "chain", "inet", cfmTableName, "input")
 }
 
+// inputAcceptsChainTextCLI is the DNAT accepts' read of the input chain
+// (inputAcceptOps, cleanupScopedDNATAccepts), with firewall.
+// InputAcceptsNFTTimeout: the 5 s of ListChainText, a diagnostic listing,
+// ran past EL8's 4–12 s `list chain`.
+func (b *Backend) inputAcceptsChainTextCLI() (string, error) {
+	return nftReadCLITimeout(firewall.InputAcceptsNFTTimeout, "-a", "list", "chain", "inet", cfmTableName, "input")
+}
+
 // nftReadCLI runs a read-only nft command (firewall.NFTRead). It gets the CLI
 // write timeout: on a node with large feed sets one nft process takes seconds.
 // An error carries nft's stderr.
@@ -88,6 +97,10 @@ func nftReadCLITimeout(timeout time.Duration, args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// A timeout is not a missing chain (EnsureInputAccepts).
+			return "", fmt.Errorf("nft %s: %w: %w: %s", strings.Join(args, " "), context.DeadlineExceeded, err, strings.TrimSpace(stderr.String()))
+		}
 		return "", fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil

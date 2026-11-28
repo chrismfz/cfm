@@ -186,7 +186,7 @@ func (b *Backend) findTable(name string, family nftables.TableFamily) (*nftables
 // inet cfm/input over netlink.
 func (b *Backend) inputAcceptOps() firewall.NFTTextOps {
 	return firewall.NFTTextOps{
-		ListInput: func() (string, error) { return b.ListChainText("inet", cfmTableName, "input") },
+		ListInput: b.inputAcceptsChainTextCLI,
 		Run:       b.nftExec,
 	}
 }
