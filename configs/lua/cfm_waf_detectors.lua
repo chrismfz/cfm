@@ -6605,6 +6605,34 @@ do
     return false
   end
 
+  -- A beacon body the edge did not hold whole. The browser's FormData has
+  -- six fields, results LAST, and results is not bounded (its LCP list is
+  -- every visible candidate with srcset / sources, data: URIs included), so a
+  -- legitimate beacon over waf_body_max_len is cut inside results: that shape
+  -- is logged (10035 OVERSIZE_RESULTS), never refused. A cut body that is not
+  -- that shape is 10034 OVERSIZE (a 403): a field the beacon never sends
+  -- (padding), a second results (PHP keeps the last), a short field over
+  -- ROCKET_SHORT_MAX, or no body at all (the action came from the query,
+  -- where the beacon never puts it).
+  local ROCKET_FIELDS = { action = true, rocket_beacon_nonce = true, url = true,
+                          is_mobile = true, status = true, results = true }
+  local ROCKET_SHORT_MAX = 4096
+  local function rocket_cut_tag(method, body, headers)
+    if body == "" then return "OVERSIZE", "exploit" end
+    local all = _M.php_request_fields(method, "", body, headers)
+    for name, t in pairs(all) do
+      if not ROCKET_FIELDS[name] then return "OVERSIZE", "exploit" end
+      if name == "results" then
+        if #t > 1 then return "OVERSIZE", "exploit" end
+      else
+        for _, v in ipairs(t) do
+          if #v > ROCKET_SHORT_MAX then return "OVERSIZE", "exploit" end
+        end
+      end
+    end
+    return "OVERSIZE_RESULTS", "unseen"
+  end
+
   -- Rule 10034: a rocket_beacon POST whose results carry a non-origin
   -- preconnect entry. Tag NON_ORIGIN. add_data() reads $_POST['results'], so
   -- the body; the query is read too (a harmless over-match). The action is
@@ -6612,14 +6640,15 @@ do
   -- posts to admin_url('admin-ajax.php'), which a security plugin can rename
   -- (Hide My WP's /ajax), and no other endpoint gets action=rocket_beacon
   -- with a results list.
-  -- Also 10034, tag OVERSIZE: a rocket_beacon POST whose body the edge did not
-  -- hold whole (cut past waf_body_max_len, or declared and not read): the list
-  -- may sit past the cut (padding, or a benign results then a second one; PHP
-  -- reads up to post_max_size and keeps the last). The beacon's own body is a
-  -- few KB (at most 20 entries per list), so a cut one is no browser's.
-  -- Rule 10035 (logonly): UNPARSED, a results value naming preconnect (or
-  -- carrying \u escapes) that the reader above does not decode, where PHP's
-  -- json_decode might. Returns tag, rule ("exploit" / "unseen").
+  -- A body the edge did not hold whole (cut past waf_body_max_len, or
+  -- declared and not read): rocket_cut_tag above (10034 OVERSIZE, or 10035
+  -- OVERSIZE_RESULTS). Residuals: padding sent BEFORE action hides the
+  -- action itself (nothing to key on), and padding inside results is the
+  -- legitimate large beacon's shape (logged, not refused).
+  -- Rule 10035 (logonly) also takes UNPARSED, a results value naming
+  -- preconnect (or carrying \u escapes) that the reader above does not
+  -- decode, where PHP's json_decode might. Returns tag, rule
+  -- ("exploit" / "unseen").
   -- body_deferred: cfm.lua's first pass over a burn-in body (the second pass
   -- reads it); body_unread: a gate that reads no body (the panel ports).
   function _M.detect_cve_wp_rocket_beacon(method, args, body, headers, _nab, get_fields, body_deferred, body_unread)
@@ -6641,7 +6670,7 @@ do
       if r == nil and lower(v):find("preconnect", 1, true) then unparsed = true end
       if r == nil and v:find("\\u", 1, true) then unparsed = true end
     end
-    if body_was_cut(body or "", headers) then return "OVERSIZE", "exploit" end
+    if body_was_cut(body or "", headers) then return rocket_cut_tag(method, body or "", headers) end
     if unparsed then return "UNPARSED", "unseen" end
     return nil
   end

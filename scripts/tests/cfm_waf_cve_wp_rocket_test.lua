@@ -3,10 +3,12 @@
 --
 --   rule 10034  rule_cve_wp_rocket_beacon         (WAF_CVE, block, autoblock held)
 --     POST admin-ajax.php action=rocket_beacon whose `results` JSON carries a
---     preconnect_external_domain entry that is not a bare origin (NON_ORIGIN).
+--     preconnect_external_domain entry that is not a bare origin (NON_ORIGIN),
+--     or a cut body that is not a legitimate beacon's shape (OVERSIZE).
 --
 --   rule 10035  rule_cve_wp_rocket_beacon_unseen  (WAF_CVE, logonly)
---     the same request with a list the edge could not read: UNPARSED / OVERSIZE.
+--     beacon JSON the edge could not decode (UNPARSED), or a body cut inside
+--     results, the shape of a large legitimate beacon (OVERSIZE_RESULTS).
 --
 -- The legitimate request is the one wpr-beacon.js builds
 -- (BeaconManager._saveFinalResultIntoDB, 3.24.1):
@@ -99,6 +101,7 @@ end
 local NON = "WAF_CVE:CVE_2026_125812:WP_ROCKET:NON_ORIGIN"
 local UNPARSED = "WAF_CVE:CVE_2026_125812:WP_ROCKET:UNPARSED"
 local OVERSIZE = "WAF_CVE:CVE_2026_125812:WP_ROCKET:OVERSIZE"
+local OVERSIZE_RESULTS = "WAF_CVE:CVE_2026_125812:WP_ROCKET:OVERSIZE_RESULTS"
 
 set_only({ rule_cve_wp_rocket_beacon = "block", rule_cve_wp_rocket_beacon_unseen = "logonly" })
 
@@ -165,7 +168,7 @@ fires(post(AJAX, "", "action%00x=rocket_beacon&results=" .. urlenc('{"preconnect
 fires(post(AJAX, "", "action=rocket_beacon&results=" .. urlenc(' \n{ "preconnect_external_domain" : [ "http://e.example/x.php" ] } ')),
       "JSON whitespace around the document", NON, 10034)
 
--- ═══ Rule 10035 — UNPARSED / OVERSIZE (logonly) ═════════════════════════════
+-- ═══ Cut bodies (10034 OVERSIZE / 10035 OVERSIZE_RESULTS) and UNPARSED ═══════
 fires(beacon('{"preconnect_external_domain":["http://e.example/x.php"]'),
       "truncated JSON naming preconnect", UNPARSED, 10035, "logonly")
 fires(beacon('{"\\u0070reconnect_external_domain":["http://e.example/x.php"],}'),
@@ -173,7 +176,7 @@ fires(beacon('{"\\u0070reconnect_external_domain":["http://e.example/x.php"],}')
 clean(beacon('{"lcp":'), "broken JSON that names no preconnect entry")
 do
   -- Content-Length says more than the edge holds: the list may be past the
-  -- cut (the review's PoC: padding, or a benign results then an evil one)
+  -- cut (the review's PoC: a padding field, or a benign results then an evil one)
   local c = post(AJAX, "", "action=rocket_beacon&pad=" .. string.rep("A", 100) .. "&results=" .. urlenc('{"preconnect_external_domain":[]}'))
   c.headers["Content-Length"] = "40000"
   fires(c, "body cut past waf_body_max_len (benign results seen, evil one past the cut)", OVERSIZE, 10034)
@@ -186,6 +189,26 @@ do
   local c3 = post(AJAX, "action=rocket_beacon", "")
   c3.headers["Content-Length"] = "900"
   fires(c3, "body declared and not read", OVERSIZE, 10034)
+  -- a legitimate beacon over the cap (results is last and unbounded: every LCP
+  -- candidate, data: URIs included) is cut inside results: logged, not refused
+  local big = '{"lcp":{"type":"img","src":"data:image/png;base64,' .. string.rep("Q", 40000) .. '"},"preconnect_external_domain":["https://fonts.googleapis.com"]}'
+  local bb, bct = multipart({ { "action", "rocket_beacon" }, { "rocket_beacon_nonce", "4f1c2e9ab0" },
+    { "url", "https://shop.example.gr/gallery" }, { "is_mobile", "false" }, { "status", "success" }, { "results", big } })
+  local cl = post(AJAX, "", bb:sub(1, 32768), bct)
+  cl.headers["Content-Length"] = tostring(#bb)
+  fires(cl, "large legitimate beacon cut inside results (multipart)", OVERSIZE_RESULTS, 10035, "logonly")
+  local ul = beacon(big, "ue")
+  ul.headers["Content-Length"] = tostring(#ul.body)
+  ul.body = ul.body:sub(1, 32768)
+  fires(ul, "large legitimate beacon cut inside results (urlencoded)", OVERSIZE_RESULTS, 10035, "logonly")
+  -- a complete results, then a second one past the cut (PHP keeps the last)
+  local two = post(AJAX, "", "action=rocket_beacon&results=" .. urlenc('{"preconnect_external_domain":[]}') .. "&results=" .. urlenc('{"lcp":"' .. string.rep("A", 100)))
+  two.headers["Content-Length"] = "40000"
+  fires(two, "second results past the cut", OVERSIZE, 10034)
+  -- padding in a field the beacon sends short
+  local longurl = post(AJAX, "", "action=rocket_beacon&url=" .. string.rep("A", 5000) .. "&results=x")
+  longurl.headers["Content-Length"] = "40000"
+  fires(longurl, "padding in url", OVERSIZE, 10034)
   -- cfm.lua's burn-in first pass holds the body back for the second: no hit
   local c4 = post(AJAX, "action=rocket_beacon", "")
   c4.headers["Content-Length"] = "900"

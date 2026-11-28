@@ -150,8 +150,8 @@ Every rule below ships at edge default **`block`** (Lua `CFG` and Go
 | 10031 | `rule_cve_php_fpm_smuggle` | CVE-2026-129289 | PHP core (FPM / LSAPI) | a FastCGI BEGIN_REQUEST + PARAMS record (`FCGI_BEGIN_REQUEST`) or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR (`FCGI_PARAMS`) in a POST body | **logonly** (burn-in from 2026-11-21) |
 | 10032 | `rule_cve_php_oversized_auth` | CVE-2026-129496 | PHP core (ext/date) | an Authorization header line over nginx's default 8 KB buffer (`BASIC_OVERSIZE` / `OVERSIZE`, `:len=N`) | **logonly** (burn-in from 2026-11-21) |
 | 10033 | `rule_cve_php_multipart_desync` | CVE-2026-129289 (first leg) | PHP core | a multipart POST that leaves bytes PHP never reads (`GARBLED_STOP` / `GARBLED_STOP_SMALL` / `NO_BOUNDARY` / `BOUNDARY_TOO_LARGE`) | **logonly** (burn-in from 2026-11-21) |
-| 10034 | `rule_cve_wp_rocket_beacon` | CVE-2026-125812 | WP Rocket < 3.24.2 | `POST` `action=rocket_beacon` (admin-ajax.php, any path) whose `results` JSON has a `preconnect_external_domain` entry that is not a bare origin (`NON_ORIGIN`), or a body the edge did not hold whole (`OVERSIZE`) | **held** (watch from 2026-11-28) |
-| 10035 | `rule_cve_wp_rocket_beacon_unseen` | CVE-2026-125812 | WP Rocket | the same request with JSON the edge could not decode (`UNPARSED`) | **logonly** |
+| 10034 | `rule_cve_wp_rocket_beacon` | CVE-2026-125812 | WP Rocket < 3.24.2 | `POST` `action=rocket_beacon` (admin-ajax.php, any path) whose `results` JSON has a `preconnect_external_domain` entry that is not a bare origin (`NON_ORIGIN`), or a cut body that is not a real beacon's shape (`OVERSIZE`) | **held** (watch from 2026-11-28) |
+| 10035 | `rule_cve_wp_rocket_beacon_unseen` | CVE-2026-125812 | WP Rocket | beacon JSON the edge could not decode (`UNPARSED`), or a body cut inside `results` (`OVERSIZE_RESULTS`) | **logonly** |
 
 Lua tests: `scripts/tests/cfm_waf_cve_<slug>_test.lua` per product (plus
 `*_e2e_test.lua` for 10021/10022, 10024, 10027/10028, 10030). 10023 is
@@ -384,17 +384,23 @@ tested in the `php_upload_progress` files, 10029 in
   all the browser sends (`url.origin`). 10034 decodes `results` as
   `json_decode` does (escapes, duplicate keys, a string / list / object of
   entries) and accepts only `null` or `scheme://host[:port]/?`. It fires
-  whether or not the site has either feature on. A beacon whose body the
-  edge did not hold whole (cut past `waf_body_max_len`, 32 KB, or declared
-  and unread) is 10034's `OVERSIZE`, a 403 as well: padding is the obvious
-  way around the read, and the browser's beacon is a few KB. Edge 403, autoblock held
+  whether or not the site has either feature on. A cut body (past
+  `waf_body_max_len`, 32 KB, or declared and unread): the browser's FormData
+  has six fields with `results` last, and `results` is unbounded (every LCP
+  candidate with srcset / sources, `data:` URIs included), so a large real
+  beacon is cut inside `results`; that shape is 10035 `OVERSIZE_RESULTS`
+  (logged). Any other cut body is 10034 `OVERSIZE` (403): a field the beacon
+  never sends (padding), a second `results` (PHP keeps the last), a short
+  field over 4 KB, or no body at all. Residuals, both seen in review:
+  padding sent BEFORE `action` hides the action (nothing to key on), and
+  padding inside `results` looks like the real large beacon. Edge 403, autoblock held
   per rule (`RULE_10034 = 0`) for a 2–3 day watch; `RULE_10034 = 1` in a
   node's `[waf_security]` arms it there, and dropping `HoldAutoblock` (Go)
   makes that the default once the hits read as attacks only. Keyed on the
   fields, not the path (a security plugin can rename admin-ajax.php), like
   10018; a renamed path off cfm.lua's body read list gets its body in the
-  burn-in pass, so 10034 is in `BURNIN_ENFORCE_IDS` and runs early there. admin-ajax.php bodies are read whole by Step 2, never in the burn-in
-  pass. 10035 (logonly) is `UNPARSED`: JSON the edge reader does not decode
+  burn-in pass, so 10034 is in `BURNIN_ENFORCE_IDS` and runs early there. admin-ajax.php bodies are read (up to `waf_body_max_len`) by Step 2,
+  never in the burn-in pass. 10035 (logonly) is `UNPARSED`: JSON the edge reader does not decode
   (a fuzz against PHP 8.3.6's `json_decode`, 30k documents, found no case
   PHP stores a non-origin entry that 10034 misses).
 - **10030 Drupal render-array callbacks** (`#region_callback`,

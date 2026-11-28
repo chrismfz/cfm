@@ -350,9 +350,10 @@ var wafRuleIDs = []WAFRule{
 	// the page beacon. 10034 = POST admin-ajax.php action=rocket_beacon whose results
 	// JSON carries a preconnect_external_domain entry that is not a bare
 	// origin (the browser sends url.origin only). Edge 403, autoblock held
-	// (RULE_10034 = 1 arms it) for a watch before arming; a beacon body the
-	// edge did not hold whole is 10034 too (OVERSIZE). 10035 = the same
-	// request with JSON the edge could not decode (UNPARSED), logonly.
+	// (RULE_10034 = 1 arms it) for a watch before arming; a cut beacon body
+	// that is not the browser's shape is 10034 too (OVERSIZE). 10035 =
+	// beacon JSON the edge could not decode (UNPARSED), or a body cut inside
+	// results, the large legitimate beacon's shape (OVERSIZE_RESULTS); logonly.
 	{ID: 10034, Name: "rule_cve_wp_rocket_beacon", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 	{ID: 10035, Name: "rule_cve_wp_rocket_beacon_unseen", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 }
