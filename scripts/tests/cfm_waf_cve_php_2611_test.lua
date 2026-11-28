@@ -188,7 +188,7 @@ do
   -- turning on allow_url_include / auto_prepend_file=php://input) is 305's:
   -- an armed block, evaluated before the held 10031 / 10033.
   local exploit = field("a", "1") .. GARBLED .. BEGIN .. PARAMS .. fcgi(5, "<?php system('id'); ?>")
-  local hit, reason, act = rule_of(req("POST", exploit, { ["User-Agent"] = "python-requests/2.31" }))
+  local hit, reason, act, rid = rule_of(req("POST", exploit, { ["User-Agent"] = "python-requests/2.31" }))
   check(hit == true and act == "block", "advisory request: blocked (got " .. tostring(act) .. ")")
   check(type(reason) == "string" and reason:sub(1, 7) ~= "WAF_CVE", "advisory request: an armed rule's headline, not a held one (got " .. tostring(reason) .. ")")
   -- A smuggled request with no wrapper: 10031 blocks it.
@@ -205,6 +205,26 @@ do
   hit, reason, act = rule_of(req("GET", "", { Authorization = "Basic " .. string.rep("A", 9000), ["User-Agent"] = "Mozilla/5.0" }))
   check(act == "block" and type(reason) == "string" and reason:find("BASIC_OVERSIZE", 1, true) ~= nil,
         "shipped: BASIC_OVERSIZE blocks (got " .. tostring(reason) .. " / " .. tostring(act) .. ")")
+  -- cfm.lua's body burn-in second pass (a chunked / large POST /) enforces
+  -- only BURNIN_ENFORCE_IDS and ends at the first block, so 10031 / 10033
+  -- must be the first block there, ahead of 305 too.
+  local function burnin(c) c.burnin_pass = true; return c end
+  hit, reason, act, rid = rule_of(burnin(req("POST", exploit, { ["User-Agent"] = "python-requests/2.31" })))
+  check(act == "block" and rid == "10031", "burn-in pass: the advisory request is 10031's (got " .. tostring(reason) .. " / " .. tostring(rid) .. ")")
+  local desync = field("a", "1") .. GARBLED .. string.rep("A", 6000) .. "\r\n" .. CLOSE
+  hit, reason, act, rid = rule_of(burnin(req("POST", desync, { ["User-Agent"] = "Mozilla/5.0" })))
+  check(act == "block" and rid == "10033", "burn-in pass: GARBLED_STOP is 10033's block (got " .. tostring(reason) .. " / " .. tostring(rid) .. ")")
+  -- and a logonly tag there stays logonly
+  hit, reason, act = rule_of(burnin(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form-data", ["User-Agent"] = "Mozilla/5.0" })))
+  check(act == "logonly", "burn-in pass: NO_BOUNDARY stays logonly (got " .. tostring(reason) .. " / " .. tostring(act) .. ")")
+end
+-- cfm.lua enforces them in the burn-in pass
+do
+  local f = assert(io.open("configs/lua/cfm.lua"))
+  local src = f:read("*a"); f:close()
+  local list = src:match("local BURNIN_ENFORCE_IDS = (%b{})")
+  check(list and list:find('["10031"] = true', 1, true), "BURNIN_ENFORCE_IDS lists 10031")
+  check(list and list:find('["10033"] = true', 1, true), "BURNIN_ENFORCE_IDS lists 10033")
 end
 
 if fails > 0 then

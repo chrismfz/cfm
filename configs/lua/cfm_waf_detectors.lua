@@ -8838,8 +8838,8 @@ end
 
 -- Rules 10031 / 10032 / 10033 — the request shapes of three php-src
 -- advisories published 2026-11-19 (fixed in 8.2.36 / 8.3.37 / 8.4.28 /
--- 8.5.13), LOGONLY: telemetry for a burn-in, never a block until the fleet
--- read says so. Sources: the advisory texts (no fix commit or PoC was
+-- 8.5.13). Logonly burn-in 2026-11-21..28, then block with the ban held
+-- (the tags noted below stay logonly, forced in cfm_waf.lua). Sources: the advisory texts (no fix commit or PoC was
 -- published with them) and, for what PHP accepts, php-src PHP-8.3
 -- main/fastcgi.c (fcgi_read_request), main/rfc1867.c and
 -- sapi/fpm/fpm/fpm_main.c. None of them is a substitute for the PHP update.
@@ -8997,7 +8997,7 @@ function _M.detect_cve_php_multipart_desync(method, body, headers)
   if rest <= 0 then return nil end
   -- Past one FILLUNIT the rest is certainly left unread; under it, it may
   -- be too (PHP refills its 5120-byte buffer from wherever its last read
-  -- left off), so the burn-in records it apart.
+  -- left off), so it is tagged apart (and stays logonly).
   if rest > MP_FILLUNIT then return "GARBLED_STOP:rest=" .. rest end
   return "GARBLED_STOP_SMALL:rest=" .. rest
 end

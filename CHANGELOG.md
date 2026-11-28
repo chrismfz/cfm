@@ -31,7 +31,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   `[waf_security]` arms one). 10032's `OVERSIZE` (other schemes), 10033's
   `GARBLED_STOP_SMALL` and `NO_BOUNDARY` stay logonly. The rules now run with
   the other held rules, late: the advisory's own request is blocked and banned
-  by 305 (php://input) as before.
+  by 305 (php://input) as before. A chunked or > 1 MB body on `POST /` (the
+  body burn-in pass) is enforced too: 10031 / 10033 run first there.
 - **The default `cfm.conf` opens 9601 and 4190.** A new node with NGM no longer
   needs them added by hand: 9601 is NGM's panel UI, 4190 ManageSieve (any
   Dovecot with sieve). An existing node with an edited `cfm.conf` (every one:

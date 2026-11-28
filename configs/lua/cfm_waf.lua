@@ -1218,6 +1218,32 @@ local function check_impl(ctx, st)
       end
     end
   end
+  -- php-src 2026-11-19 (rules 10031 / 10033, bans held) in the burn-in
+  -- second pass: early, for the same reason as 10028 above. Outside that
+  -- pass they run late, with the held rules.
+  if ctx.burnin_pass then
+    do
+      local mode = rule_mode(CFG.rule_cve_php_fpm_smuggle, "block")
+      if mode ~= "disabled" and body_inspect_ok then
+        local tag = det.detect_cve_php_fpm_smuggle(body)
+        if tag then
+          local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_fpm_smuggle) then goto done end
+        end
+      end
+    end
+    do
+      local mode = rule_mode(CFG.rule_cve_php_multipart_desync, "block")
+      if mode ~= "disabled" and body_inspect_ok then
+        local tag = det.detect_cve_php_multipart_desync(m_lower, body, headers)
+        if tag then
+          if tag == "NO_BOUNDARY" or tag:sub(1, 18) == "GARBLED_STOP_SMALL" then mode = "logonly" end
+          local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_desync) then goto done end
+        end
+      end
+    end
+  end
   -- The PHP2Shell tool by its request head, rule 10023.
   do
     local mode = rule_mode(CFG.rule_cve_php2shell_tool, "block")
@@ -2832,26 +2858,31 @@ local function check_impl(ctx, st)
   -- smuggled request without a wrapper reaches these. 10033's
   -- GARBLED_STOP_SMALL and NO_BOUNDARY stay logonly (PHP may still read a
   -- small rest; a missing boundary is mostly broken clients): a forced
-  -- logonly, as 10024's SAME_SITE. Not in BURNIN_ENFORCE_IDS: in the body
-  -- burn-in second pass they are logged, not enforced.
-  do
-    local mode = rule_mode(CFG.rule_cve_php_fpm_smuggle, "block")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_cve_php_fpm_smuggle(body)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_fpm_smuggle) then goto done end
+  -- logonly, as 10024's SAME_SITE. In cfm.lua's burn-in second pass (a
+  -- chunked or large body on `location /`, so a POST / routed to
+  -- index.php) they run early instead, as 10028 / 10034 do: that pass ends
+  -- at the first block and enforces only BURNIN_ENFORCE_IDS, which lists
+  -- both.
+  if not ctx.burnin_pass then
+    do
+      local mode = rule_mode(CFG.rule_cve_php_fpm_smuggle, "block")
+      if mode ~= "disabled" and body_inspect_ok then
+        local tag = det.detect_cve_php_fpm_smuggle(body)
+        if tag then
+          local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_fpm_smuggle) then goto done end
+        end
       end
     end
-  end
-  do
-    local mode = rule_mode(CFG.rule_cve_php_multipart_desync, "block")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_cve_php_multipart_desync(m_lower, body, headers)
-      if tag then
-        if tag == "NO_BOUNDARY" or tag:sub(1, 18) == "GARBLED_STOP_SMALL" then mode = "logonly" end
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_desync) then goto done end
+    do
+      local mode = rule_mode(CFG.rule_cve_php_multipart_desync, "block")
+      if mode ~= "disabled" and body_inspect_ok then
+        local tag = det.detect_cve_php_multipart_desync(m_lower, body, headers)
+        if tag then
+          if tag == "NO_BOUNDARY" or tag:sub(1, 18) == "GARBLED_STOP_SMALL" then mode = "logonly" end
+          local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_desync) then goto done end
+        end
       end
     end
   end
@@ -3097,8 +3128,9 @@ local function check_impl(ctx, st)
   -- Block since 2026-11-28 for BASIC_OVERSIZE (the advisory's proof), ban
   -- held per rule (HoldAutoblock, RULE_10032 = 0); OVERSIZE (any other
   -- scheme: a rare legitimate large token) stays logonly. Header only, late,
-  -- after every armed block rule and the logonly 503 / 417 (a logonly
-  -- OVERSIZE does not take their headline: the first equal hit owns it).
+  -- after every armed block rule, the held 417 and the logonly 503 (a
+  -- logonly OVERSIZE does not take 503's headline: the first equal hit
+  -- owns it).
   do
     local mode = rule_mode(CFG.rule_cve_php_oversized_auth, "block")
     if mode ~= "disabled" then

@@ -101,11 +101,11 @@ get the reason format right.
 
 A large or chunked body on `location /` is read by cfm.lua in a burn-in pass,
 where only the block rules in `BURNIN_ENFORCE_IDS` (`configs/lua/cfm.lua`)
-are enforced: today **10021, 10024, 10027, 10028, 10030, 10034**. A rule whose
+are enforced: today **10021, 10024, 10027, 10028, 10030, 10031, 10033, 10034**. A rule whose
 exploit arrives that way must be in that list and must run before any other
 block rule that the same request can trip (the pass ends at the first block,
 enforced or not). That is why 10021, 10024, 10027 and 10030 run first in
-`check()`, and why 10028 and then 10034 run early in the burn-in second pass
+`check()`, and why 10028, 10034, then 10031 / 10033 run early in the burn-in second pass
 (`ctx.burnin_pass`, after 10027 and 10030) but late otherwise.
 
 ---
@@ -189,9 +189,11 @@ tested in the `php_upload_progress` files, 10029 in
   `RULE_10033 = 0`): an edge 403, no nft ban, for a further watch at block.
   Forced logonly in code, as 10024's SAME_SITE: 10032's OVERSIZE (a rare
   legitimate large Bearer token), 10033's GARBLED_STOP_SMALL (PHP may still
-  read a small rest) and NO_BOUNDARY (broken clients). None is in
-  `BURNIN_ENFORCE_IDS`: in the body burn-in second pass they are logged,
-  not enforced. As held block rules all three run late, after every armed
+  read a small rest) and NO_BOUNDARY (broken clients). 10031 / 10033 are in
+  `BURNIN_ENFORCE_IDS` and run early in the body burn-in second pass (a
+  chunked or > 1 MB `POST /` carrying them reached the origin otherwise; in
+  that pass they also come before 305, so a chunked advisory request is
+  theirs, a 403 without a ban). Elsewhere, as held block rules, all three run late, after every armed
   block rule (a held block evaluated earlier would take the headline and end
   the check before an armed rule's ban); so the advisory's own request,
   which also trips 305 (php://input in PHP_ADMIN_VALUE, an armed block), is
