@@ -3,8 +3,8 @@
 # install-edge.sh — prepare cfm-edge (chrismfz/cfm-edge) as this node's edge
 #
 # cfm-edge is CFM's own edge package: nginx.org nginx + the OpenResty Lua set,
-# laid out like a distro package. This script installs it (EL, from the same
-# repo as cfm), ADOPTS it (CFM's edge config and sidecars in /etc/cfm-edge,
+# laid out like a distro package. This script installs it (the rpm on EL, the
+# .deb on Debian / Ubuntu, from the same repo as cfm), ADOPTS it (CFM's edge config and sidecars in /etc/cfm-edge,
 # tested together from a staging dir with `cfm-edge -t` before any of them
 # goes in place) and makes the node ready to switch.
 #
@@ -22,19 +22,19 @@
 # cfm-edge: its live nginx.conf carries the line `# cfm-edge-adopted-by: cfm`).
 #
 # Layout:
-#   Binary:        /usr/sbin/cfm-edge             (cfm-edge rpm)
+#   Binary:        /usr/sbin/cfm-edge             (cfm-edge package)
 #   Config:        /etc/cfm-edge/nginx.conf       (= /usr/share/cfm/configs/cfm-edge.conf,
 #                                                   rendered from openresty.conf)
 #   Sidecars:      /etc/cfm-edge/{trusted_proxies,challenge_waf_bypass,cfm-panel-listeners}.conf
 #   CFM Lua:       /var/lib/cfm/lua/              (cfm package)
-#   Logs:          /var/log/cfm-edge/             (rotated by the cfm-edge rpm)
+#   Logs:          /var/log/cfm-edge/             (rotated by the cfm-edge package)
 #   Caches:        /var/cache/nginx/              (cfm_static + cfm_micro_<ttl>s)
 #   Temp dirs:     /var/lib/cfm/nginx/*           (cfm:cfm)
 #   PID:           the package's (its compiled default = its unit's PIDFile;
 #                  CFM's config sets none, so cfm-edge can move it)
 #
 # Usage: bash scripts/install-edge.sh
-#   CFM_EDGE_SKIP_INSTALL=1   do not install the rpm (it must already be there)
+#   CFM_EDGE_SKIP_INSTALL=1   do not install the package (it must already be there)
 #   CFM_SKIP_REALIP=1         skip `cfm realip fix`
 
 # bash only. Run as `sh install-*.sh`, this script would not stop at once: sh
@@ -107,16 +107,65 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# cfm-edge ships as one rpm for EL8/9/10 today; the .deb is a later step.
-require_el() {
+# cfm-edge ships as one rpm for EL 8/9/10 and its .deb (the same files, for
+# Debian 12+ / Ubuntu 22.04+), both from the nixpal repo cfm comes from.
+PKG_FAMILY=""
+require_supported_os() {
     [ -r /etc/os-release ] || die "cannot read /etc/os-release"
     # shellcheck disable=SC1091
     . /etc/os-release
     case " ${ID:-} ${ID_LIKE:-} " in
-        *" rhel "*|*" centos "*|*" fedora "*|*" almalinux "*|*" rocky "*|*" cloudlinux "*) ;;
-        *) die "cfm-edge is packaged for EL (AlmaLinux / Rocky / RHEL / CloudLinux 8, 9, 10) only so far; this is ${ID:-unknown}" ;;
+        *" rhel "*|*" centos "*|*" fedora "*|*" almalinux "*|*" rocky "*|*" cloudlinux "*)
+            PKG_FAMILY=rpm
+            command_exists rpm || die "rpm not found" ;;
+        *" debian "*|*" ubuntu "*)
+            PKG_FAMILY=deb
+            command_exists dpkg-query || die "dpkg-query not found"
+            require_deb_release ;;
+        *) die "cfm-edge is packaged for EL (AlmaLinux / Rocky / RHEL / CloudLinux 8, 9, 10) and Debian 12+ / Ubuntu 22.04+; this is ${ID:-unknown}" ;;
     esac
-    command_exists rpm || die "rpm not found"
+}
+
+# The .deb's floor: Debian 12 / Ubuntu 22.04. Older releases would install it
+# (its Depends are met), but their systemd predates the unit's ProtectProc=
+# (systemd 247) and runs the edge with that part of the sandbox silently
+# ignored. Derivatives (ID_LIKE=debian / ubuntu) are judged by
+# the Debian or Ubuntu release they name; an unknown one is refused.
+require_deb_release() {
+    local base ver major
+    case " ${ID:-} " in
+        " ubuntu ") base=ubuntu; ver="${VERSION_ID:-}" ;;
+        " debian ") base=debian; ver="${VERSION_ID:-}" ;;
+        *)
+            case " ${ID_LIKE:-} " in
+                *" ubuntu "*) base=ubuntu; ver="${UBUNTU_VERSION_ID:-}" ;;
+                *) base=debian; ver="$(cut -d. -f1 /etc/debian_version 2>/dev/null || true)" ;;
+            esac ;;
+    esac
+    major="${ver%%.*}"
+    case "$major" in ''|*[!0-9]*)
+        die "cannot tell which ${base} release this is (${ID:-?} ${VERSION_ID:-?}): the cfm-edge .deb needs Debian 12+ / Ubuntu 22.04+" ;;
+    esac
+    if [ "$base" = ubuntu ] && [ "$major" -lt 22 ]; then
+        die "the cfm-edge .deb needs Ubuntu 22.04+ (its unit's sandbox needs systemd 247+); this is Ubuntu ${ver}"
+    fi
+    if [ "$base" = debian ] && [ "$major" -lt 12 ]; then
+        die "the cfm-edge .deb needs Debian 12+ (its unit's sandbox needs systemd 247+); this is Debian ${ver}"
+    fi
+}
+
+# The installed cfm-edge (name and version), or nothing when it is not
+# installed. Decided by the package manager's own answer, never its text:
+# rpm translates "is not installed".
+installed_cfm_edge() {
+    if [ "$PKG_FAMILY" = deb ]; then
+        # dpkg-query exits 1 for a package it does not know: under set -e and
+        # pipefail that would end the script, silently, inside $(...).
+        dpkg-query -W -f='${Status} ${Version}\n' cfm-edge 2>/dev/null \
+            | awk '$1 == "install" && $3 == "installed" { print "cfm-edge " $4 }' || true
+    elif rpm -q cfm-edge >/dev/null 2>&1; then
+        rpm -q --qf 'cfm-edge %{VERSION}-%{RELEASE}\n' cfm-edge 2>/dev/null || true
+    fi
 }
 
 # CFM must be installed and new enough to ship the cfm-edge config.
@@ -127,18 +176,35 @@ require_cfm() {
 }
 
 install_cfm_edge_package() {
-    if rpm -q cfm-edge >/dev/null 2>&1; then
-        log "cfm-edge already installed: $(rpm -q cfm-edge)"
+    local have
+    have="$(installed_cfm_edge)"
+    if [ -n "$have" ]; then
+        log "cfm-edge already installed: $have"
         return 0
     fi
     if [ "${CFM_EDGE_SKIP_INSTALL:-0}" = "1" ]; then
         die "cfm-edge is not installed and CFM_EDGE_SKIP_INSTALL=1"
     fi
-    local pm
-    if command_exists dnf; then pm=dnf; elif command_exists yum; then pm=yum; else die "neither dnf nor yum found"; fi
-    log "Installing cfm-edge ($pm, from the repo cfm comes from)"
-    "$pm" -y install cfm-edge || die "could not install cfm-edge: is the nixpal repo (the one cfm is installed from) configured on this node?"
-    log "Installed: $(rpm -q cfm-edge)"
+    if [ "$PKG_FAMILY" = deb ]; then
+        command_exists apt-get || die "apt-get not found"
+        log "Installing cfm-edge (apt, from the repo cfm comes from)"
+        # A node that installed cfm long ago may have stale lists without
+        # cfm-edge: refresh them once when the first try cannot find it.
+        if ! DEBIAN_FRONTEND=noninteractive apt-get -y install cfm-edge; then
+            log "Refreshing the apt lists and trying again"
+            apt-get update || die "apt-get update failed (its error is above)"
+            DEBIAN_FRONTEND=noninteractive apt-get -y install cfm-edge \
+                || die "could not install cfm-edge: apt's error is above. Usual causes: the nixpal repo (the one cfm comes from) is not configured, another apt/dpkg run holds the lock (unattended-upgrades), or a dependency cannot be met"
+        fi
+    else
+        local pm
+        if command_exists dnf; then pm=dnf; elif command_exists yum; then pm=yum; else die "neither dnf nor yum found"; fi
+        log "Installing cfm-edge ($pm, from the repo cfm comes from)"
+        "$pm" -y install cfm-edge || die "could not install cfm-edge: $pm's error is above. Usual causes: the nixpal repo (the one cfm comes from) is not configured, or a dependency cannot be met"
+    fi
+    have="$(installed_cfm_edge)"
+    [ -n "$have" ] || die "the install reported success but cfm-edge is not installed"
+    log "Installed: $have"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -484,7 +550,7 @@ print_next_steps() {
 ===========================================================================
   cfm-edge PREPARED (the live edge was not touched)
 ===========================================================================
-  Package:      $(rpm -q cfm-edge 2>/dev/null || echo "?")
+  Package:      $(installed_cfm_edge | grep . || echo "?")
   Config:       $EDGE_MAIN_CONF (CFM's; the package's copy: $EDGE_MAIN_CONF.pre-cfm)
   Config test:  $(edge_test -q >/dev/null 2>&1 && echo passed || echo "FAILED: run $EDGE_BIN -t")
   Active units: ${edges:-none}
@@ -645,7 +711,7 @@ EOF
 
 main() {
     need_root
-    require_el
+    require_supported_os
     require_cfm
     install_cfm_edge_package
 

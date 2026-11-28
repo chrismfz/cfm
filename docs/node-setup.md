@@ -33,6 +33,12 @@ dnf install cfm cfm-edge
 dnf install nixpal-clamav                            # if the node scans uploads (§4)
 ```
 
+On Debian 12+ / Ubuntu 22.04+, the repo as in the README ("Install"), then
+`apt install cfm cfm-edge`. Neither .deb ships a dpkg conffile: postinst
+seeds `/etc/cfm` and `/etc/cfm-edge` and records what it installed
+(`/var/lib/cfm/etc-cfm-files.sha256`, `/var/lib/cfm-edge/config-files.sha256`),
+so `dpkg --verify` does not see an edit there; `rpm -V cfm` below is EL-only.
+
 `rpm -V cfm` clean means `/etc/cfm` still holds the defaults. Keep a copy
 before editing: `cp -a /etc/cfm /root/cfm-setup-$(date +%Y%m%d)/`.
 
