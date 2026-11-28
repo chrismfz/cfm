@@ -21,6 +21,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Changed
+- **The php-src 2026-11-19 WAF rules now block (403), with no ban.** After a
+  7-day logonly burn-in on all 8 cfm-edge nodes that saw no exploit and no
+  false positive, 10031 (a FastCGI request smuggled in a POST body,
+  CVE-2026-129289), 10032's `BASIC_OVERSIZE` (an HTTP Basic header over 8 KB,
+  CVE-2026-129496) and 10033's `GARBLED_STOP` / `BOUNDARY_TOO_LARGE` (a
+  multipart body PHP stops reading early) answer 403. The nft ban is held per
+  rule for a further watch (`RULE_10031` / `RULE_10032` / `RULE_10033 = 1` in
+  `[waf_security]` arms one). 10032's `OVERSIZE` (other schemes), 10033's
+  `GARBLED_STOP_SMALL` and `NO_BOUNDARY` stay logonly. The rules now run with
+  the other held rules, late: the advisory's own request is blocked and banned
+  by 305 (php://input) as before.
 - **The default `cfm.conf` opens 9601 and 4190.** A new node with NGM no longer
   needs them added by hand: 9601 is NGM's panel UI, 4190 ManageSieve (any
   Dovecot with sieve). An existing node with an edited `cfm.conf` (every one:

@@ -271,9 +271,9 @@ local CFG = {
   rule_cve_fabrik_listfilter_eval = "block", -- CVE-2026-67282 (Fabrik for Joomla 1.0.0–4.6.7, fixed in 4.7.2 with CVE-2026-66915): unauth RCE through the list filter, which runs `<table>___<element>[value]` as PHP when the element also carries `[eval]` set. Fires on a request field (query, urlencoded or multipart POST) with an `[eval]` index on a Fabrik request (option=com_fabrik, `fabrik` in the path, or the element name's `___`): EVAL_ARG / EVAL_BODY for a set value, EVAL_ZERO (always logonly) for `=0`. Source: the dmkomotinis.gr compromise (earth, 2026-11-12). Fabrik's own filter form posts `[eval]=0` (POST bodies, which the access log does not carry). Promoted logonly→block 2026-11-17 (burn-in: a 14-day read of all 8 nodes' cfm.waf.log found EVAL_ZERO only, 10 hits from Greek users on three Fabrik sites, and EVAL_ARG / EVAL_BODY only from the attacker); WAF_CVE armed, so the first probe (`[value]=1;` with `[eval]=1`) bans, before any payload reaches rule 332.
   rule_cve_drupal_render_callback = "block", -- CVE-2026-108097 (SA-CORE-2026-014, Drupal Field UI, fixed 2026-10-14 in 10.6.19 / 11.3.19 / 11.4.10) and CVE-2018-7600 (Drupalgeddon2): a render-array callback key (#region_callback, #post_render, #pre_render, #lazy_builder, #access_callback) sent as a request-field NAME or a JSON object KEY (JSON body on POST / PUT / PATCH; in a field value that is a JSON document, #region_callback only), or in the query of Drupal 7's `destination` (never the words in a value). Runs right after 10027 and is enforced in the body burn-in (cfm.lua BURNIN_ENFORCE_IDS). Drupal builds those keys server-side, so no legitimate request carries one; a 7-day read of all 8 edge nodes (2026-11-18) found them only in attacks (the lab-route probe, a Drupalgeddon2 payload that got a 200). Block, WAF_CVE armed: three EOL Drupal sites on the fleet (8.6, 9.3) cannot take the core patch.
   rule_cve_elementor_pro_form_upload = "block", -- CVE-2026-32475: Elementor Pro (<4.2.2) Forms File Upload unauth arbitrary upload->RCE. validation() return-vs-continue mismatch on an empty (UPLOAD_ERR_NO_FILE) first part skips the extension blocklist for a following .php part, which process_field() still moves into public wp-content/uploads/elementor/forms/. POST admin-ajax.php action=elementor_pro_forms_send_form (nopriv) + php-exec upload filename (the surviving extension IS the vuln; content leg intentionally omitted — rule 402 covers php content). Runs before rule 401 for CVE attribution; reuses the hardened rule-401 detector. Near-zero FP (a legit Elementor form upload never carries a php-executable file). Body-budget caveat: a filename past waf_body_max_len is ClamAV's backstop.
-  rule_cve_php_fpm_smuggle = "logonly", -- CVE-2026-129289 (GHSA-qc49-hpvq-g2w6, php-src 2026-11-19, fixed 8.2.36/8.3.37/8.4.28/8.5.13): PHP-FPM request smuggling through an unread body on a kept-open backend connection (fastcgi_keep_conn, enablereuse, LSAPI): a malformed multipart stops PHP's parser and a FastCGI request in the body is read as the next one (SCRIPT_FILENAME, REMOTE_ADDR, PHP_ADMIN_VALUE). Fires on the raw POST body (any content type) holding a FastCGI BEGIN_REQUEST record followed by a PARAMS record (FCGI_BEGIN_REQUEST, read as fcgi_read_request accepts it: any version, reserved byte or request id, role 1-3), or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR parameter (FCGI_PARAMS). LOGONLY burn-in (2026-11-21), early in step 0 so the exploit's own request (which 305 blocks) still records it; a promotion decides the autoblock intent in the same change. Not a substitute for the PHP update.
-  rule_cve_php_oversized_auth = "logonly", -- CVE-2026-129496 (GHSA-gr4f-wgx5-jpfv, php-src 2026-11-19): ext/date use-after-free; the advisory's FPM code-execution proof used an HTTP Basic Authorization header larger than nginx's default per-header limit (8 KB), which this edge (64 KB) lets through. BASIC_OVERSIZE / OVERSIZE (any other scheme), with `:len=N`. LOGONLY burn-in (2026-11-21), late (header only). Not a substitute for the PHP update.
-  rule_cve_php_multipart_desync = "logonly", -- CVE-2026-129289's first leg, for the class of PHP multipart parser desyncs: a multipart POST that leaves bytes PHP never reads. GARBLED_STOP (a part with a Content-Disposition but neither name nor filename ends PHP's parse, checked against PHP 8.3.6, and more than one 5120-byte read buffer of content follows: certainly unread; `:rest=trunc` for a body the edge holds only in part), GARBLED_STOP_SMALL (a smaller rest: PHP may still leave some unread), NO_BOUNDARY (no boundary parameter: PHP parses nothing; mostly broken clients, a noise baseline), BOUNDARY_TOO_LARGE (a boundary PHP refuses, over 5116 bytes). LOGONLY burn-in (2026-11-21), early in step 0 with 10031.
+  rule_cve_php_fpm_smuggle = "block", -- CVE-2026-129289 (GHSA-qc49-hpvq-g2w6, php-src 2026-11-19, fixed 8.2.36/8.3.37/8.4.28/8.5.13): PHP-FPM request smuggling through an unread body on a kept-open backend connection (fastcgi_keep_conn, enablereuse, LSAPI): a malformed multipart stops PHP's parser and a FastCGI request in the body is read as the next one (SCRIPT_FILENAME, REMOTE_ADDR, PHP_ADMIN_VALUE). Fires on the raw POST body (any content type) holding a FastCGI BEGIN_REQUEST record followed by a PARAMS record (FCGI_BEGIN_REQUEST, read as fcgi_read_request accepts it: any version, reserved byte or request id, role 1-3), or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR parameter (FCGI_PARAMS). Logonly burn-in 2026-11-21..28 (0 hits on 8 nodes), then block, ban held per rule (HoldAutoblock, RULE_10031 = 0). Late, with the held rules: the exploit's own request (php://input in PHP_ADMIN_VALUE) is 305's, an armed block. Not a substitute for the PHP update.
+  rule_cve_php_oversized_auth = "block", -- CVE-2026-129496 (GHSA-gr4f-wgx5-jpfv, php-src 2026-11-19): ext/date use-after-free; the advisory's FPM code-execution proof used an HTTP Basic Authorization header larger than nginx's default per-header limit (8 KB), which this edge (64 KB) lets through. BASIC_OVERSIZE / OVERSIZE (any other scheme), with `:len=N`. Logonly burn-in 2026-11-21..28 (0 hits), then BASIC_OVERSIZE blocks, ban held per rule (HoldAutoblock, RULE_10032 = 0); OVERSIZE stays logonly (forced in code). Late (header only). Not a substitute for the PHP update.
+  rule_cve_php_multipart_desync = "block", -- CVE-2026-129289's first leg, for the class of PHP multipart parser desyncs: a multipart POST that leaves bytes PHP never reads. GARBLED_STOP (a part with a Content-Disposition but neither name nor filename ends PHP's parse, checked against PHP 8.3.6, and more than one 5120-byte read buffer of content follows: certainly unread; `:rest=trunc` for a body the edge holds only in part), GARBLED_STOP_SMALL (a smaller rest: PHP may still leave some unread), NO_BOUNDARY (no boundary parameter: PHP parses nothing; mostly broken clients, a noise baseline), BOUNDARY_TOO_LARGE (a boundary PHP refuses, over 5116 bytes). Logonly burn-in 2026-11-21..28 (0 GARBLED_STOP / BOUNDARY_TOO_LARGE on 8 nodes; 108 NO_BOUNDARY, one site's broken client and a scanner), then GARBLED_STOP / BOUNDARY_TOO_LARGE block with the ban held per rule (HoldAutoblock, RULE_10033 = 0); GARBLED_STOP_SMALL and NO_BOUNDARY stay logonly (forced in code). Late, with 10031 and the held rules.
   rule_cve_wp_rocket_beacon = "block", -- CVE-2026-125812 (WP Rocket < 3.24.2): unauthenticated POST action=rocket_beacon (admin-ajax.php; keyed on the fields, not the path, which a security plugin can rename) whose `results` JSON carries a preconnect_external_domain entry that is not a bare origin (NON_ORIGIN). add_data() stored it through sanitize_url() only; the page printed it as a dns-prefetch link that LazyLoad for CSS background images / Host Fonts Locally fetched and wrote to the cache as .php (wp-content/cache/background-css/). The browser sends url.origin only (wpr-beacon.js), and the 3.24.2 fix (OriginTrait::get_origin) keeps only scheme://host[:port], so any other entry is the exploit; so is a cut beacon body that is not the browser's shape (OVERSIZE: no single results starting {" and running to the end of the held body, an extra field, a short field over 4 KB, no body; a large real beacon is cut inside results and is 10035's OVERSIZE_RESULTS). Residuals: padding before action, or inside results. Sources: the CVE record (Patchstack), Patchstack's 2026-11-27 advisory, the wp-rocket v3.24.1..v3.24.2 diff. Edge 403, autoblock held per rule (RULE_10034 = 0) for a 2-3 day watch from 2026-11-28; late with the other held rules.
   rule_cve_wp_rocket_beacon_unseen = "logonly", -- CVE-2026-125812, a rocket_beacon POST whose results the edge's JSON reader does not decode, where PHP's json_decode might (UNPARSED: naming preconnect, or carrying \u escapes). Also OVERSIZE_RESULTS: a body cut inside results, the shape of a large legitimate beacon (padding inside results looks the same). Logonly: measures how often the read fails.
 
@@ -1142,33 +1142,6 @@ local function check_impl(ctx, st)
       end
     end
   end
-  -- php-src advisory of 2026-11-19, CVE-2026-129289 (rules 10031 / 10033,
-  -- logonly burn-in): here in step 0, before every block rule, so the
-  -- exploit's own request (which also trips 305's php://input wrapper, a
-  -- block that ends the check) still records them, at least as an
-  -- also_rule_ids id. A logonly record never ends the check nor outranks a
-  -- challenge / block; it can take the headline from a later logonly rule.
-  do
-    local mode = rule_mode(CFG.rule_cve_php_fpm_smuggle, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_cve_php_fpm_smuggle(body)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_fpm_smuggle) then goto done end
-      end
-    end
-  end
-  do
-    local mode = rule_mode(CFG.rule_cve_php_multipart_desync, "logonly")
-    if mode ~= "disabled" and body_inspect_ok then
-      local tag = det.detect_cve_php_multipart_desync(m_lower, body, headers)
-      if tag then
-        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
-        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_desync) then goto done end
-      end
-    end
-  end
-
   -- Magento "PolyShell" unauth file upload (CVE-2026-48356), rule 10027: a
   -- cart item's custom option `file_info` writes a base64 file, any name and
   -- extension, to pub/media/custom_options/quote/ (orion, 2026-10-29: GIF+PHP
@@ -2850,6 +2823,39 @@ local function check_impl(ctx, st)
     end
   end
 
+  -- php-src advisory of 2026-11-19, CVE-2026-129289 (rules 10031 / 10033).
+  -- Block since 2026-11-28 with the ban held per rule (HoldAutoblock,
+  -- RULE_10031 / RULE_10033 = 0), so here with the other held block rules:
+  -- evaluated earlier a held hit would own the headline and end the check
+  -- before an armed rule's ban. The advisory's own request (php://input in
+  -- PHP_ADMIN_VALUE) is taken by 305 first, an armed block, which bans; a
+  -- smuggled request without a wrapper reaches these. 10033's
+  -- GARBLED_STOP_SMALL and NO_BOUNDARY stay logonly (PHP may still read a
+  -- small rest; a missing boundary is mostly broken clients): a forced
+  -- logonly, as 10024's SAME_SITE. Not in BURNIN_ENFORCE_IDS: in the body
+  -- burn-in second pass they are logged, not enforced.
+  do
+    local mode = rule_mode(CFG.rule_cve_php_fpm_smuggle, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_php_fpm_smuggle(body)
+      if tag then
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_fpm_smuggle) then goto done end
+      end
+    end
+  end
+  do
+    local mode = rule_mode(CFG.rule_cve_php_multipart_desync, "block")
+    if mode ~= "disabled" and body_inspect_ok then
+      local tag = det.detect_cve_php_multipart_desync(m_lower, body, headers)
+      if tag then
+        if tag == "NO_BOUNDARY" or tag:sub(1, 18) == "GARBLED_STOP_SMALL" then mode = "logonly" end
+        local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+        if record("WAF_CVE:CVE_2026_129289:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_desync) then goto done end
+      end
+    end
+  end
+
   -- Magento PolyShell, a cart-save request rule 10027 could not read (rule
   -- 10028, held): here with the other held rules, outside the burn-in pass
   -- (where it runs right after 10027).
@@ -3087,15 +3093,18 @@ local function check_impl(ctx, st)
     end
   end
 
-  -- ── php-src advisory of 2026-11-19, rule 10032 (logonly burn-in) ────────
-  -- Header-only telemetry, late: after every block rule and after the
-  -- logonly 503 / 417, which keep their headline (between equal logonly hits
-  -- the first recorded owns it). 10031 / 10033 run early (step 0).
+  -- ── php-src advisory of 2026-11-19, rule 10032 ──────────────────────────
+  -- Block since 2026-11-28 for BASIC_OVERSIZE (the advisory's proof), ban
+  -- held per rule (HoldAutoblock, RULE_10032 = 0); OVERSIZE (any other
+  -- scheme: a rare legitimate large token) stays logonly. Header only, late,
+  -- after every armed block rule and the logonly 503 / 417 (a logonly
+  -- OVERSIZE does not take their headline: the first equal hit owns it).
   do
-    local mode = rule_mode(CFG.rule_cve_php_oversized_auth, "logonly")
+    local mode = rule_mode(CFG.rule_cve_php_oversized_auth, "block")
     if mode ~= "disabled" then
       local tag = det.detect_cve_php_oversized_auth(headers)
       if tag then
+        if tag:sub(1, 8) == "OVERSIZE" then mode = "logonly" end
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_129496:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_oversized_auth) then goto done end
       end

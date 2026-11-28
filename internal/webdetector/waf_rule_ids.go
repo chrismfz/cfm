@@ -336,16 +336,19 @@ var wafRuleIDs = []WAFRule{
 	// all 8 edge nodes found them only in attacks. Armed.
 	{ID: 10030, Name: "rule_cve_drupal_render_callback", ReasonFamily: "WAF_CVE", DefaultMode: "block"},
 	// 10031 / 10032 / 10033: the request shapes of the php-src advisories of
-	// 2026-11-19, logonly burn-in (a promotion decides the autoblock intent
-	// in the same change). 10031 = CVE-2026-129289, a FastCGI request or
-	// length-prefixed FastCGI parameter name in a POST body (PHP-FPM request
-	// smuggling through an unread body). 10032 = CVE-2026-129496, an
-	// Authorization header over nginx's default 8 KB per-header limit.
-	// 10033 = CVE-2026-129289's first leg: a multipart body that leaves bytes
-	// PHP never reads (a garbled part, no boundary, a boundary too large).
-	{ID: 10031, Name: "rule_cve_php_fpm_smuggle", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
-	{ID: 10032, Name: "rule_cve_php_oversized_auth", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
-	{ID: 10033, Name: "rule_cve_php_multipart_desync", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	// 2026-11-19. Logonly burn-in 2026-11-21..28 (8 nodes, no exploit shape
+	// seen), then block with the ban held per rule: an edge 403, no
+	// waf_security ban (RULE_100xx = 1 arms one). 10031 = CVE-2026-129289, a
+	// FastCGI request or length-prefixed FastCGI parameter name in a POST
+	// body (PHP-FPM request smuggling through an unread body). 10032 =
+	// CVE-2026-129496, an HTTP Basic Authorization header over nginx's
+	// default 8 KB per-header limit (another scheme's, OVERSIZE, stays
+	// logonly in the Lua). 10033 = CVE-2026-129289's first leg: a multipart
+	// body that leaves bytes PHP never reads (GARBLED_STOP,
+	// BOUNDARY_TOO_LARGE; GARBLED_STOP_SMALL and NO_BOUNDARY stay logonly).
+	{ID: 10031, Name: "rule_cve_php_fpm_smuggle", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	{ID: 10032, Name: "rule_cve_php_oversized_auth", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	{ID: 10033, Name: "rule_cve_php_multipart_desync", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
 	// 10034 / 10035: CVE-2026-125812, WP Rocket < 3.24.2 unauth RCE through
 	// the page beacon. 10034 = POST admin-ajax.php action=rocket_beacon whose results
 	// JSON carries a preconnect_external_domain entry that is not a bare
