@@ -61,6 +61,8 @@ jobs:
         run: ./scripts/tests/check_logrotate_coverage.sh
       - name: Enforce origin-keepalive 443 SNI-safety config invariant
         run: ./scripts/tests/check_origin_ka_config.sh
+      - name: Every edge proxy block sends X-CFM-Peer (the edge's TCP peer)
+        run: ./scripts/tests/check_edge_peer_header.sh
       - name: Enforce shared-Lua layout + installer manifest parity
         run: ./scripts/tests/check_shared_lua_layout.sh
       - name: configs/cfm-edge.conf is the current render of openresty.conf

@@ -432,7 +432,7 @@ func (l layout) probe(upstream string) Probe {
 		}
 	}
 	if !p.Trusted && p.Panel == PanelNGM && p.Stack == StackNginx {
-		p.Note += "; NGM renders nginx itself, so the trust has to come from NGM's templates (a hand-written file is overwritten on apply)"
+		p.Note += "; NGM renders nginx itself and trusts the loopback while CFM is installed (NGM 2026-11-28 and later): run ngm trusted-proxies refresh"
 	}
 	return p
 }

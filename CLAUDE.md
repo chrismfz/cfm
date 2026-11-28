@@ -219,6 +219,7 @@ make test-js                                     # node --test on internal/webui
 ./scripts/tests/check_bypass_list.sh             # challenge_waf_bypass.conf + trusted_proxies.conf bounds + generator tests
 ./scripts/tests/check_logrotate_coverage.sh      # every CFM log path is rotated (see §5)
 ./scripts/tests/check_origin_ka_config.sh        # origin-keepalive 443 SNI-safety: keepalive 0 (OpenResty) + proxy_ssl_session_reuse off
+./scripts/tests/check_edge_peer_header.sh        # every edge proxy_pass block sets X-CFM-Peer $realip_remote_addr (a client's is never passed through)
 ./scripts/tests/check_shared_lua_layout.sh       # installer CFM_LUA_MANIFEST == configs/lua/*.lua (see §5)
 ./scripts/tests/check_cfm_edge_conf.sh           # configs/cfm-edge.conf == a fresh render of openresty.conf (make cfm-edge-conf)
 ./scripts/tests/check_package_lua_delivery.sh    # Lua ships ONLY as /var/lib/cfm/lua/*, package-owned (see §5)
