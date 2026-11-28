@@ -17,7 +17,8 @@ X-CFM-Peer, with exactly $realip_remote_addr.
 
 Not checked, by decision: cfm-panel-listeners.conf(.in), the panel-port
 listeners (2082-2096). They front cPanel / DirectAdmin's own daemons, which
-read no X-CFM-Peer, through cfm_panel_tunnel.lua's raw byte tunnel; NGM's
+read no X-CFM-Peer (plain proxy_pass $cfm_pass, and cfm_panel_tunnel.lua's
+raw byte tunnel for the acctxfer rsync/dsync locations); NGM's
 panel listens itself (9601) and its nginx's X-CFM-Peer map is reached only
 through the web DNAT (80/443). Panel DNAT in front of an NGM nginx port would
 need this check (or a cleared header) there too.
