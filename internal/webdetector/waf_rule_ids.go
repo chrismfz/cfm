@@ -346,6 +346,15 @@ var wafRuleIDs = []WAFRule{
 	{ID: 10031, Name: "rule_cve_php_fpm_smuggle", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 	{ID: 10032, Name: "rule_cve_php_oversized_auth", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 	{ID: 10033, Name: "rule_cve_php_multipart_desync", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
+	// 10034 / 10035: CVE-2026-125812, WP Rocket < 3.24.2 unauth RCE through
+	// the page beacon. 10034 = POST admin-ajax.php action=rocket_beacon whose results
+	// JSON carries a preconnect_external_domain entry that is not a bare
+	// origin (the browser sends url.origin only). Edge 403, autoblock held
+	// (RULE_10034 = 1 arms it) for a watch before arming; a beacon body the
+	// edge did not hold whole is 10034 too (OVERSIZE). 10035 = the same
+	// request with JSON the edge could not decode (UNPARSED), logonly.
+	{ID: 10034, Name: "rule_cve_wp_rocket_beacon", ReasonFamily: "WAF_CVE", DefaultMode: "block", HoldAutoblock: true},
+	{ID: 10035, Name: "rule_cve_wp_rocket_beacon_unseen", ReasonFamily: "WAF_CVE", DefaultMode: "logonly"},
 }
 
 // wafRuleGroupNames maps the leading digit (id/100) to a human-readable label.

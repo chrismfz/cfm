@@ -101,19 +101,19 @@ get the reason format right.
 
 A large or chunked body on `location /` is read by cfm.lua in a burn-in pass,
 where only the block rules in `BURNIN_ENFORCE_IDS` (`configs/lua/cfm.lua`)
-are enforced: today **10021, 10024, 10027, 10028, 10030**. A rule whose
+are enforced: today **10021, 10024, 10027, 10028, 10030, 10034**. A rule whose
 exploit arrives that way must be in that list and must run before any other
 block rule that the same request can trip (the pass ends at the first block,
 enforced or not). That is why 10021, 10024, 10027 and 10030 run first in
-`check()`, and why 10028 runs right after 10027 in the burn-in second pass
-(`ctx.burnin_pass`) but late otherwise.
+`check()`, and why 10028 (then 10034) runs right after 10027 in the burn-in
+second pass (`ctx.burnin_pass`) but late otherwise.
 
 ---
 
 ## 2. Rules in code
 
 Every rule below ships at edge default **`block`** (Lua `CFG` and Go
-`DefaultMode` agree), except the logonly burn-in rules 10031–10033. "Armed" = the `WAF_CVE` default applies (6 h nft ban +
+`DefaultMode` agree), except the logonly rules 10031–10033 (burn-in) and 10035. "Armed" = the `WAF_CVE` default applies (6 h nft ban +
 `WAF/CVE-…` alert); "held" = `HoldAutoblock` (403 only).
 
 | Id | `CFG` name | CVE(s) in the reason | Product | Keyed on | Autoblock |
@@ -150,6 +150,8 @@ Every rule below ships at edge default **`block`** (Lua `CFG` and Go
 | 10031 | `rule_cve_php_fpm_smuggle` | CVE-2026-129289 | PHP core (FPM / LSAPI) | a FastCGI BEGIN_REQUEST + PARAMS record (`FCGI_BEGIN_REQUEST`) or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR (`FCGI_PARAMS`) in a POST body | **logonly** (burn-in from 2026-11-21) |
 | 10032 | `rule_cve_php_oversized_auth` | CVE-2026-129496 | PHP core (ext/date) | an Authorization header line over nginx's default 8 KB buffer (`BASIC_OVERSIZE` / `OVERSIZE`, `:len=N`) | **logonly** (burn-in from 2026-11-21) |
 | 10033 | `rule_cve_php_multipart_desync` | CVE-2026-129289 (first leg) | PHP core | a multipart POST that leaves bytes PHP never reads (`GARBLED_STOP` / `GARBLED_STOP_SMALL` / `NO_BOUNDARY` / `BOUNDARY_TOO_LARGE`) | **logonly** (burn-in from 2026-11-21) |
+| 10034 | `rule_cve_wp_rocket_beacon` | CVE-2026-125812 | WP Rocket < 3.24.2 | `POST` `action=rocket_beacon` (admin-ajax.php, any path) whose `results` JSON has a `preconnect_external_domain` entry that is not a bare origin (`NON_ORIGIN`), or a body the edge did not hold whole (`OVERSIZE`) | **held** (watch from 2026-11-28) |
+| 10035 | `rule_cve_wp_rocket_beacon_unseen` | CVE-2026-125812 | WP Rocket | the same request with JSON the edge could not decode (`UNPARSED`) | **logonly** |
 
 Lua tests: `scripts/tests/cfm_waf_cve_<slug>_test.lua` per product (plus
 `*_e2e_test.lua` for 10021/10022, 10024, 10027/10028, 10030). 10023 is
@@ -367,6 +369,34 @@ tested in the `php_upload_progress` files, 10029 in
   2026-11-17 after a 14-day read of all 8 nodes' `cfm.waf.log` (`EVAL_ZERO`
   only from real users, a set `[eval]` only from the attacker). Armed, so the
   first probe bans before a payload reaches rule 332.
+- **10034 / 10035 WP Rocket beacon** (CVE-2026-125812,
+  unauthenticated RCE, exploited from 2026-11-25). Sources: the CVE record
+  (Patchstack; it publishes only `POST admin-ajax.php` +
+  `action=rocket_beacon`), Patchstack's 2026-11-27 advisory (its detection
+  hint: full URLs where bare domains are expected) and the
+  `wp-media/wp-rocket` v3.24.1..v3.24.2 diff. The chain:
+  `PreconnectExternalDomains\AJAX\Controller::add_data()` stored each
+  `results.preconnect_external_domain` entry through `sanitize_url()` only;
+  the page printed it as a `dns-prefetch` link; LazyLoad for CSS background
+  images and Host Fonts Locally fetched that URL and wrote it to the cache
+  under a name from its path (`wp-content/cache/background-css/…/*.php`). The
+  fix (`OriginTrait::get_origin`) keeps only `scheme://host[:port]`, which is
+  all the browser sends (`url.origin`). 10034 decodes `results` as
+  `json_decode` does (escapes, duplicate keys, a string / list / object of
+  entries) and accepts only `null` or `scheme://host[:port]/?`. It fires
+  whether or not the site has either feature on. A beacon whose body the
+  edge did not hold whole (cut past `waf_body_max_len`, 32 KB, or declared
+  and unread) is 10034's `OVERSIZE`, a 403 as well: padding is the obvious
+  way around the read, and the browser's beacon is a few KB. Edge 403, autoblock held
+  per rule (`RULE_10034 = 0`) for a 2–3 day watch; `RULE_10034 = 1` in a
+  node's `[waf_security]` arms it there, and dropping `HoldAutoblock` (Go)
+  makes that the default once the hits read as attacks only. Keyed on the
+  fields, not the path (a security plugin can rename admin-ajax.php), like
+  10018; a renamed path off cfm.lua's body read list gets its body in the
+  burn-in pass, so 10034 is in `BURNIN_ENFORCE_IDS` and runs early there. admin-ajax.php bodies are read whole by Step 2, never in the burn-in
+  pass. 10035 (logonly) is `UNPARSED`: JSON the edge reader does not decode
+  (a fuzz against PHP 8.3.6's `json_decode`, 30k documents, found no case
+  PHP stores a non-origin entry that 10034 misses).
 - **10030 Drupal render-array callbacks** (`#region_callback`,
   `#post_render`, `#pre_render`, `#lazy_builder`, `#access_callback`) as a
   field NAME (query, urlencoded, multipart), a JSON KEY (POST/PUT/PATCH,

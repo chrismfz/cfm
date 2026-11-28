@@ -21,6 +21,17 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **WAF rule 10034 for the WP Rocket beacon RCE
+  (CVE-2026-125812, exploited since 2026-11-25).** A `rocket_beacon` POST to
+  admin-ajax.php whose `preconnect_external_domain` list holds anything but a
+  bare origin (`scheme://host[:port]`, all a browser sends) is refused with a
+  403. That list is how the attacker gets a PHP file into
+  `wp-content/cache/background-css/` on WP Rocket < 3.24.2. The rule fires whether or not a site has the
+  vulnerable features on. The IP is not banned yet (`RULE_10034 = 0` in
+  `[waf_security]`): watch the hits for a few days, then set
+  `RULE_10034 = 1`. A beacon padded past the 32 KB the edge reads is
+  refused too. Rule 10035 (logonly) logs a beacon whose JSON the edge could
+  not decode.
 - **An Alerts tab on the Mail page.** The mail-abuse findings the team is
   paged with (hijacked mailbox, bounce / mailbox / script spike, queue hog,
   an IP on a blocklist) are now on the node's own page too: what is open
