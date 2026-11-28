@@ -96,12 +96,13 @@ func (b *Backend) PanelDNATStatus() (bool, string, error) {
 }
 
 // inputAcceptOps drives the shared input-accept code (panel and web DNAT
-// accepts) with this backend's nft runner. Listing is argv mode (ListChainText): a script-mode `-a` list is a
+// accepts) with this backend's nft runner. Listing is argv mode
+// (inputAcceptsChainText, with firewall.InputAcceptsNFTTimeout): a script-mode `-a` list is a
 // syntax error, which once made the accepts land after the default drop and
 // the state report every panel port "blocked".
 func (b *Backend) inputAcceptOps() firewall.NFTTextOps {
 	return firewall.NFTTextOps{
-		ListInput: func() (string, error) { return b.ListChainText(family, tableName, "input") },
+		ListInput: b.inputAcceptsChainText,
 		Run:       b.nftCmd,
 	}
 }

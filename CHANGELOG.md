@@ -20,7 +20,16 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **EL8: `cfm edge on` / `cfm dnat on` no longer fail right after a daemon
+  restart.** The DNAT accepts' read of the input chain (web and cPanel ports,
+  both firewall engines) had a 5 s deadline, and EL8's nft takes 4–12 s to
+  list a chain while it is busy. During an upgrade on virgo the edge's
+  `cfm edge on` failed this way and the web DNAT stayed off, the sites served
+  by the origin without the WAF, for ~90 s until its retry. The read now gets
+  the same 30 s budget as the firewall setup and the ports policy; a read
+  that runs out of time fails at once instead of being retried, and on the
+  `nftlib` engine it no longer holds up bans and set updates while it waits.
 
 ## 2026.11.28
 

@@ -150,7 +150,15 @@ The history behind each rule below is in the code comments it names.
   `-run LiveNFTRestoresAPlainDrop`, both engines). The ports policy's two chain reads and its transaction get
   `firewall.PortsPolicyNFTTimeout` (30 s) on both engines, and the
   output chain is read only when the chain listing has it
-  (`PortsPolicyReads.Chains`; `nft/ports_cost_test.go`). Compare before you
+  (`PortsPolicyReads.Chains`; `nft/ports_cost_test.go`). The DNAT accepts'
+  read of the input chain (web + panel, `NFTTextOps.ListInput`) gets
+  `firewall.InputAcceptsNFTTimeout` (30 s), never `ListChainText`'s 5 s
+  diagnostic deadline: that failed `cfm edge on` on virgo mid-upgrade and
+  left the web DNAT off (`TestInputAcceptsRead_UsesItsBudget`, both
+  engines). A timed-out read is marked `context.DeadlineExceeded` and never
+  taken for a missing chain (no second read), and nftlib runs these CLI reads
+  under `dnatMu`, never `b.mu`, which every ban waits on
+  (`TestInstallDNATRules_AcceptsReadRunsOutsideTheLock`). Compare before you
   write (`firewall.SameSetElems`), and put a write in one script. `ensurebase_cost_test.go` pins EnsureBase's profile,
   the unknown probe and the dedupe (live: `-run LiveNFTDedupe`).
 - **An automatic ban never reads the whole set.** Every detector ban is a
