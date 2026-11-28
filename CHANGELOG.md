@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.28
+
 ### Added
 - **WAF rule 10034 for the WP Rocket beacon RCE
   (CVE-2026-125812, exploited since 2026-11-25).** A `rocket_beacon` POST to
