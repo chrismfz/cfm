@@ -23,7 +23,8 @@ defence-in-depth across five layers, from the HTTP edge down to the kernel:
 The in-path edge proxy is **cfm-edge** (`chrismfz/cfm-edge`: nginx.org nginx
 + the OpenResty Lua set, `/usr/sbin/cfm-edge`, `/etc/cfm-edge`,
 `/var/log/cfm-edge`), on every CFM node that runs an edge since 2026-11 (an
-EL rpm for now; Debian / Ubuntu use OpenResty until its `.deb`). **OpenResty**
+rpm for EL 8/9/10 and, since 2026-11-28, the same files as a .deb for Debian
+12+ / Ubuntu 22.04+; `install-edge.sh` installs either). **OpenResty**
 is the fallback: `configs/cfm-edge.conf` is rendered from
 `configs/openresty.conf`, so the two run the same config. **Angie** is
 deprecated (no new installs; its removal is its own change, after a fleet

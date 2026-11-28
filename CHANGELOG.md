@@ -21,6 +21,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Added
+- **`install-edge.sh` on Debian 12+ / Ubuntu 22.04+.** cfm-edge now ships a
+  .deb next to its rpm (the same files, from the same repo), so the installer
+  installs it with apt there (`apt-get install cfm-edge`, refreshing the lists
+  once when the first try cannot find it) and with dnf/yum on EL as before;
+  everything after the install (adoption, `-t`, the printed switch) is the
+  same. It still refuses any other OS. README, `docs/node-setup.md` and
+  `CLAUDE.md` drop "Debian uses OpenResty until the .deb";
+  `install-angie.sh`'s deprecation line no longer sends Debian to OpenResty.
 - **An Alerts tab on the Mail page.** The mail-abuse findings the team is
   paged with (hijacked mailbox, bounce / mailbox / script spike, queue hog,
   an IP on a blocklist) are now on the node's own page too: what is open
