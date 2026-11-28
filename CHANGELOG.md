@@ -21,6 +21,19 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ## [Unreleased]
 
 ### Changed
+- **The php-src 2026-11-19 WAF rules now block (403), with no ban.** After a
+  7-day logonly burn-in on all 8 cfm-edge nodes that saw no exploit and no
+  false positive, 10031 (a FastCGI request smuggled in a POST body,
+  CVE-2026-129289), 10032's `BASIC_OVERSIZE` (an HTTP Basic header over 8 KB,
+  CVE-2026-129496) and 10033's `GARBLED_STOP` / `BOUNDARY_TOO_LARGE` (a
+  multipart body PHP stops reading early) answer 403. The nft ban is held per
+  rule for a further watch (`RULE_10031` / `RULE_10032` / `RULE_10033 = 1` in
+  `[waf_security]` arms one). 10032's `OVERSIZE` (other schemes), 10033's
+  `GARBLED_STOP_SMALL` and `NO_BOUNDARY` stay logonly. The rules now run with
+  the other held rules, late, so the advisory's own request (php://input) is
+  still blocked and banned by 305. A chunked or > 1 MB body on `POST /` (the
+  body burn-in pass, where these rules were only logged) is now enforced too:
+  there 10031 / 10033 run first, so that request is their 403, with no ban.
 - **The clearance cookie lasts 60 minutes by default (was 45).** The stock
   `CHALLENGE_COOKIE_LIFE` is `60m`. Since `OPENRESTY_OK_IP_TTL = 0` the cookie
   is the only pass, and the re-solves 45–90 minutes after a solve were readers

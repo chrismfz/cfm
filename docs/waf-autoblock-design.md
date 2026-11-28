@@ -184,7 +184,7 @@ The registry today:
 | `BACKDOOR` | 438, 440 | `RULE_440` | 1 |
 | `PHP_WRAPPER` | 305 | — | 1 |
 | `AUTH_BURST` | 510, 511, 512 | `RULE_511` | 1 |
-| `CVE` | every 10xxx rule (10001-10035; 10031-10033 and 10035 logonly, so they feed no ban) | `RULE_10020`, `RULE_10022`, `RULE_10026`, `RULE_10028`, `RULE_10034` | 1 |
+| `CVE` | every 10xxx rule (10001-10035; 10035 logonly, so it feeds no ban, as do 10032's OVERSIZE and 10033's GARBLED_STOP_SMALL / NO_BOUNDARY) | `RULE_10020`, `RULE_10022`, `RULE_10026`, `RULE_10028`, `RULE_10031`, `RULE_10032`, `RULE_10033`, `RULE_10034` | 1 |
 | `JS_PROTO` | 303 | `RULE_303` | 1 |
 | `XXE` | 307 | `RULE_307` | 1 |
 | `PHP_WEBSHELL_BODY` | 416, 417 | `RULE_416`, `RULE_417` | 1 |
