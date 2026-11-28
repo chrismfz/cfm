@@ -1733,6 +1733,12 @@ local BURNIN_SEV = { logonly = 1, challenge = 2, challenge_v2 = 3, block = 4 }
 -- 10030 (Drupal render-array callback keys, Drupalgeddon2) is keyed on a
 -- field name or JSON key Drupal alone builds, and its POST /user/register
 -- can come chunked or large (not on the POST allowlist), so in burn-in.
+-- 10034 (CVE-2026-125812, the WP Rocket beacon) can come on a renamed ajax
+-- path off the read list, chunked or large. 10031 / 10033 (CVE-2026-129289,
+-- a FastCGI request smuggled behind a multipart body PHP stops reading) are
+-- body shapes like 10021's, so a chunked or > 1 MB POST / carries them too.
+-- check() runs the held ones (10028, 10034, 10031 / 10033) early in the
+-- burn-in second pass only.
 local BURNIN_ENFORCE_IDS = { ["10021"] = true, ["10024"] = true, ["10027"] = true, ["10028"] = true,
                              ["10030"] = true, ["10031"] = true, ["10033"] = true, ["10034"] = true }
 
@@ -1851,8 +1857,9 @@ if not lockdown_held and waf_ok and waf and waf.enabled and waf.enabled() then
         -- challenge too (which a cleared client would otherwise turn into
         -- logonly below and pass upstream with the body).
         waf_ctx.body, waf_ctx.shdict, waf_ctx.body_deferred = req_body, nil, nil
-        -- check() orders the held 10028 early in this pass only (it ends at
-        -- the first block, and only BURNIN_ENFORCE_IDS blocks are enforced).
+        -- check() orders the held 10028, 10034 and 10031 / 10033 early in
+        -- this pass only (it ends at the first block, and only
+        -- BURNIN_ENFORCE_IDS blocks are enforced).
         waf_ctx.burnin_pass = true
         local b_ok, b_hit, b_reason, b_ttl, b_action, b_hits, b_rule = pcall(waf.check, waf_ctx)
         if not b_ok then

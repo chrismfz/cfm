@@ -200,7 +200,12 @@ tested in the `php_upload_progress` files, 10029 in
   305's, banned, and records no 10031 / 10033. 10032 also blocks on the
   panel ports (the panel gate denies block-tier hits; 0 panel hits in the
   burn-in). During the burn-in 10031 / 10033 ran early, in step 0, so the
-  exploit would have been recorded behind 305. 10031 reads the FastCGI records as php-src's
+  exploit would have been recorded behind 305. Accepted residual: a client
+  sending a nameless `Content-Disposition: form-data` part (.NET's
+  `MultipartFormDataContent.Add(content)` without a name) followed by more
+  than 5 KB is a GARBLED_STOP 403. PHP drops everything after that part
+  anyway; a non-PHP origin behind the edge would have read it (an exclude
+  for that host / rule is the remedy). The burn-in saw none. 10031 reads the FastCGI records as php-src's
   `fcgi_read_request` accepts them (any version >= 1, request id and
   reserved byte, role 1–3; a BEGIN_REQUEST counts only with a PARAMS record
   right after it; anchored on the plain `\0\8` of its content length, so a

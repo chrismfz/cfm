@@ -214,6 +214,19 @@ do
   local desync = field("a", "1") .. GARBLED .. string.rep("A", 6000) .. "\r\n" .. CLOSE
   hit, reason, act, rid = rule_of(burnin(req("POST", desync, { ["User-Agent"] = "Mozilla/5.0" })))
   check(act == "block" and rid == "10033", "burn-in pass: GARBLED_STOP is 10033's block (got " .. tostring(reason) .. " / " .. tostring(rid) .. ")")
+  -- the late slot does not run again in that pass: one 10033 hit only
+  do
+    local _, _, _, _, bhits = waf.check(burnin(req("POST", field("a", "1") .. CLOSE,
+      { ["Content-Type"] = "multipart/form-data", ["User-Agent"] = "Mozilla/5.0" })))
+    local n = 0
+    for _, h in ipairs(bhits or {}) do if tostring(h.waf_rule_id) == "10033" then n = n + 1 end end
+    check(n == 1, "burn-in pass: 10033 recorded once (got " .. n .. ")")
+    local _, _, _, _, nhits = waf.check(req("POST", field("a", "1") .. CLOSE,
+      { ["Content-Type"] = "multipart/form-data", ["User-Agent"] = "Mozilla/5.0" }))
+    n = 0
+    for _, h in ipairs(nhits or {}) do if tostring(h.waf_rule_id) == "10033" then n = n + 1 end end
+    check(n == 1, "normal pass: 10033 recorded once (got " .. n .. ")")
+  end
   -- and a logonly tag there stays logonly
   hit, reason, act = rule_of(burnin(req("POST", field("a", "1") .. CLOSE, { ["Content-Type"] = "multipart/form-data", ["User-Agent"] = "Mozilla/5.0" })))
   check(act == "logonly", "burn-in pass: NO_BOUNDARY stays logonly (got " .. tostring(reason) .. " / " .. tostring(act) .. ")")
