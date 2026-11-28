@@ -274,6 +274,8 @@ local CFG = {
   rule_cve_php_fpm_smuggle = "logonly", -- CVE-2026-129289 (GHSA-qc49-hpvq-g2w6, php-src 2026-11-19, fixed 8.2.36/8.3.37/8.4.28/8.5.13): PHP-FPM request smuggling through an unread body on a kept-open backend connection (fastcgi_keep_conn, enablereuse, LSAPI): a malformed multipart stops PHP's parser and a FastCGI request in the body is read as the next one (SCRIPT_FILENAME, REMOTE_ADDR, PHP_ADMIN_VALUE). Fires on the raw POST body (any content type) holding a FastCGI BEGIN_REQUEST record followed by a PARAMS record (FCGI_BEGIN_REQUEST, read as fcgi_read_request accepts it: any version, reserved byte or request id, role 1-3), or a length-prefixed SCRIPT_FILENAME / PATH_TRANSLATED / PHP_ADMIN_VALUE / REMOTE_ADDR parameter (FCGI_PARAMS). LOGONLY burn-in (2026-11-21), early in step 0 so the exploit's own request (which 305 blocks) still records it; a promotion decides the autoblock intent in the same change. Not a substitute for the PHP update.
   rule_cve_php_oversized_auth = "logonly", -- CVE-2026-129496 (GHSA-gr4f-wgx5-jpfv, php-src 2026-11-19): ext/date use-after-free; the advisory's FPM code-execution proof used an HTTP Basic Authorization header larger than nginx's default per-header limit (8 KB), which this edge (64 KB) lets through. BASIC_OVERSIZE / OVERSIZE (any other scheme), with `:len=N`. LOGONLY burn-in (2026-11-21), late (header only). Not a substitute for the PHP update.
   rule_cve_php_multipart_desync = "logonly", -- CVE-2026-129289's first leg, for the class of PHP multipart parser desyncs: a multipart POST that leaves bytes PHP never reads. GARBLED_STOP (a part with a Content-Disposition but neither name nor filename ends PHP's parse, checked against PHP 8.3.6, and more than one 5120-byte read buffer of content follows: certainly unread; `:rest=trunc` for a body the edge holds only in part), GARBLED_STOP_SMALL (a smaller rest: PHP may still leave some unread), NO_BOUNDARY (no boundary parameter: PHP parses nothing; mostly broken clients, a noise baseline), BOUNDARY_TOO_LARGE (a boundary PHP refuses, over 5116 bytes). LOGONLY burn-in (2026-11-21), early in step 0 with 10031.
+  rule_cve_wp_rocket_beacon = "block", -- CVE-2026-125812 (WP Rocket < 3.24.2): unauthenticated POST action=rocket_beacon (admin-ajax.php; keyed on the fields, not the path, which a security plugin can rename) whose `results` JSON carries a preconnect_external_domain entry that is not a bare origin (NON_ORIGIN). add_data() stored it through sanitize_url() only; the page printed it as a dns-prefetch link that LazyLoad for CSS background images / Host Fonts Locally fetched and wrote to the cache as .php (wp-content/cache/background-css/). The browser sends url.origin only (wpr-beacon.js), and the 3.24.2 fix (OriginTrait::get_origin) keeps only scheme://host[:port], so any other entry is the exploit; so is a cut beacon body that is not the browser's shape (OVERSIZE: no single results starting {" and running to the end of the held body, an extra field, a short field over 4 KB, no body; a large real beacon is cut inside results and is 10035's OVERSIZE_RESULTS). Residuals: padding before action, or inside results. Sources: the CVE record (Patchstack), Patchstack's 2026-11-27 advisory, the wp-rocket v3.24.1..v3.24.2 diff. Edge 403, autoblock held per rule (RULE_10034 = 0) for a 2-3 day watch from 2026-11-28; late with the other held rules.
+  rule_cve_wp_rocket_beacon_unseen = "logonly", -- CVE-2026-125812, a rocket_beacon POST whose results the edge's JSON reader does not decode, where PHP's json_decode might (UNPARSED: naming preconnect, or carrying \u escapes). Also OVERSIZE_RESULTS: a body cut inside results, the shape of a large legitimate beacon (padding inside results looks the same). Logonly: measures how often the read fails.
 
   -- [top-4]  Upload controls
   rule_upload_filename    = "block",  -- webshell extension in multipart filename (.php, .jsp, user.ini …)
@@ -753,6 +755,8 @@ local RULE_IDS = {
   rule_cve_php_fpm_smuggle = 10031,
   rule_cve_php_oversized_auth = 10032,
   rule_cve_php_multipart_desync = 10033,
+  rule_cve_wp_rocket_beacon = 10034,
+  rule_cve_wp_rocket_beacon_unseen = 10035,
   rule_cve_wp_pagename_traversal = 10017,
   rule_cve_translatepress_reset_preview = 10018,
   rule_cve_translatepress_reset_preview_authed = 10020,
@@ -1221,6 +1225,23 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_48356:MAGENTO_POLYSHELL:" .. tag, ttl, mode, RULE_IDS.rule_cve_magento_polyshell_unseen) then goto done end
+      end
+    end
+  end
+  -- WP Rocket beacon (rules 10034 / 10035, 10034's ban held) in the burn-in
+  -- second pass: early, for the same reason as 10028 above.
+  if ctx.burnin_pass then
+    local mode = rule_mode(CFG.rule_cve_wp_rocket_beacon, "block")
+    local mode_unseen = rule_mode(CFG.rule_cve_wp_rocket_beacon_unseen, "logonly")
+    if mode ~= "disabled" or mode_unseen ~= "disabled" then
+      local tag, kind = det.detect_cve_wp_rocket_beacon(m_lower, args, body, headers, get_norm_ab(), get_php_fields)
+      if tag then
+        local m = (kind == "exploit") and mode or mode_unseen
+        local id = (kind == "exploit") and RULE_IDS.rule_cve_wp_rocket_beacon or RULE_IDS.rule_cve_wp_rocket_beacon_unseen
+        if m ~= "disabled" then
+          local ttl = (m == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_CVE:CVE_2026_125812:WP_ROCKET:" .. tag, ttl, m, id) then goto done end
+        end
       end
     end
   end
@@ -2803,6 +2824,28 @@ local function check_impl(ctx, st)
       if tag then
         local ttl = (mode == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
         if record("WAF_CVE:CVE_2026_109618:PHP:" .. tag, ttl, mode, RULE_IDS.rule_cve_php_multipart_no_length) then goto done end
+      end
+    end
+  end
+
+  -- WP Rocket beacon (CVE-2026-125812, rules 10034 / 10035).
+  -- 10034 blocks at the edge with its ban held in code (HoldAutoblock), so it
+  -- runs here with the other held rules; in cfm.lua's burn-in second pass it
+  -- runs early instead (a renamed ajax path off the read list, sent chunked
+  -- or large), as 10028 does. 10035 is logonly.
+  if not ctx.burnin_pass then
+    local mode = rule_mode(CFG.rule_cve_wp_rocket_beacon, "block")
+    local mode_unseen = rule_mode(CFG.rule_cve_wp_rocket_beacon_unseen, "logonly")
+    if mode ~= "disabled" or mode_unseen ~= "disabled" then
+      local tag, kind = det.detect_cve_wp_rocket_beacon(m_lower, args, body, headers, get_norm_ab(), get_php_fields,
+        ctx.body_deferred == true, ctx.body_unread == true)
+      if tag then
+        local m = (kind == "exploit") and mode or mode_unseen
+        local id = (kind == "exploit") and RULE_IDS.rule_cve_wp_rocket_beacon or RULE_IDS.rule_cve_wp_rocket_beacon_unseen
+        if m ~= "disabled" then
+          local ttl = (m == "block") and CFG.block_ttl_sec or CFG.default_ttl_sec
+          if record("WAF_CVE:CVE_2026_125812:WP_ROCKET:" .. tag, ttl, m, id) then goto done end
+        end
       end
     end
   end

@@ -657,6 +657,7 @@ _M.PHP_FIELDS_WANT = {
   pagename = true, action = true, string_ids = true, ["trp-edit-translation"] = true,
   user_login = true, wc_reset_password = true, ["woocommerce-lost-password-nonce"] = true,
   changeit = true, changeit2 = true, rest_route = true, _method = true, option_page = true, tab = true,  -- rule 503
+  results = true,  -- rule 10034
 }
 
 -- want_hints(want): for each wanted name, the literal pieces any key PHP
@@ -6407,6 +6408,307 @@ function _M.detect_cve_translatepress_id_lookup(method, args, body, headers, coo
   -- `[true]` reads row 1 as well as a `[1]` does.
   if any_value(f, "string_ids", function(v) return v:find("[^%s%[%]]") ~= nil end) then return "STRING_IDS" end
   return nil
+end
+
+-- ── WP Rocket beacon (rules 10034 / 10035) ────────────────────────────────
+-- CVE-2026-125812 (WP Rocket < 3.24.2). The page beacon (assets/js/wpr-beacon.js)
+-- POSTs to admin-ajax.php, nopriv: action=rocket_beacon, rocket_beacon_nonce
+-- (printed into every page, so no protection), url, is_mobile, status, and
+-- results, a JSON object {lcp, lrc, preload_fonts, preconnect_external_domain}.
+-- PreconnectExternalDomains\AJAX\Controller::add_data() stored each
+-- preconnect_external_domain entry through sanitize_url() only, so a full URL
+-- went in; the page then printed it as <link rel="dns-prefetch" href=…>, where
+-- LazyLoad for CSS background images and Host Fonts Locally picked it up,
+-- fetched it and wrote it to the cache under a name taken from its path
+-- (wp-content/cache/background-css/…/x.php). The 3.24.2 fix
+-- (OriginTrait::get_origin) keeps only
+-- scheme://host[:port]. The browser sends `url.origin` and nothing else
+-- (wpr-beacon.js BeaconPreconnectExternalDomain.processElement), so anything
+-- else in that list is the exploit, whether or not the site is exposed.
+do
+  -- An origin as URL.origin serializes it: "null" (an opaque origin), or
+  -- scheme://host[:port], the host a DNS name, an IPv4 address or a bracketed
+  -- IPv6 one, the port digits. A trailing "/" is tolerated (the fix does
+  -- too). Any scheme: an extension's element is chrome-extension://<id>.
+  local function rocket_is_origin(v)
+    if v == "" or v == "null" then return true end
+    local auth = v:match("^[%a][%w+.-]*://([^/]*)/?$")
+    if not auth then return false end
+    auth = auth:gsub(":%d+$", "", 1)
+    return auth:find("^[%w_-][%w._-]*$") ~= nil or auth:find("^%[[%x:.]+%]$") ~= nil
+  end
+
+  -- A JSON reader for the beacon's `results`, as PHP's json_decode reads it
+  -- (RFC 8259; at most 511 nested containers, which PHP's default depth 512
+  -- allows (measured on PHP 8.3.6; 512 is "Maximum stack depth exceeded"); whitespace is
+  -- space, tab, CR, LF only). Objects are kept as an ordered list of
+  -- {key, value} so a duplicate key is seen too (PHP keeps the last; every
+  -- one is checked, the safe side). A literal is {lit = …} and a number
+  -- {num = …}, so a string value is always a Lua string. Returns the value,
+  -- or nil for text PHP would not decode (and for some it would: invalid
+  -- UTF-8 and lone surrogates are not checked here, which only over-reads).
+  local ROCKET_JSON_DEPTH = 511
+  local function rocket_json(s)
+    local pos, n = 1, #s
+    local byte, sub, char = string.byte, string.sub, string.char
+    local function ws()
+      while pos <= n do
+        local c = byte(s, pos)
+        if c == 32 or c == 9 or c == 10 or c == 13 then pos = pos + 1 else return end
+      end
+    end
+    local function utf8(cp)
+      if cp < 0x80 then return char(cp) end
+      if cp < 0x800 then return char(0xC0 + math.floor(cp / 0x40), 0x80 + cp % 0x40) end
+      if cp < 0x10000 then
+        return char(0xE0 + math.floor(cp / 0x1000), 0x80 + math.floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40)
+      end
+      return char(0xF0 + math.floor(cp / 0x40000), 0x80 + math.floor(cp / 0x1000) % 0x40,
+                  0x80 + math.floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40)
+    end
+    local ESC = { [34] = '"', [92] = "\\", [47] = "/", [98] = "\b", [102] = "\f",
+                  [110] = "\n", [114] = "\r", [116] = "\t" }
+    local function str()
+      pos = pos + 1  -- the opening quote
+      local out, start = {}, pos
+      while true do
+        if pos > n then return nil end
+        local c = byte(s, pos)
+        if c == 34 then
+          out[#out + 1] = sub(s, start, pos - 1)
+          pos = pos + 1
+          return table.concat(out)
+        elseif c == 92 then
+          out[#out + 1] = sub(s, start, pos - 1)
+          local e = byte(s, pos + 1)
+          if e == 117 then
+            local h = sub(s, pos + 2, pos + 5)
+            if not h:find("^%x%x%x%x$") then return nil end
+            local cp = tonumber(h, 16)
+            pos = pos + 6
+            if cp >= 0xD800 and cp <= 0xDBFF and sub(s, pos, pos + 1) == "\\u" then
+              local h2 = sub(s, pos + 2, pos + 5)
+              local lo = h2:find("^%x%x%x%x$") and tonumber(h2, 16)
+              if lo and lo >= 0xDC00 and lo <= 0xDFFF then
+                cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
+                pos = pos + 6
+              end
+            end
+            out[#out + 1] = utf8(cp)
+          elseif e and ESC[e] then
+            out[#out + 1] = ESC[e]
+            pos = pos + 2
+          else
+            return nil
+          end
+          start = pos
+        elseif c < 32 then
+          return nil
+        else
+          pos = pos + 1
+        end
+      end
+    end
+    local value
+    local function container(open, depth)
+      if depth > ROCKET_JSON_DEPTH then return nil end
+      pos = pos + 1
+      local t = { obj = open == 123 }
+      ws()
+      local close = open == 123 and 125 or 93
+      if byte(s, pos) == close then pos = pos + 1; return t end
+      while true do
+        ws()
+        local k
+        if t.obj then
+          if byte(s, pos) ~= 34 then return nil end
+          k = str()
+          if k == nil then return nil end
+          ws()
+          if byte(s, pos) ~= 58 then return nil end
+          pos = pos + 1
+          ws()
+        end
+        local ok, v = value(depth)
+        if not ok then return nil end
+        t[#t + 1] = t.obj and { k, v } or v
+        ws()
+        local c = byte(s, pos)
+        if c == 44 then pos = pos + 1
+        elseif c == close then pos = pos + 1; return t
+        else return nil end
+      end
+    end
+    value = function(depth)
+      local c = byte(s, pos)
+      if c == 34 then
+        local v = str()
+        return v ~= nil, v
+      elseif c == 123 or c == 91 then
+        local v = container(c, depth + 1)
+        return v ~= nil, v
+      end
+      for _, lit in ipairs({ "true", "false", "null" }) do
+        if sub(s, pos, pos + #lit - 1) == lit then pos = pos + #lit; return true, { lit = lit } end
+      end
+      local p = pos
+      if byte(s, p) == 45 then p = p + 1 end
+      local int = s:match("^%d+", p)
+      if not int or (#int > 1 and int:sub(1, 1) == "0") then return false end
+      p = p + #int
+      if byte(s, p) == 46 then
+        local frac = s:match("^%d+", p + 1)
+        if not frac then return false end
+        p = p + 1 + #frac
+      end
+      local ex = s:match("^[eE][%+%-]?%d+", p)
+      if ex then p = p + #ex elseif s:find("^[eE]", p) then return false end
+      local num = sub(s, pos, p - 1)
+      pos = p
+      return true, { num = num }
+    end
+    ws()
+    if pos > n then return nil end
+    local ok, v = value(0)
+    if not ok then return nil end
+    ws()
+    if pos <= n then return nil end
+    return v
+  end
+  _M._rocket_json = rocket_json  -- tests
+
+  -- The first non-origin preconnect entry of one `results` text, false when
+  -- there is none, nil when the text is not JSON PHP would decode into an
+  -- object. add_data() iterates `(array) $results->preconnect_external_domain`:
+  -- a string is one entry, an array or an object its values; a non-string
+  -- entry is no URL (a number casts to digits, an array is a TypeError).
+  local function rocket_bad_preconnect(text)
+    local doc = rocket_json(text)
+    if type(doc) ~= "table" then return nil end
+    if not doc.obj then return false end  -- `$results->…` on a non-object is null
+    local function bad(v)
+      return type(v) == "string" and not rocket_is_origin(v)
+    end
+    for _, kv in ipairs(doc) do
+      if kv[1] == "preconnect_external_domain" then
+        local v = kv[2]
+        if type(v) == "string" then
+          if bad(v) then return v end
+        elseif type(v) == "table" and v.lit == nil and v.num == nil then
+          for _, e in ipairs(v) do
+            local ev = v.obj and e[2] or e
+            if bad(ev) then return ev end
+          end
+        end
+      end
+    end
+    return false
+  end
+
+  -- A beacon body the edge did not hold whole. The browser's FormData has
+  -- six fields, results LAST, and results is not bounded (its LCP list is
+  -- every visible candidate with srcset / sources, data: URIs included), so a
+  -- legitimate beacon over waf_body_max_len is cut inside results: that shape
+  -- is logged (10035 OVERSIZE_RESULTS), never refused. A cut body that is not
+  -- that shape is 10034 OVERSIZE (a 403): no results, or one that does not
+  -- run to the end of the held body, a second results (PHP keeps the last),
+  -- a field the beacon never sends (padding), a short field over
+  -- ROCKET_SHORT_MAX, or no body at all (the action came from the query,
+  -- where the beacon never puts it).
+  local ROCKET_FIELDS = { action = true, rocket_beacon_nonce = true, url = true,
+                          is_mobile = true, status = true, results = true }
+  local ROCKET_SHORT_MAX = 4096
+  -- The one results value must run to the END of the held body: only then
+  -- is the cut inside it. The reader does not report every part (a file
+  -- part, a part with an empty name or no Content-Disposition, a part whose
+  -- header block the cut ends), so padding hidden in one of those would
+  -- otherwise read as "only beacon fields"; with results past the cut, it
+  -- is not reported at all (review 3, checked against PHP 8.3.6's rfc1867).
+  local function results_runs_to_end(body, headers, v)
+    if php_media_type(php_content_type(headers)) == "multipart/form-data" then
+      if v == "" then return body:find("\r?\n\r?\n$") ~= nil end
+      if body:sub(-#v) == v then return true end
+      -- the cut (or a body of exactly the cap) landed inside the closing
+      -- delimiter, right after results (review 4: a beacon of 32768 to
+      -- ~32812 bytes was refused)
+      local bnd = php_mp_boundary(php_content_type(headers)) or ""
+      for _, close in ipairs({ "\r\n--" .. bnd .. "--\r\n", "\n--" .. bnd .. "--\n" }) do
+        for k = 1, #close do
+          local t = close:sub(1, k)
+          if #body > #t and body:sub(-#t) == t and body:sub(-#t - #v, -#t - 1) == v then return true end
+        end
+      end
+      return false
+    end
+    -- urlencoded: the last raw pair is results=… (its key decoded)
+    local last = body:match("([^&]*)$") or ""
+    local key = last:match("^([^=]*)=") or ""
+    if key:find("[%%+]") then key = _form_unescape(key) end
+    if key:find("[%z %.%[]") then key = php_var_name(key) end
+    return key == "results"
+  end
+  local function rocket_cut_tag(method, body, headers)
+    if body == "" then return "OVERSIZE", "exploit" end
+    local all = _M.php_request_fields(method, "", body, headers)
+    local res = all.results
+    if not res or #res ~= 1 then return "OVERSIZE", "exploit" end
+    for name, t in pairs(all) do
+      if not ROCKET_FIELDS[name] then return "OVERSIZE", "exploit" end
+      if name ~= "results" then
+        for _, v in ipairs(t) do
+          if #v > ROCKET_SHORT_MAX then return "OVERSIZE", "exploit" end
+        end
+      end
+    end
+    -- JSON.stringify of an object: `{"` first. A results "value" that is the
+    -- tail of a header line rfc1867 cut at 5120 bytes (padding in the
+    -- results part's own headers) is not.
+    if not res[1]:find('^{"') then return "OVERSIZE", "exploit" end
+    if not results_runs_to_end(body, headers, res[1]) then return "OVERSIZE", "exploit" end
+    return "OVERSIZE_RESULTS", "unseen"
+  end
+
+  -- Rule 10034: a rocket_beacon POST whose results carry a non-origin
+  -- preconnect entry. Tag NON_ORIGIN. add_data() reads $_POST['results'], so
+  -- the body; the query is read too (a harmless over-match). The action is
+  -- $_REQUEST's, any source. Keyed on the fields, not the path: the beacon
+  -- posts to admin_url('admin-ajax.php'), which a security plugin can rename
+  -- (Hide My WP's /ajax), and no other endpoint gets action=rocket_beacon
+  -- with a results list.
+  -- A body the edge did not hold whole (cut past waf_body_max_len, or
+  -- declared and not read): rocket_cut_tag above (10034 OVERSIZE, or 10035
+  -- OVERSIZE_RESULTS). Residuals: padding sent BEFORE action hides the
+  -- action itself (nothing to key on), and padding inside results is the
+  -- legitimate large beacon's shape (logged, not refused).
+  -- Rule 10035 (logonly) also takes UNPARSED, a results value naming
+  -- preconnect (or carrying \u escapes) that the reader above does not
+  -- decode, where PHP's json_decode might. Returns tag, rule
+  -- ("exploit" / "unseen").
+  -- body_deferred: cfm.lua's first pass over a burn-in body (the second pass
+  -- reads it); body_unread: a gate that reads no body (the panel ports).
+  function _M.detect_cve_wp_rocket_beacon(method, args, body, headers, _nab, get_fields, body_deferred, body_unread)
+    if method ~= "post" then return nil end
+    if body_deferred or body_unread then return nil end
+    if not field_gate_open(method, args, body, headers, _nab, "rocket_beacon", true) then
+      return nil
+    end
+    local f = request_fields(method, args, body, headers, get_fields)
+    if not any_value(f, "action", function(v) return v == "rocket_beacon" end) then
+      return nil
+    end
+    local unparsed = false
+    local t = f.results
+    for _, v in ipairs(t or {}) do
+      v = v:gsub("\r", "")
+      local r = rocket_bad_preconnect(v)
+      if r then return "NON_ORIGIN", "exploit" end
+      if r == nil and lower(v):find("preconnect", 1, true) then unparsed = true end
+      if r == nil and v:find("\\u", 1, true) then unparsed = true end
+    end
+    if body_was_cut(body or "", headers) then return rocket_cut_tag(method, body or "", headers) end
+    if unparsed then return "UNPARSED", "unseen" end
+    return nil
+  end
 end
 
 -- phpfuck / numeric-XOR obfuscation blob detector, used by the generic
