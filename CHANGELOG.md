@@ -20,6 +20,10 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## 2026.11.28
+
 ### Changed
 - **The php-src 2026-11-19 WAF rules now block (403), with no ban.** After a
   7-day logonly burn-in on all 8 cfm-edge nodes that saw no exploit and no
@@ -72,8 +76,6 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   the same 30 s budget as the firewall setup and the ports policy; a read
   that runs out of time fails at once instead of being retried, and on the
   `nftlib` engine it no longer holds up bans and set updates while it waits.
-
-## 2026.11.28
 
 ### Added
 - **WAF rule 10034 for the WP Rocket beacon RCE
