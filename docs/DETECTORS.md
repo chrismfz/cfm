@@ -673,7 +673,7 @@ The mirror image of `challenge_solver_farm`, and its blind spot.
 
 Solving mints a signed clearance cookie (`cfm_clearance` on web,
 `cfm_clearance_p<port>` on panel ports) valid for `CHALLENGE_COOKIE_LIFE`
-(45m in the stock config). A browser stores it and does not solve again until
+(60m in the stock config). A browser stores it and does not solve again until
 it expires. An address that re-solves minutes later **never stored the
 cookie**: a pipeline with no cookie jar, driving a headless browser per
 request and paying the challenge every time. The solver-farm detector keys on
