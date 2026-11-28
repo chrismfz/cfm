@@ -25,8 +25,8 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   needs them added by hand: 9601 is NGM's panel UI, 4190 ManageSieve (any
   Dovecot with sieve). An existing node with an edited `cfm.conf` (every one:
   `AUTH_TOKEN`) keeps it, and the new default lands as `.rpmnew` /
-  `.dpkg-dist`: add `TCP_IN = "9601,4190"` there. A Debian `cfm.conf` untouched
-  since install is replaced by the new default, with both ports.
+  `.dpkg-dist`: add `TCP_IN = "9601,4190"` there. An untouched `cfm.conf` (rpm or
+  Debian) is replaced by the new default, with both ports.
 - **The edge sends its own TCP peer to the origin as `X-CFM-Peer`.** Every
   web (80/443) proxying block sets it to `$realip_remote_addr` (the visitor, or the
   Cloudflare address a proxied visitor came from), so an origin that keys

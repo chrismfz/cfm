@@ -36,6 +36,20 @@ import sys
 
 PEER_VALUE = "$realip_remote_addr"
 
+# The includes the edge confs may carry, by file name. Each holds no proxy_pass
+# the check must see: mime types, address lists, the generated IPv6 listen
+# lines, and the panel-port listeners (left out by decision, see above). Any
+# other include fails: it could bring in whole server or location blocks
+# whose proxy_pass this check would never read.
+ALLOWED_INCLUDES = {
+    "mime.types",
+    "trusted_proxies.conf",
+    "challenge_waf_bypass.conf",
+    "cfm-listen-v6-http.con[f]",
+    "cfm-listen-v6-https.con[f]",
+    "cfm-panel-listeners.conf",
+}
+
 
 class ParseError(Exception):
     pass
@@ -174,6 +188,9 @@ def check(path):
                         errors.append(f"{line}: X-CFM-Peer set to {' '.join(words[2:])!r}, not {PEER_VALUE}")
             elif words[0] == "include":
                 stack[-1]["include"] = stack[-1]["include"] or line
+                target = words[1].rsplit("/", 1)[-1] if len(words) > 1 else ""
+                if target not in ALLOWED_INCLUDES:
+                    errors.append(f"{line}: include {' '.join(words[1:])!r} is not one this check knows holds no proxy_pass (ALLOWED_INCLUDES)")
             elif words[0] == "proxy_pass":
                 passes.append((line, list(reversed(stack))))
     if len(stack) != 1:
