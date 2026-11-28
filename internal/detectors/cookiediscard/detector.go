@@ -3,7 +3,7 @@
 // perfectly valid clearance cookie for the same server.
 //
 // Why that is worth a detector of its own. A solved challenge mints a signed
-// cfm_clearance cookie whose lifetime is CHALLENGE_COOKIE_LIFE (45m by default).
+// cfm_clearance cookie whose lifetime is CHALLENGE_COOKIE_LIFE (60m by default).
 // A browser stores it and does not solve again until it expires. A client that
 // re-solves minutes later is therefore telling you something specific: it never
 // stored the cookie. That is not "aggressive crawling" — it is a request

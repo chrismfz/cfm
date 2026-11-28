@@ -12,7 +12,7 @@ import (
 // challenge_cookie_discard turns the challenge-solve event stream into a per-IP
 // "this client throws away its clearance cookie" finding.
 //
-// A solved challenge grants clearance for CHALLENGE_COOKIE_LIFE (45m by
+// A solved challenge grants clearance for CHALLENGE_COOKIE_LIFE (60m by
 // default), so a browser solves once and is done. An address that solves again
 // minutes later never stored the cookie — a request pipeline with no cookie jar,
 // driving a headless browser per request.
