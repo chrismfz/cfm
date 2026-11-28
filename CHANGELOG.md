@@ -23,19 +23,24 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 ### Changed
 - **The default `cfm.conf` opens 9601 and 4190.** A new node with NGM no longer
   needs them added by hand: 9601 is NGM's panel UI, 4190 ManageSieve (any
-  Dovecot with sieve). An existing node keeps its own `cfm.conf` (the new
-  default lands as `.rpmnew` / `.dpkg-dist`): add `TCP_IN = "9601,4190"` there.
+  Dovecot with sieve). An existing node with an edited `cfm.conf` (every one:
+  `AUTH_TOKEN`) keeps it, and the new default lands as `.rpmnew` /
+  `.dpkg-dist`: add `TCP_IN = "9601,4190"` there. An untouched `cfm.conf` (rpm or
+  Debian) is replaced by the new default, with both ports.
 - **The edge sends its own TCP peer to the origin as `X-CFM-Peer`.** Every
-  proxying block sets it to `$realip_remote_addr` (the visitor, or the
+  web (80/443) proxying block sets it to `$realip_remote_addr` (the visitor, or the
   Cloudflare address a proxied visitor came from), so an origin that keys
   security on the peer can tell it from `CF-Connecting-IP` / `X-Real-IP`, which
   a Cloudflare Worker can write. NGM's panel uses it for its login limiter and
   bans behind the edge. A client's own `X-CFM-Peer` never reaches the origin;
-  `check_edge_peer_header.sh` (CI) fails a proxy block without it.
+  `check_edge_peer_header.sh` (CI) fails a proxy block without it. The
+  panel-port listeners (2082-2096, 2222) do not send it: they front
+  cPanel / DirectAdmin, which read no `X-CFM-Peer`.
 - **`cfm edge check` on an NGM node names the fix.** NGM (2026-11-28 and later)
   trusts the edge's loopback hop in its own realip include while CFM is
   installed; the origin real-IP check now says to run
   `ngm trusted-proxies refresh` instead of pointing at NGM's templates.
+
 ### Fixed
 - **EL8: `cfm edge on` / `cfm dnat on` no longer fail right after a daemon
   restart.** The DNAT accepts' read of the input chain (web and cPanel ports,

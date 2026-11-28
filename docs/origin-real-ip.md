@@ -150,8 +150,10 @@ prints the upgrade hint.
 ## What the trust lets through
 
 The edge also sends its own TCP peer as `X-CFM-Peer` (`$realip_remote_addr`:
-the visitor, or the Cloudflare address of a proxied one) in every proxy block,
-replacing any the client sent (`check_edge_peer_header.sh`). The headers above
+the visitor, or the Cloudflare address of a proxied one) in every web (80/443)
+proxy block, replacing any the client sent (`check_edge_peer_header.sh`). The
+panel-port listeners (2082-2096, 2222) do not: cPanel and DirectAdmin read no
+`X-CFM-Peer`. The headers above
 carry the visitor the edge resolved, which a Cloudflare Worker can write; an
 origin that keys a security decision on the peer reads `X-CFM-Peer` from a
 loopback peer instead (NGM's panel does, for its login limiter and bans).

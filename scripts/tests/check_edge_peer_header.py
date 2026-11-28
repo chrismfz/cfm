@@ -23,6 +23,10 @@ panel listens itself (9601) and its nginx's X-CFM-Peer map is reached only
 through the web DNAT (80/443). Panel DNAT in front of an NGM nginx port would
 need this check (or a cleared header) there too.
 
+An `include` in a block that decides a proxy_pass's list (its own block, or
+one it inherits through) fails the check: the included file may set headers
+the parser cannot see.
+
 The parser understands quotes, # comments and *_by_lua_block bodies (Lua
 strings, long brackets and -- comments), and fails rather than guess: an
 unbalanced brace, or a proxy_pass count that differs from a plain text count.
@@ -31,6 +35,20 @@ import re
 import sys
 
 PEER_VALUE = "$realip_remote_addr"
+
+# The includes the edge confs may carry, by file name. Each holds no proxy_pass
+# the check must see: mime types, address lists, the generated IPv6 listen
+# lines, and the panel-port listeners (left out by decision, see above). Any
+# other include fails: it could bring in whole server or location blocks
+# whose proxy_pass this check would never read.
+ALLOWED_INCLUDES = {
+    "mime.types",
+    "trusted_proxies.conf",
+    "challenge_waf_bypass.conf",
+    "cfm-listen-v6-http.con[f]",
+    "cfm-listen-v6-https.con[f]",
+    "cfm-panel-listeners.conf",
+}
 
 
 class ParseError(Exception):
@@ -150,11 +168,11 @@ def check(path):
     s = open(path, encoding="utf-8").read()
     errors = []
     # frames: dicts {sets_any, sets_peer, line}
-    stack = [{"sets_any": False, "sets_peer": False, "line": 0}]
+    stack = [{"sets_any": False, "sets_peer": False, "include": 0, "line": 0}]
     passes = []  # (line, [frames innermost..outermost])
     for kind, data in parse(s):
         if kind == "open":
-            stack.append({"sets_any": False, "sets_peer": False, "line": data[1]})
+            stack.append({"sets_any": False, "sets_peer": False, "include": 0, "line": data[1]})
         elif kind == "close":
             if len(stack) == 1:
                 raise ParseError(f"line {data}: '}}' closes nothing")
@@ -168,12 +186,23 @@ def check(path):
                         stack[-1]["sets_peer"] = True
                     else:
                         errors.append(f"{line}: X-CFM-Peer set to {' '.join(words[2:])!r}, not {PEER_VALUE}")
+            elif words[0] == "include":
+                stack[-1]["include"] = stack[-1]["include"] or line
+                target = words[1].rsplit("/", 1)[-1] if len(words) > 1 else ""
+                if target not in ALLOWED_INCLUDES:
+                    errors.append(f"{line}: include {' '.join(words[1:])!r} is not one this check knows holds no proxy_pass (ALLOWED_INCLUDES)")
             elif words[0] == "proxy_pass":
                 passes.append((line, list(reversed(stack))))
     if len(stack) != 1:
         raise ParseError(f"{len(stack) - 1} block(s) never closed")
     for line, frames in passes:
         for f in frames:
+            # An include in a block whose list this proxy_pass uses (its own,
+            # or one it inherits through) may hold proxy_set_header lines the
+            # parser cannot see: nginx would use them, so refuse to guess.
+            if f["include"]:
+                errors.append(f"{line}: proxy_pass whose proxy_set_header list may come from an include (line {f['include']}): inline the headers, or teach this check to read it")
+                break
             if f["sets_any"]:
                 if not f["sets_peer"]:
                     errors.append(f"{line}: proxy_pass whose proxy_set_header list (block at line {f['line']}) lacks X-CFM-Peer {PEER_VALUE}")
