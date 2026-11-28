@@ -6627,7 +6627,18 @@ do
   local function results_runs_to_end(body, headers, v)
     if php_media_type(php_content_type(headers)) == "multipart/form-data" then
       if v == "" then return body:find("\r?\n\r?\n$") ~= nil end
-      return body:sub(-#v) == v
+      if body:sub(-#v) == v then return true end
+      -- the cut (or a body of exactly the cap) landed inside the closing
+      -- delimiter, right after results (review 4: a beacon of 32768 to
+      -- ~32812 bytes was refused)
+      local bnd = php_mp_boundary(php_content_type(headers)) or ""
+      for _, close in ipairs({ "\r\n--" .. bnd .. "--\r\n", "\n--" .. bnd .. "--\n" }) do
+        for k = 1, #close do
+          local t = close:sub(1, k)
+          if #body > #t and body:sub(-#t) == t and body:sub(-#t - #v, -#t - 1) == v then return true end
+        end
+      end
+      return false
     end
     -- urlencoded: the last raw pair is results=… (its key decoded)
     local last = body:match("([^&]*)$") or ""

@@ -201,6 +201,26 @@ do
   ul.headers["Content-Length"] = tostring(#ul.body)
   ul.body = ul.body:sub(1, 32768)
   fires(ul, "large legitimate beacon cut inside results (urlencoded)", OVERSIZE_RESULTS, 10035, "logonly")
+  -- a legitimate beacon of 32768 to ~32812 bytes: the cut lands in the
+  -- closing delimiter, after results (review 4)
+  for total = 32760, 32830 do
+    local fields = { { "action", "rocket_beacon" }, { "rocket_beacon_nonce", "4f1c2e9ab0" },
+      { "url", "https://shop.example.gr/gallery" }, { "is_mobile", "false" }, { "status", "success" } }
+    local function build(n)
+      local f = {}
+      for i, x in ipairs(fields) do f[i] = x end
+      f[#f + 1] = { "results", '{"lcp":{"src":"data:' .. string.rep("Q", n) .. '"},"preconnect_external_domain":[]}' }
+      return multipart(f)
+    end
+    local b0 = build(0)
+    local b, bct = build(total - #b0)
+    assert(#b == total)
+    local cw = post(AJAX, "", b:sub(1, 32768), bct)
+    cw.headers["Content-Length"] = tostring(#b)
+    local hit, reason, _, action = waf.check(cw)
+    check(not (hit and action == "block"),
+          "legitimate beacon of " .. total .. " bytes must not be refused (got " .. tostring(reason) .. ")")
+  end
   -- a complete results, then a second one past the cut (PHP keeps the last)
   local two = post(AJAX, "", "action=rocket_beacon&results=" .. urlenc('{"preconnect_external_domain":[]}') .. "&results=" .. urlenc('{"lcp":"' .. string.rep("A", 100)))
   two.headers["Content-Length"] = "40000"

@@ -84,7 +84,7 @@ get the reason format right.
   (`wafSecurityRuleOverrides`), which reaches configs that predate the rule;
   an operator's `RULE_<id>` in `detectors.conf` still wins. Mention the hold
   in the `[waf_security]` comment block of `configs/detectors.conf`. Held
-  today: **10020, 10022, 10026, 10028**.
+  today: **10020, 10022, 10026, 10028, 10034**.
 - **A held block rule runs late in `check()`.** The first block hit owns the
   headline `record()` and `goto done` ends evaluation, so a held rule placed
   early would take the ban from an armed rule on the same request. Held CVE
@@ -383,14 +383,14 @@ tested in the `php_upload_progress` files, 10029 in
   fix (`OriginTrait::get_origin`) keeps only `scheme://host[:port]`, which is
   all the browser sends (`url.origin`). 10034 decodes `results` as
   `json_decode` does (escapes, duplicate keys, a string / list / object of
-  entries) and accepts only `null` or `scheme://host[:port]/?`. It fires
+  entries) and accepts only `null`, `""` or `scheme://host[:port]/?`. It fires
   whether or not the site has either feature on. A cut body (past
   `waf_body_max_len`, 32 KB, or declared and unread): the browser's FormData
   has six fields with `results` last, and `results` is unbounded (every LCP
   candidate with srcset / sources, `data:` URIs included), so a large real
   beacon is cut inside `results`; that shape is 10035 `OVERSIZE_RESULTS`
   (logged): a single `results` that starts `{"` and runs to the end of the
-  held body. Any other cut body is 10034 `OVERSIZE` (403): no `results` in
+  held body (or to a cut inside the closing delimiter right after it). Any other cut body is 10034 `OVERSIZE` (403): no `results` in
   view (padding in a file part, a nameless part or a part's headers hides
   the parts after it from the field reader), a second `results` (PHP keeps
   the last), a field the beacon never sends, a short field over 4 KB, or no
