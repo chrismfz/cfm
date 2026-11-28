@@ -224,7 +224,7 @@ unwired (hardcoded 16). So a per-vhost/under-attack "harden PoW" rung is a clean
 
 `cfm.lua` Step 2b: when the clearance cookie is valid AND the WAF passed, the
 `/nginx/decision` RPC is **skipped entirely**. So a client that *solved* the
-challenge is waved through for the cookie lifetime (~45m). The only signal that
+challenge is waved through for the cookie lifetime (~60m by default). The only signal that
 catches a solver post-clearance is **cookie_discard** (re-solve). Implication:
 for the solver-farm / headless-solver class, the per-client score must act
 through a path that survives valid clearance (shorten/condition clearance, or

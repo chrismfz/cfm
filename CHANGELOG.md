@@ -34,6 +34,14 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   still blocked and banned by 305. A chunked or > 1 MB body on `POST /` (the
   body burn-in pass, where these rules were only logged) is now enforced too:
   there 10031 / 10033 run first, so that request is their 403, with no ban.
+- **The clearance cookie lasts 60 minutes by default (was 45).** The stock
+  `CHALLENGE_COOKIE_LIFE` is `60m`. Since `OPENRESTY_OK_IP_TTL = 0` the cookie
+  is the only pass, and the re-solves 45–90 minutes after a solve were readers
+  and shoppers coming back (a phpBB forum, e-shop category pages, webmail
+  logins), not wp-admin. The cookie still slides on every request
+  (`CHALLENGE_COOKIE_REFRESH`). An existing node keeps its own
+  `detectors.conf`: set `CHALLENGE_COOKIE_LIFE = 60m` there or in a
+  `detectors.d` drop-in.
 - **The default `cfm.conf` opens 9601 and 4190.** A new node with NGM no longer
   needs them added by hand: 9601 is NGM's panel UI, 4190 ManageSieve (any
   Dovecot with sieve). An existing node with an edited `cfm.conf` (every one:
