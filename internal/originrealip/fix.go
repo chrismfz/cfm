@@ -164,8 +164,9 @@ func (l layout) planApache(pl *Plan) {
 func (l layout) planNginx(pl *Plan) {
 	p := pl.Probe
 	if p.Panel == PanelNGM {
-		pl.Reason = "NGM renders nginx itself: the realip trust has to come from NGM's templates " +
-			"(NGM docs/cfm-integration-map.md), not a file CFM drops in (apply would overwrite it)"
+		pl.Reason = "NGM renders nginx itself: its realip include trusts the loopback while CFM is installed " +
+			"(NGM 2026-11-28 and later); run: ngm trusted-proxies refresh (an older NGM: upgrade it, then " +
+			"ngm init --only=nginx-provision). Not a file CFM drops in: an apply would overwrite it"
 		return
 	}
 	ng := p.ng

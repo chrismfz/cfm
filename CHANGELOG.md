@@ -20,7 +20,15 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **The default `cfm.conf` opens 9601 and 4190.** A new node with NGM no longer
+  needs them added by hand: 9601 is NGM's panel UI, 4190 ManageSieve (any
+  Dovecot with sieve). An existing node keeps its own `cfm.conf` (the new
+  default lands as `.rpmnew` / `.dpkg-dist`): add `TCP_IN = "9601,4190"` there.
+- **`cfm edge check` on an NGM node names the fix.** NGM (2026-11-28 and later)
+  trusts the edge's loopback hop in its own realip include while CFM is
+  installed; the origin real-IP check now says to run
+  `ngm trusted-proxies refresh` instead of pointing at NGM's templates.
 
 ## 2026.11.28
 
