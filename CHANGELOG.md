@@ -27,7 +27,9 @@ of every earlier entry is in the git history of this file. The first ~1000 PRs
   list a chain while it is busy. During an upgrade on virgo the edge's
   `cfm edge on` failed this way and the web DNAT stayed off, the sites served
   by the origin without the WAF, for ~90 s until its retry. The read now gets
-  the same 30 s budget as the firewall setup and the ports policy.
+  the same 30 s budget as the firewall setup and the ports policy; a read
+  that runs out of time fails at once instead of being retried, and on the
+  `nftlib` engine it no longer holds up bans and set updates while it waits.
 
 ## 2026.11.28
 

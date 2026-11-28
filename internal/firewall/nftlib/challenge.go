@@ -605,31 +605,58 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	if len(wanted) == 0 {
 		return nil
 	}
-	// Hold b.mu from the read through the rebuild, and read FIRST: a failure
-	// then returns before anything has changed. The input-chain accepts below
-	// must not move to the new ports while the prerouting rules still redirect
-	// to the old ones — new connections would hit the default drop.
+	// dnatMu holds from the read through the prune, so no other DNAT
+	// operation of this backend interleaves. Read FIRST: a failure then
+	// returns before anything has changed. The input-chain accepts must not
+	// move to the new ports while the prerouting rules still redirect to the
+	// old ones — new connections would hit the default drop.
+	//
+	// b.mu covers only the netlink work (the read, then the rebuild), never
+	// the accepts: those are nft CLI runs of up to InputAcceptsNFTTimeout
+	// each (two reads when the first fails), and held under b.mu they stalled
+	// every ban and set write for as long. Between the two b.mu sections only
+	// a writer outside this process can change the prerouting chain, which
+	// b.mu never excluded.
+	b.dnatMu.Lock()
+	defer b.dnatMu.Unlock()
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	t, ch, err := b.getDNATTableAndChain(family, table)
-	if err != nil {
-		return err
-	}
 	var rules []*nftables.Rule
-	if ch != nil {
+	if err == nil && ch != nil {
 		// A failed read must not pass for an empty chain: the rebuild below
 		// would then append a second copy of the managed rules after the
 		// live ones, and new bypass entries would never match.
 		if rules, err = b.conn.GetRules(t, ch); err != nil {
-			return fmt.Errorf("nftlib: read %s %s prerouting rules: %w", family, table, err)
+			err = fmt.Errorf("nftlib: read %s %s prerouting rules: %w", family, table, err)
 		}
 	}
-	// nft CLI only (no b.mu inside), so safe to run under the lock. Accepts
-	// for the new ports go in first; the old ones stay until the redirect has
-	// moved (pruned after installEdgeDNATRules below).
+	b.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// Accepts for the new ports go in first; the old ones stay until the
+	// redirect has moved (pruned after installEdgeDNATRules below).
 	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, false); err != nil {
 		return err
 	}
+	if err := b.rebuildDNATChain(family, table, t, ch, rules, wanted, includeLoopbackAccept); err != nil {
+		return err
+	}
+	// The redirect is committed: pruning the accepts nobody wants is best
+	// effort. Leftovers match only connections DNAT'd to their port, which no
+	// redirect targets any more, and the next EnsureDNATAccepts prunes them.
+	// Failing here would report the new redirect as not installed.
+	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, true); err != nil {
+		b.logPhase("DNATOn", "warn", 0, err, "op=dnat leftover scoped accepts (inert without a redirect to their port)")
+	}
+	return nil
+}
+
+// rebuildDNATChain writes the wanted prerouting rules over the chain
+// installDNATRules read (ch nil: none yet), under b.mu.
+func (b *Backend) rebuildDNATChain(family, table string, t *nftables.Table, ch *nftables.Chain, rules []*nftables.Rule, wanted []dnatRuleSpec, includeLoopbackAccept bool) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	// For CFM's own table, rebuild it whole in this same batch (so the
 	// redirect never lapses) when a rule-by-rule update can't produce the
 	// wanted chain: its hook priority differs (it can't change in place, and
@@ -669,17 +696,7 @@ func (b *Backend) installDNATRules(family, table string, wanted []dnatRuleSpec, 
 	// but on the second install (e.g. `cfm dnat bypass add`, which calls
 	// DNATOn again) the bypass rules ended up AFTER the surviving dport
 	// rules, silently breaking the bypass.
-	if err := b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept); err != nil {
-		return err
-	}
-	// The redirect is committed: pruning the accepts nobody wants is best
-	// effort. Leftovers match only connections DNAT'd to their port, which no
-	// redirect targets any more, and the next EnsureDNATAccepts prunes them.
-	// Failing here would report the new redirect as not installed.
-	if err := b.ensureScopedDNATAccepts(dnatAcceptNamespace(namespace), wanted, true); err != nil {
-		b.logPhase("DNATOn", "warn", 0, err, "op=dnat leftover scoped accepts (inert without a redirect to their port)")
-	}
-	return nil
+	return b.installEdgeDNATRules(t, ch, wanted, rules, includeLoopbackAccept)
 }
 
 // hasForeignDNATRules reports whether a prerouting chain holds a rule the
@@ -795,6 +812,8 @@ func (b *Backend) dnatOffUnlocked(family, table, namespace string) error {
 // its accepts above the drops (the ports policy itself never deletes them).
 func (b *Backend) EnsureDNATAccepts() error {
 	family, table := dnatDefaults("", "")
+	b.dnatMu.Lock()
+	defer b.dnatMu.Unlock()
 	b.mu.Lock()
 	t, ch, err := b.getDNATTableAndChain(family, table)
 	if err != nil || ch == nil {
@@ -837,6 +856,8 @@ func (b *Backend) DNATOff(family, table string) (err error) {
 		b.logPhase("DNATOff", st, time.Since(start), err, "op=dnat")
 	}()
 	family, table = dnatDefaults(family, table)
+	b.dnatMu.Lock()
+	defer b.dnatMu.Unlock()
 	b.mu.Lock()
 	var offErr error
 	if strings.EqualFold(family, firewall.DNATDefaultFamily) && table == firewall.DNATDefaultTable {

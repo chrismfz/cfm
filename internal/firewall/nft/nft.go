@@ -2231,6 +2231,10 @@ func (b *Backend) inputAcceptsChainText() (string, error) {
 	res, err := runNFTCommand(ctx, "-a", "list", "chain", family, tableName, "input")
 	out := []byte(res.Stdout + res.Stderr)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// Marked for EnsureInputAccepts: a timeout is not a missing chain.
+			return "", fmt.Errorf("nft list chain %s %s input: %w: %w: %s", family, tableName, context.DeadlineExceeded, err, string(out))
+		}
 		return "", fmt.Errorf("nft list chain %s %s input: %v: %s", family, tableName, err, string(out))
 	}
 	return string(out), nil

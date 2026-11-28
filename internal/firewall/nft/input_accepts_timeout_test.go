@@ -3,6 +3,8 @@
 package nft
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -45,8 +47,12 @@ func TestInputAcceptsRead_UsesItsBudget(t *testing.T) {
 		if c.wantErr && err == nil {
 			t.Errorf("%s: a hung listing read as success", c.name)
 		}
-		// web ensure reads twice (declare the chain, read again).
-		if took >= 4*time.Second {
+		if c.wantErr && !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("%s: error %v does not mark the timeout (EnsureInputAccepts would read again)", c.name, err)
+		}
+		// One read each: a timed-out web ensure no longer declares the chain
+		// and waits out a second read.
+		if took >= 2*time.Second {
 			t.Errorf("%s took %v with a 300ms budget: the read is not bounded by InputAcceptsNFTTimeout", c.name, took)
 		}
 	}

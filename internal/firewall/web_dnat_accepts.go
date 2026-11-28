@@ -1,6 +1,8 @@
 package firewall
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -18,11 +20,15 @@ func IsWebDNATAccept(line string) bool {
 // engines: EnsureInputAccepts for the web accepts, EnsurePanelDNATAccepts &
 // co for the panel ones, and the cleanup on `dnat off`). It is EnsureBase's
 // budget: EL8's nft 1.0.4 loads every set element before any `list chain`
-// (3.9 s idle on virgo, more right after a daemon restart), and the deadline
-// also covers the wait for an nft slot. At 5 s, `cfm edge on` failed during
+// (3.9 s idle on virgo, more right after a daemon restart). At 5 s, `cfm edge on` failed during
 // an upgrade on virgo (2026-11-28: two timed-out reads, 10.1 s), and the web
 // DNAT stayed off, the sites served without the WAF, until a retry. A var
 // only so the engines' fake-nft tests can shorten it.
+//
+// On the exec engine the deadline also covers the wait for one of the four
+// nft slots; nftlib's CLI reads take no slot. A read that runs out of time
+// returns an error wrapping context.DeadlineExceeded (both engines), which
+// EnsureInputAccepts does not take for a missing chain.
 var InputAcceptsNFTTimeout = BaseInputReadTimeout
 
 // EnsureInputAccepts makes `inet cfm input` hold the rules in want (rule
@@ -54,8 +60,14 @@ func EnsureInputAccepts(ops NFTTextOps, want []string, managed func(line string)
 	// Fail closed on a listing error: without the default-drop handle the
 	// accepts would be appended after the drop, where nothing reaches them,
 	// and without the handles the stale ones could not be found. A missing
-	// chain is declared and read again (EnsureBase normally made it).
+	// chain is declared and read again (EnsureBase normally made it). A read
+	// that ran out of time is not a missing chain: a second read would only
+	// wait out another InputAcceptsNFTTimeout (60 s before `cfm edge on`
+	// failed), so it fails at once.
 	out, err := ops.ListInput()
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("list inet cfm input chain for accepts: %w", err)
+	}
 	if err != nil {
 		_ = ops.Run("add table inet cfm")
 		_ = ops.Run("add chain inet cfm input { type filter hook input priority 0; policy accept; }")

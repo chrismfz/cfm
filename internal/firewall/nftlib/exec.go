@@ -7,6 +7,7 @@ package nftlib
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -96,6 +97,10 @@ func nftReadCLITimeout(timeout time.Duration, args ...string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			// A timeout is not a missing chain (EnsureInputAccepts).
+			return "", fmt.Errorf("nft %s: %w: %w: %s", strings.Join(args, " "), context.DeadlineExceeded, err, strings.TrimSpace(stderr.String()))
+		}
 		return "", fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
